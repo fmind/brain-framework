@@ -20,7 +20,7 @@ schema:
   time: {description: Event time., cardinality: optional}
   title: {description: Meaningful title., cardinality: optional}
   ticket: {description: Tickets., cardinality: many, relation: true}
-layers: {events: true, index: false, tasks: false, projects: false, wiki: false}
+layers: {events: true, inventories: false, tasks: false, projects: false, wiki: false}
 sources:
   synthetic:
     enabled: true
@@ -107,5 +107,5 @@ def test_context_expansion_digest_appends_new_candidates_in_go_order(tmp_path: P
         ),
     )
 
-    # Ranking v10 deliberately changes the receipt domain, not expansion order.
-    assert pack.receipt.input_digest == "70bfbb2f2536ff6a"
+    # The versioned layout changes the receipt digest while preserving expansion order.
+    assert pack.receipt.input_digest == "f26dfc6252c080c9"

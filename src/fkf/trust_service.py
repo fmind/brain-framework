@@ -30,7 +30,7 @@ from fkf.trust import (
 class TrustedBasePolicy:
     layers: dict[str, bool]
     days: int
-    index_max_age_hours: int
+    inventory_max_age_hours: int
     timeout: str
     concurrency: int
     working_directory: str
@@ -76,7 +76,7 @@ def trust(base: Base, *, record: bool, all_items: bool = False, cancel: Cancella
     policy = TrustedBasePolicy(
         layers={str(layer): enabled for layer, enabled in base.config.layers.items()},
         days=base.config.sync.days,
-        index_max_age_hours=base.config.sync.index_max_age_hours,
+        inventory_max_age_hours=base.config.sync.inventory_max_age_hours,
         timeout=format_duration(base.config.sync.timeout),
         concurrency=base.config.sync.concurrency,
         working_directory=os.fspath(DECLARED_COMMAND_DIRECTORY),
@@ -212,7 +212,7 @@ def render_trust_text(report: TrustReport) -> str:
     lines.extend(
         (
             (
-                f"  sync:  {report.policy.days} day(s), index stale after {report.policy.index_max_age_hours}h, "
+                f"  sync:  {report.policy.days} day(s), inventory stale after {report.policy.inventory_max_age_hours}h, "
                 f"timeout {report.policy.timeout}, concurrency {report.policy.concurrency}"
             ),
             "",

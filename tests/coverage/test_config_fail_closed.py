@@ -24,7 +24,7 @@ schema:
   time: {description: Event time., cardinality: one}
   title: {description: Subject., cardinality: optional}
   related: {description: Related identities., cardinality: many, relation: true}
-layers: {events: true, index: true, tasks: false, projects: false, wiki: false}
+layers: {events: true, inventories: true, tasks: false, projects: false, wiki: false}
 sources:
   source:
     enabled: true
@@ -58,8 +58,8 @@ def source_replace(old: str, new: str) -> str:
         (source_option("auth: []"), "auth must contain"),
         (source_option("test: []"), "test must contain"),
         (source_option("layer: tasks"), "authored evidence"),
-        (source_option("layer: invented"), "expected events or index"),
-        (source_option("layer: projects"), "expected events or index"),
+        (source_option("layer: invented"), "expected events or inventories"),
+        (source_option("layer: projects"), "expected events or inventories"),
         (source_option("format: csv"), "expected json or ndjson"),
         (source_option("timeout: soon"), "timeout:"),
         (source_option("timeout: 2h"), "expected 0"),
@@ -77,8 +77,8 @@ def source_replace(old: str, new: str) -> str:
         (source_option('retry: {attempts: 2, on: ["exit:nope"]}'), "invalid syntax"),
         (source_option('retry: {attempts: 2, on: ["bad\\ncondition"]}'), "control character"),
         (source_option("retry: {attempts: 2, backoff: 11m, on: [exit:1]}"), "expected a duration up to"),
-        (source_option("max_age_hours: 2"), "valid only for an index source"),
-        (source_option("window: true\n    layer: index"), "only events support"),
+        (source_option("max_age_hours: 2"), "valid only for an inventory source"),
+        (source_option("window: true\n    layer: inventories"), "only events support"),
         (source_replace("events: true", "events: false"), "is enabled but layers.events is false"),
         (source_replace('run: [provider, "{{date}}"]', 'run: [provider, "{{unknown}}"]'), "unknown placeholder"),
         (source_option('auth: [provider, "{{base}}"]'), "must be literal"),
@@ -115,7 +115,7 @@ def test_source_execution_contract_rejects_unsafe_or_ambiguous_declarations(
         (BASE.replace("name: brain", "name: " + "a" * 64), "expected at most 63"),
         (BASE.replace("events: true", "mystery: true"), "unknown layer"),
         (BASE + "sync: {days: 0}\n", "sync.days"),
-        (BASE + "sync: {index_max_age_hours: 0}\n", "index_max_age_hours"),
+        (BASE + "sync: {inventory_max_age_hours: 0}\n", "inventory_max_age_hours"),
         (BASE + "sync: {concurrency: 5}\n", "sync.concurrency"),
         (BASE + "sync: {timeout: 500ms}\n", "sync.timeout"),
         (
@@ -212,7 +212,7 @@ def test_identity_aliases_and_inferred_kinds_cover_supported_namespaces() -> Non
         validate_source_name("a" * 251)
 
     event = Source("event", layer=Layer.EVENTS)
-    index = Source("index", layer=Layer.INDEX, max_age_hours=12)
+    index = Source("index", layer=Layer.INVENTORIES, max_age_hours=12)
     assert event.effective_max_age_hours(168) == 168
     assert index.effective_max_age_hours(168) == 12
     assert event.retry_attempts() == 1

@@ -43,7 +43,7 @@ schema:
   related: {description: Synthetic benchmark relationships., cardinality: many, relation: true}
 layers:
   events: true
-  index: false
+  inventories: false
   tasks: false
   projects: false
   wiki: false

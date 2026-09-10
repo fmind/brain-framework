@@ -22,6 +22,7 @@ from fkf.harness import (
 )
 from fkf.locking import WriterLock
 from fkf.output import register_jsonl, register_text
+from fkf.private_skills import PrivateSkillsReport, PrivateSkillsRequest, install_private_skills
 from fkf.schedule import ScheduleAction, ScheduleReport, ScheduleRequest, schedule
 
 
@@ -79,9 +80,17 @@ def _schedule_text(report: ScheduleReport) -> str:
     return "\n".join((f"{prefix} {report.platform} {report.name}: {condition}", execution, *files))
 
 
+def _private_skills_text(report: PrivateSkillsReport) -> str:
+    if not report.changes:
+        return f"private skills {report.mode} for {report.base}: current ({report.discovered} discovered)"
+    return "\n".join(f"{change.action} {change.source} -> {change.target}" for change in report.changes)
+
+
 register_text(HarnessPlan, _harness_plan_text)
 register_text(HarnessInstallReport, _harness_install_text)
 register_jsonl(HarnessInstallReport, lambda report: report.changes)
+register_text(PrivateSkillsReport, _private_skills_text)
+register_jsonl(PrivateSkillsReport, lambda report: report.changes)
 register_text(ScheduleReport, _schedule_text)
 register_jsonl(ScheduleReport, lambda report: report.files)
 
@@ -163,6 +172,43 @@ def register_integration_commands(app: typer.Typer) -> None:
             invocation.emit(report)
             if check and not report.complete:
                 raise OperationalError(f"{len(report.changes)} harness integration change(s) required")
+
+        if check or dry_run:
+            execute()
+        else:
+            with WriterLock.acquire(base.root):
+                execute()
+
+    skills_app = typer.Typer(
+        cls=FKFGroup,
+        invoke_without_command=True,
+        no_args_is_help=False,
+        help="Install this private base's optional Agent Skills for user-scope discovery.",
+        rich_markup_mode=None,
+    )
+    app.add_typer(skills_app, name="skills")
+
+    @skills_app.callback()
+    def skills_parent(ctx: typer.Context) -> None:
+        parent_without_command(ctx, "name a subcommand")
+
+    @skills_app.command("install", help="Link base-owned skills into ~/.agents/skills without replacing peers.")
+    def skills_install(
+        ctx: typer.Context,
+        dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+        check: Annotated[bool, typer.Option("--check")] = False,
+    ) -> None:
+        if check and dry_run:
+            raise InvalidUsageError("fkf skills install --check cannot be combined with --dry-run")
+        invocation = state(ctx)
+        base = invocation.base()
+        request = PrivateSkillsRequest(home=Path.home(), dry_run=dry_run, check=check)
+
+        def execute() -> None:
+            report = install_private_skills(base.root, request, cancel=invocation.cancel)
+            invocation.emit(report)
+            if check and not report.complete:
+                raise OperationalError(f"{len(report.changes)} private skill link(s) required")
 
         if check or dry_run:
             execute()

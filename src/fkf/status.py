@@ -22,7 +22,7 @@ from fkf.documents import (
     day_window,
     decode_document,
     event_document_uri,
-    index_document_uri,
+    inventory_document_uri,
     parse_day,
     verify_document,
 )
@@ -81,7 +81,7 @@ _MANAGED_BEGIN: Final = "# >>> fkf managed block — do not edit between the mar
 _MANAGED_BEGIN_PREFIX: Final = "# >>> fkf managed block"
 _MANAGED_END: Final = "# <<< fkf managed block"
 _MANAGED_END_PREFIX: Final = "# <<< fkf managed block"
-_COLLECTED_LAYERS: Final = ("events/", "index/")
+_COLLECTED_LAYERS: Final = ("events/", "inventories/")
 _CONFLICT_MARKERS: Final = (b"<<<<<<< ", b"=======\n", b">>>>>>> ")
 
 _CREDENTIAL_PATTERNS: Final = (
@@ -315,11 +315,11 @@ class _StatusDocuments:
         return tuple(
             PurePosixPath(entry.uri).name.removesuffix(".json")
             for entry in self.entries
-            if entry.uri.startswith("index/")
+            if entry.uri.startswith("inventories/")
         )
 
     def index_status(self, name: str) -> tuple[int, str, Instant] | None:
-        entry = self.by_uri.get(index_document_uri(name))
+        entry = self.by_uri.get(inventory_document_uri(name))
         if entry is None or entry.error is not None or entry.document is None:
             return None
         collected = parse_rfc3339(entry.document.collected_at)
@@ -331,7 +331,7 @@ class _StatusDocuments:
         valid = 0
         for entry in self.entries:
             document = entry.document
-            if entry.error is not None or document is None or not entry.uri.startswith("index/"):
+            if entry.error is not None or document is None or not entry.uri.startswith("inventories/"):
                 continue
             collected = parse_rfc3339(document.collected_at)
             valid += 1
@@ -367,8 +367,8 @@ def _load_status_documents(
     if base.store.enabled(Layer.EVENTS):
         for day in base.event_dates(scan=scan):
             uris.extend(event_document_uri(day, name) for name in base.day_documents(day, scan=scan))
-    if base.store.enabled(Layer.INDEX):
-        uris.extend(index_document_uri(name) for name in base.index_documents(scan=scan))
+    if base.store.enabled(Layer.INVENTORIES):
+        uris.extend(inventory_document_uri(name) for name in base.inventory_documents(scan=scan))
 
     entries: list[_StatusDocumentEntry] = []
     for uri in uris:
@@ -457,7 +457,7 @@ def _layer_overviews(
                 since=dates[0] if dates else "",
                 until=dates[-1] if dates else "",
             )
-        elif layer is Layer.INDEX:
+        elif layer is Layer.INVENTORIES:
             count, note = documents.index_overview(_instant(now))
             summary = replace(summary, count=count, unit="document", note=note)
         elif layer is Layer.TASKS:
@@ -595,7 +595,7 @@ def _source_statuses(
             body=source.has_body(),
             auth=bool(source.auth),
         )
-        if source.layer is Layer.INDEX:
+        if source.layer is Layer.INVENTORIES:
             indexed = documents.index_status(name)
             if indexed is not None:
                 count, last_date, collected = indexed
@@ -603,8 +603,8 @@ def _source_statuses(
         else:
             entry = _apply_volume(entry, history.get(name, ()))
         max_age = request.max_age_hours
-        if max_age == 0 and source.layer is Layer.INDEX:
-            max_age = source.effective_max_age_hours(base.config.sync.index_max_age_hours)
+        if max_age == 0 and source.layer is Layer.INVENTORIES:
+            max_age = source.effective_max_age_hours(base.config.sync.inventory_max_age_hours)
         entry = _observe_freshness(entry, now_instant, max_age)
         if source.enabled and source.layer is Layer.EVENTS and base.store.enabled(Layer.EVENTS):
             collected_dates = {day.date for day in history.get(name, ())}
@@ -622,12 +622,12 @@ def _source_statuses(
         entry = SourceStatus(name, False, Layer.EVENTS, undeclared=True)
         entry = _observe_freshness(_apply_volume(entry, undeclared[name]), now_instant, 0)
         entries.append(entry)
-    if base.store.enabled(Layer.INDEX):
+    if base.store.enabled(Layer.INVENTORIES):
         for name in documents.index_names():
             check_cancel(cancel)
             if name in base.config.sources:
                 continue
-            entry = SourceStatus(name, False, Layer.INDEX, undeclared=True)
+            entry = SourceStatus(name, False, Layer.INVENTORIES, undeclared=True)
             indexed = documents.index_status(name)
             if indexed is not None:
                 count, last_date, collected = indexed
@@ -1206,7 +1206,7 @@ def report(
             Finding(
                 "history",
                 Severity.WARNING,
-                "this base commits events/ and index/; git history is append-only, so anything collected is permanent",
+                "this base commits events/ and inventories/; git history is append-only, so anything collected is permanent",
                 fix="start a new base if that was not intended",
             )
         )

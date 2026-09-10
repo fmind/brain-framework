@@ -59,7 +59,7 @@ identities:
     canonical: repo:github.com/fmind/fkf
     aliases: [repository:github.com/fmind/fkf]
     kind: repository
-layers: {events: true, index: false, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: false, tasks: true, projects: true, wiki: true}
 sources:
   activity:
     enabled: true

@@ -7,11 +7,11 @@ Read this reference when configuring collection, bodies, identities, or graph re
 | Layer                              | Holds                                                           |
 | ---------------------------------- | --------------------------------------------------------------- |
 | `events/YYYY-MM-DD/`               | One complete JSON document per enabled event source.            |
-| `index/`                           | One current document per index source.                          |
+| `inventories/`                     | One current document per inventory source.                      |
 | `tasks/YYYY-MM-DD/<slug>/TASKS.md` | Requests, work, verification, and findings from one session.    |
 | `projects/<slug>.md`               | Intent, status, decisions, open questions, and actionable work. |
 | `wiki/<slug>.md`                   | Flat, tagged, reusable knowledge.                               |
-| `graph*.tsv`                       | Rebuildable source, destination, and offset caches.             |
+| `graphs/*.tsv`                     | Rebuildable source, destination, and offset caches.             |
 
 Root `schema:` owns shared field meanings, `one`/`optional`/`many` cardinality, and `relation: true`. Sources map provider paths to those fields; only `id` and event `time` are structural. Stored documents retain the schema subset and field map used to create them.
 
@@ -46,7 +46,7 @@ Edges come only from:
 
 The two declared-alias forms emit auditable `same-as` edges from each alias to its canonical URI. FKF never infers those edges from matching names or values.
 
-The graph is a digest-bound cache over exact documents and authored pages. Root rows are `src`, `dst`, `kind`, `at`, `via`, and `indexed`. Rebuild after source or authored changes; `graph --verify` hashes every input and artifact without writing.
+The graph is a digest-bound cache over exact documents and authored pages. Graph rows are `src`, `dst`, `kind`, `at`, `via`, and `indexed`. Rebuild after source or authored changes; `graph --verify` hashes every input and artifact without writing.
 
 For a project handoff, retrieve context and read the selected project first, then traverse that page’s declared links. A repository entity can have thousands of historical neighbours; the first graph page is an ordered slice, not a relevance or recency ranking. Narrow the edge kind or follow the opaque cursor when the broader evidence is needed.
 

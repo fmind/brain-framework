@@ -34,7 +34,7 @@ fkf --base /absolute/path/to/brain harness install --all --check
 fkf --base /absolute/path/to/brain status --live
 ```
 
-The installer preserves unrelated entries, preflights every target before writing, writes atomically, and saves the immediately previous file as `<path>.fkf.bak`. Reinstalling the same base and workspace is byte-idempotent. It refuses a scoped key owned by another physical base, an unmanaged command, and overlapping automatic-hook workspaces. A same-named second base must be renamed explicitly in `fkf.yaml`; FKF does not invent suffixes.
+The installer preserves unrelated entries, preflights every target before writing, writes atomically, and saves the immediately previous file as `<path>.fkf.bak`. Explicit ownership markers identify workspace hooks across helper changes; reinstalling replaces stale or duplicate owned entries. Reinstalling the same base and workspace is byte-idempotent. It refuses a scoped key owned by another physical base, an unmanaged command, and overlapping automatic-hook workspaces. A same-named second base must be renamed explicitly in `fkf.yaml`; FKF does not invent suffixes.
 
 An MCP-only reinstall preserves existing workspace hooks. Changing a hook's workspace checks every other base, including Kiro's separate hook files; base names that share a prefix remain independent.
 
@@ -57,7 +57,9 @@ Both `harness print` and `harness install` accept `--executable /absolute/path/t
 | `kiro`        | `~/.kiro/settings/mcp.json`, `~/.kiro/hooks/<key>.json` | `SessionStart`                       |
 | `cline`       | `~/.cline/data/settings/cline_mcp_settings.json`        | MCP-only; one global hook filename   |
 
-No adapter creates a user-scope link to one base's embedded skills. The three skills remain under `<base>/.agents/skills/`. If a harness needs shared discovery, install a neutral FKF skill separately and require it to select the base by name; it must not infer a base from the skill's own path.
+Harness adapters do not publish the three embedded or other base-specific skills under `<base>/.agents/skills/`. Keep neutral shared FKF skills separate so they select a base explicitly rather than inferring one from their own path.
+
+A private base may additionally own cross-project packages under `<base>/skills/<name>/`. Preview and publish those explicit packages with `fkf skills install --dry-run` and `fkf skills install`. Each package is linked into `~/.agents/skills`, independently of the harness adapters; several bases coexist when their private skill names are globally unique. FKF refuses collisions rather than choosing an owner. No privacy prefix is required. The shared catalog must be a real directory outside the public source repository. Install explicitly on each computer; names and links do not make the base's repository private.
 
 Provider account selection belongs to the process that launches collection. For example, a team collector may export `GH_CONFIG_DIR=~/.config/gh-team` before `fkf sync`; ACLI keeps its selected Jira site in its own machine-local configuration. Neither value belongs in `fkf.yaml`, an MCP registration, or a workspace hook.
 
@@ -80,7 +82,7 @@ The managed hook command pins the FKF executable, physical base, and physical wo
 
 On startup it reads yesterday with 600 tokens and repository context with 850 tokens. Claude compact starts skip yesterday and use a 600-token repository reminder. The repository query is the exact `repo:github.com/owner/name` identity projected from the GitHub origin. Branch names do not become retrieval terms; without a valid repository identity, the hook omits repository context. Every FKF call includes `--base`; the hook never collects, fetches a body, or uses ambient cwd as session identity.
 
-Each child has a six-second deadline, below the host’s 20-second envelope for the three startup calls. A timeout terminates the child process group, returns the host’s empty envelope, and emits a fixed diagnostic on stderr so delivery failures are observable without leaking child output.
+The three startup calls share a fifteen-second deadline, with each child capped at ten seconds, below the host’s 20-second envelope. A timeout terminates the child process group, returns the host’s empty envelope, and emits a fixed diagnostic on stderr so delivery failures are observable without leaking child output.
 
 Workspace scope prevents accidental context injection into another checkout. It is not an execution sandbox. Overlapping scopes are rejected because the host cannot reliably distinguish which base should inject context.
 
@@ -114,5 +116,3 @@ For a coding task, ask the selected MCP server for `context` with the repository
 Keep shared skills neutral about the selected base. If a retrieval miss is reported, the bundled `fkf-use` feedback reference turns its query and expected URI into a reviewed case in the existing evaluation file. Registration, a successful protocol call, retrieval acceptance, and improved agent decisions are separate checks.
 
 The passive hook runs with Python 3.9 or newer from the sanitized system PATH. Its syntax stays compatible with that interpreter independently of the FKF package’s Python requirement.
-
-Passive retrieval shares a fifteen-second deadline across Git, day, and repository context calls; each child is capped at ten seconds. A timed-out child group is terminated and the hook reports the bounded fallback without exposing child output.

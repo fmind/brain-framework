@@ -10,7 +10,7 @@ import fkf.cli_browse as cli_browse
 from fkf.cli import app
 from fkf.cli_browse import (
     _event_listing_text,
-    _index_listing_text,
+    _inventory_listing_text,
     _page_listing_text,
     _record_title_text,
     _tag_vocabulary_text,
@@ -21,7 +21,7 @@ from fkf.cli_browse import (
 from fkf.cli_support import run_app
 from fkf.errors import CanceledError, OperationalError
 from fkf.learned import LearnedListing
-from fkf.listings import DayCount, EventDay, EventListing, IndexListing, TaskListing
+from fkf.listings import DayCount, EventDay, EventListing, InventoryListing, TaskListing
 from fkf.markdown import Page, ValidationReport
 from fkf.output import jsonl_bytes
 from fkf.pages import PageListing, TagCount, TagVocabulary
@@ -58,7 +58,7 @@ def test_listing_text_uses_uris_context_and_explicit_empty_totals() -> None:
     assert _event_listing_text(events) == (
         "events/2026-09-05/     7  a 3 · b 2 · c 1 · +1 more\n\n1 day(s), 7 record(s)"
     )
-    assert _index_listing_text(IndexListing((), 0)) == "\n0 document(s)"
+    assert _inventory_listing_text(InventoryListing((), 0)) == "\n0 document(s)"
     assert _task_listing_text(TaskListing(Window(), ())) == "\n0 trace(s)"
 
 
@@ -113,7 +113,7 @@ def test_learned_listing_forwards_the_invocation_cancellation(monkeypatch: pytes
     ("symbol", "arguments"),
     [
         ("list_events", ("list", "events")),
-        ("list_index", ("list", "index")),
+        ("list_inventories", ("list", "inventories")),
         ("list_tasks", ("list", "tasks")),
         ("list_pages", ("list", "projects")),
         ("validate_all", ("validate",)),

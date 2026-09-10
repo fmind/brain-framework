@@ -9,7 +9,7 @@ from fkf.base import Base
 from fkf.config import ConfigError, load_config
 from fkf.documents import Document, day_window, fields_of, parse_day_in_location, schema_of
 from fkf.jsoncodec import dumps
-from fkf.listings import list_events, list_index, list_tasks
+from fkf.listings import list_events, list_inventories, list_tasks
 from fkf.query import Window
 from fkf.store import Layer
 
@@ -20,8 +20,8 @@ schema:
   id: {description: Stable identity., cardinality: one}
   time: {description: Event time., cardinality: one}
   title: {description: Meaningful title., cardinality: optional}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
-sync: {index_max_age_hours: 24}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
+sync: {inventory_max_age_hours: 24}
 sources:
   events:
     enabled: true
@@ -30,7 +30,7 @@ sources:
     fields: {id: .id, time: .time, title: .title}
   snapshot:
     enabled: true
-    layer: index
+    layer: inventories
     max_age_hours: 2
     run: [provider]
     fields: {id: .id, title: .title}
@@ -81,34 +81,34 @@ def test_list_events_walks_dates_first_and_filters_known_source(tmp_path: Path) 
         list_events(base, source="typo")
 
 
-def test_list_index_uses_collected_time_and_source_freshness(tmp_path: Path) -> None:
+def test_list_inventories_uses_collected_time_and_source_freshness(tmp_path: Path) -> None:
     base = make_base(tmp_path)
     document = empty_document(
         base,
         source="snapshot",
-        layer=Layer.INDEX,
+        layer=Layer.INVENTORIES,
         collected="2026-09-06T09:00:00Z",
     )
     base.write_document(document)
-    listing = list_index(base)
+    listing = list_inventories(base)
     assert listing.total == 1
     assert listing.entries[0].age_hours == 3
     assert listing.entries[0].stale is True
     assert listing.entries[0].bytes > 0
 
 
-def test_list_index_omits_zero_count_and_fresh_marker_from_json(tmp_path: Path) -> None:
+def test_list_inventories_omits_zero_count_and_fresh_marker_from_json(tmp_path: Path) -> None:
     base = make_base(tmp_path)
     base.write_document(
         empty_document(
             base,
             source="snapshot",
-            layer=Layer.INDEX,
+            layer=Layer.INVENTORIES,
             collected="2026-09-06T12:00:00Z",
         )
     )
 
-    encoded = dumps(list_index(base))
+    encoded = dumps(list_inventories(base))
 
     assert b'"count"' not in encoded
     assert b'"stale"' not in encoded

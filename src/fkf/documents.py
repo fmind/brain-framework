@@ -94,8 +94,8 @@ class Document:
 
     def uri(self) -> str:
         """Return this document's base-relative address."""
-        if self.layer is Layer.INDEX:
-            return index_document_uri(self.source)
+        if self.layer is Layer.INVENTORIES:
+            return inventory_document_uri(self.source)
         return event_document_uri(self.date, self.source)
 
     def record_uri(self, record: Record) -> str | None:
@@ -129,7 +129,7 @@ class _StoredFieldDefinition:
 class _StoredDocument:
     fkf: int
     source: str
-    layer: Layer
+    layer: str
     date: str = field(default="", metadata={"json": "date,omitempty"})
     window_start: str = field(default="", metadata={"json": "window_start,omitempty"})
     window_end: str = field(default="", metadata={"json": "window_end,omitempty"})
@@ -156,9 +156,9 @@ def event_document_uri(day: str, source: str) -> str:
     return posixpath.normpath(f"events/{day}/{source}.json")
 
 
-def index_document_uri(source: str) -> str:
-    """Return the storage URI of one index source snapshot."""
-    return posixpath.normpath(f"index/{source}.json")
+def inventory_document_uri(source: str) -> str:
+    """Return the storage URI of one inventory source snapshot."""
+    return posixpath.normpath(f"inventories/{source}.json")
 
 
 def encode_fragment(identity: str) -> str:
@@ -205,7 +205,8 @@ def _stored_document(document: Document) -> _StoredDocument:
     return _StoredDocument(
         fkf=document.fkf,
         source=document.source,
-        layer=document.layer,
+        # The v1 evidence marker is permanent; directory names are a separate contract.
+        layer="index" if document.layer is Layer.INVENTORIES else str(document.layer),
         date=document.date,
         window_start=document.window_start,
         window_end=document.window_end,
@@ -316,15 +317,11 @@ def decode_document(data: str | bytes | bytearray | memoryview, path: str = "doc
             )
         raw_layer = _json_string(value.get("layer"), "layer")
         try:
-            layer = Layer(raw_layer)
-        except ValueError as error:
+            layer = {"events": Layer.EVENTS, "index": Layer.INVENTORIES}[raw_layer]
+        except KeyError as error:
             raise UnknownSchemaError(
-                f"{path} declares layer {raw_layer!r}; a stored document is filed under events or index"
+                f"{path} declares layer {raw_layer!r}; a v1 evidence layer must be events or index"
             ) from error
-        if layer not in {Layer.EVENTS, Layer.INDEX}:
-            raise UnknownSchemaError(
-                f"{path} declares layer {raw_layer!r}; a stored document is filed under events or index"
-            )
         raw_fields = value.get("fields")
         fields = FieldMap() if raw_fields is None else FieldMap.from_json_value(raw_fields)
         return Document(
@@ -506,7 +503,7 @@ def verify_document(document: Document, *, zone: tzinfo | None = None) -> None:
     """Validate a stored document's definition, identities, and event membership."""
     if document.fkf != SCHEMA_VERSION:
         raise UnknownSchemaError(f"unsupported evidence envelope fkf {document.fkf}")
-    if document.layer not in {Layer.EVENTS, Layer.INDEX}:
+    if document.layer not in {Layer.EVENTS, Layer.INVENTORIES}:
         raise UnknownSchemaError(f"stored document declares unsupported layer {document.layer!r}")
     if document.count != len(document.records):
         raise ValueError(f"document count {document.count} does not match {len(document.records)} records")
@@ -542,9 +539,9 @@ def verify_document(document: Document, *, zone: tzinfo | None = None) -> None:
     if document.layer is Layer.EVENTS:
         _strict_date(document.date, "event document date")
     elif document.date:
-        raise ValueError(f"index document declares date {document.date!r}; an index is a point-in-time snapshot")
+        raise ValueError(f"inventory document declares date {document.date!r}; an index is a point-in-time snapshot")
     elif document.window_start or document.window_end:
-        raise ValueError("index document declares an event collection window")
+        raise ValueError("inventory document declares an event collection window")
 
     seen: dict[str, int] = {}
     for index, record in enumerate(document.records):
@@ -590,8 +587,8 @@ def _new_document(
 ) -> Document:
     if source.layer is Layer.EVENTS and window is None:
         raise ValueError("an events source requires a collection window")
-    if source.layer is Layer.INDEX and window is not None:
-        raise ValueError("an index source cannot declare an event collection window")
+    if source.layer is Layer.INVENTORIES and window is not None:
+        raise ValueError("an inventory source cannot declare an event collection window")
     document = Document(
         source=source.name,
         layer=source.layer,
@@ -899,7 +896,7 @@ __all__ = [
     "encode_fragment",
     "event_document_uri",
     "fields_of",
-    "index_document_uri",
+    "inventory_document_uri",
     "parse_day",
     "parse_day_in_location",
     "read_document",

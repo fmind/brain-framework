@@ -262,13 +262,13 @@ def test_entity_uri_refuses_noncanonical_identity_text(uri: str) -> None:
     [
         "https://example.test/post",
         "events/2026-08-22/rss.json#https://example.test/post",
-        "index/github-repositories.json#fmind/fkf",
+        "inventories/github-repositories.json#fmind/fkf",
         "tasks/2026-08-22/review/TASKS.md#verification",
         "projects/fkf.md#decisions",
         "wiki/retrieval-boundary.md#decision",
-        "graph.tsv",
-        "graph.meta.json?jq=.edges",
-        "graph.generation.json?jq=.state",
+        "graphs/src.tsv",
+        "graphs/meta.json?jq=.edges",
+        "graphs/generation.json?jq=.state",
         "AGENTS.md#invariants",
         "fkf.yaml",
     ],
@@ -296,7 +296,7 @@ def test_relation_value_accepts_only_published_canonical_uris(value: str) -> Non
         "wiki/",
         "wiki/page.md?jq=.title",
         "fkf.yaml#config",
-        "graph.tsv?jq=.",
+        "graphs/src.tsv?jq=.",
     ],
 )
 def test_relation_value_refuses_unpublished_or_noncanonical_uris(value: str) -> None:

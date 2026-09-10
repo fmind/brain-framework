@@ -41,7 +41,7 @@ schema:
   time: {description: Event time., cardinality: one}
   title: {description: Meaningful title., cardinality: optional}
   topic: {description: Topic., cardinality: optional}
-layers: {events: true, index: true, tasks: false, projects: false, wiki: true}
+layers: {events: true, inventories: true, tasks: false, projects: false, wiki: true}
 sources:
   daily:
     enabled: true
@@ -54,7 +54,7 @@ sources:
     fields: {id: .id, time: .time, title: .title}
   snapshot:
     enabled: true
-    layer: index
+    layer: inventories
     max_age_hours: 12
     auth: [provider, auth]
     run: [provider, snapshot]
@@ -66,7 +66,7 @@ sources:
   disabled:
     run: [provider, disabled, "{{date}}"]
     fields: {id: .id, time: .time, title: .title}
-sync: {days: 2, index_max_age_hours: 168, timeout: 2s, concurrency: 4}
+sync: {days: 2, inventory_max_age_hours: 168, timeout: 2s, concurrency: 4}
 """
 
 
@@ -465,7 +465,7 @@ def test_sync_body_policy_restores_only_the_newest_selected_event_document(tmp_p
 def test_sync_body_policy_repairs_each_current_index_record(tmp_path: Path) -> None:
     index_config = BODY_CONFIG.replace(
         "  daily:\n    enabled: true\n",
-        "  daily:\n    enabled: true\n    layer: index\n",
+        "  daily:\n    enabled: true\n    layer: inventories\n",
         1,
     )
 

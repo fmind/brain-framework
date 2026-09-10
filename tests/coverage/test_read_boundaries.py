@@ -27,7 +27,7 @@ schema:
   id: {description: Stable identity., cardinality: one}
   time: {description: Event time., cardinality: one}
   title: {description: Meaningful title., cardinality: optional}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 sources:
   journal:
     enabled: true
@@ -37,7 +37,7 @@ sources:
     body: [provider, body, "{{id}}"]
 BODY_POLICY  snapshot:
     enabled: true
-    layer: index
+    layer: inventories
     run: [provider]
     fields: {id: .id, title: .title}
 """
@@ -108,7 +108,7 @@ def _make_base(
     base.write_document(
         Document(
             source="snapshot",
-            layer=Layer.INDEX,
+            layer=Layer.INVENTORIES,
             collected_at="2026-09-06T11:00:00Z",
             schema=schema_of(index_source),
             fields=fields_of(index_source),
@@ -152,7 +152,7 @@ def test_read_result_rejects_ambiguous_or_incomplete_payloads() -> None:
             "non-selection read result",
         ),
         (
-            {"uri": "index/snapshot.json#id", "kind": "record", "record": {}, "body_state": "cached"},
+            {"uri": "inventories/snapshot.json#id", "kind": "record", "record": {}, "body_state": "cached"},
             "body_state must carry body text",
         ),
     )
@@ -161,7 +161,7 @@ def test_read_result_rejects_ambiguous_or_incomplete_payloads() -> None:
             ReadResult(**arguments)
 
     # JSON null remains a present selector result; ``kind`` disambiguates it from no payload.
-    assert ReadResult(uri="index/snapshot.json?jq=null", kind="selection", selection=None).selection is None
+    assert ReadResult(uri="inventories/snapshot.json?jq=null", kind="selection", selection=None).selection is None
 
 
 def test_resolver_reports_record_heading_utf8_and_option_errors_without_execution(tmp_path: Path) -> None:
@@ -172,9 +172,9 @@ def test_resolver_reports_record_heading_utf8_and_option_errors_without_executio
         ("events/2026-09-05/journal.json#missing", ReadOptions(), OperationalError, "holds no record"),
         ("wiki/retrieval-boundary.md#missing", ReadOptions(), OperationalError, "its anchors are"),
         ("events/2026-09-05/", ReadOptions(limit=-1), InvalidUsageError, "limit must be non-negative"),
-        ("graph.tsv", ReadOptions(body=True), InvalidUsageError, "is derived"),
-        ("graph.tsv#anything", ReadOptions(), InvalidUsageError, "does not support fragments"),
-        ("graph.tsv?jq=.state", ReadOptions(), InvalidUsageError, "applies to a JSON document"),
+        ("graphs/src.tsv", ReadOptions(body=True), InvalidUsageError, "is derived"),
+        ("graphs/src.tsv#anything", ReadOptions(), InvalidUsageError, "does not support fragments"),
+        ("graphs/src.tsv?jq=.state", ReadOptions(), InvalidUsageError, "applies to a JSON document"),
     )
     for uri, options, error_type, message in cases:
         with pytest.raises(error_type, match=message):
@@ -295,7 +295,7 @@ def test_suggestions_fail_closed_when_optional_surfaces_are_unreadable(
         raise ValueError("invalid event directory")
 
     monkeypatch.setattr("fkf.read.load_markdown_layer", broken_pages)
-    monkeypatch.setattr(Base, "index_documents", broken_indexes)
+    monkeypatch.setattr(Base, "inventory_documents", broken_indexes)
     monkeypatch.setattr(Base, "event_dates", broken_events)
 
     assert suggest_uris(base, "anything") == ()
@@ -305,19 +305,20 @@ def test_graph_artifact_boundaries_distinguish_json_null_and_corruption(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     base = _make_base(tmp_path)
-    (base.root / "graph.generation.json").write_text('{"state":null}', encoding="utf-8")
+    (base.root / "graphs").mkdir()
+    (base.root / "graphs/generation.json").write_text('{"state":null}', encoding="utf-8")
 
-    generation = read(base, "graph.generation.json")
-    selected = read(base, "graph.generation.json?jq=.state")
+    generation = read(base, "graphs/generation.json")
+    selected = read(base, "graphs/generation.json?jq=.state")
 
     assert generation.kind == "index"
     assert generation.selection == {"state": None}
     assert selected.kind == "selection"
     assert selected.selection is None
 
-    (base.root / "graph.generation.json").write_text("not-json", encoding="utf-8")
+    (base.root / "graphs/generation.json").write_text("not-json", encoding="utf-8")
     with pytest.raises(EdgeValidationError, match="not one JSON document"):
-        read(base, "graph.generation.json")
+        read(base, "graphs/generation.json")
 
     def invalid_utf8(candidate: Base, path: str, limit: int, *, cancel: object = None) -> bytes:
         del candidate, path, limit, cancel
@@ -325,7 +326,7 @@ def test_graph_artifact_boundaries_distinguish_json_null_and_corruption(
 
     monkeypatch.setattr("fkf.graph.read_validated_graph_artifact", invalid_utf8)
     with pytest.raises(EdgeValidationError, match="not valid UTF-8"):
-        read(base, "graph.tsv")
+        read(base, "graphs/src.tsv")
 
 
 def test_sections_stop_at_peer_headings_and_expose_canonical_anchors(tmp_path: Path) -> None:

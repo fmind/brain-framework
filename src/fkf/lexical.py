@@ -22,7 +22,7 @@ from fkf.bodies import (
     load_body_manifest,
     read_cached_body_from_manifest,
 )
-from fkf.documents import Document, Record, event_document_uri, index_document_uri
+from fkf.documents import Document, Record, event_document_uri, inventory_document_uri
 from fkf.errors import InvalidUsageError, OperationalError
 from fkf.fields import (
     DEFAULT_FIELD_WEIGHT,
@@ -63,8 +63,8 @@ if TYPE_CHECKING:
     from fkf.base import Base
 
 
-LEXICAL_INDEX_PATH: Final = "index/.fkf-index.tsv"
-LEXICAL_INDEX_META_PATH: Final = "index/.fkf-index.meta.json"
+LEXICAL_INDEX_PATH: Final = "indexes/index.tsv"
+LEXICAL_INDEX_META_PATH: Final = "indexes/meta.json"
 
 LEXICAL_INDEX_FALLBACK_MISSING: Final = "missing"
 LEXICAL_INDEX_FALLBACK_STALE: Final = "stale"
@@ -72,7 +72,7 @@ LEXICAL_INDEX_FALLBACK_CORRUPT: Final = "corrupt"
 LEXICAL_INDEX_FALLBACK_QUERY_TOO_SHORT: Final = "query-too-short"
 
 LEXICAL_INDEX_SCHEMA_VERSION: Final = 4
-LEXICAL_INDEX_EXTRACTOR_VERSION: Final = 14
+LEXICAL_INDEX_EXTRACTOR_VERSION: Final = 15
 RANKING_VERSION: Final = 10
 LEXICAL_INDEX_FORMAT: Final = "postings-varint-v3"
 LEXICAL_LOOKUP_SHARD_COUNT: Final = 4096
@@ -382,7 +382,7 @@ class LexicalEntry:
 
     @property
     def is_record(self) -> bool:
-        return self.kind in {Layer.EVENTS, Layer.INDEX}
+        return self.kind in {Layer.EVENTS, Layer.INVENTORIES}
 
     def active(self, window: Window, as_of: str) -> bool:
         if self.kind in {Layer.EVENTS, Layer.TASKS} and self.date and not window.contains(self.date):
@@ -779,8 +779,8 @@ def _collect_lexical_corpus(base: Base, cancel: Cancellation | None) -> _Lexical
         for day in base.event_dates():
             check_cancel(cancel)
             document_uris.extend(event_document_uri(day, name) for name in base.day_documents(day))
-    if base.store.enabled(Layer.INDEX):
-        document_uris.extend(index_document_uri(name) for name in base.index_documents())
+    if base.store.enabled(Layer.INVENTORIES):
+        document_uris.extend(inventory_document_uri(name) for name in base.inventory_documents())
     for uri in document_uris:
         check_cancel(cancel)
         document = base.read_document(uri)
@@ -3289,7 +3289,7 @@ def query_find_lexical_index(
             return None, LexicalIndexUse(reason=LEXICAL_INDEX_FALLBACK_CORRUPT)
         if not base.store.enabled(layer):
             continue
-        if record_only and layer not in {Layer.EVENTS, Layer.INDEX}:
+        if record_only and layer not in {Layer.EVENTS, Layer.INVENTORIES}:
             continue
         if wanted_sources and entry.source not in wanted_sources:
             continue

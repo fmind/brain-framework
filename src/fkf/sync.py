@@ -29,7 +29,7 @@ from fkf.documents import (
     Window,
     day_window,
     event_document_uri,
-    index_document_uri,
+    inventory_document_uri,
     parse_day_in_location,
 )
 from fkf.errors import CanceledError, OperationalError
@@ -311,11 +311,11 @@ def _plan_units(targets: Sequence[Source], days: Sequence[datetime]) -> tuple[_S
     dates = tuple(day.date().isoformat() for day in days)
     work: list[_SyncWork] = []
     for source in targets:
-        if source.layer is Layer.INDEX:
+        if source.layer is Layer.INVENTORIES:
             work.append(
                 _SyncWork(
                     source,
-                    SyncUnit(source=source.name, kind=source.layer, uri=index_document_uri(source.name)),
+                    SyncUnit(source=source.name, kind=source.layer, uri=inventory_document_uri(source.name)),
                 )
             )
         elif source.window and dates:
@@ -338,7 +338,7 @@ def _plan_units(targets: Sequence[Source], days: Sequence[datetime]) -> tuple[_S
 
 def _source_collection_window(source: Source, label: str, now: datetime) -> Window:
     if not label:
-        if source.layer is not Layer.INDEX:
+        if source.layer is not Layer.INVENTORIES:
             raise ValueError(f"events source {source.name} has no collection date")
         label = now.date().isoformat()
     return day_window(parse_day_in_location(label, _zone(now)))
@@ -361,10 +361,10 @@ def _should_skip(base: Base, source: Source, unit: SyncUnit, request: SyncReques
         collected_at = parse_rfc3339(document.collected_at)
     except Exception as error:
         raise OperationalError(
-            f"inspect existing index snapshot {unit.uri}: {error}; use --force to replace it", cause=error
+            f"inspect existing inventory {unit.uri}: {error}; use --force to replace it", cause=error
         ) from error
     age = Instant.from_datetime(base.now()).unix_nanoseconds - collected_at.unix_nanoseconds
-    max_age = source.effective_max_age_hours(base.config.sync.index_max_age_hours) * 3_600_000_000_000
+    max_age = source.effective_max_age_hours(base.config.sync.inventory_max_age_hours) * 3_600_000_000_000
     return SyncOutcome.SKIPPED_FRESH if 0 <= age < max_age else None
 
 
@@ -397,7 +397,7 @@ def _body_document_due(base: Base, source: Source, uri: str) -> bool:
     manifest = load_body_manifest(base)
     if source.layer is Layer.EVENTS:
         return _event_body_restore_pending(manifest, source.name)
-    if source.layer is not Layer.INDEX:
+    if source.layer is not Layer.INVENTORIES:
         return False
     document = base.read_document(uri)
     return any(not _body_cache_current(base, manifest, document, record) for record in document.records)
@@ -812,7 +812,7 @@ def _sync_unit_bodies(
     restore_event: bool,
     cancel: Cancellation | None,
 ) -> SyncUnit:
-    # Newly written evidence, a fresh index snapshot, and the one selected event restore are
+    # Newly written evidence, a fresh inventory, and the one selected event restore are
     # the only units allowed to trigger provider body reads.
     if unit.outcome not in {SyncOutcome.WRITTEN, SyncOutcome.SKIPPED_FRESH} and not restore_event:
         return unit
@@ -901,7 +901,9 @@ def _preview_sync(base: Base, request: SyncRequest, cancel: Cancellation | None)
     window = _source_collection_window(source, label, started)
     if not _run_auth_probe(base, source, cancel):
         uri = (
-            event_document_uri(label, source.name) if source.layer is Layer.EVENTS else index_document_uri(source.name)
+            event_document_uri(label, source.name)
+            if source.layer is Layer.EVENTS
+            else inventory_document_uri(source.name)
         )
         return SyncReport(
             base=os.fspath(base.root),

@@ -22,7 +22,7 @@ name: brain
 schema:
   id: {description: Stable identity., cardinality: one}
   title: {description: Subject., cardinality: optional, weight: 7}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 identities:
   owner:
     canonical: person:email/owner@example.com
@@ -30,11 +30,11 @@ identities:
     owner: true
 sources:
   example-records:
-    layer: index
+    layer: inventories
     run: [example, list]
     fields: {id: .id, title: [.title, .subject]}
     retry: {attempts: 2, backoff: 1s, on: ["exit:7"]}
-sync: {days: 4, index_max_age_hours: 12, timeout: 3s, concurrency: 2}
+sync: {days: 4, inventory_max_age_hours: 12, timeout: 3s, concurrency: 2}
 """,
         encoding="utf-8",
     )
@@ -98,11 +98,11 @@ def test_config_parent_and_schema_cli_preserve_public_bytes(tmp_path: Path) -> N
     )
     assert stdout.getvalue().splitlines()[:4] == [
         f"brain  {root / 'fkf.yaml'}",
-        "layers:  events index projects tasks wiki",
-        "sync:    4 day(s), timeout 3s, concurrency 2, index stale after 12h",
+        "layers:  events inventories projects tasks wiki",
+        "sync:    4 day(s), timeout 3s, concurrency 2, inventory stale after 12h",
         "",
     ]
-    assert "example-records          off  index    " in stdout.getvalue()
+    assert "example-records          off  inventories" in stdout.getvalue()
     assert stderr.getvalue() == ""
 
     stdout, stderr = io.StringIO(), io.StringIO()

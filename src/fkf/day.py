@@ -950,7 +950,7 @@ def _is_who_record_uri(base: Base, raw: str) -> bool:
         return False
     if uri.scheme != Scheme.FILE or not uri.fragment or uri.jq or not uri.path.endswith(".json"):
         return False
-    return base.store.layer_of(uri.path) in {Layer.EVENTS, Layer.INDEX}
+    return base.store.layer_of(uri.path) in {Layer.EVENTS, Layer.INVENTORIES}
 
 
 def _read_who_record(base: Base, raw: str, resolver: IdentityResolver) -> RecordHit:

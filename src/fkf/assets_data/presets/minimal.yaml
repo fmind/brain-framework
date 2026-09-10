@@ -4,7 +4,7 @@ sources: {}
 #   sources:
 #     my-source:
 #       enabled: true
-#       layer: events                   # or index
+#       layer: events                   # or inventories
 #       requires: [some-cli]            # explicit readiness checks; never inferred from run:
 #       run: [some-cli, --since, "{{date}}", --until, "{{next_date}}", --json]
 #       fields:                         # open mapping: add the meanings useful to this base

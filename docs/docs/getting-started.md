@@ -79,15 +79,16 @@ The personal preset declares a small supported set of local and provider sources
 Initialization creates:
 
 - `fkf.yaml`, with `fkf: 1`, a root semantic schema, all source defaults, and no secrets;
-- five enabled layers: `events/`, `index/`, `tasks/`, `projects/`, and `wiki/`;
+- five enabled layers: `events/`, `inventories/`, `tasks/`, `projects/`, and `wiki/`;
 - managed blocks in `.gitignore` and `.gitattributes`;
 - a minimal base-specific `AGENTS.md` and the copied `fkf-use`, `fkf-learn`, and `daily-brief` skills;
+- an empty `skills/` catalog for optional private user-scope skills;
 - non-overwriting Claude bridges;
 - helpers required by initially enabled sources and the session-start hook under trust-digested `sources/`;
-- `checks/queries.yaml`, the owner-controlled retrieval acceptance set `fkf eval` runs;
+- `operations/queries.yaml`, the owner-controlled retrieval acceptance set `fkf eval` runs;
 - a git repository with owner-only files.
 
-Running `fkf init ~/brain` again refreshes FKF-owned skills and managed blocks. It preserves `fkf.yaml`, `AGENTS.md`, custom skills, existing bridges, and existing helpers. After enabling a preset source, run `fkf config helpers --refresh` to install any newly required official helper. `fkf config helpers` compares official helpers with the running binary, and refresh leaves custom scripts untouched.
+Running `fkf init ~/brain` again refreshes FKF-owned skills and managed blocks. It preserves `fkf.yaml`, `AGENTS.md`, custom skills, private `skills/<name>` packages, existing bridges, and existing helpers. After enabling a preset source, run `fkf config helpers --refresh` to install any newly required official helper. `fkf config helpers` compares official helpers with the running binary, and refresh leaves custom scripts untouched.
 
 ## Setup checklist
 
@@ -139,7 +140,7 @@ fkf --base ~/brain harness install --all
 
 `print` lets you inspect the exact integration first. `install` pins the current executable and absolute base in every managed entry, and wraps base-owned hook execution in a trust check. The server exposes bounded `context`, `find`, `day`, `timeline`, `list`, `read`, and `graph` operations. It cannot write, collect, or fetch record bodies. Pageable calls return opaque cursors bound to the normalized effective query and result snapshot. `--base` is required so the launch command states the disclosure boundary.
 
-Keep the base's `AGENTS.md` minimal and specific to that base. FKF instructions belong in the copied skills, and reusable custom workflows belong in their own `.agents/skills/<name>/` packages.
+Keep the base's `AGENTS.md` minimal and specific to that base. FKF instructions belong in the copied skills, and reusable base-specific workflows belong in their own `.agents/skills/<name>/` packages. A workflow that is private, safe across projects, and intentionally available to every harness belongs in `skills/<name>/`; review it and run `fkf skills install`. Private skill names are global across installed bases, and the prefix does not make a public base confidential.
 
 ## Share one team base
 
@@ -158,7 +159,7 @@ GH_CONFIG_DIR=~/.config/gh-team fkf --base ~/team-brain sync jira-issues --previ
 
 Select the Jira site in ACLI's machine-local configuration with `acli jira auth switch`; keep its credentials and GitHub's `GH_CONFIG_DIR` out of the base. Preview and collect each enabled source deliberately. Then inspect `git status`, the projected JSON, and `git diff` before a separately authorized commit and push.
 
-`--track-collected` is the durable sharing decision: `git check-ignore events index` should report neither layer, and `git ls-files events index` names collected documents after they are explicitly added. `fkf.local.yaml`, `bodies/`, and `index/.fkf-index.*` stay ignored because they contain machine-local configuration or rebuildable caches. A second clone can run `fkf validate records`, `fkf build`, and offline reads without provider access.
+`--track-collected` is the durable sharing decision: `git check-ignore events inventories` should report neither layer, and `git ls-files events inventories` names collected documents after they are explicitly added. `fkf.local.yaml`, `bodies/`, and `indexes/` stay ignored because they contain machine-local configuration or rebuildable caches. A second clone can run `fkf validate records`, `fkf build`, and offline reads without provider access.
 
 ## Next
 

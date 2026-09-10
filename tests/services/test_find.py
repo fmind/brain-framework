@@ -40,7 +40,7 @@ schema:
   repo: {description: Repository., cardinality: optional, relation: true}
   author: {description: Author., cardinality: optional, relation: true}
   topic: {description: Topic., cardinality: optional}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 sources:
   synthetic:
     enabled: true
@@ -51,7 +51,7 @@ sources:
     fields: {id: .id, time: .time, title: .subject, repo: .repo, author: .author, topic: .topic}
   catalog:
     enabled: true
-    layer: index
+    layer: inventories
     run: [provider]
     fields: {id: .id, title: .title, topic: .topic}
 """
@@ -176,14 +176,14 @@ def test_bare_find_is_recent_and_bounded_but_a_question_is_exhaustive(tmp_path: 
 
     bare = find(base)
     assert len(bare.days) == DEFAULT_FIND_DAYS
-    assert all(not record.uri.startswith("index/") for record in bare.records)
+    assert all(not record.uri.startswith("inventories/") for record in bare.records)
     assert all("2026-05-01" not in record.uri for record in bare.records)
 
     exhaustive = find(base, FindFilter(grep=("exhaustive signal",)))
     assert exhaustive.matched == DEFAULT_FIND_DAYS + 2
     assert len(exhaustive.records) == DEFAULT_FIND_DAYS + 2
     assert not exhaustive.truncated
-    assert exhaustive.records[-1].uri == "index/catalog.json#index-match"
+    assert exhaustive.records[-1].uri == "inventories/catalog.json#index-match"
 
     records: list[Record] = [
         {"id": f"many-{index:03d}", "time": "2026-05-09T09:00:00Z", "subject": "bounded discovery"}
@@ -270,7 +270,7 @@ def test_bounded_find_pages_tasks_and_index_records_across_a_continuation(tmp_pa
             {"id": "two", "title": "Unrelated index record"},
         ],
     )
-    filters = FindFilter(grep=("needle",), layers=(Layer.TASKS, Layer.INDEX))
+    filters = FindFilter(grep=("needle",), layers=(Layer.TASKS, Layer.INVENTORIES))
 
     first = find_bounded(base, filters, counting=False, limit=1)
     assert [page.uri for page in first.result.pages] == ["tasks/2026-05-04/memory/TASKS.md"]
@@ -280,12 +280,12 @@ def test_bounded_find_pages_tasks_and_index_records_across_a_continuation(tmp_pa
 
     second = find_bounded(base, filters, counting=False, limit=1, after=first.next)
     assert second.result.pages == ()
-    assert [record.uri for record in second.result.records] == ["index/catalog.json#one"]
+    assert [record.uri for record in second.result.records] == ["inventories/catalog.json#one"]
     assert second.next is None
     assert second.snapshot_sha256 == first.snapshot_sha256
     assert (second.result.scanned, second.result.matched) == (2, 1)
 
-    count_filters = FindFilter(grep=("needle",), layers=(Layer.EVENTS, Layer.INDEX))
+    count_filters = FindFilter(grep=("needle",), layers=(Layer.EVENTS, Layer.INVENTORIES))
     first_count = find_bounded(base, count_filters, counting=True, limit=1)
     assert [(volume.date, volume.total) for volume in first_count.result.volumes] == [("2026-05-04", 1)]
     assert first_count.next == FindPosition("volume", date="2026-05-04")

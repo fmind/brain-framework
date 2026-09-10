@@ -29,7 +29,7 @@ This is generic by design. FKF has no special repository, ticket, or person fiel
 
 ### Derived lexical cache
 
-`fkf build index` writes a sorted postings TSV plus integrity metadata under ignored `index/.fkf-index.*` paths. FKF uses this plain format instead of adding a database and its transitive dependency surface. The cache is bound to every searchable document, cached-body manifest and body, and ranking/schema semantics.
+`fkf build index` writes a sorted postings TSV plus integrity metadata under ignored `indexes/` paths. FKF uses this plain format instead of adding a database and its transitive dependency surface. The cache is bound to every searchable document, cached-body manifest and body, and ranking/schema semantics.
 
 The cache supplies only a conservative candidate set and corpus term statistics. FKF reloads selected durable evidence and applies the same Python scorer, so the semantic pack is identical to a scan. Missing, stale, or corrupt cache bytes fall back to the scan; `receipt.index` and default text output name the base-relative path and `used`, `missing`, `stale`, `corrupt`, or `query-too-short` state. Stored reads remain offline in both paths.
 

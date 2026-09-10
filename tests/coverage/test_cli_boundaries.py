@@ -75,8 +75,8 @@ def test_ask_commands_cover_each_published_read_shape_and_graph_mode(tmp_path: P
         assert message in stderr
 
     graph_cases = (
-        (("graph",), "graph.tsv"),
-        (("graph", "--verify"), "graph.tsv"),
+        (("graph",), "graphs/src.tsv"),
+        (("graph", "--verify"), "graphs/src.tsv"),
         (("graph", "person:alice", "--in"), "link       "),
         (("graph", "person:alice", "--out"), "edge(s)"),
         (("graph", "person:alice", "--both"), "link       "),
@@ -112,7 +112,7 @@ def test_browse_commands_cover_list_validation_and_tag_surfaces(tmp_path: Path) 
     commands = (
         ("list", "events"),
         ("list", "events", "--source", "synthetic", "--limit", "1"),
-        ("list", "index"),
+        ("list", "inventories"),
         ("list", "tasks"),
         ("list", "tasks", "learned", "--unharvested"),
         ("list", "projects", "--status", "active"),

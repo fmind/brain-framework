@@ -170,7 +170,40 @@ def test_install_all_combines_shared_targets_once(tmp_path: Path) -> None:
     assert checked.changes == ()
 
 
-def test_preflight_conflicts_and_overlapping_workspaces_write_nothing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("current_first", [False, True])
+def test_workspace_hook_repair_uses_ownership_markers_and_removes_duplicates(
+    tmp_path: Path, current_first: bool
+) -> None:
+    base = make_base(tmp_path)
+    home = tmp_path / "harness-home"
+    home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolver = fake_launcher(tmp_path / "tools" / "fkf")
+    request = HarnessInstallRequest(names=("claude",), home=home, workspace=workspace)
+    install_harnesses(base, request, launcher_resolver=resolver)
+    config = home / ".claude" / "settings.json"
+    value = json.loads(config.read_text())
+    current = value["hooks"]["SessionStart"][0]
+    stale = json.loads(json.dumps(current).replace("sources/fkf-hook.py", "retired/context-helper"))
+    unrelated = {"hooks": [{"type": "command", "command": "echo unrelated"}]}
+    value["hooks"]["SessionStart"] = [current, stale] if current_first else [stale, current]
+    value["hooks"]["SessionStart"].append(unrelated)
+    before = json.dumps(value)
+    config.write_text(before)
+
+    checked = install_harnesses(base, replace(request, check=True), launcher_resolver=resolver)
+    assert not checked.complete
+    assert config.read_text() == before
+    install_harnesses(base, request, launcher_resolver=resolver)
+
+    assert json.loads(config.read_text())["hooks"]["SessionStart"] == [current, unrelated]
+    assert config.with_name(config.name + ".fkf.bak").read_text() == before
+    assert install_harnesses(base, replace(request, check=True), launcher_resolver=resolver).complete
+
+
+@pytest.mark.parametrize("retired_helper", [False, True])
+def test_preflight_conflicts_and_overlapping_workspaces_write_nothing(tmp_path: Path, retired_helper: bool) -> None:
     base = make_base(tmp_path / "first", "shared")
     other = make_base(tmp_path / "second", "other")
     home = tmp_path / "harness-home"
@@ -197,6 +230,9 @@ def test_preflight_conflicts_and_overlapping_workspaces_write_nothing(tmp_path: 
         HarnessInstallRequest(names=("claude",), home=home, workspace=workspace),
         launcher_resolver=resolver,
     )
+    if retired_helper:
+        settings = home / ".claude" / "settings.json"
+        settings.write_text(settings.read_text().replace("sources/fkf-hook.py", "retired/context-helper"))
     with pytest.raises(HarnessConflictError, match="overlapping"):
         install_harnesses(
             other,

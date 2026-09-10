@@ -27,6 +27,7 @@ from fkf.graph import graph_input_uris
 from fkf.helpers import install_missing_required_helpers
 from fkf.io import atomic_write, read_file_limited, sync_directory
 from fkf.marked_block import MarkedBlockError, MarkedBlockMarkers, parse_marked_block_region
+from fkf.private_skills import PRIVATE_SKILLS_DIR
 from fkf.process import Cancellation, Command, Runner, SubprocessRunner, sanitize_path
 from fkf.schema import SCHEMA_URL
 from fkf.source_runtime import Environment
@@ -64,7 +65,7 @@ PRESET_MINIMAL: Final = "minimal"
 PRESET_PERSONAL: Final = "personal"
 PRESET_TEAM: Final = "team"
 
-_EVAL_DIRECTORY = "checks"
+_EVAL_DIRECTORY = "operations"
 _EVAL_QUERIES_FILE = "queries.yaml"
 _MANAGED_BEGIN = "# >>> fkf managed block — do not edit between the markers"
 _MANAGED_BEGIN_PREFIX = "# >>> fkf managed block"
@@ -112,14 +113,14 @@ _MACHINE_LOCAL_PATTERNS: Final = (
     ".agents/tmp/",
     ".agents/skills/local-*/",
     "/bodies/",
-    "/index/.fkf-index.*",
+    "/indexes/",
     "*.exe",
     "*.dll",
     "*.so",
     "*.dylib",
     "*.test",
 )
-_COLLECTED_LAYERS: Final = ("events/", "index/")
+_COLLECTED_LAYERS: Final = ("events/", "inventories/")
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,11 +235,7 @@ def managed_ignore_block(track_collected: bool) -> str:
     lines.extend(
         (
             "# Derived and rebuildable: `fkf sync` and `fkf build` recreate these.",
-            f"/{GRAPH_FILE}",
-            f"/{GRAPH_DST_FILE}",
-            f"/{GRAPH_OFFSETS_FILE}",
-            f"/{GRAPH_META_FILE}",
-            f"/{GRAPH_GENERATION_FILE}",
+            "/graphs/",
             _MANAGED_END,
         )
     )
@@ -252,7 +249,7 @@ def managed_attributes_block() -> str:
         "# A collected document is written whole. Line-merging two machines' copies would\n"
         "# produce a file that parses and lies, so conflicts stay visible instead.\n"
         "events/**/*.json -merge text eol=lf\n"
-        "index/**/*.json -merge text eol=lf\n"
+        "inventories/**/*.json -merge text eol=lf\n"
         "*.md text eol=lf\n"
         f"{_MANAGED_END}\n"
     )
@@ -469,7 +466,7 @@ This directory is the **{name}** fkf base.
 - `fkf.yaml` is the shared configuration and disclosure boundary; review changed execution definitions with `fkf trust`.
 - Declare online apps in `clients:` with `url` and one Python `script` filename under `clients/`; call them through explicit `uv run --script` argv. The complete clients tree is trust-covered and stays outside PATH.
 - Keep collection and body helpers under `sources/`; keep source `test:` hooks under `tests/`. All three execution trees are trust-digested, but only tests prepend the latter to PATH.
-- `fkf init` refreshes bundled skills but never this file. Put shared base-specific workflows in another skill and prefix machine-local skills with `local-`.
+- `fkf init` refreshes bundled skills but never this file. Keep base-specific workflows under `.agents/skills/`. Put private user-scope skills under `skills/<name>/` and publish them explicitly with `fkf skills install`; names must be unique across installed bases.
 
 ## Base-specific instructions
 
@@ -514,7 +511,7 @@ schema: # shared semantic names; sources only map provider paths to these defini
 
 layers: # a disabled layer is not created, listed, served, or scanned
   events: true # what happened, one document per source per day (JSON)
-  index: true # what you have, one point-in-time document per source (JSON)
+  inventories: true # what you have, one point-in-time document per source (JSON)
   tasks: true # execution evidence (Markdown)
   projects: true # intent and decisions over weeks (Markdown, status-bearing)
   wiki: true # durable approved knowledge (Markdown, OKF v0.2)
@@ -581,7 +578,7 @@ def render_config(name: str, preset: str, *, demo: bool = False) -> str:
         + """
 sync:
   days: 30 # completed local days to collect when no --date is given; 1..366
-  index_max_age_hours: 168 # refresh an index document only when it is older
+  inventory_max_age_hours: 168 # refresh an inventory document only when it is older
   timeout: 2m0s # per command; a source may override with its own timeout:
   concurrency: 4
 """
@@ -592,6 +589,7 @@ def _validate_scaffold_targets(root: Path, cancel: Cancellation | None) -> None:
     directories = [
         root / ".agents",
         root / Path(BASE_SKILLS_DIR),
+        root / PRIVATE_SKILLS_DIR,
         root / BASE_SOURCES_DIR,
         root / BASE_CLIENTS_DIR,
         root / BASE_TESTS_DIR,
@@ -617,6 +615,7 @@ def _validate_scaffold_targets(root: Path, cancel: Cancellation | None) -> None:
         ".gitignore",
         ".gitattributes",
         "CLAUDE.md",
+        f"{PRIVATE_SKILLS_DIR}/.gitkeep",
         f"{_EVAL_DIRECTORY}/{_EVAL_QUERIES_FILE}",
     ):
         validate_path_confinement(root / Path(relative))
@@ -642,9 +641,9 @@ def _write_managed_blocks(root: Path, track: bool, report: InitReport) -> None:
     attributes = _plan_managed_block(root / ".gitattributes", managed_attributes_block())
     _apply_managed_plan(ignore)
     _apply_managed_plan(attributes)
-    detail = "events/ and index/ stay out of history (re-create with --track-collected to version them)"
+    detail = "events/ and inventories/ stay out of history (re-create with --track-collected to version them)"
     if track:
-        detail = "events/ and index/ are versioned; history is append-only"
+        detail = "events/ and inventories/ are versioned; history is append-only"
     report.step(".gitignore", detail, ignore.changed)
     report.step(".gitattributes", "JSON layers never line-merge", attributes.changed)
 
@@ -656,6 +655,23 @@ def _write_base_agents(root: Path, name: str, report: InitReport) -> None:
     except FileNotFoundError:
         atomic_write(target, base_agents_template(name).encode(), mode=BASE_FILE_MODE)
         report.step(BASE_AGENTS_FILE, "routes agents to the copied fkf skills", True)
+
+
+def _write_private_skills_scaffold(root: Path, report: InitReport, created: list[_CreatedFile] | None) -> None:
+    directory = root / PRIVATE_SKILLS_DIR
+    directory.mkdir(mode=BASE_DIR_MODE, parents=True, exist_ok=True)
+    marker = directory / ".gitkeep"
+    try:
+        info = marker.lstat()
+    except FileNotFoundError:
+        atomic_write(marker, b"", mode=BASE_FILE_MODE)
+        if created is not None:
+            created.append(_created_file(marker))
+        report.step(f"{PRIVATE_SKILLS_DIR}/", "optional user-scope Agent Skills", True)
+        return
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise UnsafePathError(f"{PRIVATE_SKILLS_DIR}/.gitkeep must be a regular file")
+    report.step(f"{PRIVATE_SKILLS_DIR}/", "optional user-scope Agent Skills", False)
 
 
 def _created_file(path: Path) -> _CreatedFile:
@@ -826,6 +842,7 @@ def _scaffold_created_base(
         _init_git(root, runner, cancel)
     _write_managed_blocks(root, request.track_collected, report)
     _write_base_agents(root, name, report)
+    _write_private_skills_scaffold(root, report, created)
     _write_starter_eval(root, report, created)
     _write_skills_and_helpers(root, config, report, created, cancel)
     _write_agent_bridges(root, report)
@@ -906,6 +923,7 @@ def _refresh(
     track = tracks_collected(root) or request.track_collected
     report.track_collected = track
     _write_managed_blocks(root, track, report)
+    _write_private_skills_scaffold(root, report, None)
     _write_starter_eval(root, report, None)
     _write_skills_and_helpers(root, None, report, None, cancel)
     _write_agent_bridges(root, report)
@@ -1352,7 +1370,7 @@ def _stage_files(root: Path) -> tuple[Path, ...]:
 
 
 def _demo_target(base: Base, relative: str) -> Path:
-    if relative in {"index/.fkf-index.tsv", "index/.fkf-index.meta.json"}:
+    if relative in {"indexes/index.tsv", "indexes/meta.json"}:
         target = base.root.joinpath(*PurePosixPath(relative).parts)
         validate_within_root(base.root, target)
         return target

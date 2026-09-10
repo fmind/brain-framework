@@ -379,7 +379,7 @@ def _base_execution_digest(config: Config) -> str:
         digest.field("layer-name", layer)
         digest.boolean("layer-enabled", config.layers.get(layer, False))
     digest.integer("sync-days", config.sync.days)
-    digest.integer("index-max-age-hours", config.sync.index_max_age_hours)
+    digest.integer("index-max-age-hours", config.sync.inventory_max_age_hours)
     digest.integer("timeout", int(config.sync.timeout))
     digest.integer("concurrency", config.sync.concurrency)
     for name, client in sorted(config.clients.items()):

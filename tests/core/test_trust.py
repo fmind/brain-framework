@@ -48,7 +48,7 @@ schema:
   title: {description: Meaningful subject line., cardinality: optional}
   project: {description: Provider project., cardinality: optional}
   topic: {description: Retrieval-only topic., cardinality: optional}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 """
 
 
@@ -82,7 +82,7 @@ def test_config_digest_binds_the_current_execution_layout(tmp_path: Path) -> Non
         tmp_path,
         """\
 bin: [/opt/provider-tools, ~/bin]
-sync: {days: 7, index_max_age_hours: 36, timeout: 1500ms, concurrency: 3}
+sync: {days: 7, inventory_max_age_hours: 36, timeout: 1500ms, concurrency: 3}
 sources:
   github:
     enabled: true
@@ -108,12 +108,12 @@ sources:
     config = load_config(root)
     items = trust_items(config)
 
-    # Golden framing includes the sources/ and clients/ execution-directory policy.
+    # The inventories layer deliberately re-arms trust along with the execution-directory policy.
     assert [(item.kind, item.name, item.digest, item.executable) for item in items] == [
-        (TrustItemKind.CONFIG, "base", "0aef57d225a7c3e3dd113c285228fafb169e3d2657bd0343f682de40a15c9e5a", False),
+        (TrustItemKind.CONFIG, "base", "73b5302a5d70fdc7f968849d930b2bc9f37974b7d5e826670b07046dd8fdd8f2", False),
         (TrustItemKind.SOURCE, "github", "60923b76bc804432267f091113cb638dba30e5e226931e6e3c4b8e66ca616600", False),
     ]
-    assert config_digest(config) == "d9dfff16e44a6f4ca957689baf13e5027792e7d3534b749bbe59ea6a96f01cac"
+    assert config_digest(config) == "b5474ac524465f4842796e177f19f94d8c786b332f8a468b2e79a71fab3302f8"
 
 
 def test_digest_tracks_execution_changes_but_not_retrieval_metadata(tmp_path: Path) -> None:
@@ -168,7 +168,7 @@ def test_execution_tree_inventory_is_recursive_deterministic_and_complete(tmp_pa
     # Complete golden item list includes the execution-directory policy.
     config = load_config(root)
     assert [(item.kind, item.name, item.digest, item.executable) for item in trust_items(config)] == [
-        (TrustItemKind.CONFIG, "base", "5bd7a0b5db136b6fcf28ee4054c9c2a7928e363ab5ef2619ac03477d4cd21346", False),
+        (TrustItemKind.CONFIG, "base", "6f5b7c9bdc8eb3e0d9ca613684594b6532f3d8a5ae5eb67c5c01944d3f4cc473", False),
         (TrustItemKind.SCRIPT, "README", "ef368410ab8e4e16d994084e0bc431be5ec232b76af69245a38d1f7c2c431d7e", False),
         (
             TrustItemKind.SCRIPT,
@@ -184,7 +184,7 @@ def test_execution_tree_inventory_is_recursive_deterministic_and_complete(tmp_pa
             True,
         ),
     ]
-    assert config_digest(config) == "02b4b3081ae32a1fd550bde1e7ec41e8188c1e21030137ba77d5fc54046d82e7"
+    assert config_digest(config) == "a19a22359f1a3d359a1c154b4c254bc0da0e02d7dd48f08226c5c6de53b60df0"
 
 
 @pytest.mark.parametrize("tree", ["sources", "tests"])

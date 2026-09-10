@@ -34,7 +34,7 @@ schema:
   id: {description: Stable record identity., cardinality: one}
   time: {description: Event time., cardinality: one}
   title: {description: Human-readable title., cardinality: optional}
-layers: {events: false, index: false, tasks: true, projects: true, wiki: true}
+layers: {events: false, inventories: false, tasks: true, projects: true, wiki: true}
 sources: {}
 """
 
@@ -291,7 +291,7 @@ def test_learn_services_receive_the_invocation_event_and_cancel_with_exit_130(
 def test_learn_apply_emits_durable_report_before_rebuild_failure(tmp_path: Path) -> None:
     root = make_base(tmp_path, lesson="Keep approved knowledge after cache failure.")
     proposal_id = propose(root)
-    (root / "graph.tsv").mkdir()
+    (root / "graphs/src.tsv").mkdir(parents=True)
 
     code, stdout, stderr = invoke("learn", "apply", proposal_id, "--format", "json", "--base", str(root))
 

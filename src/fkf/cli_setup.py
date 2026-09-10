@@ -74,7 +74,8 @@ def register_setup_commands(app: typer.Typer, config_app: typer.Typer) -> None:
         help=(
             "Create a base, or refresh the parts of one that fkf owns. On a new path this writes "
             "the chosen preset's fkf.yaml, enabled layers, managed git blocks, AGENTS.md, bundled "
-            "skills, helpers required by enabled sources, and agent bridges. It records trust only "
+            "skills, an empty private skill catalog, helpers required by enabled sources, and agent bridges.\n\n"
+            "It records trust only "
             "when no execution input predated init. On an existing base it refreshes FKF-owned "
             "skills and managed blocks, creates missing agent bridges, and preserves fkf.yaml, "
             "AGENTS.md, and helpers."
@@ -91,7 +92,7 @@ def register_setup_commands(app: typer.Typer, config_app: typer.Typer) -> None:
         name: Annotated[str, typer.Option("--name", help="Base name; defaults to the directory name.")] = "",
         track_collected: Annotated[
             bool,
-            typer.Option("--track-collected", help="Track events/ and index/ in append-only Git history."),
+            typer.Option("--track-collected", help="Track events/ and inventories/ in append-only Git history."),
         ] = False,
         demo: Annotated[
             int,

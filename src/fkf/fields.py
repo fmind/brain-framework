@@ -692,17 +692,17 @@ def _clean_relative(relative: str) -> str:
 
 
 def _relation_file_path(relative: str) -> tuple[bool, bool, bool]:
-    if relative in {"fkf.yaml", "graph.tsv", "graph.dst.tsv", "graph.offsets.tsv"}:
+    if relative in {"fkf.yaml", "graphs/src.tsv", "graphs/dst.tsv", "graphs/offsets.tsv"}:
         return False, False, True
     if relative == "AGENTS.md":
         return True, False, True
-    if relative in {"graph.meta.json", "graph.generation.json"}:
+    if relative in {"graphs/meta.json", "graphs/generation.json"}:
         return False, True, True
 
     parts = relative.split("/")
     if len(parts) == 3 and parts[0] == "events" and _valid_date(parts[1]) and _source_document(parts[2]):
         return True, True, True
-    if len(parts) == 2 and parts[0] == "index" and _source_document(parts[1]):
+    if len(parts) == 2 and parts[0] == "inventories" and _source_document(parts[1]):
         return True, True, True
     if (
         len(parts) == 4

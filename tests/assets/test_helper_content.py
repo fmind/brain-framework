@@ -18,7 +18,7 @@ from .conftest import HelperInstallation, load_preset, validate_helper_output
     ("helper", "provider_output", "field", "expected", "source"),
     [
         (
-            "github-gists-json.sh",
+            "github-gists-json.py",
             (
                 '[{"id":"deadbeef","description":"","html_url":"https://gist.github.com/example/deadbeef",'
                 '"updated_at":"2026-05-04T09:00:00Z","public":true,"files":{"notes.md":{}}}]'
@@ -28,7 +28,7 @@ from .conftest import HelperInstallation, load_preset, validate_helper_output
             "github-gists",
         ),
         (
-            "github-stars-json.sh",
+            "github-stars-json.py",
             (
                 '[{"starred_at":"2026-05-04T09:00:00Z","repo":{"full_name":"example/project",'
                 '"html_url":"https://github.com/example/project","description":"Soft\\u00adware",'
@@ -399,7 +399,7 @@ esac
     assert invalid.stdout == b""
     assert b"invalid message resource name" in invalid.stderr
 
-    document = helpers.run("gws-doc-text.sh", "document-1")
+    document = helpers.run("gws-doc-text.py", "document-1")
     assert document.returncode == 0, document.stderr.decode(errors="replace")
     assert document.stdout == b"First paragraph.\nTable cell.\n\n"
 

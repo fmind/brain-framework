@@ -128,14 +128,14 @@ fkf graph nodes --kind person
 
 ```bash
 fkf list events --since 7d
-fkf list index
+fkf list inventories
 fkf list tasks --since 7d
 fkf list tasks learned --unharvested
 fkf list projects --status active
 fkf list wiki --tag architecture
 ```
 
-The fixed layer vocabulary is `events`, `index`, `tasks`, `projects`, and `wiki`. Every listing leads with the URI accepted by `read`. Run the relevant subcommand's help for layer-specific filters.
+The fixed layer vocabulary is `events`, `inventories`, `tasks`, `projects`, and `wiki`. Every listing leads with the URI accepted by `read`. Run the relevant subcommand's help for layer-specific filters.
 
 ### `validate`
 
@@ -165,7 +165,7 @@ Tags are listed with usage counts, most-used first. The bare command is the wiki
 fkf eval
 ```
 
-`checks/queries.yaml` is the base-owned retrieval acceptance set. It declares default `k`, `budget`, and `delivery` values, a recall threshold, and optional per-query overrides. `delivery` selects `json` (the default), `jsonl`, or `text` for the context pack; it is independent of the evaluation report's `--format`. Each ordinary query names expected URIs that must arrive within its top-k delivery and forbidden URIs that must be absent from the complete delivered pack. An explicit `expect_empty: true` case requires a genuinely empty answer and cannot declare URI expectations.
+`operations/queries.yaml` is the base-owned retrieval acceptance set. It declares default `k`, `budget`, and `delivery` values, a recall threshold, and optional per-query overrides. `delivery` selects `json` (the default), `jsonl`, or `text` for the context pack; it is independent of the evaluation report's `--format`. Each ordinary query names expected URIs that must arrive within its top-k delivery and forbidden URIs that must be absent from the complete delivered pack. An explicit `expect_empty: true` case requires a genuinely empty answer and cannot declare URI expectations.
 
 `fkf init` creates one runnable entry-point check plus commented target-journey prompts, then leaves the file entirely owner-controlled on refresh. Replace or extend that baseline with exact URIs from the base. Evaluation calls the same final budgeted context path used for delivery and reads stored evidence only. Its report includes effective budgets and delivery formats, delivered bytes and tokens, expected ranks, omissions, forbidden hits, input digests, the ranking version, and one evaluation time. An unmet rank, recall, empty-answer, or forbidden-delivery assertion exits `1`; an invalid suite exits `2`.
 
@@ -179,9 +179,21 @@ fkf init ~/team-brain --preset team --track-collected
 fkf init /tmp/fkf-demo --demo 30
 ```
 
-On a new path, init writes the configuration, layers, managed git blocks, base instructions, embedded skills, the helpers required by enabled sources, agent bridges, and optionally synthetic data. On an existing base it refreshes only FKF-owned skills and marked blocks, creates missing bridges, and preserves `fkf.yaml`, `AGENTS.md`, and existing helpers. Use `config helpers` for an explicit helper diff or refresh.
+On a new path, init writes the configuration, layers, managed git blocks, base instructions, embedded skills, an empty `skills/` private catalog, the helpers required by enabled sources, agent bridges, and optionally synthetic data. On an existing base it refreshes only FKF-owned skills and marked blocks, creates a missing private catalog or bridge, and preserves `fkf.yaml`, `AGENTS.md`, private skills, and existing helpers. Use `config helpers` for an explicit helper diff or refresh.
 
 The default `minimal` preset starts with no source. `personal` and `team` are opt-in starting points; `--demo` adds synthetic records to the minimal configuration. `--track-collected` decides repository policy through the managed `.gitignore` block, not a configuration key.
+
+### `skills install`
+
+```bash
+fkf skills install --dry-run
+fkf skills install
+fkf skills install --check
+```
+
+The root `skills/` directory is a private base's optional user-scope catalog. Every skill directory must use a globally unique lowercase hyphenated name and contain a regular `SKILL.md`. Installation preflights the complete base catalog, then links each package into `~/.agents/skills`; it never copies a skill or replaces an existing path. Existing links from other bases remain in place, so several private bases can coexist. A same-named package from a different base is an explicit collision and exits `2` before any link is written.
+
+`--dry-run` reports missing links and writes nothing. `--check` is also read-only and exits `1` when links are missing, making it suitable for a base's validation task. Removing or renaming a private skill does not delete its old user-scope link; remove that exact link after reviewing its target. No privacy prefix is required. The destination must be a real directory; a catalog symlink is rejected to prevent installing private links into a public source repository. Skill installation is an explicit opt-in on each computer and does not validate remote visibility or audit instructions and scripts. Store these packages only in a repository whose access boundary is already appropriate.
 
 ### `trust`
 
@@ -215,7 +227,7 @@ fkf sync --if-due
 fkf sync --no-graph
 ```
 
-Sync collects completed days that are missing and refreshes due index sources. A source's optional trust-covered `auth:` command runs once only when that source has due work; an ordinary provider exit skips the source as `auth-required` without failing other collection or exposing probe output. Missing executables, timeouts, signals, unsafe paths, trust drift, and runner failures remain hard errors. `--force` replaces an existing document atomically. `--dry-run` prints rendered commands without execution. `--preview` executes the auth probe and validates exactly one source once, shows its count and up to three projected records, and writes nothing; it cannot be combined with `--days`, `--force`, `--dry-run`, or `--no-graph`. `--if-due` cannot be combined with `--force`, `--dry-run`, or `--preview`; it checks for work without taking the writer lock and returns a compact success when nothing is due. `--no-graph` defers the derived graph rebuild. A `window: true` source runs once per contiguous missing date span rather than crossing an already collected gap.
+Sync collects completed days that are missing and refreshes due inventory sources. A source's optional trust-covered `auth:` command runs once only when that source has due work; an ordinary provider exit skips the source as `auth-required` without failing other collection or exposing probe output. Missing executables, timeouts, signals, unsafe paths, trust drift, and runner failures remain hard errors. `--force` replaces an existing document atomically. `--dry-run` prints rendered commands without execution. `--preview` executes the auth probe and validates exactly one source once, shows its count and up to three projected records, and writes nothing; it cannot be combined with `--days`, `--force`, `--dry-run`, or `--no-graph`. `--if-due` cannot be combined with `--force`, `--dry-run`, or `--preview`; it checks for work without taking the writer lock and returns a compact success when nothing is due. `--no-graph` defers the derived graph rebuild. A `window: true` source runs once per contiguous missing date span rather than crossing an already collected gap.
 
 ### `learn`
 

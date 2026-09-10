@@ -18,11 +18,11 @@ schema:
   title: {description: Subject., cardinality: optional}
   related: {description: Related URI., cardinality: many, relation: true}
   note: {description: Plain note., cardinality: optional}
-layers: {events: false, index: true, tasks: false, projects: true, wiki: true}
+layers: {events: false, inventories: true, tasks: false, projects: true, wiki: true}
 sources:
   snapshot:
     enabled: true
-    layer: index
+    layer: inventories
     run: [provider]
     fields: {id: .id, title: .title}
 """

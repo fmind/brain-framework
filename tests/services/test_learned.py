@@ -21,7 +21,7 @@ name: brain
 schema:
   id: {description: Stable identity., cardinality: one}
   time: {description: Event time., cardinality: one}
-layers: {events: false, index: false, tasks: true, projects: true, wiki: true}
+layers: {events: false, inventories: false, tasks: true, projects: true, wiki: true}
 sources: {}
 """
 

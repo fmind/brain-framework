@@ -36,7 +36,7 @@ schema:
   time: {description: Event time., cardinality: one}
   title: {description: Human-readable title., cardinality: optional}
   related: {description: Related resource., cardinality: many, relation: true}
-layers: {events: false, index: false, tasks: true, projects: true, wiki: true}
+layers: {events: false, inventories: false, tasks: true, projects: true, wiki: true}
 sources: {}
 """
 

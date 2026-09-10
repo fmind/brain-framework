@@ -35,11 +35,11 @@ schema:
   id: {description: Stable identity., cardinality: one}
   title: {description: Meaningful title., cardinality: optional}
   modified: {description: Provider modification time., cardinality: optional}
-layers: {events: false, index: true, tasks: false, projects: false, wiki: false}
+layers: {events: false, inventories: true, tasks: false, projects: false, wiki: false}
 sources:
   snapshot:
     enabled: true
-    layer: index
+    layer: inventories
     run: [provider]
     fields: {id: .id, title: .title, modified: .modified}
     body: [provider, body, "{{id}}"]
@@ -56,7 +56,7 @@ def make_base(tmp_path: Path) -> tuple[Base, Document, Record]:
     record: Record = {"id": "alpha", "title": "Alpha", "modified": "2026-09-05T10:00:00Z"}
     document = Document(
         source="snapshot",
-        layer=Layer.INDEX,
+        layer=Layer.INVENTORIES,
         collected_at="2026-09-06T10:00:00Z",
         schema=schema_of(source),
         fields=fields_of(source),
@@ -100,7 +100,7 @@ def test_manifest_is_strict_bounded_and_canonical(tmp_path: Path) -> None:
     with pytest.raises(BodyCacheError, match="unknown field"):
         load_body_manifest(base)
 
-    uri = "index/snapshot.json#alpha"
+    uri = "inventories/snapshot.json#alpha"
     bad = BodyManifestEntry(
         uri=uri,
         source="snapshot",
@@ -118,7 +118,7 @@ def test_body_manifest_can_hold_the_declared_entry_capacity(tmp_path: Path) -> N
     base, _document, _record = make_base(tmp_path)
     entries = {}
     for number in range(MAX_BODY_CACHE_ENTRIES):
-        uri = f"index/snapshot.json#prompt-{number:04d}-{'a' * 160}"
+        uri = f"inventories/snapshot.json#prompt-{number:04d}-{'a' * 160}"
         entries[uri] = BodyManifestEntry(
             uri=uri,
             source="snapshot",

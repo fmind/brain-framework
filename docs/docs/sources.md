@@ -77,25 +77,25 @@ FKF neither assigns those names nor infers equivalence. It validates cardinality
 
 ## Source keys
 
-| Key            | Meaning                                                       |
-| -------------- | ------------------------------------------------------------- |
-| `enabled`      | Whether sync may run the source; false by default             |
-| `layer`        | `events`, `index`, or the dedicated `tasks` trace importer    |
-| `requires`     | Explicit bare executable names checked by `status`            |
-| `auth`         | Optional literal argv probing provider login readiness        |
-| `run`          | Direct argv producing JSON; required                          |
-| `test`         | Optional direct argv verifying the source without collection  |
-| `format`       | `json` or `ndjson`; default `json`                            |
-| `records`      | Field path selecting records inside a wrapper                 |
-| `fields`       | Root-schema name to one path or ordered list of paths         |
-| `window`       | Run once per contiguous missing date range and bucket records |
-| `body`         | Argv that fetches one record body on explicit `read --body`   |
-| `bodies`       | Rebuildable body policy: `none`, `cache`, or `sync`           |
-| `recency`      | Optional lexical recency half-life in days                    |
-| `install`      | Human guidance printed by status; never executed              |
-| `timeout`      | Source timeout overriding the base default                    |
-| `retry`        | Bounded attempts, backoff, and named retryable failures       |
-| `min_interval` | Minimum interval between calls to this source                 |
+| Key            | Meaning                                                          |
+| -------------- | ---------------------------------------------------------------- |
+| `enabled`      | Whether sync may run the source; false by default                |
+| `layer`        | `events`, `inventories`, or the dedicated `tasks` trace importer |
+| `requires`     | Explicit bare executable names checked by `status`               |
+| `auth`         | Optional literal argv probing provider login readiness           |
+| `run`          | Direct argv producing JSON; required                             |
+| `test`         | Optional direct argv verifying the source without collection     |
+| `format`       | `json` or `ndjson`; default `json`                               |
+| `records`      | Field path selecting records inside a wrapper                    |
+| `fields`       | Root-schema name to one path or ordered list of paths            |
+| `window`       | Run once per contiguous missing date range and bucket records    |
+| `body`         | Argv that fetches one record body on explicit `read --body`      |
+| `bodies`       | Rebuildable body policy: `none`, `cache`, or `sync`              |
+| `recency`      | Optional lexical recency half-life in days                       |
+| `install`      | Human guidance printed by status; never executed                 |
+| `timeout`      | Source timeout overriding the base default                       |
+| `retry`        | Bounded attempts, backoff, and named retryable failures          |
+| `min_interval` | Minimum interval between calls to this source                    |
 
 `requires:` is the ordinary collection/body readiness contract. Each item is a unique bare executable name such as `gh`, `python3`, `github-search-json.py`, or `fish`; paths and inferred names are rejected. `status` checks all requirements for enabled sources without running them. It reports the `test[0]` entrypoint separately on the test-only PATH, so a base-owned hook need not duplicate its own name in `requires:`. External tools that the hook invokes still belong in `requires:`. FKF deliberately does not infer dependencies from argv or helper contents.
 
@@ -134,7 +134,7 @@ The generated scaffold is deliberately portable and does not select a runtime wi
 - `{{start}}` and `{{end}}` for its half-open window;
 - `{{base}}` and `{{home}}` as opaque path values.
 
-For event sources the date values describe the requested completed range. An index source receives the current local day, which supports replaceable agenda snapshots without collecting an incomplete event document. The exact lowercase spelling is mandatory. Whitespace inside braces, unknown names, uppercase names, malformed braces, and placeholders in the executable position fail configuration loading. Each YAML item remains exactly one argument after substitution; FKF never invokes a shell or performs expansion.
+For event sources the date values describe the requested completed range. An inventory source receives the current local day, which supports replaceable agenda snapshots without collecting an incomplete event document. The exact lowercase spelling is mandatory. Whitespace inside braces, unknown names, uppercase names, malformed braces, and placeholders in the executable position fail configuration loading. Each YAML item remains exactly one argument after substitution; FKF never invokes a shell or performs expansion.
 
 `test:` is also one direct argv array. It may use only `{{base}}` and `{{home}}`, because a verification hook is independent of collection windows and stored values. Put a base-owned hook and its fixtures or support files under `tests/`; FKF hashes the complete tree and prepends it only for `test:` execution, so a fixture cannot shadow collection or body commands. With no names, `fkf test` selects enabled sources that declare a hook; explicit names also select disabled sources, and `--all` selects every declared hook. An empty selection preserves the compatible successful 0/0 report. Name every mandatory source in a project completion task so the gate also detects one accidentally removed hook. Hooks use the source timeout, run sequentially, discard stdout, expose no provider stderr, and never write evidence.
 
@@ -176,13 +176,13 @@ Any of these fails the whole collection unit and writes nothing:
 
 Writes are atomic. A reader sees the previous complete document or the new complete document, never a partial day. Today is never collected. Existing event documents are skipped unless `--force` is supplied. Normal sync is therefore safe to repeat: completed event units and fresh indexes are skipped, due indexes refresh, missing units resume, and a failed derived rebuild is retried from the complete stored inputs.
 
-Index freshness defaults to `sync.index_max_age_hours`. An index source may declare `max_age_hours: N` to use a different `1..87600` hour cadence; `fkf.local.yaml` may override the same field for one machine. Zero is invalid rather than a second spelling for inheritance. Due-work planning, `fkf status`, and `fkf list index` use the same threshold and treat exact equality as stale. An explicit `fkf status --max-age-hours N` remains a report-wide diagnostic override for every enabled source.
+Inventory freshness defaults to `sync.inventory_max_age_hours`. An inventory source may declare `max_age_hours: N` to use a different `1..87600` hour cadence; `fkf.local.yaml` may override the same field for one machine. Zero is invalid rather than a second spelling for inheritance. Due-work planning, `fkf status`, and `fkf list inventories` use the same threshold and treat exact equality as stale. An explicit `fkf status --max-age-hours N` remains a report-wide diagnostic override for every enabled source.
 
 `format: json` expects one array, or one wrapper selected by `records:`; empty output is failure because a real empty JSON result is `[]`. `format: ndjson` expects one value per line and accepts empty output as an empty result.
 
 `window: true` runs once for each contiguous missing span in the requested half-open range and buckets records by their mapped time. An already collected day splits the plan, so a source is never asked to re-fetch across that gap unless `--force` makes the whole span eligible. It is for event sources whose fixed cost is scanning a large file tree or paginated range once.
 
-Sources write only ordinary JSON evidence in `events/` or `index/`. Session transcript collectors belong in `layer: events` with the same explicit `id`, `time`, and `title` projections as every other event source. The `tasks/` layer remains available for authored execution evidence and reviewed learning; collection never creates or updates its Markdown pages.
+Sources write only ordinary JSON evidence in `events/` or `inventories/`. Session transcript collectors belong in `layer: events` with the same explicit `id`, `time`, and `title` projections as every other event source. The `tasks/` layer remains available for authored execution evidence and reviewed learning; collection never creates or updates its Markdown pages.
 
 Before a real write, preview exactly one source:
 
@@ -216,7 +216,7 @@ A source may set `bodies: none`, `cache`, or `sync`; the default is `none`:
 
 - `none` fetches only for the explicit read and stores nothing. Mail, Chat, and ordinary provider sources use this policy.
 - `cache` stores a body only after an explicit `read --body`.
-- `sync` prefetches new or provider-modified bodies after the evidence document is safely written. A fresh current index snapshot repairs missing cache entries. A failed new event document gets one later retry; after a complete cache prune, the newest selected event document for each opted-in source gets the same bounded retry cycle. An attempt marker prevents a vanished historical resource from becoming perpetual hourly work. Use an explicit `read --body` for any other historical miss or `sync --force` to re-collect and prefetch its document. Meeting notes and local harness memory files opt in.
+- `sync` prefetches new or provider-modified bodies after the evidence document is safely written. A fresh current inventory repairs missing cache entries. A failed new event document gets one later retry; after a complete cache prune, the newest selected event document for each opted-in source gets the same bounded retry cycle. An attempt marker prevents a vanished historical resource from becoming perpetual hourly work. Use an explicit `read --body` for any other historical miss or `sync --force` to re-collect and prefetch its document. Meeting notes and local harness memory files opt in.
 
 Cached text lives under ignored `bodies/<source>/` and is bound by `bodies/manifest.json` to its record URI, provider modification time, byte count, SHA-256, and the cache-local event restore markers. It is bounded to 4,096 entries, 512 MiB total, a 1 MiB manifest, and 4 MiB per body. FKF refuses growth before publishing a body that the manifest cannot name. The cache is UTF-8, machine-local, rebuildable data—not evidence and never mirrored by FKF. `read --body` uses a valid cached copy before executing. `find --bodies` and `context` consult valid cached text offline; neither fetches a miss. `fkf build bodies --prune` explicitly empties the cache (or selectively prunes by `--older-than` and `--source`) and re-arms the one-time newest-event restoration for the next sync. Its manifest has a separate 8 MiB bound so ordinary record URIs can fill the declared entry capacity without hitting the smaller configuration-file limit.
 
@@ -232,7 +232,7 @@ When a declared `run:` exits unsuccessfully, the diagnostic names the source, da
 
 ## Presets and custom sources
 
-`personal` enables only git activity and local agent metadata. Its disabled, opt-in examples cover agent prompts, Chromium history and bookmarks, RSS, authored documents, mise tools, GitHub activity and Actions, Google Workspace, Google Cloud, Kaggle, and Hugging Face. `google-calendar-agenda` is a refreshable index snapshot for today's brief; `google-calendar-events` remains the permanent completed-day history. The `meeting-notes` source joins Google Docs to calendar records by attachment ID, then selects the nearest start time among attachment-less events with the exact title prefix. Enable and sync `google-calendar-events` with it: the notes helper refuses to emit a matched calendar record URI until that owning document is durable, keeping `read` and `timeline` addressable. Its reviewed body helper emits Docs text without storing it in the evidence record. Remote collectors remain disabled until the owner reviews their metadata projection and authentication probe. Explicit sentinels such as `REPLACE_WITH_OWNER`, `REPLACE_WITH_MEETING_PREFIX`, or `REPLACE_WITH_WRITING_DOCUMENT.md` must be edited before enabling that source; FKF does not guess an account or filesystem corpus. `team` declares disabled, repository-scoped GitHub issue and pull-request sources, one organization repository inventory, and one project-scoped Jira snapshot. The helpers reject returned records outside those declared scopes and stop at finite completeness ceilings. The team preset enables no source, browser history, email, whole-account inventory, or personal session source. Network collection is always opt-in. `minimal` starts with no sources. `--demo N` writes synthetic data without running a source. FKF has no plugin manager: presets are examples plus maintained helpers, while a base may run any reviewed command or script.
+`personal` enables only git activity and local agent metadata. Its disabled, opt-in examples cover agent prompts, Chromium history and bookmarks, RSS, authored documents, mise tools, GitHub activity and Actions, Google Workspace, Google Cloud, Kaggle, and Hugging Face. `google-calendar-agenda` is a refreshable inventory for today's brief; `google-calendar-events` remains the permanent completed-day history. The `meeting-notes` source joins Google Docs to calendar records by attachment ID, then selects the nearest start time among attachment-less events with the exact title prefix. Enable and sync `google-calendar-events` with it: the notes helper refuses to emit a matched calendar record URI until that owning document is durable, keeping `read` and `timeline` addressable. Its reviewed body helper emits Docs text without storing it in the evidence record. Remote collectors remain disabled until the owner reviews their metadata projection and authentication probe. Explicit sentinels such as `REPLACE_WITH_OWNER`, `REPLACE_WITH_MEETING_PREFIX`, or `REPLACE_WITH_WRITING_DOCUMENT.md` must be edited before enabling that source; FKF does not guess an account or filesystem corpus. `team` declares disabled, repository-scoped GitHub issue and pull-request sources, one organization repository inventory, and one project-scoped Jira snapshot. The helpers reject returned records outside those declared scopes and stop at finite completeness ceilings. The team preset enables no source, browser history, email, whole-account inventory, or personal session source. Network collection is always opt-in. `minimal` starts with no sources. `--demo N` writes synthetic data without running a source. FKF has no plugin manager: presets are examples plus maintained helpers, while a base may run any reviewed command or script.
 
 The optional `agent-prompts` source selects recent archive generations using bounded manifests. Its body helper takes the base, source name, and stored ID, then resolves the exact lineage, generation, and turn already retained in the evidence. This avoids ambiguous timestamp matches across immutable transcript generations; historical evidence and archives remain intact.
 
@@ -255,10 +255,43 @@ clients:
 sources:
   example-app-records:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [uv]
     run: [uv, run, --script, "{{base}}/clients/example-app.py", records]
     fields: { id: .id, title: .title }
 ```
 
 The example assumes `schema.id` and `schema.title` are already declared and the client emits one complete JSON array. Create `clients/example-app.py` with `uv init --script clients/example-app.py`, implement the app's API commands there, and keep output bounded and all-or-nothing. No ExampleApp client or credentials are bundled. Inline script metadata isolates dependencies from the base; see [uv scripts](https://docs.astral.sh/uv/guides/scripts/).
+
+## Portable Python helpers and private settings
+
+Bundled collection helpers contain reusable logic and synthetic examples. Keep machine-specific roots and project exclusions in the ignored `fkf.local.yaml` overlay; it replaces the declared source's complete `run:` argument list. Both configuration files participate in execution trust. The overlay is plaintext local configuration, not a credential store, and must remain untracked and outside published artifacts. Provider CLIs own authentication.
+
+`writing-source-json.py` accepts explicit files, repeatable `--articles-root` directories containing Markdown files, and repeatable `--packages-root` directories containing article packages. Within a package, `article.md` supersedes `draft.txt`. It scans only the supplied roots and fails on an empty inventory. For example:
+
+```yaml
+# https://fmind.github.io/fkf/docs/base/
+sources:
+  writing-documents:
+    enabled: true
+    run:
+      - writing-source-json.py
+      - --articles-root
+      - "{{home}}/example-site/articles"
+      - --packages-root
+      - "{{home}}/example-drafts"
+  gcloud-audit-projects:
+    enabled: true
+    run:
+      - gcloud-audit-projects-json.py
+      - "{{start}}"
+      - "{{end}}"
+      - --exclude-project
+      - example-excluded-project
+      - --exclude-project-prefix
+      - example-prefix-
+```
+
+The opt-in `gcloud-audit-projects` source enumerates visible projects and fails the whole collection if any selected project cannot be read; the existing `gcloud-audit-logs` source stays scoped to the active provider project. `gcloud-billing` collects billing-account/project linkage, not spend. `google-developers-posts` resolves missing feed dates from same-origin article metadata and fails when the bounded feed cannot cover the requested window.
+
+Metadata remains private data: Drive names and owners, cloud resource and account identifiers, and writing metadata may identify people or infrastructure. Share reviewed helper code and synthetic tests; do not copy provider responses, local overlays, histories, caches, or personal fixtures into public repositories. Tests use temporary homes and fake providers, and release review must inspect both Git changes and built distributions. Ignoring a file cannot remove any previously committed copy from Git history.

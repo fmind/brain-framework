@@ -29,7 +29,7 @@ def _base(tmp_path: Path, *, wiki: bool = True) -> Base:
 
 
 def _summary() -> GraphSummary:
-    return GraphSummary("graph.tsv", "2026-09-06T00:00:00Z", 2, 3, (), (), (), EdgeScanStats())
+    return GraphSummary("graphs/src.tsv", "2026-09-06T00:00:00Z", 2, 3, (), (), (), EdgeScanStats())
 
 
 def test_build_target_vocabulary_is_closed() -> None:
@@ -42,8 +42,8 @@ def test_build_all_preserves_wiki_graph_index_order(monkeypatch: pytest.MonkeyPa
     calls: list[str] = []
     base = _base(tmp_path)
     wiki = WikiIndexReport("wiki/index.md", 1, 1, 1, changed=True)
-    graph = BuildCheck("graph.tsv", False)
-    index = BuildCheck("index/.fkf-index.tsv", False)
+    graph = BuildCheck("graphs/src.tsv", False)
+    index = BuildCheck("indexes/index.tsv", False)
     monkeypatch.setattr("fkf.build.build_wiki_index", lambda _base, **_options: calls.append("wiki") or wiki)
     monkeypatch.setattr("fkf.build.build_graph", lambda _base, **_kwargs: calls.append("graph") or graph)
     monkeypatch.setattr("fkf.build.build_lexical_index", lambda _base, **_kwargs: calls.append("index") or index)
@@ -141,7 +141,7 @@ def test_build_passes_one_cancellation_event_through_ordered_phases(
         assert cancel is cancel_event
         calls.append("graph")
         cancel_event.set()
-        return BuildCheck("graph.tsv", False)
+        return BuildCheck("graphs/src.tsv", False)
 
     cancel_event = cancel
     monkeypatch.setattr("fkf.build.build_wiki_index", wiki)

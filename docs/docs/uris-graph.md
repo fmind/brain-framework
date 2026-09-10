@@ -23,21 +23,21 @@ The first form addresses files inside the base. The second is an open entity URI
 | `events/2026-05-04/`                                                               | one day's documents                    |
 | `events/2026-05-04/github-pull-requests.json`                                      | one complete collected document        |
 | `events/2026-05-04/github-pull-requests.json#https://github.com/fmind/fkf/pull/42` | one record selected by its declared id |
-| `index/github-repositories.json#fmind/fkf`                                         | one record in a current snapshot       |
+| `inventories/github-repositories.json#fmind/fkf`                                   | one record in a current snapshot       |
 | `tasks/2026-08-22/review/TASKS.md#verification`                                    | one task-trace heading                 |
 | `projects/fkf.md#decisions`                                                        | one project heading                    |
 | `wiki/retrieval-boundary.md#decision`                                              | one wiki heading                       |
-| `graph.tsv`                                                                        | one validated graph edge snapshot      |
-| `graph.dst.tsv`                                                                    | destination-sorted graph twin          |
-| `graph.offsets.tsv`                                                                | source and destination byte ranges     |
-| `graph.meta.json`                                                                  | that snapshot's integrity metadata     |
-| `graph.generation.json`                                                            | atomic graph publication state         |
+| `graphs/src.tsv`                                                                   | one validated graph edge snapshot      |
+| `graphs/dst.tsv`                                                                   | destination-sorted graph twin          |
+| `graphs/offsets.tsv`                                                               | source and destination byte ranges     |
+| `graphs/meta.json`                                                                 | that snapshot's integrity metadata     |
+| `graphs/generation.json`                                                           | atomic graph publication state         |
 | `fkf.yaml`                                                                         | the base configuration                 |
 | `AGENTS.md`                                                                        | base-specific agent instructions       |
 
 Directories end in `/`. A fragment is accepted only when it names an existing document record or Markdown heading; files with no addressable children reject fragments. Record fragments use the declared id rather than an array position, so they survive reordering and re-collection.
 
-Only enabled layers plus `fkf.yaml`, `AGENTS.md`, and the five root graph artifacts are reachable. Every path goes through the store, which refuses traversal, absolute and home-relative paths, unknown root files, and symlinks below the base. A URI cannot read `.git/config`, `.env`, `.netrc`, or another neighbouring file.
+Only enabled layers plus `fkf.yaml`, `AGENTS.md`, and the five artifacts under `graphs/` are reachable. Every path goes through the store, which refuses traversal, absolute and home-relative paths, unknown root files, and symlinks below the base. A URI cannot read `.git/config`, `.env`, `.netrc`, or another neighbouring file.
 
 ## Bounded JSON selectors
 
@@ -72,7 +72,7 @@ The scheme is a namespace, not a built-in FKF type. Identity spelling is preserv
 
 ## A transcription-only graph
 
-Root `graph.tsv` stores one edge per line:
+`graphs/src.tsv` stores one edge per line:
 
 ```text
 src<TAB>dst<TAB>kind<TAB>at<TAB>via<TAB>indexed
@@ -145,13 +145,13 @@ Markdown link titles are tooltip metadata and never hidden graph carriers. This 
 
 Graph metadata records each collected document and authored Markdown input with its URI, byte size, modification time, and SHA-256. An ordinary read stats every input and hashes only fingerprints that changed. `fkf graph --verify` is the explicit slow path that hashes every input and generated artifact without writing.
 
-`graph.tsv` stays source-sorted. `graph.dst.tsv` is its destination-sorted twin, while `graph.offsets.tsv` maps each source and destination to an exact byte range. A neighbourhood step binary-searches the offset file and reads only that range. One walk keeps all three validated descriptors open across its hops and rechecks their stats before return.
+`graphs/src.tsv` stays source-sorted. `graphs/dst.tsv` is its destination-sorted twin, while `graphs/offsets.tsv` maps each source and destination to an exact byte range. A neighbourhood step binary-searches the offset file and reads only that range. One walk keeps all three validated descriptors open across its hops and rechecks their stats before return.
 
-`graph.meta.json` schema version 3 records the generation's integrity fields alongside its column, edge-count, and observed-vocabulary summary:
+`graphs/meta.json` schema version 4 records the generation's integrity fields alongside its column, edge-count, and observed-vocabulary summary:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "extractor_version": 2,
   "inputs": [
     {
@@ -162,30 +162,30 @@ Graph metadata records each collected document and authored Markdown input with 
     }
   ],
   "outputs": [
-    { "uri": "graph.dst.tsv", "bytes": 4567, "modified_unix_nano": 1788508800000000000, "sha256": "..." },
-    { "uri": "graph.offsets.tsv", "bytes": 890, "modified_unix_nano": 1788508800000000000, "sha256": "..." },
-    { "uri": "graph.tsv", "bytes": 4567, "modified_unix_nano": 1788508800000000000, "sha256": "..." }
+    { "uri": "graphs/dst.tsv", "bytes": 4567, "modified_unix_nano": 1788508800000000000, "sha256": "..." },
+    { "uri": "graphs/offsets.tsv", "bytes": 890, "modified_unix_nano": 1788508800000000000, "sha256": "..." },
+    { "uri": "graphs/src.tsv", "bytes": 4567, "modified_unix_nano": 1788508800000000000, "sha256": "..." }
   ],
   "sha256": {
     "inputs": {
       "AGGREGATE": "...",
       "events": "...",
-      "index": "...",
+      "inventories": "...",
       "projects": "...",
       "tasks": "...",
       "wiki": "...",
       "schema": "..."
     },
     "outputs": {
-      "graph.dst.tsv": "...",
-      "graph.offsets.tsv": "...",
-      "graph.tsv": "..."
+      "graphs/dst.tsv": "...",
+      "graphs/offsets.tsv": "...",
+      "graphs/src.tsv": "..."
     }
   }
 }
 ```
 
-`graph.generation.json` is a bounded publication marker. A build records its next digest as `building` before replacing any artifact and switches it to `current` only after publishing matching metadata. Readers check it before and after opening the three artifacts, so they reject an interrupted or mixed generation without hashing the complete graph on every seek. `fkf graph --verify` remains the explicit full-byte integrity pass.
+`graphs/generation.json` is a bounded publication marker. A build records its next digest as `building` before replacing any artifact and switches it to `current` only after publishing matching metadata. Readers check it before and after opening the three artifacts, so they reject an interrupted or mixed generation without hashing the complete graph on every seek. `fkf graph --verify` remains the explicit full-byte integrity pass.
 
 Collected and authored components frame each canonical URI with its file digest. `schema` includes field names, cardinalities, and relation flags; descriptions and examples cannot change an edge and remain outside the digest. `AGGREGATE` frames the extractor version and every named input pair. Empty and disabled layers still have deterministic component digests.
 

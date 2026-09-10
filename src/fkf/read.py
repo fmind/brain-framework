@@ -433,14 +433,14 @@ def suggest_uris(base: Base, raw: str, *, cancel: Cancellation | None = None) ->
                 if not anchor_slug(heading.text) or heading.anchor == _stem_of(page.uri):
                     continue
                 consider(f"{page.uri}#{heading.anchor}")
-    if base.store.enabled(Layer.INDEX):
+    if base.store.enabled(Layer.INVENTORIES):
         try:
-            names = base.index_documents()
+            names = base.inventory_documents()
         except OSError, ValueError:
             names = ()
         for name in names:
             check_cancel(cancel)
-            consider(f"index/{name}.json")
+            consider(f"inventories/{name}.json")
     if base.store.enabled(Layer.EVENTS):
         try:
             dates = base.event_dates()

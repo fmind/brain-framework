@@ -54,6 +54,7 @@ def test_create_refresh_preserves_owned_and_owner_files(tmp_path: Path) -> None:
     assert (root / "CLAUDE.md").read_text(encoding="utf-8") == "@AGENTS.md\n"
     assert (root / ".claude" / "skills").readlink() == Path("../.agents/skills")
     assert {path.name for path in (root / ".agents" / "skills").iterdir()} == set(BUNDLED_SKILLS)
+    assert (root / "skills" / ".gitkeep").read_bytes() == b""
     assert read_trust(load_config(root)).trusted is True
     assert tracks_collected(root) is False
 
@@ -62,6 +63,9 @@ def test_create_refresh_preserves_owned_and_owner_files(tmp_path: Path) -> None:
     helper = root / "sources" / "fkf-hook.py"
     helper.write_text("owner helper\n", encoding="utf-8")
     (root / "CLAUDE.md").write_text("owner instructions\n", encoding="utf-8")
+    private_skill = root / "skills" / "private-owner" / "SKILL.md"
+    private_skill.parent.mkdir()
+    private_skill.write_text("owner private skill\n", encoding="utf-8")
     skill = root / ".agents" / "skills" / "fkf-use" / "SKILL.md"
     skill.write_text("drifted\n", encoding="utf-8")
     refreshed = init_base(InitRequest(path=root, track_collected=True), now=lambda: NOW)
@@ -73,6 +77,7 @@ def test_create_refresh_preserves_owned_and_owner_files(tmp_path: Path) -> None:
     assert (root / "AGENTS.md").read_bytes() == agents
     assert helper.read_text(encoding="utf-8") == "owner helper\n"
     assert (root / "CLAUDE.md").read_text(encoding="utf-8") == "owner instructions\n"
+    assert private_skill.read_text(encoding="utf-8") == "owner private skill\n"
     assert skill.read_bytes() == read_asset("skills/fkf-use/SKILL.md")
     assert tracks_collected(root) is True
 
@@ -166,9 +171,9 @@ def test_failed_demo_init_is_retryable_and_removes_created_executables(tmp_path:
     root.mkdir()
     owner = root / "owner.txt"
     owner.write_text("keep\n", encoding="utf-8")
-    (root / "graph.tsv").mkdir()
+    (root / "graphs/src.tsv").mkdir(parents=True)
 
-    with pytest.raises(Exception, match=r"already holds graph\.tsv"):
+    with pytest.raises(Exception, match=r"already holds graphs/src\.tsv"):
         init_base(InitRequest(path=root, demo=1, skip_git=True), now=lambda: NOW)
 
     assert owner.read_text(encoding="utf-8") == "keep\n"

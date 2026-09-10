@@ -31,7 +31,7 @@ schema:
   note: {description: Plain note., cardinality: optional}
   related: {description: Related URI., cardinality: optional, relation: true}
   supersedes: {description: Superseded URI., cardinality: many, relation: true}
-layers: {events: false, index: true, tasks: false, projects: true, wiki: true}
+layers: {events: false, inventories: true, tasks: false, projects: true, wiki: true}
 sources: {}
 """
 

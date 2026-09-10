@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import json
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +28,7 @@ schema:
   id: {description: Stable identity., cardinality: one}
   time: {description: Event time., cardinality: one}
   title: {description: Meaningful title., cardinality: optional}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 sources: {}
 """
 
@@ -43,6 +45,29 @@ def base_root(tmp_path: Path) -> Path:
     root.mkdir()
     (root / "fkf.yaml").write_text(CONFIG, encoding="utf-8")
     return root
+
+
+def test_live_status_preserves_the_registered_launcher_symlink(
+    base_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fkf.harness import HarnessInstallRequest, install_harnesses
+
+    executable = tmp_path / "package-launcher"
+    executable.write_text("#!/bin/sh\nexit 99\n")
+    executable.chmod(0o700)
+    launcher = tmp_path / "fkf"
+    launcher.symlink_to(executable)
+    install_harnesses(
+        base_root,
+        HarnessInstallRequest(names=("codex",), home=Path.home(), executable=launcher),
+    )
+    monkeypatch.setattr(sys, "argv", [str(launcher)])
+
+    _, stdout, _ = invoke("status", "--live", "--base", str(base_root))
+
+    codex = next(item for item in json.loads(stdout)["harnesses"] if item["name"] == "codex")
+    assert codex["registered"] is True
+    assert codex["changes"] == 0
 
 
 @pytest.mark.parametrize(

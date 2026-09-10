@@ -23,7 +23,7 @@ schema:
     cardinality: many
     relation: true
     examples: ["actor:github.com/fmind"]
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 """
 
 
@@ -77,7 +77,7 @@ sources:
     assert config.path == root / "fkf.yaml"
     assert config.local_path == root / "fkf.local.yaml"
     assert config.sync.days == 30
-    assert config.sync.index_max_age_hours == 168
+    assert config.sync.inventory_max_age_hours == 168
     assert config.sync.timeout == parse_duration("2m")
     assert config.sync.concurrency == 4
     assert config.layers[Layer.EVENTS] is True

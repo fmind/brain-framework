@@ -9,11 +9,12 @@ import pytest
 
 import fkf.cli_integrate as cli_integrate
 from fkf.cli import app
-from fkf.cli_integrate import HarnessList, _harness_install_text, _schedule_text
+from fkf.cli_integrate import HarnessList, _harness_install_text, _private_skills_text, _schedule_text
 from fkf.cli_support import run_app
 from fkf.errors import CanceledError, OperationalError
 from fkf.harness import HarnessChange, HarnessInstallReport, HarnessPlan
 from fkf.harness import harness_plan_for as build_harness_plan
+from fkf.private_skills import PrivateSkillChange, PrivateSkillsReport
 from fkf.schedule import (
     ScheduleAction,
     ScheduleExecution,
@@ -186,6 +187,52 @@ def test_integration_text_reports_name_current_changes_and_execution() -> None:
 
 def test_harness_list_dataclass_preserves_closed_tuple() -> None:
     assert HarnessList(("codex",)).harnesses == ("codex",)
+
+
+def test_private_skills_cli_previews_installs_and_checks(tmp_path: Path) -> None:
+    base = seeded_base(tmp_path)
+    source = base.root / "skills" / "meeting-prep"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("---\nname: meeting-prep\n---\n", encoding="utf-8")
+
+    code, stdout, stderr = invoke("skills", "install", "--dry-run", "--base", str(base.root))
+    assert code == 0
+    assert stderr == ""
+    preview = json.loads(stdout)
+    assert preview["mode"] == "dry-run"
+    assert preview["complete"] is False
+    assert preview["changes"][0]["name"] == "meeting-prep"
+
+    code, stdout, stderr = invoke("skills", "install", "--check", "--base", str(base.root))
+    assert code == 1
+    assert json.loads(stdout)["complete"] is False
+    assert "1 private skill link(s) required" in stderr
+
+    code, _stdout, stderr = invoke("skills", "install", "--base", str(base.root))
+    assert code == 0
+    assert stderr == ""
+    code, stdout, stderr = invoke("skills", "install", "--check", "--base", str(base.root))
+    assert code == 0
+    assert json.loads(stdout)["complete"] is True
+    assert stderr == ""
+
+
+def test_private_skills_text_names_current_and_link_changes() -> None:
+    current = PrivateSkillsReport(Path("/base"), "check", Path("/home/.agents/skills"), True, 0, ())
+    assert _private_skills_text(current) == "private skills check for /base: current (0 discovered)"
+    changed = PrivateSkillsReport(
+        Path("/base"),
+        "dry-run",
+        Path("/home/.agents/skills"),
+        False,
+        1,
+        (
+            PrivateSkillChange(
+                "private-one", "link", Path("/base/skills/private-one"), Path("/home/.agents/skills/private-one")
+            ),
+        ),
+    )
+    assert _private_skills_text(changed) == "link /base/skills/private-one -> /home/.agents/skills/private-one"
 
 
 @pytest.mark.parametrize("command", ["print", "install"])

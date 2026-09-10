@@ -42,7 +42,7 @@ class PublicRetry:
 @dataclass(frozen=True, slots=True)
 class PublicSync:
     days: int
-    index_max_age_hours: int
+    inventory_max_age_hours: int
     timeout: DurationNS
     concurrency: int
 
@@ -148,7 +148,7 @@ def _source(value: Source) -> PublicSource:
 
 
 def _sync(value: SyncConfig) -> PublicSync:
-    return PublicSync(value.days, value.index_max_age_hours, value.timeout, value.concurrency)
+    return PublicSync(value.days, value.inventory_max_age_hours, value.timeout, value.concurrency)
 
 
 def public_config(value: Config) -> PublicConfig:

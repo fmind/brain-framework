@@ -20,7 +20,7 @@ from typing import Any, Final, cast
 from fkf import DISPLAY_VERSION
 from fkf.base import Base
 from fkf.bodies import BodyManifest, load_body_manifest, read_cached_body_from_manifest
-from fkf.documents import Document, Record, event_document_uri, index_document_uri
+from fkf.documents import Document, Record, event_document_uri, inventory_document_uri
 from fkf.errors import InvalidUsageError, OperationalError
 from fkf.fields import (
     DEFAULT_FIELD_WEIGHT,
@@ -1041,10 +1041,10 @@ def _scan_candidates(
                     _record_candidate(document, record, _source_schema(base, document.source))
                     for record in document.records
                 )
-    if base.store.enabled(Layer.INDEX):
-        for source in base.index_documents():
+    if base.store.enabled(Layer.INVENTORIES):
+        for source in base.inventory_documents():
             _check_cancel(cancel)
-            document = base.read_document(index_document_uri(source))
+            document = base.read_document(inventory_document_uri(source))
             candidates.extend(
                 _record_candidate(document, record, _source_schema(base, document.source))
                 for record in document.records
@@ -1596,7 +1596,7 @@ def _kind_for_uri(uri: str) -> str:
     head = uri.partition("/")[0]
     if head in {str(Layer.WIKI), str(Layer.PROJECTS), str(Layer.TASKS)}:
         return head
-    return str(Layer.EVENTS) if head == str(Layer.EVENTS) else str(Layer.INDEX)
+    return str(Layer.EVENTS) if head == str(Layer.EVENTS) else str(Layer.INVENTORIES)
 
 
 def _date_for_task_uri(uri: str) -> str:

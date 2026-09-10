@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from fkf.base import Base
-from fkf.documents import event_document_uri, index_document_uri
+from fkf.documents import event_document_uri, inventory_document_uri
 from fkf.pages import read_page, require_known
 from fkf.process import Cancellation, check_cancel
 from fkf.query import Window
@@ -43,7 +43,7 @@ class EventListing:
 
 
 @dataclass(frozen=True, slots=True)
-class IndexEntry:
+class InventoryEntry:
     name: str
     uri: str
     count: int = field(metadata={"json": "count,omitempty"})
@@ -54,8 +54,8 @@ class IndexEntry:
 
 
 @dataclass(frozen=True, slots=True)
-class IndexListing:
-    entries: tuple[IndexEntry, ...]
+class InventoryListing:
+    entries: tuple[InventoryEntry, ...]
     total: int
 
 
@@ -123,23 +123,23 @@ def _clock_instant(now: datetime) -> Instant:
     return Instant.from_datetime(now.replace(tzinfo=UTC) if now.tzinfo is None else now)
 
 
-def list_index(
+def list_inventories(
     base: Base,
     *,
     limit: int = 0,
     cancel: Cancellation | None = None,
     scan: ScanGuard | None = None,
-) -> IndexListing:
+) -> InventoryListing:
     """Describe point-in-time evidence freshness from collected_at, never mtime."""
     check_cancel(cancel)
     if limit < 0:
         raise ValueError("limit must not be negative")
-    names = base.index_documents(scan=scan)
-    entries: list[IndexEntry] = []
+    names = base.inventory_documents(scan=scan)
+    entries: list[InventoryEntry] = []
     now = _clock_instant(base.now())
     for name in names[:limit] if limit else names:
         check_cancel(cancel)
-        uri = index_document_uri(name)
+        uri = inventory_document_uri(name)
         try:
             size = base.store.resolve(uri).stat().st_size
         except OSError as error:
@@ -150,13 +150,13 @@ def list_index(
         except ValueError as error:
             raise ValueError(f"parse {uri} collected_at: {error}") from error
         source = base.config.sources.get(name)
-        max_age_hours = base.config.sync.index_max_age_hours
-        if source is not None and source.layer is Layer.INDEX:
+        max_age_hours = base.config.sync.inventory_max_age_hours
+        if source is not None and source.layer is Layer.INVENTORIES:
             max_age_hours = source.effective_max_age_hours(max_age_hours)
         age_ns = now.unix_nanoseconds - collected.unix_nanoseconds
         age_hours = max(0, int(age_ns / 3_600_000_000_000))
         stale = age_ns < 0 or age_ns >= max_age_hours * 3_600_000_000_000
-        entry = IndexEntry(
+        entry = InventoryEntry(
             name=name,
             uri=uri,
             count=document.count,
@@ -168,7 +168,7 @@ def list_index(
         if scan is not None:
             scan.retain(entry)
         entries.append(entry)
-    return IndexListing(tuple(entries), len(names))
+    return InventoryListing(tuple(entries), len(names))
 
 
 def _subdirectories(
@@ -249,11 +249,11 @@ __all__ = [
     "DayCount",
     "EventDay",
     "EventListing",
-    "IndexEntry",
-    "IndexListing",
+    "InventoryEntry",
+    "InventoryListing",
     "TaskListing",
     "TaskTrace",
     "list_events",
-    "list_index",
+    "list_inventories",
     "list_tasks",
 ]

@@ -150,7 +150,7 @@ class SyncConfig:
     """Resolved collection defaults."""
 
     days: int = 30
-    index_max_age_hours: int = 168
+    inventory_max_age_hours: int = 168
     timeout: DurationNS = _DEFAULT_SYNC_TIMEOUT
     concurrency: int = 4
 
@@ -301,7 +301,7 @@ class _FileSource(_BoundaryModel):
 
 class _FileSync(_BoundaryModel):
     days: int | None = None
-    index_max_age_hours: int | None = None
+    inventory_max_age_hours: int | None = None
     timeout: str | None = None
     concurrency: int | None = None
 
@@ -564,9 +564,9 @@ def _build_source(name: str, raw: _FileSource, path: Path) -> Source:
         try:
             layer = Layer(raw.layer.strip())
         except ValueError as error:
-            raise fail(f"layer is {raw.layer!r}; expected events or index", cause=error) from error
-        if layer not in {Layer.EVENTS, Layer.INDEX}:
-            raise fail(f"layer is {raw.layer!r}; expected events or index")
+            raise fail(f"layer is {raw.layer!r}; expected events or inventories", cause=error) from error
+        if layer not in {Layer.EVENTS, Layer.INVENTORIES}:
+            raise fail(f"layer is {raw.layer!r}; expected events or inventories")
 
     output_format = OutputFormat.JSON
     if raw.format.strip():
@@ -725,8 +725,8 @@ def _build_sync(raw: _FileSync | None, path: Path) -> SyncConfig:
         timeout = _parse_duration(raw.timeout, "sync.timeout", path)
     return SyncConfig(
         days=defaults.days if raw.days is None else raw.days,
-        index_max_age_hours=(
-            defaults.index_max_age_hours if raw.index_max_age_hours is None else raw.index_max_age_hours
+        inventory_max_age_hours=(
+            defaults.inventory_max_age_hours if raw.inventory_max_age_hours is None else raw.inventory_max_age_hours
         ),
         timeout=timeout,
         concurrency=defaults.concurrency if raw.concurrency is None else raw.concurrency,
@@ -837,9 +837,9 @@ def _validate_clients(config: Config) -> None:
 def _validate_sync(sync: SyncConfig, path: Path) -> None:
     if sync.days < 1 or sync.days > 366:
         raise _error(f"{path}: sync.days is {sync.days}; expected 1..366")
-    if sync.index_max_age_hours < 1 or sync.index_max_age_hours > MAX_FRESHNESS_AGE_HOURS:
+    if sync.inventory_max_age_hours < 1 or sync.inventory_max_age_hours > MAX_FRESHNESS_AGE_HOURS:
         raise _error(
-            f"{path}: sync.index_max_age_hours is {sync.index_max_age_hours}; expected 1..{MAX_FRESHNESS_AGE_HOURS}"
+            f"{path}: sync.inventory_max_age_hours is {sync.inventory_max_age_hours}; expected 1..{MAX_FRESHNESS_AGE_HOURS}"
         )
     if sync.concurrency < 1 or sync.concurrency > MAX_SYNC_CONCURRENCY:
         raise _error(f"{path}: sync.concurrency is {sync.concurrency}; expected 1..{MAX_SYNC_CONCURRENCY}")
@@ -974,8 +974,8 @@ def _validate_requirements(source: Source, fail: _Fail) -> None:
 
 def _validate_source_policy(config: Config, source: Source, fail: _Fail) -> None:
     if source.max_age_hours is not None:
-        if source.layer is not Layer.INDEX:
-            raise fail("max_age_hours is valid only for an index source")
+        if source.layer is not Layer.INVENTORIES:
+            raise fail("max_age_hours is valid only for an inventory source")
         if source.max_age_hours < 1 or source.max_age_hours > MAX_FRESHNESS_AGE_HOURS:
             raise fail(f"max_age_hours is {source.max_age_hours}; expected 1..{MAX_FRESHNESS_AGE_HOURS}")
     if source.bodies is not BodyPolicy.NONE and not source.has_body():

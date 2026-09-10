@@ -12,7 +12,15 @@ from typer import _click as click
 from fkf.cli_support import FKFGroup, parent_without_command, state
 from fkf.errors import InvalidUsageError, OperationalError
 from fkf.learned import LearnedListing, list_learned
-from fkf.listings import DayCount, EventListing, IndexListing, TaskListing, list_events, list_index, list_tasks
+from fkf.listings import (
+    DayCount,
+    EventListing,
+    InventoryListing,
+    TaskListing,
+    list_events,
+    list_inventories,
+    list_tasks,
+)
 from fkf.markdown import ValidationReport
 from fkf.output import inline, register_jsonl, register_text
 from fkf.pages import PageFilter, PageListing, TagVocabulary, build_tag_vocabulary, list_pages
@@ -28,7 +36,7 @@ from fkf.validation import (
 )
 
 register_jsonl(EventListing, lambda result: result.days)
-register_jsonl(IndexListing, lambda result: result.entries)
+register_jsonl(InventoryListing, lambda result: result.entries)
 register_jsonl(TaskListing, lambda result: result.traces)
 register_jsonl(LearnedListing, lambda result: (result,))
 register_jsonl(PageListing, lambda result: result.pages)
@@ -60,7 +68,7 @@ def _event_listing_text(result: EventListing) -> str:
     return "\n".join(lines)
 
 
-def _index_listing_text(result: IndexListing) -> str:
+def _inventory_listing_text(result: InventoryListing) -> str:
     width = _uri_width(result.entries)
     lines = []
     for item in result.entries:
@@ -111,7 +119,7 @@ def _tag_vocabulary_text(result: TagVocabulary) -> str:
 
 
 register_text(EventListing, _event_listing_text)
-register_text(IndexListing, _index_listing_text)
+register_text(InventoryListing, _inventory_listing_text)
 register_text(TaskListing, _task_listing_text)
 register_text(LearnedListing, _learned_listing_text)
 register_text(PageListing, _page_listing_text)
@@ -200,10 +208,10 @@ def register_browse_commands(app: typer.Typer) -> None:
             raise InvalidUsageError(str(error), cause=error) from error
         invocation.emit(list_events(base, window, source=source, limit=_limit(limit), cancel=invocation.cancel))
 
-    @list_app.command("index", help="List point-in-time index snapshots.")
-    def index(ctx: typer.Context) -> None:
+    @list_app.command("inventories", help="List collected inventories and their freshness.")
+    def inventories(ctx: typer.Context) -> None:
         invocation = state(ctx)
-        invocation.emit(list_index(invocation.base(), cancel=invocation.cancel))
+        invocation.emit(list_inventories(invocation.base(), cancel=invocation.cancel))
 
     tasks_app = typer.Typer(
         cls=FKFGroup,

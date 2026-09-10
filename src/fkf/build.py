@@ -135,7 +135,7 @@ def _graph_check(base: Base, cancel: Cancellation | None) -> GraphBuild:
     except CanceledError:
         raise
     except Exception:
-        return GraphBuild("graph.tsv", 0, 0, 0, "", "", _empty_graph_meta(), stale=True)
+        return GraphBuild("graphs/src.tsv", 0, 0, 0, "", "", _empty_graph_meta(), stale=True)
     return GraphBuild(summary.uri, summary.edges, 0, 0, "", "", _empty_graph_meta())
 
 

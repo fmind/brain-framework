@@ -20,7 +20,7 @@ schema:
   time: {description: Event time., cardinality: one}
   title: {description: Meaningful title., cardinality: optional}
   repo: {description: Repository., cardinality: optional, relation: true}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 sources:
   synthetic:
     enabled: true

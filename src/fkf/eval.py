@@ -34,7 +34,7 @@ from fkf.store import MAX_CONFIG_BYTES, MAX_NARRATIVE_BYTES, validate_within_roo
 from fkf.uri import URIError, parse_uri
 
 EVAL_SCHEMA_VERSION: Final = 1
-EVAL_PATH: Final = "checks/queries.yaml"
+EVAL_PATH: Final = "operations/queries.yaml"
 MAX_EVAL_K: Final = 100
 MAX_EVAL_BUDGET: Final = MAX_NARRATIVE_BYTES // 4
 _DELIVERIES: Final = frozenset({CONTEXT_DELIVERY_JSON, CONTEXT_DELIVERY_JSONL, CONTEXT_DELIVERY_TEXT})
@@ -225,7 +225,7 @@ def _query(value: _QueryModel, index: int, names: set[str]) -> _EvalQuery:
 
 
 def _load_suite(base: Base) -> _EvalSuite:
-    absolute = base.root / "checks" / "queries.yaml"
+    absolute = base.root / "operations" / "queries.yaml"
     validate_within_root(base.root, absolute)
     try:
         data = read_file_limited(absolute, MAX_CONFIG_BYTES)

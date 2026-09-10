@@ -40,11 +40,11 @@ schema:
   id: {description: Stable identity., cardinality: one}
   title: {description: Meaningful title., cardinality: optional}
   modified: {description: Provider modification time., cardinality: optional}
-layers: {events: false, index: true, tasks: false, projects: false, wiki: false}
+layers: {events: false, inventories: true, tasks: false, projects: false, wiki: false}
 sources:
   snapshot:
     enabled: true
-    layer: index
+    layer: inventories
     run: [provider]
     fields: {id: .id, title: .title, modified: .modified}
     body: [provider, body, "{{id}}"]
@@ -78,7 +78,7 @@ def make_base(
     record: Record = {"id": "alpha", "title": "Alpha", "modified": "2026-09-05T10:00:00Z"}
     document = Document(
         source="snapshot",
-        layer=Layer.INDEX,
+        layer=Layer.INVENTORIES,
         collected_at="2026-09-06T10:00:00Z",
         schema=schema_of(source),
         fields=fields_of(source),
@@ -147,7 +147,7 @@ def test_manifest_entries_fail_closed_before_cache_reads(
     tmp_path: Path, changes: dict[str, object], message: str
 ) -> None:
     base, _document, _record, _runner = make_base(tmp_path)
-    uri = "index/snapshot.json#alpha"
+    uri = "inventories/snapshot.json#alpha"
     entry = manifest_entry(uri, **changes)
     payload = json.dumps({"schema_version": 1, "entries": {uri: entry}}).encode()
 
@@ -157,7 +157,7 @@ def test_manifest_entries_fail_closed_before_cache_reads(
 
 def test_manifest_capacity_and_encoding_limits_are_enforced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     base, _document, _record, _runner = make_base(tmp_path)
-    uri = "index/snapshot.json#alpha"
+    uri = "inventories/snapshot.json#alpha"
     payload = json.dumps({"schema_version": 1, "entries": {uri: manifest_entry(uri)}}).encode()
 
     monkeypatch.setattr(bodies, "MAX_BODY_CACHE_ENTRIES", 0)
@@ -179,7 +179,7 @@ def test_cached_body_rejects_non_utf8_and_propagates_non_missing_io_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     base, _document, _record, _runner = make_base(tmp_path)
-    uri = "index/snapshot.json#alpha"
+    uri = "inventories/snapshot.json#alpha"
     raw = b"\xff"
     entry = BodyManifestEntry(
         uri=uri,

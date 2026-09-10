@@ -26,7 +26,7 @@ schema:
   id: {description: Stable identity., cardinality: one}
   time: {description: Event time., cardinality: one}
   title: {description: Meaningful title., cardinality: optional}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 sources:
   journal:
     enabled: true
@@ -36,10 +36,38 @@ sources:
     body: [provider, body, "{{id}}"]
 BODY_POLICY  snapshot:
     enabled: true
-    layer: index
+    layer: inventories
     run: [provider]
     fields: {id: .id, title: .title}
 """
+
+
+def test_flat_layout_rebuild_and_reads_preserve_collected_bytes_offline(tmp_path: Path) -> None:
+    from fkf.graph import build_graph
+    from fkf.lexical import build_lexical_index
+
+    base = make_base(tmp_path)
+    inventory = base.root / "inventories/snapshot.json"
+    evidence = inventory.read_bytes()
+    assert b'"layer": "index"' in evidence
+
+    build_graph(base)
+    build_lexical_index(base)
+    assert read(base, "inventories/snapshot.json#snapshot").record == {"id": "snapshot", "title": "Snapshot"}
+    (base.root / "graphs/private.json").write_text("{}", encoding="utf-8")
+    assert read(base, "graphs/").entries == (
+        "graphs/dst.tsv",
+        "graphs/generation.json",
+        "graphs/meta.json",
+        "graphs/offsets.tsv",
+        "graphs/src.tsv",
+    )
+    assert (base.root / "indexes/index.tsv").is_file()
+    assert (base.root / "indexes/meta.json").is_file()
+    for relative in ("index/snapshot.json", "indexes/", "indexes/meta.json"):
+        with pytest.raises(InvalidUsageError, match="path is not addressable"):
+            read(base, relative)
+    assert inventory.read_bytes() == evidence
 
 
 class FakeRunner:
@@ -111,7 +139,7 @@ def make_base(tmp_path: Path, *, bodies: str = "none", runner: FakeRunner | Expl
     base.write_document(
         Document(
             source="snapshot",
-            layer=Layer.INDEX,
+            layer=Layer.INVENTORIES,
             collected_at="2026-09-06T11:00:00Z",
             schema=schema_of(index_source),
             fields=fields_of(index_source),
@@ -255,9 +283,9 @@ def test_entities_and_graph_artifacts_use_one_validated_offline_generation(tmp_p
     build_graph(base)
     entity = read(base, "person:alice", ReadOptions(limit=1))
     external = read(base, "https://example.test/evidence")
-    graph = read(base, "graph.tsv")
-    meta = read(base, 'graph.meta.json?jq=.sha256.outputs."graph.tsv"')
-    generation = read(base, "graph.generation.json?jq=.state")
+    graph = read(base, "graphs/src.tsv")
+    meta = read(base, 'graphs/meta.json?jq=.sha256.outputs."graphs/src.tsv"')
+    generation = read(base, "graphs/generation.json?jq=.state")
 
     assert entity.entity is not None
     assert entity.entity.neighbours
@@ -279,7 +307,7 @@ def test_missing_graph_is_empty_but_a_corrupt_graph_is_not_hidden(tmp_path: Path
     missing = read(base, "person:absent")
     assert missing.entity is not None
     assert missing.entity.neighbours == ()
-    (base.root / "graph.tsv").mkdir()
+    (base.root / "graphs/src.tsv").mkdir(parents=True)
     with pytest.raises(ValueError, match="neighbourhood"):
         read(base, "person:absent")
 

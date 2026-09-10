@@ -91,7 +91,9 @@ def test_every_preset_run_is_direct_bounded_argv(tmp_path: Path) -> None:
                     assert source.run[index : index + 3] == ("--page-all", "--page-limit", "100"), (
                         f"{preset}/{source.name} delegates pagination without the finite page/token contract"
                     )
-                    assert source.run[0] == "gws-page-json.py"
+                    assert source.run[0] == (
+                        "gws-drive-files-json.py" if source.name == "google-drive-files" else "gws-page-json.py"
+                    )
 
 
 def test_shipped_collectors_have_no_nominally_unbounded_pagination() -> None:
@@ -142,7 +144,7 @@ def test_preset_regressions_stay_closed(tmp_path: Path) -> None:
     )
     assert personal.sources["google-gmail-emails"].run == ("gmail-json.py", "{{start}}", "{{end}}")
     assert "python@latest" in personal.sources["google-gmail-emails"].install
-    assert personal.sources["google-chat-spaces"].layer.value == "index"
+    assert personal.sources["google-chat-spaces"].layer.value == "inventories"
     assert str(personal.sources["google-chat-spaces"].fields.paths("title").values[0]) == ".name"
     assert personal.sources["github-repositories"].run == ("github-list-json.py", "user-repositories")
     assert team.sources["github-repositories"].run == (
@@ -152,7 +154,7 @@ def test_preset_regressions_stay_closed(tmp_path: Path) -> None:
     )
     assert {"agent-session-trace.py", "python3", "git"} <= set(personal.sources["agent-session-traces"].requires)
     assert {"agent-session-trace.py", "python3", "git"} <= set(team.sources["agent-session-traces"].requires)
-    assert personal.sources["meeting-notes"].body == ("gws-doc-text.sh", "{{id}}")
+    assert personal.sources["meeting-notes"].body == ("gws-doc-text.py", "{{id}}")
     assert str(personal.sources["meeting-notes"].fields.paths("meeting").values[0]) == ".meeting_uris[]"
     assert str(personal.sources["meeting-notes"].fields.paths("attachment").values[0]) == ".attachment_uris[]"
     for name in ("github-pull-requests", "github-issues", "github-commits"):

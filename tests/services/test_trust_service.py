@@ -55,7 +55,7 @@ def test_trust_check_discloses_commands_and_body_fields(monkeypatch, tmp_path: P
     assert rendered.startswith(
         b"collection policy\n"
         b"  layer: events=true\n"
-        b"  layer: index=true\n"
+        b"  layer: inventories=true\n"
         b"  layer: tasks=true\n"
         b"  layer: projects=true\n"
         b"  layer: wiki=true\n"

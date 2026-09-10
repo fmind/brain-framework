@@ -549,7 +549,8 @@ def _build_plan(
         )
         notes.append("Cline has one global TaskStart filename; this adapter is MCP-only.")
     notes.append(
-        "Skills remain base-local. Install neutral shared FKF skills separately if the harness needs user-scope discovery."
+        "Bundled and base-specific skills remain under .agents/skills. "
+        "Install reviewed skills/<name> packages separately with `fkf skills install`."
     )
     return HarnessPlan(name, base, base_name, tuple(fragments), workspace, tuple(notes))
 
@@ -652,7 +653,11 @@ def _check_workspace_conflict(path: Path, value: object, fragment: HarnessFragme
 
     def inspect(command: str) -> None:
         nonlocal conflict
-        if conflict or "fkf-hook.py" not in command or _marker_value(command, "fkf-base") == fragment.managed_base:
+        if (
+            conflict
+            or not _marker_value(command, "fkf-key")
+            or _marker_value(command, "fkf-base") == fragment.managed_base
+        ):
             return
         workspace = _marker_value(command, "fkf-workspace")
         if _workspace_overlap(workspace, fragment.workspace):
@@ -713,12 +718,16 @@ def _mcp_base(value: object) -> str:
 
 
 def _owned(value: object, fragment: HarnessFragment) -> bool:
+    if fragment.managed_kind == "hook":
+        # Explicit ownership survives helper renames; an executable filename does not.
+        return (
+            _marker_value(value, "fkf-key") == fragment.managed_key
+            and _marker_value(value, "fkf-base") == fragment.managed_base
+        )
     if not _json_managed(value, fragment.managed_kind):
         return False
     if fragment.managed_kind == "mcp":
         return _mcp_base(value) == fragment.managed_base
-    if fragment.managed_kind == "hook":
-        return _marker_value(value, "fkf-base") == fragment.managed_base
     return False
 
 
@@ -744,6 +753,15 @@ def _apply_json_fragment(path: Path, root: dict[str, object], fragment: HarnessF
         entries = list(existing) if isinstance(existing, list) else []
         if fragment.managed_kind == "hook":
             _check_workspace_conflict(path, entries, fragment)
+            owned = [index for index, entry in enumerate(entries) if _owned(entry, fragment)]
+            if owned:
+                first = owned[0]
+                parent[key] = [
+                    fragment.value if index == first else entry
+                    for index, entry in enumerate(entries)
+                    if index == first or index not in owned
+                ]
+                return
         for index, entry in enumerate(entries):
             if entry == fragment.value:
                 return

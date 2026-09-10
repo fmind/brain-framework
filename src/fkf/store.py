@@ -17,11 +17,12 @@ from fkf.errors import InvalidUsageError, OperationalError
 BASE_DIR_MODE: Final = 0o700
 BASE_FILE_MODE: Final = 0o600
 
-GRAPH_FILE: Final = "graph.tsv"
-GRAPH_DST_FILE: Final = "graph.dst.tsv"
-GRAPH_OFFSETS_FILE: Final = "graph.offsets.tsv"
-GRAPH_META_FILE: Final = "graph.meta.json"
-GRAPH_GENERATION_FILE: Final = "graph.generation.json"
+GRAPH_DIR: Final = "graphs"
+GRAPH_FILE: Final = "graphs/src.tsv"
+GRAPH_DST_FILE: Final = "graphs/dst.tsv"
+GRAPH_OFFSETS_FILE: Final = "graphs/offsets.tsv"
+GRAPH_META_FILE: Final = "graphs/meta.json"
+GRAPH_GENERATION_FILE: Final = "graphs/generation.json"
 TASK_TRACE_FILE: Final = "TASKS.md"
 BASE_AGENTS_FILE: Final = "AGENTS.md"
 BASE_SKILLS_DIR: Final = ".agents/skills"
@@ -70,7 +71,7 @@ class Layer(StrEnum):
     """One typed storage layer in a base."""
 
     EVENTS = "events"
-    INDEX = "index"
+    INVENTORIES = "inventories"
     TASKS = "tasks"
     PROJECTS = "projects"
     WIKI = "wiki"
@@ -264,7 +265,7 @@ def _addressable_layer_path(layer: Layer, relative: str) -> bool:
         if len(parts) == 2:
             return _valid_address_date(parts[1])
         return len(parts) == 3 and _valid_address_date(parts[1]) and _addressable_source_document(parts[2])
-    if layer is Layer.INDEX:
+    if layer is Layer.INVENTORIES:
         return len(parts) == 2 and _addressable_source_document(parts[1])
     if layer is Layer.TASKS:
         if len(parts) == 2:
@@ -294,6 +295,7 @@ def addressable_base_path(relative: str) -> bool:
         layer = Layer(first)
     except ValueError:
         return cleaned in {
+            GRAPH_DIR,
             GRAPH_FILE,
             GRAPH_DST_FILE,
             GRAPH_OFFSETS_FILE,
@@ -473,6 +475,7 @@ __all__ = [
     "BASE_SOURCES_DIR",
     "BASE_TESTS_DIR",
     "CONFIG_FILE_NAME",
+    "GRAPH_DIR",
     "GRAPH_DST_FILE",
     "GRAPH_FILE",
     "GRAPH_GENERATION_FILE",

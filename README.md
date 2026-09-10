@@ -92,9 +92,11 @@ fkf context "repo:github.com/OWNER/REPOSITORY" --since 30d --explain --base ~/br
 
 Set `FKF_BASE=~/brain`, or run from inside the base, to drop `--base`.
 
-`fkf init` creates the five layers, `fkf.yaml`, managed git rules, the helpers your enabled sources need under `sources/`, and three agent skills under `.agents/skills/`. It contacts no provider and asks for no token. Browser, mail, and shell-history sources stay disabled until you turn them on.
+`fkf init` creates the five layers, `fkf.yaml`, managed git rules, the helpers your enabled sources need under `sources/`, three base-local agent skills under `.agents/skills/`, and an empty `skills/` catalog for private user-scope skills. It contacts no provider and asks for no token. Browser, mail, and shell-history sources stay disabled until you turn them on.
 
-From there, `fkf sync` is safe to re-run: existing event documents are skipped, due index snapshots refresh, the graph follows document writes, and the lexical cache rebuilds only when searchable bytes change. `fkf brief` gives you the daily loop — yesterday's digest, today's calendar, assigned work, failing CI, stale or login-blocked sources.
+An owner may add reviewed `skills/<name>/SKILL.md` packages to a private base, then run `fkf skills install`. FKF links them into `~/.agents/skills` without copying or replacing a same-named package, so private skills from several bases can coexist when their names are globally unique. No privacy prefix is required. The user catalog must be a real directory, never a link into a public repository. Installation is explicit on each computer; the base and its remote must remain private.
+
+From there, `fkf sync` is safe to re-run: existing event documents are skipped, due inventories refresh, the graph follows document writes, and the lexical cache rebuilds only when searchable bytes change. `fkf brief` gives you the daily loop — yesterday's digest, today's calendar, assigned work, failing CI, stale or login-blocked sources.
 
 ## The model
 
@@ -104,11 +106,11 @@ Four ideas cover most of FKF.
 
 ```text
 events/YYYY-MM-DD/  one complete JSON document per event source
-index/              current point-in-time source documents
+inventories/              current point-in-time source documents
 tasks/              authored execution evidence and learned items
 projects/           active, paused, or completed efforts
 wiki/               reusable decisions, patterns, tools, and insights
-graph.tsv           rebuildable relation cache at the base root
+graphs/src.tsv           rebuildable relation cache at the base root
 ```
 
 **A source is a command.** A source runs a reviewed command that prints one JSON document, and the named CLI owns its login. Adding GitHub, Google Workspace, Jira, or a local database needs no framework adapter — just YAML and, when the glue gets real, a small reviewed helper under the base's `sources/`:
@@ -131,7 +133,7 @@ sources:
     body: [gh, pr, view, "{{id}}", --repo, "{{repo}}", --json, "body,comments"]
 ```
 
-**Relations are explicit URIs.** Records and pages link to file URIs or to entities such as `repo:github.com/fmind/fkf`. `graph.tsv` is built from declared relation fields and authored links — FKF never guesses a relationship from prose.
+**Relations are explicit URIs.** Records and pages link to file URIs or to entities such as `repo:github.com/fmind/fkf`. `graphs/src.tsv` is built from declared relation fields and authored links — FKF never guesses a relationship from prose.
 
 **Retrieval is bounded and reproducible.** `find` returns every lexical match; `context` selects under a budget and explains itself. By default, records are stored as metadata plus a link and bodies stay at the provider. The opt-in `cache` and `sync` body policies keep ignored, manifest-verified local copies after an explicit read or evidence sync.
 
@@ -155,7 +157,7 @@ The MCP server is read-only and bounded: `context`, `find`, `day`, `timeline`, `
 - **Collected content is untrusted data** — evidence, never instructions. A stored value never becomes shell syntax or an executable name.
 - **`fkf trust` hashes the executable plan**: the effective `auth:`, `run:`, `test:`, and `body:` argv plus every file under the base's `sources/` and `tests/`. A meaningful change requires review again. It detects change; it is not a sandbox.
 - **Stored reads are offline, including `brief`.** `read --body` is the explicit read-time fetch; `sync` may prefetch bodies under the opt-in `bodies: sync` policy. Explicit `status --live` runs only bounded trusted `auth:` probes.
-- **FKF encrypts nothing and provides no backup.** Protect the disk and the remote. Whether event and index documents enter git history is your choice at `init`, recorded in `.gitignore`.
+- **FKF encrypts nothing and provides no backup.** Protect the disk and the remote. Whether event and inventory documents enter git history is your choice at `init`, recorded in `.gitignore`.
 
 Details and the full threat boundary: [privacy and trust](https://fmind.github.io/fkf/docs/privacy/).
 
@@ -182,4 +184,4 @@ Full documentation: <https://fmind.github.io/fkf/>
 
 MIT. See [LICENSE](LICENSE).
 
-Online apps without a provider CLI can declare one uv Python script each in `clients/` through root `clients:` configuration. Collection helpers live in `sources/`; source hooks live in `tests/`. All three execution trees are trust-covered. Repository checks and retrieval acceptance live under `checks/`, including `checks/queries.yaml`. See [app clients](docs/docs/sources.md#app-clients).
+Online apps without a provider CLI can declare one uv Python script each in `clients/` through root `clients:` configuration. Collection helpers live in `sources/`; source hooks live in `tests/`. All three execution trees are trust-covered. Repository checks and retrieval acceptance live under `operations/`, including `operations/queries.yaml`. See [app clients](docs/docs/sources.md#app-clients).

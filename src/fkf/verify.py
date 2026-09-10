@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from fkf.base import Base
-from fkf.documents import event_document_uri, index_document_uri
+from fkf.documents import event_document_uri, inventory_document_uri
 from fkf.errors import CanceledError
 from fkf.process import Cancellation, check_cancel
 from fkf.store import Layer
@@ -36,10 +36,10 @@ def document_uris(base: Base, *, cancel: Cancellation | None = None) -> tuple[st
             for name in base.day_documents(day):
                 check_cancel(cancel)
                 uris.append(event_document_uri(day, name))
-    if base.store.enabled(Layer.INDEX):
-        for name in base.index_documents():
+    if base.store.enabled(Layer.INVENTORIES):
+        for name in base.inventory_documents():
             check_cancel(cancel)
-            uris.append(index_document_uri(name))
+            uris.append(inventory_document_uri(name))
     return tuple(uris)
 
 

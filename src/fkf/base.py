@@ -135,9 +135,9 @@ class Base:
             for entry in entries:
                 del entry
 
-    def index_documents(self, *, scan: ScanGuard | None = None) -> tuple[str, ...]:
-        self.require_layer(Layer.INDEX)
-        directory = self.store.directory(Layer.INDEX)
+    def inventory_documents(self, *, scan: ScanGuard | None = None) -> tuple[str, ...]:
+        self.require_layer(Layer.INVENTORIES)
+        directory = self.store.directory(Layer.INVENTORIES)
         try:
             iterator = os.scandir(directory)
         except FileNotFoundError:

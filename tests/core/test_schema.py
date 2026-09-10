@@ -23,7 +23,7 @@ def test_config_schema_matches_the_closed_loader_surface() -> None:
     sources = _object(properties["sources"])
     sync = _object(_object(properties["sync"])["properties"])
     assert _object(sources["propertyNames"])["maxLength"] == MAX_SOURCE_NAME_LENGTH
-    assert _object(sync["index_max_age_hours"])["maximum"] == MAX_FRESHNESS_AGE_HOURS
+    assert _object(sync["inventory_max_age_hours"])["maximum"] == MAX_FRESHNESS_AGE_HOURS
     assert _object(sync["concurrency"])["maximum"] == MAX_SYNC_CONCURRENCY
 
     source = _object(sources["additionalProperties"])

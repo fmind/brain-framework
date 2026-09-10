@@ -15,7 +15,7 @@ The base is a local corpus, and stored reads do not upload it. When an operator 
 
 There is no token field, no allowlist, no keyring integration, and no env-file loader. `fkf` does not expand `$VAR` anywhere: a `$TOKEN` inside `run:` is passed literally as one argument because FKF invokes direct argv without a shell. The credential belongs to the CLI a [source](sources.md) names — `gh` already holds your GitHub login, `gcloud` already holds your Google one — and that CLI may read it from the inherited process environment or its own config directory exactly as it does when you type it by hand.
 
-That boundary applies to configuration and authentication, not to arbitrary provider output. If a command prints a token, authorization header, private body, or prompt containing a secret, `fkf` cannot identify it reliably and retains it in the stored record. Prefer explicit provider field lists and `jq` projections, keep `events/` and `index/` ignored unless their exact contents are safe for append-only history, and scan a base before opting into versioning.
+That boundary applies to configuration and authentication, not to arbitrary provider output. If a command prints a token, authorization header, private body, or prompt containing a secret, `fkf` cannot identify it reliably and retains it in the stored record. Prefer explicit provider field lists and `jq` projections, keep `events/` and `inventories/` ignored unless their exact contents are safe for append-only history, and scan a base before opting into versioning.
 
 The personal preset includes browser-history collection but keeps it disabled until the owner explicitly opts in. Its helper strips URL credentials, queries, and fragments before printing JSON; a custom browser source must make an equally explicit privacy projection because `fkf` does not perform a generic redaction pass after collection.
 
@@ -61,7 +61,7 @@ These details matter more than the flow:
 
 - **The digest covers the canonical execution plan plus the full `sources/`, `clients/`, and `tests/` trees.** The plan is decoded from `fkf.yaml` and `fkf.local.yaml`: commands, app client URLs and script declarations, enabled states, body-bound paths, timeouts, retries, pacing, extra executable directories, and base execution policy. YAML comments and ordering, schema descriptions and examples, declared `requires:`, retrieval-only path mappings, and inherited process environment do not re-arm unchanged execution. Helper and hook contents and executable bits are included, so a mode-only change that arms a script re-opens the gate. Every symlink under any execution tree is refused. Empty and relative inherited `PATH` entries are removed from children, as is any inherited absolute entry resolving inside the base. `clients/` holds explicitly addressed uv scripts outside PATH. `sources/` is available to every declared command; `tests/` is prepended only for source tests, so fixtures cannot shadow collection or body executables. Authored and collected layers change without re-arming trust; never make a command source or execute them.
 - **The inherited provider environment is machine state, not part of the digest.** The named CLI may read an exported credential or provider setting; `fkf trust` cannot disclose those values. Interpreter and dynamic-loader startup variables such as `BASH_ENV`, `ENV`, `ZDOTDIR`, Python search/startup hooks, and preload options are removed from children because they could execute an unreviewed file before declared argv begins. Home and XDG roots are inherited only when they are absolute and do not resolve inside the base, preserving ordinary machine-local provider configuration without letting mutable base content become an implicit startup file. Export a provider selector before launching FKF, or use a reviewed wrapper under `sources/` when the base must make that selection explicit.
-- **Declared commands start from a neutral directory.** Their working directory is `/`, not the base root. A relative interpreter argument or implicit module lookup therefore cannot reach `wiki/`, `projects/`, `tasks/`, `events/`, or `index/`. Commands receive `{{base}}` as an explicit data path when configured; executable and interpreted support belongs under the trust-digested `sources/` PATH.
+- **Declared commands start from a neutral directory.** Their working directory is `/`, not the base root. A relative interpreter argument or implicit module lookup therefore cannot reach `wiki/`, `projects/`, `tasks/`, `events/`, or `inventories/`. Commands receive `{{base}}` as an explicit data path when configured; executable and interpreted support belongs under the trust-digested `sources/` PATH.
 - **Any executable-boundary change re-arms the gate.** A configuration edit that changes only retrieval semantics does not. After a pull that changes the canonical plan, a helper, or its executable bit, the next execution stops and the trust report leads with the semantic item that changed.
 - **The record lives outside the base**, in `$XDG_STATE_HOME/fkf/trust/` (or `~/.local/state/fkf/trust/`), named by the SHA-256 of the base's absolute path. Storing it inside the base would make trust clonable, which is precisely what the gate exists to prevent, and machine-local state has no business in a repository you may push.
 - **Context delta snapshots also live outside the base**, under the sibling `receipts/` directory. Each owner-only compressed file stores candidate URIs and semantic digests for one `input_digest`, never record or page bodies. FKF retains 16 snapshots per physical base. This is the minimum state needed for `context --since-receipt`; a one-way digest cannot otherwise identify which individual records changed.
@@ -127,11 +127,11 @@ The omitted tail applies `0600` to files outside the three execution trees, then
 
 ## Git history is append-only
 
-Whether collected content enters history is decided once, at `fkf init`, and written into the managed block of the base's `.gitignore`. By default `events/` and `index/` are ignored; `--track-collected` versions them instead. There is no configuration key for this, on purpose: a key in `fkf.yaml` could be flipped by a teammate in a pull request, and history is append-only, so removing those lines later cannot undo what they let in. `fkf status` reads the `.gitignore` back rather than trusting anything else, and warns when a base tracks what it collects.
+Whether collected content enters history is decided once, at `fkf init`, and written into the managed block of the base's `.gitignore`. By default `events/` and `inventories/` are ignored; `--track-collected` versions them instead. There is no configuration key for this, on purpose: a key in `fkf.yaml` could be flipped by a teammate in a pull request, and history is append-only, so removing those lines later cannot undo what they let in. `fkf status` reads the `.gitignore` back rather than trusting anything else, and warns when a base tracks what it collects.
 
 The same block ignores the files whose entire purpose is holding a secret — `.env*`, `*.pem`, `*.key`, `id_*`, `.netrc`, `.npmrc`, `credentials.json`, `service-account*.json`, `.aws/`, `.ssh/`, and their neighbours — plus `fkf.local.yaml` and `PRIVATE.md`. `fkf` reads none of them. The list exists because the CLIs your sources name tend to write credentials next to the work, and the cheapest moment to keep one out of a repository is before it is ever added.
 
-`.gitattributes` marks collected JSON documents as non-mergeable. A document is written whole; line-merging two machines' copies would produce a file that parses and lies, so a conflict stays visible instead. The five root graph artifacts are ignored because the complete generation is rebuildable.
+`.gitattributes` marks collected JSON documents as non-mergeable. A document is written whole; line-merging two machines' copies would produce a file that parses and lies, so a conflict stays visible instead. The five artifacts under `graphs/` are ignored because the complete generation is rebuildable.
 
 ## What health audits in `fkf status` actually check
 
@@ -139,21 +139,21 @@ The tracked-file audit runs `git ls-files` and reads the answer. It does not inf
 
 Each source row reports every explicit `requires:` executable against the ordinary collection/body PATH and reports the `test[0]` entrypoint separately against the test-only PATH; no executable is run. The summary keeps missing requirements and missing enabled-source hooks as separate counts.
 
-| Check                 | Severity         | Means                                                                   |
-| --------------------- | ---------------- | ----------------------------------------------------------------------- |
-| `git`                 | warning          | the base is not a git working tree, so nothing versions it              |
-| `uncommitted`         | warning          | a git tree with no commit, so every tracked-file audit passes vacuously |
-| `tracked-credentials` | error            | git tracks a credential-shaped file; untrack it and rotate the secret   |
-| `tracked-collected`   | error            | `events/` or `index/` is ignored yet still tracked, so it keeps landing |
-| `conflict-markers`    | error            | a page holds merge markers, so it asserts something no author wrote     |
-| `documents`           | error            | stored JSON document schema / count mismatch / duplicate record IDs     |
-| `derived`             | error or warning | a graph or lexical-index cache is absent, stale, corrupt, or invalid    |
-| `helpers`             | warning          | an official required helper is missing or an installed one has drifted  |
-| `trust`               | warning          | this base is not trusted here, so `fkf sync` will refuse its commands   |
-| `history`             | warning          | this base commits what it collects, permanently                         |
-| `permissions`         | warning          | something in the base is readable beyond its owner                      |
-| `skills`              | warning          | the fkf-owned skills drifted from this package or are missing           |
-| `learned`             | warning          | unharvested `## Learned` bullets in task traces not yet in wiki/project |
+| Check                 | Severity         | Means                                                                         |
+| --------------------- | ---------------- | ----------------------------------------------------------------------------- |
+| `git`                 | warning          | the base is not a git working tree, so nothing versions it                    |
+| `uncommitted`         | warning          | a git tree with no commit, so every tracked-file audit passes vacuously       |
+| `tracked-credentials` | error            | git tracks a credential-shaped file; untrack it and rotate the secret         |
+| `tracked-collected`   | error            | `events/` or `inventories/` is ignored yet still tracked, so it keeps landing |
+| `conflict-markers`    | error            | a page holds merge markers, so it asserts something no author wrote           |
+| `documents`           | error            | stored JSON document schema / count mismatch / duplicate record IDs           |
+| `derived`             | error or warning | a graph or lexical-index cache is absent, stale, corrupt, or invalid          |
+| `helpers`             | warning          | an official required helper is missing or an installed one has drifted        |
+| `trust`               | warning          | this base is not trusted here, so `fkf sync` will refuse its commands         |
+| `history`             | warning          | this base commits what it collects, permanently                               |
+| `permissions`         | warning          | something in the base is readable beyond its owner                            |
+| `skills`              | warning          | the fkf-owned skills drifted from this package or are missing                 |
+| `learned`             | warning          | unharvested `## Learned` bullets in task traces not yet in wiki/project       |
 
 Any error exits 1, so `fkf status` is worth a line in whatever runs your periodic [sync](commands.md).
 

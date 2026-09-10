@@ -36,7 +36,7 @@ def _seed_entries(base: Base, layer: str) -> None:
     for index in range(3):
         if layer in {"events", "tasks"}:
             (directory / f"2026-09-0{index + 1}").mkdir()
-        elif layer == "index":
+        elif layer == "inventories":
             (directory / f"source-{index}.json").write_text("{}\n", encoding="utf-8")
         else:
             (directory / f"page-{index}.md").write_text(f"# Page {index}\n", encoding="utf-8")
@@ -57,7 +57,7 @@ def _hide_file_size(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
     monkeypatch.setattr(Path, "stat", stale_stat)
 
 
-@pytest.mark.parametrize("layer", ["events", "index", "tasks", "wiki"])
+@pytest.mark.parametrize("layer", ["events", "inventories", "tasks", "wiki"])
 def test_mcp_list_refuses_each_layer_after_the_filesystem_scan_ceiling(
     base: Base,
     monkeypatch: pytest.MonkeyPatch,

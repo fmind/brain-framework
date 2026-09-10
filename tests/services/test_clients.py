@@ -27,7 +27,7 @@ SCRIPT = '# /// script\n# dependencies = []\n# ///\nprint("[]")\n'
 SOURCE = """sources:
   example-app-records:
     enabled: true
-    layer: index
+    layer: inventories
     requires: [uv]
     run: [uv, run, --script, "{{base}}/clients/example-app.py", records]
     body: [uv, run, --script, "{{base}}/clients/example-app.py", body, "{{id}}"]
@@ -190,10 +190,12 @@ def test_client_collection_uses_runner_and_keeps_stored_reads_offline(tmp_path: 
         str(base.root / "clients" / "example-app.py"),
         "records",
     )
-    assert base.read_document("index/example-app-records.json").records == [{"id": "rec-1", "title": "ExampleApp item"}]
+    assert base.read_document("inventories/example-app-records.json").records == [
+        {"id": "rec-1", "title": "ExampleApp item"}
+    ]
     assert len(runner.commands) == 1
-    before = (base.root / "index" / "example-app-records.json").read_bytes()
+    before = (base.root / "inventories" / "example-app-records.json").read_bytes()
     base.runner = FakeRunner(lambda _command: b'[{"id":"rec-2"}]')
     failed = sync(base, SyncRequest(targets=("example-app-records",), force=True, no_graph=True))
     assert not failed.complete
-    assert (base.root / "index" / "example-app-records.json").read_bytes() == before
+    assert (base.root / "inventories" / "example-app-records.json").read_bytes() == before

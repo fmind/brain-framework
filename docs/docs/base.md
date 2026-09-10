@@ -12,14 +12,14 @@ A base is one git repository of plain JSON and Markdown. Its committed `fkf.yaml
 | Path                               | Holds                                                      |
 | ---------------------------------- | ---------------------------------------------------------- |
 | `events/YYYY-MM-DD/<source>.json`  | one complete collected document per source and day         |
-| `index/<name>.json`                | one current point-in-time document per index source        |
+| `inventories/<name>.json`          | one current point-in-time document per inventory source    |
 | `tasks/YYYY-MM-DD/<slug>/TASKS.md` | request, work trace, changed files, evidence, and learning |
 | `projects/<slug>.md`               | intent and decisions over weeks; `status` is required      |
 | `wiki/<slug>.md`                   | durable approved knowledge, flat [OKF v0.2](okf.md)        |
 
-Root `graph.tsv`, its destination-sorted `graph.dst.tsv` twin, `graph.offsets.tsv`, `graph.meta.json`, and `graph.generation.json` are one rebuildable cache generation. The source of truth is the relation schema stored with collected documents plus authored links, tags, and explicit Markdown `relations:`. `fkf build graph` marks the next generation as building before it replaces any artifact and publishes the current marker last. Readers check that bounded marker before and after opening the files, so they fail closed during the brief publication window rather than mix generations.
+`graphs/src.tsv`, its destination-sorted `graphs/dst.tsv` twin, `graphs/offsets.tsv`, `graphs/meta.json`, and `graphs/generation.json` are one rebuildable cache generation. The source of truth is the relation schema stored with collected documents plus authored links, tags, and explicit Markdown `relations:`. `fkf build graph` marks the next generation as building before it replaces any artifact and publishes the current marker last. Readers check that bounded marker before and after opening the files, so they fail closed during the brief publication window rather than mix generations.
 
-The sidecar records URI, size, mtime, and SHA-256 for each input and graph artifact. It also carries separate SHA-256 inputs for events, index, projects, tasks, wiki, and the edge-relevant root schema, plus one aggregate. A stale read therefore names which logical component changed instead of reporting one opaque base-wide mismatch. Ordinary reads stat all inputs and hash only changed fingerprints; `fkf graph --verify` hashes everything explicitly.
+The sidecar records URI, size, mtime, and SHA-256 for each input and graph artifact. It also carries separate SHA-256 inputs for events, inventories, projects, tasks, wiki, and the edge-relevant root schema, plus one aggregate. A stale read therefore names which logical component changed instead of reporting one opaque base-wide mismatch. Ordinary reads stat all inputs and hash only changed fingerprints; `fkf graph --verify` hashes everything explicitly.
 
 FKF keeps this plain-file design until measurements justify another storage layer. `mise run benchmark` builds a reproducible synthetic corpus of exactly 100,000 records and 500,000 edges, then reports wall time and maximum RAM for find, context, graph build, and navigation. Maximum RAM is the measured peak resident set size (RSS): the largest amount of physical memory occupied during that run. It is an optional observation with no pass/fail threshold and no database claim.
 
@@ -28,13 +28,17 @@ Every layer is explicitly enabled:
 ```yaml
 layers:
   events: true
-  index: true
+  inventories: true
   tasks: true
   projects: true
   wiki: true
 ```
 
 An absent layer entry is disabled. Disabled layers are not created, listed, served, scanned, or addressable.
+
+The remaining data folders have separate roles: `graphs/` contains the five generated graph artifacts, `indexes/index.tsv` and `indexes/meta.json` accelerate lexical retrieval, and `bodies/` holds manifest-verified fetched text. All three are Git-ignored and rebuildable. Base-owned maintenance and retrieval acceptance files belong in `operations/`; they are outside the published read path and execution-trust trees.
+
+The `inventories` layer is named the same way in configuration, CLI listings, and file URIs. Its stored v1 JSON envelope permanently retains `layer: "index"`. FKF translates that evidence marker at the document boundary; renaming a directory never requires rewriting collected values or fetching them again. The lexical builder remains `fkf build index`.
 
 ## Finding a base
 
@@ -61,7 +65,7 @@ schema:
 
 layers:
   events: true
-  index: true
+  inventories: true
   tasks: true
   projects: true
   wiki: true
@@ -77,7 +81,7 @@ sources:
 
 sync:
   days: 30
-  index_max_age_hours: 168
+  inventory_max_age_hours: 168
   timeout: 2m0s
   concurrency: 4
 ```
@@ -104,6 +108,6 @@ Mutating CLI paths share one fail-fast cross-process lock keyed by the physical 
 
 ## Managed repository files
 
-`fkf init` refreshes marked blocks in `.gitignore` and `.gitattributes` without touching surrounding content. The ignore block covers local configuration, common secret-bearing files, all five root graph artifacts, and optional collected data according to the choice made at initialization. The attributes block prevents line-merging complete JSON documents. The graph files need no merge rule because they are rebuilt from source files.
+`fkf init` refreshes marked blocks in `.gitignore` and `.gitattributes` without touching surrounding content. The ignore block covers local configuration, common secret-bearing files, all five artifacts under `graphs/`, and optional collected data according to the choice made at initialization. The attributes block prevents line-merging complete JSON documents. The graph files need no merge rule because they are rebuilt from source files.
 
-Use `fkf init` again to refresh FKF-owned skills and managed blocks. It does not overwrite base-specific `AGENTS.md`, custom skills, existing helpers under `sources/`, or source hooks under `tests/`. Use `fkf config helpers` to inspect installed official helpers and missing required ones, then `fkf config helpers --refresh` for an explicit refresh whose individual file replacements are atomic; unknown scripts remain user-owned.
+Use `fkf init` again to refresh FKF-owned skills and managed blocks and to create the root `skills/` private catalog when missing. It does not overwrite base-specific `AGENTS.md`, custom `.agents/skills/`, private `skills/<name>` packages, existing helpers under `sources/`, or source hooks under `tests/`. Use `fkf config helpers` to inspect installed official helpers and missing required ones, then `fkf config helpers --refresh` for an explicit refresh whose individual file replacements are atomic; unknown scripts remain user-owned.

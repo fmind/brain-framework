@@ -15,7 +15,7 @@ from typing import Final, Protocol
 from fkf.base import Base
 from fkf.bodies import BodyManifest, load_body_manifest, read_cached_body_from_manifest
 from fkf.config import ConfigError
-from fkf.documents import Document, Record, event_document_uri, index_document_uri
+from fkf.documents import Document, Record, event_document_uri, inventory_document_uri
 from fkf.errors import OperationalError
 from fkf.fields import FIELD_TIME, FIELD_TITLE, FIELD_URL, FieldPath, is_well_known_field, scalar_string
 from fkf.graph import IdentityResolver
@@ -627,11 +627,11 @@ def _scan_index_records(
     cancel: Cancellation | None,
 ) -> None:
     filters = prepared.filter
-    if not filters.selects() or not filters.wants(Layer.INDEX) or not base.store.enabled(Layer.INDEX):
+    if not filters.selects() or not filters.wants(Layer.INVENTORIES) or not base.store.enabled(Layer.INVENTORIES):
         return
     sources: list[SourceCount] = []
     total = 0
-    for name in base.index_documents():
+    for name in base.inventory_documents():
         _check_canceled(cancel)
         if filters.sources and name not in filters.sources:
             continue
@@ -639,7 +639,7 @@ def _scan_index_records(
             base,
             prepared,
             scan,
-            index_document_uri(name),
+            inventory_document_uri(name),
             counting=counting,
             on_record=on_record,
             cancel=cancel,

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Final, Protocol
 
 from fkf.config import IdentityKind, validate_identity_alias
-from fkf.documents import Document, Record, event_document_uri, index_document_uri
+from fkf.documents import Document, Record, event_document_uri, inventory_document_uri
 from fkf.fields import FIELD_TIME, validate_entity_uri, validate_relation_value
 from fkf.io import FileTooLargeError, atomic_write, open_regular_file, read_file_limited, write_json
 from fkf.markdown import Page
@@ -43,7 +43,7 @@ from fkf.uri import URI, Scheme, encode_fragment, parse_uri, resolve_link
 if TYPE_CHECKING:
     from fkf.base import Base
 
-EDGE_SCHEMA_VERSION: Final = 3
+EDGE_SCHEMA_VERSION: Final = 4
 GRAPH_EXTRACTOR_VERSION: Final = 2
 EDGE_FIELD_SEPARATOR: Final = "\t"
 EDGE_FIELD_COUNT: Final = 6
@@ -357,7 +357,7 @@ class GraphFileManifest:
 class GraphInputSHA256:
     aggregate: str = field(metadata={"json": "AGGREGATE"})
     events: str = ""
-    index: str = ""
+    inventories: str = ""
     projects: str = ""
     tasks: str = ""
     wiki: str = ""
@@ -366,7 +366,7 @@ class GraphInputSHA256:
     def named(self, name: str) -> str:
         return {
             "events": self.events,
-            "index": self.index,
+            "inventories": self.inventories,
             "projects": self.projects,
             "tasks": self.tasks,
             "wiki": self.wiki,
@@ -403,7 +403,7 @@ class EdgeListMeta:
     sha256: GraphSHA256Manifest
 
 
-_GRAPH_INPUT_NAMES: Final[tuple[str, ...]] = ("events", "index", "projects", "tasks", "wiki", "schema")
+_GRAPH_INPUT_NAMES: Final[tuple[str, ...]] = ("events", "inventories", "projects", "tasks", "wiki", "schema")
 
 
 class _Digest(Protocol):
@@ -451,7 +451,7 @@ def _graph_input_digest_problems(inputs: GraphInputSHA256) -> list[str]:
 
 def new_graph_input_sha256(
     events: str,
-    index: str,
+    inventories: str,
     projects: str,
     tasks: str,
     wiki: str,
@@ -460,7 +460,7 @@ def new_graph_input_sha256(
     """Validate the closed logical-input vocabulary and derive its aggregate."""
 
     inputs = GraphInputSHA256(
-        aggregate="", events=events, index=index, projects=projects, tasks=tasks, wiki=wiki, schema=schema
+        aggregate="", events=events, inventories=inventories, projects=projects, tasks=tasks, wiki=wiki, schema=schema
     )
     for name in _GRAPH_INPUT_NAMES:
         if not _canonical_sha256(inputs.named(name)):
@@ -651,12 +651,12 @@ def write_edge_list(
     if meta != expected:
         raise EdgeValidationError("edge-list metadata does not describe the exact canonical encoded rows")
 
-    generation_path = meta_path.parent / GRAPH_GENERATION_FILE
+    generation_path = meta_path.parent / Path(GRAPH_GENERATION_FILE).name
     generation = graph_generation_sha256(meta)
     _write_graph_generation_state(generation_path, "building", generation)
     _write_graph_artifact(path, artifacts.src, generated)
-    _write_graph_artifact(path.parent / GRAPH_DST_FILE, artifacts.dst, generated)
-    _write_graph_artifact(path.parent / GRAPH_OFFSETS_FILE, artifacts.offsets, generated)
+    _write_graph_artifact(path.parent / Path(GRAPH_DST_FILE).name, artifacts.dst, generated)
+    _write_graph_artifact(path.parent / Path(GRAPH_OFFSETS_FILE).name, artifacts.offsets, generated)
     write_json(meta, meta_path)
     _write_graph_generation_state(generation_path, "current", generation)
 
@@ -737,8 +737,8 @@ def graph_input_uris(base: Base, *, cancel: Cancellation | None = None) -> tuple
         for day in base.event_dates():
             check_cancel(cancel)
             uris.extend(event_document_uri(day, name) for name in base.day_documents(day))
-    if base.store.enabled(Layer.INDEX):
-        uris.extend(index_document_uri(name) for name in base.index_documents())
+    if base.store.enabled(Layer.INVENTORIES):
+        uris.extend(inventory_document_uri(name) for name in base.inventory_documents())
     for layer in (Layer.PROJECTS, Layer.TASKS, Layer.WIKI):
         check_cancel(cancel)
         uris.extend(_authored_graph_input_uris(base, layer, cancel))
@@ -750,7 +750,11 @@ def hash_graph_input(base: Base, uri: str, *, cancel: Cancellation | None = None
 
     absolute = base.store.resolve(uri)
     check_cancel(cancel)
-    limit = MAX_SOURCE_DOCUMENT_BYTES if _graph_input_layer(uri) in {Layer.EVENTS, Layer.INDEX} else MAX_NARRATIVE_BYTES
+    limit = (
+        MAX_SOURCE_DOCUMENT_BYTES
+        if _graph_input_layer(uri) in {Layer.EVENTS, Layer.INVENTORIES}
+        else MAX_NARRATIVE_BYTES
+    )
     try:
         handle = open_regular_file(absolute)
     except (OSError, UnsafePathError) as error:
@@ -826,7 +830,7 @@ def _graph_input_sha256_from_files(
     digests = {layer: _graph_layer_input_sha256(layer, files, cancel) for layer in Layer}
     return new_graph_input_sha256(
         digests[Layer.EVENTS],
-        digests[Layer.INDEX],
+        digests[Layer.INVENTORIES],
         digests[Layer.PROJECTS],
         digests[Layer.TASKS],
         digests[Layer.WIKI],
@@ -1268,10 +1272,10 @@ def extract_edges(base: Base, *, cancel: Cancellation | None = None) -> tuple[li
                 check_cancel(cancel)
                 edges.extend(_document_edges(base, base.read_document(event_document_uri(day, name)), cancel))
                 documents += 1
-    if base.store.enabled(Layer.INDEX):
-        for name in base.index_documents():
+    if base.store.enabled(Layer.INVENTORIES):
+        for name in base.inventory_documents():
             check_cancel(cancel)
-            edges.extend(_document_edges(base, base.read_document(index_document_uri(name)), cancel))
+            edges.extend(_document_edges(base, base.read_document(inventory_document_uri(name)), cancel))
             documents += 1
     pages: list[Page] = []
     for layer in (Layer.WIKI, Layer.PROJECTS):
@@ -1402,12 +1406,12 @@ def _decode_manifests(value: object, label: str) -> tuple[GraphFileManifest, ...
 
 
 def _decode_graph_input_sha256(value: object) -> GraphInputSHA256:
-    fields = {"AGGREGATE", "events", "index", "projects", "tasks", "wiki", "schema"}
+    fields = {"AGGREGATE", "events", "inventories", "projects", "tasks", "wiki", "schema"}
     item = _strict_object(value, fields, f"{GRAPH_META_FILE} sha256.inputs")
     return GraphInputSHA256(
         aggregate=_strict_string(item["AGGREGATE"], "sha256.inputs.AGGREGATE"),
         events=_strict_string(item["events"], "sha256.inputs.events"),
-        index=_strict_string(item["index"], "sha256.inputs.index"),
+        inventories=_strict_string(item["inventories"], "sha256.inputs.inventories"),
         projects=_strict_string(item["projects"], "sha256.inputs.projects"),
         tasks=_strict_string(item["tasks"], "sha256.inputs.tasks"),
         wiki=_strict_string(item["wiki"], "sha256.inputs.wiki"),
@@ -2202,7 +2206,7 @@ def node_kind(uri: str) -> str:
         return "derived"
     return {
         "events": "event",
-        "index": "index",
+        "inventories": "inventory",
         "tasks": "task",
         "projects": "project",
         "wiki": "wiki",

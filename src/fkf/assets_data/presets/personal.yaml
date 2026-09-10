@@ -2,7 +2,7 @@ sources:
   # --- No credential needed: these read files already on this machine ----------------------
   git-commits: # your commits/rebases across every clone under one root, by committer time
     enabled: true
-    layer: events # events = one document per day under events/; index = one document under index/
+    layer: events # events = one document per day under events/; inventories = one document under inventories/
     requires: [git-log-json.py, python3, git]
     # window: true because the scan is the whole cost — reading N days one at a time repeats
     # the same directory walk N times for the same handful of commits. One call, bucketed by
@@ -133,7 +133,7 @@ sources:
 
   chrome-bookmarks: # a current metadata snapshot across Chromium-family profiles
     enabled: false
-    layer: index
+    layer: inventories
     max_age_hours: 24 # bookmark inventory changes slowly; daily refresh avoids hourly browser reads
     requires: [chrome-bookmarks.py, python3]
     run: [chrome-bookmarks.py]
@@ -145,9 +145,9 @@ sources:
 
   mise-tools: # active local tool versions; no provider or network call
     enabled: false
-    layer: index
-    requires: [mise-tools-json.sh, mise, jq]
-    run: [mise-tools-json.sh]
+    layer: inventories
+    requires: [mise-tools-json.py, mise, python3]
+    run: [mise-tools-json.py]
     fields:
       id: .id
       title: .title
@@ -156,7 +156,7 @@ sources:
     # Replace this root before enabling. The helper inspects only immediate Git repositories
     # and bounded metadata; it never runs Git hooks, package scripts, mise, or repository code.
     enabled: false
-    layer: index
+    layer: inventories
     max_age_hours: 24
     requires: [repository-facts.py, python3]
     run: [repository-facts.py, "{{home}}/REPLACE_WITH_REPOSITORIES"]
@@ -175,9 +175,9 @@ sources:
 
   writing-documents: # edit the sentinel to one or more explicit authored files before enabling
     enabled: false
-    layer: index
-    requires: [writing-source-json.sh, writing-index.py, python3, git, yq]
-    run: [writing-source-json.sh, "{{home}}/REPLACE_WITH_WRITING_DOCUMENT.md"]
+    layer: inventories
+    requires: [writing-source-json.py, writing-index.py, python3, git, yq]
+    run: [writing-source-json.py, "{{home}}/REPLACE_WITH_WRITING_DOCUMENT.md"]
     fields:
       id: .id
       title: .title
@@ -189,7 +189,7 @@ sources:
   # writes no feed list, and a public OPML that does not exist is a hard collection failure.
   rss-items: # feeds expose a complete current document, not historical pages
     enabled: false
-    layer: index
+    layer: inventories
     requires: [rss-json.py, python3, curl]
     run: [rss-json.py, "{{base}}/feeds.opml", --optional-opml, "{{base}}/feeds.private.opml"]
     timeout: 10m
@@ -318,7 +318,7 @@ sources:
 
   github-repositories:
     enabled: false
-    layer: index # a point-in-time snapshot, refreshed on age rather than per day
+    layer: inventories # a point-in-time snapshot, refreshed on age rather than per day
     max_age_hours: 24 # repository inventory is useful daily, not on every hourly schedule tick
     requires: [github-list-json.py, python3, gh]
     auth: [gh, auth, status]
@@ -393,31 +393,31 @@ sources:
 
   github-stars:
     enabled: false
-    layer: index
-    requires: [github-stars-json.sh, github-generic-list-json.py, python3, gh, jq]
+    layer: inventories
+    requires: [github-stars-json.py, github-generic-list-json.py, python3, gh]
     auth: [gh, auth, status]
     format: ndjson
-    run: [github-stars-json.sh]
+    run: [github-stars-json.py]
     fields:
       id: .full_name
       title: .title
       url: .url
       repo: .full_name
       repository: .repository_uri
-    install: mise use -g gh@latest jq@latest python@latest
+    install: mise use -g gh@latest python@latest
 
   github-gists:
     enabled: false
-    layer: index
-    requires: [github-gists-json.sh, github-generic-list-json.py, python3, gh, jq]
+    layer: inventories
+    requires: [github-gists-json.py, github-generic-list-json.py, python3, gh]
     auth: [gh, auth, status]
     format: ndjson
-    run: [github-gists-json.sh]
+    run: [github-gists-json.py]
     fields:
       id: .id
       title: .description
       url: .url
-    install: mise use -g gh@latest jq@latest python@latest
+    install: mise use -g gh@latest python@latest
 
   # --- Google Workspace: the gws CLI owns the OAuth flow ----------------------------------
 
@@ -425,7 +425,7 @@ sources:
   # event day mutable. Historical calendar evidence remains in google-calendar-events.
   google-calendar-agenda:
     enabled: false
-    layer: index
+    layer: inventories
     max_age_hours: 1 # today's agenda drives scheduled briefs and must stay current within the hour
     requires: [gws-calendars-json.py, gws-page-json.py, python3, gws]
     auth: [gws, auth, status]
@@ -465,7 +465,7 @@ sources:
   meeting-notes:
     enabled: false
     layer: events
-    requires: [gws-meeting-notes-json.py, gws-calendars-json.py, gws-page-json.py, gws-doc-text.sh, python3, gws, jq]
+    requires: [gws-meeting-notes-json.py, gws-calendars-json.py, gws-page-json.py, gws-doc-text.py, python3, gws, jq]
     auth: [gws, auth, status]
     window: true
     # Enable and sync google-calendar-events too. The helper refuses a matched note until the
@@ -481,7 +481,7 @@ sources:
       REPLACE_WITH_MEETING_PREFIX,
       "{{base}}",
     ]
-    body: [gws-doc-text.sh, "{{id}}"]
+    body: [gws-doc-text.py, "{{id}}"]
     bodies: sync
     timeout: 10m
     fields:
@@ -497,7 +497,7 @@ sources:
 
   google-calendars:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [gws-page-json.py, python3, gws, jq]
     auth: [gws, auth, status]
     format: ndjson
@@ -546,7 +546,7 @@ sources:
 
   google-chat-spaces:
     enabled: false
-    layer: index # spaces list has no time window, so this is one current snapshot
+    layer: inventories # spaces list has no time window, so this is one current snapshot
     requires: [gws-page-json.py, python3, gws, jq]
     auth: [gws, auth, status]
     format: ndjson
@@ -609,15 +609,14 @@ sources:
     # complete. The extra fields are free: one request returns them, and every collected field
     # is greppable by `fkf find --where`.
     enabled: false
-    layer: index
+    layer: inventories
     max_age_hours: 24 # the complete Drive inventory is intentionally a daily snapshot
-    requires: [gws-page-json.py, python3, gws, jq]
+    requires: [gws-drive-files-json.py, python3, gws]
     auth: [gws, auth, status]
     format: ndjson
     records: .files
     run: [
-      gws-page-json.py,
-      files,
+      gws-drive-files-json.py,
       gws,
       drive,
       files,
@@ -637,11 +636,11 @@ sources:
       # Drive's owners[] is ownership, not generic involvement. The root schema separates
       # `owner` from `participant`, and the role name is what becomes the graph edge kind.
       owner: [".owners[].uri"]
-    install: mise use -g github:googleworkspace/cli@latest jq@latest python@latest
+    install: mise use -g github:googleworkspace/cli@latest python@latest
 
   google-docs:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [gws-page-json.py, python3, gws, jq]
     auth: [gws, auth, status]
     format: ndjson
@@ -668,7 +667,7 @@ sources:
 
   google-forms:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [gws-page-json.py, python3, gws, jq]
     auth: [gws, auth, status]
     format: ndjson
@@ -695,7 +694,7 @@ sources:
 
   google-scripts:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [gws-page-json.py, python3, gws, jq]
     auth: [gws, auth, status]
     format: ndjson
@@ -722,7 +721,7 @@ sources:
 
   google-sheets:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [gws-page-json.py, python3, gws, jq]
     auth: [gws, auth, status]
     format: ndjson
@@ -749,7 +748,7 @@ sources:
 
   google-slides:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [gws-page-json.py, python3, gws, jq]
     auth: [gws, auth, status]
     format: ndjson
@@ -803,7 +802,7 @@ sources:
 
   google-contacts-people:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [gws-page-json.py, python3, gws, jq]
     auth: [gws, auth, status]
     format: ndjson
@@ -847,46 +846,46 @@ sources:
 
   gcloud-projects:
     enabled: false
-    layer: index
-    requires: [gcloud-auth-ready.sh, gcloud-projects-json.sh, gcloud, jq]
+    layer: inventories
+    requires: [gcloud-auth-ready.sh, gcloud-projects-json.py, gcloud, python3]
     auth: [gcloud-auth-ready.sh]
     # Limit-plus-one makes an account beyond the reviewed 10,000-project envelope fail rather
     # than publish a complete-looking truncated snapshot.
-    run: [gcloud-projects-json.sh]
+    run: [gcloud-projects-json.py]
     fields:
       id: .projectId
       title: .name
-    install: mise use -g gcloud@latest jq@latest
+    install: mise use -g gcloud@latest python@latest
 
   # --- Data and model platforms: each provider CLI owns authentication -------------------
 
   kaggle-competitions:
     enabled: false
-    layer: index
-    requires: [kaggle-competitions-json.sh, kaggle-json.py, python3, kaggle, jq]
+    layer: inventories
+    requires: [kaggle-competitions-json.py, kaggle-json.py, python3, kaggle]
     auth: [kaggle, config, view]
-    run: [kaggle-competitions-json.sh]
+    run: [kaggle-competitions-json.py]
     timeout: 5m
     fields:
       id: .ref
       title: .ref
-    install: mise use -g pipx:kaggle@latest jq@latest python@latest
+    install: mise use -g pipx:kaggle@latest python@latest
 
   kaggle-datasets:
     enabled: false
-    layer: index
-    requires: [kaggle-datasets-json.sh, kaggle-json.py, python3, kaggle, jq]
+    layer: inventories
+    requires: [kaggle-datasets-json.py, kaggle-json.py, python3, kaggle]
     auth: [kaggle, config, view]
-    run: [kaggle-datasets-json.sh]
+    run: [kaggle-datasets-json.py]
     timeout: 5m
     fields:
       id: .ref
       title: .title
-    install: mise use -g pipx:kaggle@latest jq@latest python@latest
+    install: mise use -g pipx:kaggle@latest python@latest
 
   kaggle-kernels:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [kaggle-kernels-json.py, python3, kaggle]
     auth: [kaggle, config, view]
     run: [kaggle-kernels-json.py]
@@ -898,7 +897,7 @@ sources:
 
   kaggle-models:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [kaggle-models-json.py, python3, kaggle]
     auth: [kaggle, config, view]
     # Kaggle exposes no reviewed account-discovery command here; replace this explicit owner.
@@ -911,7 +910,7 @@ sources:
 
   huggingface-repositories:
     enabled: false
-    layer: index
+    layer: inventories
     requires: [huggingface-repositories-json.py, python3, hf]
     auth: [hf, auth, whoami]
     run: [huggingface-repositories-json.py]
@@ -922,3 +921,49 @@ sources:
       url: .url
       visibility: .visibility
     install: mise use -g pipx:huggingface_hub@latest python@latest
+
+  gcloud-audit-projects:
+    # Explicitly enable account-wide project discovery; exclude inaccessible projects in
+    # fkf.local.yaml using --exclude-project or --exclude-project-prefix arguments.
+    enabled: false
+    layer: events
+    window: true
+    requires: [gcloud-audit-projects-json.py, python3, gcloud]
+    auth: [gcloud, projects, list, "--limit=1", "--format=none"]
+    run: [gcloud-audit-projects-json.py, "{{start}}", "{{end}}"]
+    timeout: 10m
+    fields:
+      id: .uid
+      time: .timestamp
+      title: .protoPayload.methodName
+      participant: [".protoPayload.authenticationInfo.principal_uri"]
+    install: mise use -g gcloud@latest python@latest
+
+  gcloud-billing:
+    # Account/project linkage metadata only, never a claim about spend.
+    enabled: false
+    layer: inventories
+    max_age_hours: 24
+    requires: [gcloud-billing-json.py, python3, gcloud]
+    auth: [gcloud, billing, accounts, list, "--limit=1", "--format=none"]
+    run: [gcloud-billing-json.py]
+    timeout: 5m
+    fields:
+      id: .projectId
+      title: .projectId
+    install: mise use -g gcloud@latest python@latest
+
+  google-developers-posts:
+    # This feed omits dates; same-origin article metadata supplies date-only precision.
+    enabled: false
+    layer: events
+    window: true
+    requires: [google-developers-json.py, python3, curl]
+    run: [google-developers-json.py, "{{start}}", "{{end}}"]
+    timeout: 10m
+    fields:
+      id: .id
+      time: .time
+      title: .title
+      url: .url
+    install: mise use -g python@latest

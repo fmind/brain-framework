@@ -203,7 +203,7 @@ def _field_definition_schema() -> dict[str, object]:
 def _layer_schema_properties() -> dict[str, object]:
     descriptions = {
         Layer.EVENTS: "Dated collected documents (JSON).",
-        Layer.INDEX: "Point-in-time collected documents (JSON).",
+        Layer.INVENTORIES: "Point-in-time collected documents (JSON).",
         Layer.TASKS: "Execution evidence (Markdown).",
         Layer.PROJECTS: "Intent and decisions over weeks (Markdown, status-bearing).",
         Layer.WIKI: "Durable approved knowledge (Markdown, OKF v0.2).",
@@ -296,7 +296,7 @@ def _source_schema() -> dict[str, object]:
                 "if": {"required": ["max_age_hours"]},
                 "then": {
                     "required": ["layer"],
-                    "properties": {"layer": {"const": Layer.INDEX.value}},
+                    "properties": {"layer": {"const": Layer.INVENTORIES.value}},
                 },
             },
         ],
@@ -307,7 +307,7 @@ def _source_schema() -> dict[str, object]:
             },
             "layer": {
                 "type": "string",
-                "enum": [Layer.EVENTS.value, Layer.INDEX.value],
+                "enum": [Layer.EVENTS.value, Layer.INVENTORIES.value],
                 "default": Layer.EVENTS.value,
                 "description": "events files one JSON document per day; index files one point-in-time JSON document.",
             },
@@ -315,7 +315,7 @@ def _source_schema() -> dict[str, object]:
                 "type": "integer",
                 "minimum": 1,
                 "maximum": MAX_FRESHNESS_AGE_HOURS,
-                "description": "Refresh this index source after this many hours; overrides sync.index_max_age_hours.",
+                "description": "Refresh this inventory source after this many hours; overrides sync.inventory_max_age_hours.",
             },
             "auth": {
                 "type": "array",
@@ -435,7 +435,7 @@ def _source_schema() -> dict[str, object]:
                 "type": "boolean",
                 "default": False,
                 "description": "Render run: ONCE for the whole requested range — {{start}}/{{end}} span every day "
-                "being collected, not one. Events bucket records by fields.time; index sources reject it.",
+                "being collected, not one. Events bucket records by fields.time; inventory sources reject it.",
             },
         },
     }
@@ -454,12 +454,12 @@ def _sync_schema() -> dict[str, object]:
                 "default": defaults.days,
                 "description": "Completed local days to collect when no --date is given.",
             },
-            "index_max_age_hours": {
+            "inventory_max_age_hours": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": MAX_FRESHNESS_AGE_HOURS,
-                "default": defaults.index_max_age_hours,
-                "description": "Refresh an index document only when it is older than this; "
+                "default": defaults.inventory_max_age_hours,
+                "description": "Refresh an inventory document only when it is older than this; "
                 f"1..{MAX_FRESHNESS_AGE_HOURS}.",
             },
             "timeout": _duration("Per-command timeout, 1s..1h."),

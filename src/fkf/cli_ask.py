@@ -350,7 +350,7 @@ def register_ask_commands(app: typer.Typer) -> None:
         else:
             invocation.emit(read(base, uri, options, cancel=invocation.cancel))
 
-    @app.command("eval", help="Measure retrieval recall at k against checks/queries.yaml.")
+    @app.command("eval", help="Measure retrieval recall at k against operations/queries.yaml.")
     def eval_command(ctx: typer.Context) -> None:
         invocation = state(ctx)
         report = evaluate(invocation.base(), cancel=invocation.cancel)

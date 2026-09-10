@@ -21,7 +21,7 @@ sources:
   # process environment (or a trusted wrapper) — it is a machine fact, not a team fact.
   github-repositories:
     enabled: false
-    layer: index
+    layer: inventories
     max_age_hours: 24 # team repository inventory is intentionally refreshed once per day
     requires: [github-list-json.py, python3, gh]
     auth: [gh, auth, status]
@@ -83,7 +83,7 @@ sources:
   # collector's launcher environment; the committed base stores only this reviewed scope.
   jira-issues:
     enabled: false
-    layer: index
+    layer: inventories
     max_age_hours: 4
     requires: [jira-issues-json.py, python3, acli]
     auth: [acli, jira, auth, status]
@@ -103,7 +103,7 @@ sources:
   repository-facts:
     # Shared evidence exposes root-1 style references, never the collector's absolute paths.
     enabled: false
-    layer: index
+    layer: inventories
     max_age_hours: 24
     requires: [repository-facts.py, python3]
     run: [repository-facts.py, "{{home}}/REPLACE_WITH_REPOSITORIES"]

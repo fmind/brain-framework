@@ -188,11 +188,13 @@ def test_metadata_binds_exact_artifacts_and_closed_input_vocabulary() -> None:
     assert meta.bytes == len(artifacts.src)
     assert meta.extractors == ("frontmatter:tags", "markdown-inline")
     assert meta.kinds == ("link", "tag")
-    assert tuple(item.uri for item in meta.outputs) == ("graph.dst.tsv", "graph.offsets.tsv", "graph.tsv")
+    assert tuple(item.uri for item in meta.outputs) == ("graphs/dst.tsv", "graphs/offsets.tsv", "graphs/src.tsv")
     for item in meta.outputs:
-        data = {"graph.tsv": artifacts.src, "graph.dst.tsv": artifacts.dst, "graph.offsets.tsv": artifacts.offsets}[
-            item.uri
-        ]
+        data = {
+            "graphs/src.tsv": artifacts.src,
+            "graphs/dst.tsv": artifacts.dst,
+            "graphs/offsets.tsv": artifacts.offsets,
+        }[item.uri]
         assert item.bytes == len(data)
         assert item.sha256 == hashlib.sha256(data).hexdigest()
     assert inputs.aggregate == new_graph_input_sha256(*(character * 64 for character in "abcdef")).aggregate
@@ -204,18 +206,18 @@ def test_write_edge_list_publishes_exact_owner_only_generation(tmp_path: Path) -
     generated = datetime(2026, 8, 21, 6, 0, tzinfo=UTC)
     indexed = "2026-08-21T06:00:00Z"
     edges = [Edge(src="a", dst="b", kind="link", via="test", indexed=indexed)]
-    rows = tmp_path / "graph.tsv"
-    meta_path = tmp_path / "graph.meta.json"
+    rows = tmp_path / "graphs/src.tsv"
+    meta_path = tmp_path / "graphs/meta.json"
     meta = new_edge_list_meta(edges, generated, _sample_inputs())
 
     write_edge_list(rows, meta_path, edges, meta)
 
     assert rows.read_bytes() == encode_edges(edges)
-    assert (tmp_path / "graph.dst.tsv").is_file()
-    assert (tmp_path / "graph.offsets.tsv").is_file()
+    assert (tmp_path / "graphs/dst.tsv").is_file()
+    assert (tmp_path / "graphs/offsets.tsv").is_file()
     assert rows.stat().st_mode & 0o777 == 0o600
     assert rows.stat().st_mtime_ns == int(generated.timestamp()) * 1_000_000_000
-    state = json.loads((tmp_path / "graph.generation.json").read_bytes())
+    state = json.loads((tmp_path / "graphs/generation.json").read_bytes())
     assert state == {"state": "current", "generation": graph_generation_sha256(meta)}
     assert read_current_graph_generation(tmp_path) == state["generation"]
 
@@ -240,14 +242,15 @@ def test_write_edge_list_rejects_metadata_that_does_not_describe_rows(tmp_path: 
     )
 
     with pytest.raises(EdgeValidationError, match="metadata does not describe"):
-        write_edge_list(tmp_path / "graph.tsv", tmp_path / "graph.meta.json", [edge], lying)
+        write_edge_list(tmp_path / "graphs/src.tsv", tmp_path / "graphs/meta.json", [edge], lying)
 
-    assert not (tmp_path / "graph.tsv").exists()
+    assert not (tmp_path / "graphs/src.tsv").exists()
 
 
 def test_generation_reader_fails_closed_on_unknown_or_building_state(tmp_path: Path) -> None:
     generation = "a" * 64
-    path = tmp_path / "graph.generation.json"
+    path = tmp_path / "graphs/generation.json"
+    path.parent.mkdir()
     path.write_text(json.dumps({"state": "building", "generation": generation}), encoding="utf-8")
     with pytest.raises(EdgeValidationError, match="not current"):
         read_current_graph_generation(tmp_path)
@@ -283,7 +286,7 @@ schema:
   title: {description: Meaningful title., cardinality: optional}
   participant: {description: Participant., cardinality: many, relation: true}
   related: {description: Related page., cardinality: many, relation: true}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 identities:
   owner:
     canonical: person:fmind
@@ -424,14 +427,14 @@ def test_graph_input_state_and_build_bind_every_exact_input(tmp_path: Path) -> N
         "events/2026-08-20/mail.json",
         "wiki/note.md",
     ]
-    assert result.uri == "graph.tsv"
+    assert result.uri == "graphs/src.tsv"
     assert result.documents == 1
     assert result.pages == 1
     assert result.edges == 3
     assert result.meta.inputs == before.files
     assert all(
         edge.indexed == "2026-08-21T06:00:00Z"
-        for edge in scan_edges(BytesIO((base.root / "graph.tsv").read_bytes()), EdgeQuery())[0]
+        for edge in scan_edges(BytesIO((base.root / "graphs/src.tsv").read_bytes()), EdgeQuery())[0]
     )
 
 
@@ -454,7 +457,7 @@ def test_graph_build_cancellation_before_publish_leaves_no_generation(
     with pytest.raises(CanceledError):
         build_graph(base, cancel=cancel)
 
-    assert not (base.root / "graph.tsv").exists()
+    assert not (base.root / "graphs/src.tsv").exists()
     assert not (base.root / graph.GRAPH_GENERATION_FILE).exists()
 
 
@@ -550,15 +553,15 @@ def test_graph_validation_rejects_changed_artifact_and_unknown_metadata(tmp_path
     (base.root / "wiki" / "a.md").write_text("# A\n\n[tag](tag:graph)\n", encoding="utf-8")
     build_graph(base)
 
-    graph = base.root / "graph.tsv"
+    graph = base.root / "graphs/src.tsv"
     graph.write_bytes(graph.read_bytes() + b"bad\trow\n")
     with pytest.raises(EdgeValidationError, match="invalid derived graph cache"):
         summarize_graph(base)
 
     build_graph(base)
-    meta = json.loads((base.root / "graph.meta.json").read_bytes())
+    meta = json.loads((base.root / "graphs/meta.json").read_bytes())
     meta["unknown"] = True
-    (base.root / "graph.meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    (base.root / "graphs/meta.json").write_text(json.dumps(meta), encoding="utf-8")
     with pytest.raises(EdgeValidationError, match="unknown field"):
         neighbours(base, GraphQuery(uri="wiki/a.md"))
 
@@ -568,7 +571,7 @@ def test_missing_primary_graph_has_a_distinct_fresh_clone_error(tmp_path: Path) 
     with pytest.raises(DerivedGraphMissingError):
         summarize_graph(base)
 
-    (base.root / "graph.tsv").mkdir()
+    (base.root / "graphs/src.tsv").mkdir(parents=True)
     with pytest.raises(EdgeValidationError, match="regular"):
         summarize_graph(base)
 
@@ -589,12 +592,12 @@ def test_graph_seek_benchmark_observation(tmp_path: Path, edge_count: int) -> No
     ]
     meta = new_edge_list_meta(edges, generated, _sample_inputs())
     started = time.perf_counter()
-    write_edge_list(tmp_path / "graph.tsv", tmp_path / "graph.meta.json", edges, meta)
+    write_edge_list(tmp_path / "graphs/src.tsv", tmp_path / "graphs/meta.json", edges, meta)
     built = time.perf_counter() - started
     with (
-        (tmp_path / "graph.tsv").open("rb") as src,
-        (tmp_path / "graph.dst.tsv").open("rb") as dst,
-        (tmp_path / "graph.offsets.tsv").open("rb") as offsets,
+        (tmp_path / "graphs/src.tsv").open("rb") as src,
+        (tmp_path / "graphs/dst.tsv").open("rb") as dst,
+        (tmp_path / "graphs/offsets.tsv").open("rb") as offsets,
     ):
         cache = ValidatedGraphCache(src, dst, offsets, meta)
         started = time.perf_counter()

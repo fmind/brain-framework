@@ -47,7 +47,7 @@ schema:
   id: {description: Stable identity., cardinality: one}
   title: {description: Display title., cardinality: optional}
   supersedes: {description: Replaced knowledge., cardinality: many, relation: true}
-layers: {events: false, index: false, tasks: false, projects: true, wiki: true}
+layers: {events: false, inventories: false, tasks: false, projects: true, wiki: true}
 sources: {}
 """
 
@@ -72,7 +72,7 @@ def _write_page(base: Base, uri: str, text: str) -> None:
 
 
 def test_versions_and_term_extraction_preserve_unicode_with_current_ranking() -> None:
-    assert (LEXICAL_INDEX_SCHEMA_VERSION, LEXICAL_INDEX_EXTRACTOR_VERSION, RANKING_VERSION) == (4, 14, 10)
+    assert (LEXICAL_INDEX_SCHEMA_VERSION, LEXICAL_INDEX_EXTRACTOR_VERSION, RANKING_VERSION) == (4, 15, 10)
     assert normalize_query_terms("Take my last Retrieval boundary FK-412 and fmind/fkf") == (
         "retrieval",
         "boundary",
@@ -94,8 +94,8 @@ def test_versions_and_term_extraction_preserve_unicode_with_current_ranking() ->
 
 
 def test_lexical_index_use_has_the_compact_public_json_contract() -> None:
-    assert dumps(LexicalIndexUse(used=True)) == b'"index/.fkf-index.tsv (used)"'
-    assert dumps(LexicalIndexUse(reason="stale")) == b'"index/.fkf-index.tsv (stale)"'
+    assert dumps(LexicalIndexUse(used=True)) == b'"indexes/index.tsv (used)"'
+    assert dumps(LexicalIndexUse(reason="stale")) == b'"indexes/index.tsv (stale)"'
 
 
 def test_posting_partition_and_lookup_key_are_go_compatible() -> None:
@@ -125,7 +125,7 @@ def test_build_is_deterministic_owner_only_and_classifies_fallbacks(tmp_path: Pa
     # This exact fixture pins semantics JSON, digest framing, TSV rows,
     # delta-varints, and all 4,096 lookup-shard descriptors.
     assert first.meta.semantics_sha256 == "981c72660159c214ba8141350ef0c22403e93250455546e772eda313334105a1"
-    assert first.meta.inputs_sha256 == "fb3b0f7ec3b2b3b7b51b8807bb9f83eb7341b07e0fc04e78f9a4441787555fad"
+    assert first.meta.inputs_sha256 == "5039010bc931b0b297cf95e9bda84eb5f964ec384de0c2e85ce7af49fa174123"
     assert first.meta.output_sha256 == "f5ca147ed7f8b9e79fbf3db51f81de91fcfdb53c6fd4d8c2b5a9c40ff77b43bf"
     assert second.meta.output_sha256 == hashlib.sha256(rows).hexdigest()
     assert (base.root / LEXICAL_INDEX_PATH).read_bytes() == rows
@@ -152,7 +152,7 @@ def test_metadata_is_strict_and_symlink_inputs_fail_closed(tmp_path: Path) -> No
     base = _base(tmp_path)
     _write_page(base, "wiki/note.md", "# Note\n")
     report = build_lexical_index(base)
-    meta_path = base.root / "index/.fkf-index.meta.json"
+    meta_path = base.root / "indexes/meta.json"
     meta = json.loads(meta_path.read_bytes())
     meta["unknown"] = True
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
@@ -182,17 +182,17 @@ def test_decoder_enforces_the_go_line_bound(tmp_path: Path, monkeypatch: pytest.
     assert lexical_index_status(base).reason == "corrupt"
 
 
-def test_index_document_inventory_ignores_derived_hidden_names(tmp_path: Path) -> None:
+def test_inventory_scan_excludes_the_separate_generated_indexes(tmp_path: Path) -> None:
     base = _base(tmp_path)
-    index = base.root / "index"
+    index = base.root / "indexes"
     index.mkdir()
-    (index / ".fkf-index.tsv").write_text("derived", encoding="utf-8")
-    (index / ".fkf-index.meta.json").write_text("{}", encoding="utf-8")
+    (index / "index.tsv").write_text("derived", encoding="utf-8")
+    (index / "meta.json").write_text("{}", encoding="utf-8")
 
     report = build_lexical_index(base)
 
     assert report.entries == 0
-    assert all(not item.path.startswith("index/.fkf-") for item in report.meta.inputs)
+    assert all(not item.path.startswith("indexes/") for item in report.meta.inputs)
 
 
 def test_failed_rebuild_does_not_replace_a_previous_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,7 +200,7 @@ def test_failed_rebuild_does_not_replace_a_previous_generation(tmp_path: Path, m
     _write_page(base, "wiki/note.md", "# Note\n")
     build_lexical_index(base)
     rows_path = base.root / LEXICAL_INDEX_PATH
-    meta_path = base.root / "index/.fkf-index.meta.json"
+    meta_path = base.root / "indexes/meta.json"
     before = (rows_path.read_bytes(), meta_path.read_bytes())
 
     original = os.stat
@@ -241,7 +241,7 @@ def test_build_cancellation_checkpoints_preserve_the_previous_generation(tmp_pat
     _write_page(base, "wiki/note.md", "# Note\n\n" + "retrieval boundary " * 50)
     build_lexical_index(base)
     rows_path = base.root / LEXICAL_INDEX_PATH
-    meta_path = base.root / "index/.fkf-index.meta.json"
+    meta_path = base.root / "indexes/meta.json"
     before = (rows_path.read_bytes(), meta_path.read_bytes())
     cancel = CancelAfter()
 
@@ -260,7 +260,7 @@ def test_build_forwards_one_cancellation_event_through_nested_inventory_reads(
     _write_page(base, "tasks/2026-09-06/audit/TASKS.md", "# Audit\n\n## Learned\n\n- Preserve the cache.\n")
     build_lexical_index(base)
     rows_path = base.root / LEXICAL_INDEX_PATH
-    meta_path = base.root / "index/.fkf-index.meta.json"
+    meta_path = base.root / "indexes/meta.json"
     before = (rows_path.read_bytes(), meta_path.read_bytes())
     _write_page(base, "wiki/note.md", "# Changed input\n")
 

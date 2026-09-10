@@ -35,7 +35,7 @@ schema:
   visibility: {description: Evidence visibility., cardinality: optional}
   topic: {description: Search topic., cardinality: optional}
   supersedes: {description: Replaced knowledge., cardinality: many, relation: true}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 identities:
   acme:
     canonical: org:github.com/acme
@@ -58,7 +58,7 @@ sources:
     bodies: cache
   catalog:
     enabled: true
-    layer: index
+    layer: inventories
     run: [provider]
     fields: {id: .id, title: .title, repo: .repo, topic: .topic}
 """
@@ -426,9 +426,9 @@ def test_context_candidate_codec_round_trips_and_rejects_malleability() -> None:
             lexical._decode_context_candidate(entry, candidate_bytes)
 
     with pytest.raises(lexical._LexicalIndexCorrupt, match="no candidate"):
-        lexical._decode_context_candidate(lexical.LexicalEntry(0, "index/a.json#x", "index"), encoded)
+        lexical._decode_context_candidate(lexical.LexicalEntry(0, "inventories/a.json#x", "inventories"), encoded)
     with pytest.raises(lexical.LexicalIndexError, match="record"):
-        lexical._encode_context_candidate(lexical.LexicalCandidate("index/a.json#x", "record"))
+        lexical._encode_context_candidate(lexical.LexicalCandidate("inventories/a.json#x", "record"))
 
 
 def test_rank_candidate_and_identifier_bound_codecs_fail_closed() -> None:

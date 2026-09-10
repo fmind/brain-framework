@@ -42,6 +42,7 @@ def test_setup_commands_share_the_existing_config_group_and_publish_help() -> No
         "records trust only",
         "no execution input predated init",
         "agent bridges",
+        "private skill catalog",
         "preserves",
         "--preset",
         "--track-collected",

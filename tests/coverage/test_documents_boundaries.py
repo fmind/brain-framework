@@ -36,7 +36,7 @@ def _field_map(**paths: str | list[str]) -> FieldMap:
 def _index_source(*, output: OutputFormat = OutputFormat.JSON, records: str = "") -> Source:
     return Source(
         name="snapshot",
-        layer=Layer.INDEX,
+        layer=Layer.INVENTORIES,
         format=output,
         records=parse_field_path(records) if records else None,
         fields=_field_map(id=".id"),
@@ -141,12 +141,12 @@ def test_decode_document_preserves_lossless_numbers_defaults_and_additive_fields
       "future": {"ignored": true}
     }"""
 
-    document = decode_document(memoryview(raw), "index/snapshot.json")
+    document = decode_document(memoryview(raw), "inventories/snapshot.json")
 
     assert document.body is False
     assert document.date == ""
     assert document.records[0]["number"] == JsonNumber("9007199254740993123")
-    assert document.record_uri(document.records[0]) == "index/snapshot.json#9007199254740993123"
+    assert document.record_uri(document.records[0]) == "inventories/snapshot.json#9007199254740993123"
     assert document.record_uri({"other": "missing id"}) is None
     assert document.find_record("absent") is None
     encoded = loads(encode_document(document))
@@ -188,11 +188,11 @@ def test_decode_document_preserves_lossless_numbers_defaults_and_additive_fields
             ValueError,
             "share the id",
         ),
-        (replace(_index_document(), date="2026-05-04"), ValueError, "index document declares date"),
+        (replace(_index_document(), date="2026-05-04"), ValueError, "inventory document declares date"),
         (
             replace(_index_document(), window_start=UTC_WINDOW.start, window_end=UTC_WINDOW.end),
             ValueError,
-            "index document declares an event collection window",
+            "inventory document declares an event collection window",
         ),
         (replace(_event_document(), records=[{"id": "a"}]), ValueError, "field time projects 0 values"),
         (
@@ -265,7 +265,7 @@ def test_build_document_enforces_collection_cardinality_relations_and_windows() 
 
     with pytest.raises(IncompleteCollectionError, match="events source requires a collection window"):
         build_document(_event_source(), [], collected_at=COLLECTED_AT)
-    with pytest.raises(IncompleteCollectionError, match="index source cannot declare an event collection window"):
+    with pytest.raises(IncompleteCollectionError, match="inventory source cannot declare an event collection window"):
         build_document(_index_source(), [], window=UTC_WINDOW, collected_at=COLLECTED_AT)
     with pytest.raises(IncompleteCollectionError, match="explicit timezone"):
         build_document(_index_source(), [], collected_at=datetime(2026, 5, 5, 8))

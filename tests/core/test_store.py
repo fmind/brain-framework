@@ -37,6 +37,30 @@ def all_layers() -> dict[Layer, bool]:
     return dict.fromkeys(LAYERS, True)
 
 
+def test_flat_layout_publishes_only_inventory_and_graph_paths(tmp_path: Path) -> None:
+    store = Store(tmp_path, all_layers())
+    for relative in (
+        "inventories/repositories.json",
+        "graphs/",
+        "graphs/src.tsv",
+        "graphs/dst.tsv",
+        "graphs/offsets.tsv",
+        "graphs/meta.json",
+        "graphs/generation.json",
+    ):
+        assert store.resolve(relative) == tmp_path / relative
+    for relative in (
+        "index/repositories.json",
+        "graph.tsv",
+        "graphs/extra.json",
+        "indexes/index.tsv",
+        "indexes/meta.json",
+        "operations/queries.yaml",
+    ):
+        with pytest.raises(NotAddressableError):
+            store.resolve(relative)
+
+
 def test_store_activation_and_layer_parsing(tmp_path: Path) -> None:
     store = Store(tmp_path, {Layer.EVENTS: True, Layer.WIKI: True})
     assert store.enabled_layers == (Layer.EVENTS, Layer.WIKI)
@@ -44,7 +68,7 @@ def test_store_activation_and_layer_parsing(tmp_path: Path) -> None:
     with pytest.raises(LayerDisabledError, match=r"layers\.projects: true"):
         store.directory(Layer.PROJECTS)
     assert parse_layer("  WIKI ") is Layer.WIKI
-    with pytest.raises(ValueError, match="events, index, tasks, projects, wiki"):
+    with pytest.raises(ValueError, match="events, inventories, tasks, projects, wiki"):
         parse_layer("logs")
 
 
@@ -74,8 +98,8 @@ def test_store_admits_only_published_grammar(tmp_path: Path) -> None:
         "events",
         "events/2026-05-04",
         "events/2026-05-04/gmail.json",
-        "index",
-        "index/github-repositories.json",
+        "inventories",
+        "inventories/github-repositories.json",
         "tasks",
         "tasks/2026-05-04",
         "tasks/2026-05-04/x",
@@ -109,8 +133,8 @@ def test_store_admits_only_published_grammar(tmp_path: Path) -> None:
         "events/2026-05-04/private.txt",
         "events/not-a-day/gmail.json",
         "events/2026-05-04/NESTED.json",
-        "index/.env",
-        "index/backup.key",
+        "inventories/.env",
+        "inventories/backup.key",
         "tasks/.env",
         "tasks/2026-05-04/x/private.md",
         "tasks/not-a-day/x/TASKS.md",

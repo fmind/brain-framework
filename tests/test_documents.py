@@ -25,7 +25,7 @@ from fkf.documents import (
     encode_document,
     encode_fragment,
     event_document_uri,
-    index_document_uri,
+    inventory_document_uri,
     parse_day_in_location,
     read_document,
     verify_document,
@@ -65,10 +65,10 @@ def event_source(*, output: OutputFormat = OutputFormat.JSON, records: str = "")
 
 
 def index_source(*, output: OutputFormat = OutputFormat.JSON, records: str = "") -> Source:
-    """Return a minimal index source."""
+    """Return a minimal inventory source."""
     return Source(
         name="repositories",
-        layer=Layer.INDEX,
+        layer=Layer.INVENTORIES,
         format=output,
         records=parse_field_path(records) if records else None,
         fields=field_map(id=".id"),
@@ -80,10 +80,19 @@ def collected_at() -> datetime:
     return datetime(2026, 5, 5, 8, tzinfo=UTC)
 
 
+def test_inventory_folder_keeps_the_permanent_index_evidence_marker() -> None:
+    stored = b'{"fkf":1,"source":"repositories","layer":"index","count":0,"records":[]}'
+    document = decode_document(stored)
+    assert document.uri() == "inventories/repositories.json"
+    assert b'"layer": "index"' in encode_document(document)
+    with pytest.raises(UnknownSchemaError, match="layer"):
+        decode_document(stored.replace(b'"index"', b'"inventories"'))
+
+
 def test_fragment_and_document_uris_are_canonical() -> None:
     assert event_document_uri("2026-05-04", "google-emails") == "events/2026-05-04/google-emails.json"
-    assert index_document_uri("github-repositories") == "index/github-repositories.json"
-    assert index_document_uri("other/../repositories") == "index/repositories.json"
+    assert inventory_document_uri("github-repositories") == "inventories/github-repositories.json"
+    assert inventory_document_uri("other/../repositories") == "inventories/repositories.json"
 
     for identity in ("fmind/fkf", "marc@example.test", "has space", "has#hash", "héllo", "a\nb"):
         encoded = encode_fragment(identity)
@@ -113,10 +122,10 @@ def test_document_round_trip_is_additive_deterministic_and_lossless(tmp_path: Pa
     assert b'"weight"' not in encoded
 
     additive = encoded.rstrip()[:-1] + b',"future":{"ignored":true}}\n'
-    decoded = decode_document(additive, "index/repositories.json")
+    decoded = decode_document(additive, "inventories/repositories.json")
     assert encode_document(decoded) == encoded
     assert decoded.records[0]["big"] == JsonNumber("9007199254740993")
-    assert decoded.record_uri(decoded.records[0]) == "index/repositories.json#fmind/fkf"
+    assert decoded.record_uri(decoded.records[0]) == "inventories/repositories.json#fmind/fkf"
     assert decoded.find_record("fmind/fkf") == decoded.records[0]
 
     path = tmp_path / "repositories.json"

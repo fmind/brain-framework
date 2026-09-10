@@ -20,7 +20,7 @@ schema:
   id: {description: Stable identity., cardinality: one}
   time: {description: Event time., cardinality: one}
   title: {description: Meaningful title., cardinality: optional}
-layers: {events: true, index: true, tasks: false, projects: false, wiki: false}
+layers: {events: true, inventories: true, tasks: false, projects: false, wiki: false}
 sources:
   events:
     enabled: true
@@ -33,7 +33,7 @@ sources:
     fields: {id: .id, time: .time, title: .title}
   snapshot:
     enabled: true
-    layer: index
+    layer: inventories
     run: [provider]
     fields: {id: .id, title: .title}
 """
@@ -58,7 +58,7 @@ def setup(tmp_path: Path):
     return config, Environment.from_config(config, inherited_path="/usr/bin")
 
 
-def test_collect_returns_complete_event_and_index_documents_without_writing(tmp_path: Path) -> None:
+def test_collect_returns_complete_event_and_inventory_documents_without_writing(tmp_path: Path) -> None:
     config, environment = setup(tmp_path)
     now = datetime(2026, 9, 6, 12, tzinfo=UTC)
     window = day_window(parse_day_in_location("2026-09-05", UTC))
@@ -77,7 +77,7 @@ def test_collect_returns_complete_event_and_index_documents_without_writing(tmp_
         parse_duration("1m"),
         now,
     )
-    assert index.uri() == "index/snapshot.json"
+    assert index.uri() == "inventories/snapshot.json"
     assert not index.date
     assert not index.window_start
 

@@ -133,7 +133,7 @@ def test_lexical_and_temporal_primitives_are_closed_and_deterministic() -> None:
 
     assert CONTEXT_INTERNAL.kind_for_uri("wiki/x.md") == "wiki"
     assert CONTEXT_INTERNAL.kind_for_uri("events/2026-05-10/x.json") == "events"
-    assert CONTEXT_INTERNAL.kind_for_uri("foreign/x") == "index"
+    assert CONTEXT_INTERNAL.kind_for_uri("foreign/x") == "inventories"
     assert CONTEXT_INTERNAL.date_for_task_uri("tasks/2026-05-10/focus/x.md") == "2026-05-10"
     assert CONTEXT_INTERNAL.date_for_task_uri("tasks/x.md") == ""
     assert CONTEXT_INTERNAL.render_window(Window()) == "all"
@@ -232,9 +232,9 @@ def test_candidate_collapsing_prefers_complete_recent_evidence() -> None:
     assert kept.count == 2
 
     other = item("wiki/other.md", kind="wiki")
-    sparse = item("index/a.json#z", url="https://example.test/x", date="2026-05-01")
+    sparse = item("inventories/a.json#z", url="https://example.test/x", date="2026-05-01")
     complete = item(
-        "index/b.json#a",
+        "inventories/b.json#a",
         url="https://example.test/x",
         date="2026-05-02",
         body_available=True,
@@ -243,9 +243,9 @@ def test_candidate_collapsing_prefers_complete_recent_evidence() -> None:
     )
     resources = CONTEXT_INTERNAL.collapse_resources((other, sparse, complete), ("needle",))
     resource = next(candidate for candidate in resources if candidate.kind == "record")
-    assert resource.uri == "index/b.json#a"
+    assert resource.uri == "inventories/b.json#a"
     assert resource.count == 2
-    assert resource.collapsed_uris == ("index/a.json#z", "index/b.json#a")
+    assert resource.collapsed_uris == ("inventories/a.json#z", "inventories/b.json#a")
 
 
 def test_supersession_selects_one_stable_winner() -> None:
@@ -361,12 +361,12 @@ def test_candidate_ordering_applies_each_tie_break(attribute: str, left: object,
 
 def test_selection_reports_policy_floor_source_and_budget_drops() -> None:
     pack = make_pack(budget=900, candidates=10, terms=("needle",))
-    candidates = [item(f"index/source.json#{index}", source="same", score=30) for index in range(7)]
+    candidates = [item(f"inventories/source.json#{index}", source="same", score=30) for index in range(7)]
     candidates.extend(
         [
             item("wiki/page.md", kind="wiki", score=25),
-            item("index/low.json#x", source="other", score=1),
-            item("index/private.json#x", source="other", score=30, default_excluded="visibility:private"),
+            item("inventories/low.json#x", source="other", score=1),
+            item("inventories/private.json#x", source="other", score=30, default_excluded="visibility:private"),
         ]
     )
     request = ContextRequest(query="needle", budget=900, delivery_format="json")
@@ -423,7 +423,7 @@ def test_text_rendering_exposes_receipt_provenance_and_structured_fields() -> No
     pack.receipt.stale_days = 2
     pack.receipt.input_digest = "a" * 16
     pack.receipt.dropped_total = 3
-    pack.receipt.index = LexicalIndexUse(path="index/cache", reason="stale")
+    pack.receipt.index = LexicalIndexUse(path="inventories/cache", reason="stale")
     pack.receipt.since_receipt = "b" * 16
     pack.receipt.changed = 1
     pack.receipt.unharvested_bullets = 2
@@ -448,7 +448,7 @@ def test_text_rendering_exposes_receipt_provenance_and_structured_fields() -> No
     assert "fkf://brain/wiki/page.md" in rendered
     assert "source=provider" in rendered
     assert "why=term:+20(needle)" in rendered
-    assert "index index/cache fallback=stale" in rendered
+    assert "index inventories/cache fallback=stale" in rendered
     assert "delta since" in rendered
     assert "unharvested" in rendered
     assert context_module.render_context_bytes(pack, "text") == rendered.encode()

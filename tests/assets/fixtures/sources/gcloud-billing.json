@@ -1,0 +1,7 @@
+[
+  {
+    "projectId": "example-project",
+    "billingAccountName": "billingAccounts/ABC123-DEF456-GHI789",
+    "billingEnabled": true
+  }
+]

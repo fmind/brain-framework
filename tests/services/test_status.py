@@ -39,8 +39,8 @@ schema:
   id: {description: Stable identity., cardinality: one}
   time: {description: Event time., cardinality: one}
   title: {description: Meaningful title., cardinality: optional}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
-sync: {index_max_age_hours: 24}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
+sync: {inventory_max_age_hours: 24}
 sources:
   daily:
     enabled: true
@@ -51,7 +51,7 @@ sources:
     fields: {id: .id, time: .time, title: .title}
   snapshot:
     enabled: true
-    layer: index
+    layer: inventories
     max_age_hours: 2
     run: [provider, snapshot]
     fields: {id: .id, title: .title}
@@ -99,7 +99,7 @@ def _write_index(base: Base, *, source: str = "snapshot", collected_at: str = "2
     base.write_document(
         Document(
             source=source,
-            layer=Layer.INDEX,
+            layer=Layer.INVENTORIES,
             collected_at=collected_at,
             schema=schema_of(declared),
             fields=fields_of(declared),
@@ -185,7 +185,7 @@ def test_report_reads_each_durable_document_once_and_keeps_corruption_as_a_findi
         {
             "events/2026-09-04/retired.json": 1,
             "events/2026-09-05/daily.json": 1,
-            "index/snapshot.json": 1,
+            "inventories/snapshot.json": 1,
         }
     )
     assert _finding(status, "documents", "retired.json") is not None

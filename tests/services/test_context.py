@@ -35,7 +35,7 @@ schema:
   time: {description: Event time., cardinality: optional}
   title: {description: Meaningful title., cardinality: optional}
   ticket: {description: Ticket., cardinality: optional, relation: true}
-layers: {events: true, index: true, tasks: true, projects: true, wiki: true}
+layers: {events: true, inventories: true, tasks: true, projects: true, wiki: true}
 sources:
   synthetic:
     enabled: true
@@ -44,7 +44,7 @@ sources:
     fields: {id: .id, time: .time, title: .title, ticket: .ticket}
   catalog:
     enabled: true
-    layer: index
+    layer: inventories
     run: [provider]
     fields: {id: .id, title: .title, ticket: .ticket}
 """

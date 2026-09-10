@@ -43,6 +43,7 @@ _CHILD_ALIASES: dict[str, frozenset[str]] = {
     "list": frozenset({"l"}),
     "events": frozenset({"e"}),
     "index": frozenset({"i"}),
+    "inventories": frozenset({"i"}),
     "tasks": frozenset({"t"}),
     "learned": frozenset({"l"}),
     "projects": frozenset({"p"}),

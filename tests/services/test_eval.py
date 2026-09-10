@@ -324,7 +324,7 @@ queries:
     with pytest.raises(CanceledError):
         evaluate(base, cancel=canceled)
 
-    evals = base.root / "checks"
+    evals = base.root / "operations"
     suite = evals / "queries.yaml"
     suite.unlink()
     evals.rmdir()

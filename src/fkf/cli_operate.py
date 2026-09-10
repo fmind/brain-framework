@@ -106,7 +106,7 @@ def _config_text(config: PublicConfig) -> str:
             f"layers:  {' '.join(enabled)}",
             (
                 f"sync:    {config.sync.days} day(s), timeout {format_duration(config.sync.timeout)}, "
-                f"concurrency {config.sync.concurrency}, index stale after {config.sync.index_max_age_hours}h"
+                f"concurrency {config.sync.concurrency}, inventory stale after {config.sync.inventory_max_age_hours}h"
             ),
         )
     )
@@ -200,7 +200,8 @@ def register_operate_commands(app: typer.Typer) -> typer.Typer:
             StatusRequest(
                 max_age_hours=max_age_hours,
                 live=live,
-                executable=str(Path(sys.argv[0]).resolve()),
+                # Harnesses pin the stable launcher, which may symlink into a tool environment.
+                executable=str(Path(sys.argv[0]).absolute()),
             ),
             cancel=invocation.cancel,
         )

@@ -16,7 +16,7 @@ from fkf.verify import document_uris, verify
 def _base(tmp_path: Path) -> Base:
     config_path = tmp_path / "fkf.yaml"
     config_path.write_text("name: test\n")
-    layers = {layer: layer in {Layer.EVENTS, Layer.INDEX} for layer in Layer}
+    layers = {layer: layer in {Layer.EVENTS, Layer.INVENTORIES} for layer in Layer}
     config = Config(1, "test", FieldSchema(), layers, {}, {}, SyncConfig(), (), config_path)
     return Base(config, Store(tmp_path, layers))
 
@@ -44,11 +44,11 @@ def test_verify_counts_clean_documents_in_stable_order(tmp_path: Path) -> None:
     base = _base(tmp_path)
     _write(tmp_path, "events/2026-05-04/beta.json")
     _write(tmp_path, "events/2026-05-04/alpha.json")
-    _write(tmp_path, "index/repos.json")
+    _write(tmp_path, "inventories/repos.json")
     assert document_uris(base) == (
         "events/2026-05-04/alpha.json",
         "events/2026-05-04/beta.json",
-        "index/repos.json",
+        "inventories/repos.json",
     )
     report = verify(base)
     assert (report.documents, report.records, report.ok, report.findings) == (3, 3, True, ())
@@ -66,7 +66,7 @@ def test_verify_continues_after_bad_documents(tmp_path: Path) -> None:
 
 def test_verify_reports_count_mismatch(tmp_path: Path) -> None:
     base = _base(tmp_path)
-    _write(tmp_path, "index/bad.json", count=7)
+    _write(tmp_path, "inventories/bad.json", count=7)
     report = verify(base)
     assert not report.ok
     assert "count 7 does not match 1 records" in report.findings[0].problem

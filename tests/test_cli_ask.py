@@ -227,7 +227,7 @@ def test_read_text_matches_the_native_page_record_document_and_entity_layout(tmp
 
 def test_graph_text_renderers_match_the_public_summary_walk_and_node_layout() -> None:
     summary = GraphSummary(
-        "graph.tsv",
+        "graphs/src.tsv",
         "2026-09-06T08:00:00Z",
         2,
         3,
@@ -237,7 +237,7 @@ def test_graph_text_renderers_match_the_public_summary_walk_and_node_layout() ->
         EdgeScanStats(lines=2, matched=2),
     )
     expected_summary = """\
-graph.tsv  2 edge(s), 3 node(s)  built 2026-09-06T08:00:00Z
+graphs/src.tsv  2 edge(s), 3 node(s)  built 2026-09-06T08:00:00Z
 edges   link 2
 nodes   wiki 3
 from    markdown-inline
