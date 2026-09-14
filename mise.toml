@@ -1,3 +1,4 @@
+# https://mise.jdx.dev/configuration.html
 [tools]
 actionlint = "1.7.12"
 dprint = "0.57.4"
@@ -33,7 +34,7 @@ description = "Format, check, test, and build the project"
 run = ["mise run format", "mise run check", "mise run test", "mise run build"]
 
 [tasks.benchmark]
-description = "Observe FKF CLI latency over a deterministic 100k-record scale corpus"
+description = "Observe build and retrieval latency over a deterministic 20k-record corpus"
 run = "uv run python scripts/benchmark_scale.py"
 
 [tasks.build]
@@ -82,15 +83,11 @@ expected_pages = {
     "docs/commands/index.html",
     "docs/context/index.html",
     "docs/getting-started/index.html",
-    "docs/harnesses/index.html",
-    "docs/identities/index.html",
     "docs/index.html",
     "docs/mcp/index.html",
-    "docs/okf/index.html",
     "docs/privacy/index.html",
     "docs/schema/index.html",
     "docs/sources/index.html",
-    "docs/uris-graph/index.html",
     "index.html",
     "third-party-notices/index.html",
 }
@@ -169,12 +166,7 @@ git ls-files -z --cached --others --exclude-standard -- "*.md" ":(exclude)docs/*
 [tasks."check:lint"]
 alias = "cl"
 description = "Lint application, tests, and shipped Python helpers (Ruff)"
-# Helpers are copied byte-for-byte into bases and keep their reviewed script style. The
-# isolated pass applies Ruff's correctness rules without rewriting that published surface.
-run = [
-  "uv run ruff check",
-  "uv run ruff check --isolated --no-cache src/fkf/assets_data/presets/sources",
-]
+run = "uv run ruff check"
 
 [tasks."check:outdated"]
 description = "Report drift in the pinned toolchain without failing the gate"
@@ -196,13 +188,13 @@ run = '''
 set -euo pipefail
 schema=$(mktemp)
 trap 'rm -f "$schema"' EXIT
-uv run fkf config schema > "$schema"
-diff -u docs/fkf.schema.json "$schema"
+uv run fkf schema | jq -S . > "$schema"
+jq -S . docs/fkf.schema.json | diff -u - "$schema"
 '''
 
 [tasks."check:shell"]
 description = "Lint every shipped and release shell helper"
-run = "find src/fkf/assets_data/presets/sources -type f -name '*.sh' -print0 | xargs -0 shellcheck -S warning scripts/release-notes scripts/verify-release-assets scripts/verify-release-tag"
+run = "shellcheck -S warning scripts/release-notes scripts/verify-release-assets scripts/verify-release-tag scripts/install-sast.sh"
 
 [tasks."check:types"]
 alias = "ct"
@@ -262,8 +254,9 @@ run = '''
 set -euo pipefail
 schema=$(mktemp docs/fkf.schema.json.XXXXXX)
 trap 'rm -f "$schema"' EXIT
-uv run fkf config schema > "$schema"
+uv run fkf schema > "$schema"
 mv "$schema" docs/fkf.schema.json
+dprint fmt docs/fkf.schema.json
 '''
 
 [tasks.install]
@@ -317,7 +310,7 @@ uv pip check --python "$tmp/wheel-venv/bin/python"
 uv pip install --offline --no-deps --python "$tmp/sdist-venv/bin/python" "$sdist"
 "$tmp/sdist-venv/bin/fkf" --version
 uv pip check --python "$tmp/sdist-venv/bin/python"
-# Exercise packaged assets and derived reads in both artifacts, with no user base or state.
+# Exercise the installed CLI and derived reads in both artifacts, with no user base or state.
 for distribution in wheel sdist; do
   fkf_package_home="$tmp/$distribution-home"
   mkdir "$fkf_package_home"
@@ -325,9 +318,10 @@ for distribution in wheel sdist; do
     unset FKF_BASE
     export HOME="$fkf_package_home" XDG_STATE_HOME="$fkf_package_home/state"
     fkf_package_bin="$tmp/$distribution-venv/bin/fkf"
-    "$fkf_package_bin" init "$tmp/$distribution-base" --demo 2 --skip-git
-    "$fkf_package_bin" --base "$tmp/$distribution-base" build --check
-    "$fkf_package_bin" --base "$tmp/$distribution-base" context "retrieval boundary" --budget 850
+    "$fkf_package_bin" init "$tmp/$distribution-base"
+    "$fkf_package_bin" build --base "$tmp/$distribution-base"
+    "$fkf_package_bin" build --base "$tmp/$distribution-base" --check
+    "$fkf_package_bin" context "project decisions" --base "$tmp/$distribution-base" --budget 850
   )
 done
 '''

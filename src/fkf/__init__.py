@@ -1,22 +1,10 @@
-"""Local, offline evidence retrieval for coding agents."""
+"""Owned evidence, small context."""
 
-from __future__ import annotations
-
-from importlib.metadata import version
-from typing import NoReturn
-
-__version__ = version("fkf")
-DISPLAY_VERSION = f"v{__version__}"
+__version__ = "7.0.0"
 
 
-def main() -> NoReturn:
-    """Run the ``fkf`` console command."""
-    from fkf.cli import app
-    from fkf.cli_support import exit_main
-    from fkf.logging_config import configure_logging
+def main() -> None:
+    """Run the console interface."""
+    from fkf.cli import main as run
 
-    configure_logging()
-    exit_main(app)
-
-
-__all__ = ["DISPLAY_VERSION", "__version__", "main"]
+    run()

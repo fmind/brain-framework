@@ -9,10 +9,6 @@
 /htmlcov/
 *.egg-info/
 
-# Preserve developer-local binaries from pre-v5 checkouts without shipping them.
-/bin/
-/fkf
-
 # Machine-local: a developer's exported credentials, agent scratch space, prompts, plans, and
 # local skills. Contributor skills under .agents/skills/ stay versioned.
 /.env

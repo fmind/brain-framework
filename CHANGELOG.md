@@ -2,6 +2,24 @@
 
 All notable changes to `fkf` are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## Unreleased
+
+### Breaking changes
+
+- Rewrite the core around one configuration and evidence format: authored `notes/`, immutable content-addressed `records/`, a disposable `.fkf/` SQLite index, eleven commands and three read-only MCP tools. Presets, harness installation, execution trust, the graph, learning proposals, briefs and bundled skills are removed; reusable skills live under `skills/` and adapters belong to the base.
+
+### Changed
+
+- Resolve an exact read by two indexed lookups. A view decided snapshot recency per row, so every read by alias or record URI scanned the corpus: on a 38,000-record base one read took about 295 seconds and now takes 0.3.
+- Carry each record's first alias in find and context results, so a note can cite an identity that follows the record across captures instead of one snapshot URI.
+- Report the MCP server version, so a host shows which build answers it.
+- Open a ready index read-only in place instead of hashing and deserializing it on every query; the manifest binds the exact cache file, and a concurrent build or collection no longer fails an open read.
+- Fold case and diacritics in matching, title weighting and excerpt selection, so `reunion` finds `réunion`.
+- Drop only English function words from queries; subject words such as `resume`, `active` and `latest` stay literal.
+- Report per-source capture counts and the newest capture time in `status`.
+- Name the invalid field and reason for rejected command or MCP arguments, and report an absent note or base explicitly.
+- Version `records/` by default: `fkf init` ignores only `.fkf/` and `fkf.local.yaml`.
+
 ## [v6.0.2](https://github.com/fmind/fkf/releases/tag/v6.0.2) - 2026-09-09
 
 ### Fixed

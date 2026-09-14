@@ -1,1 +1,0 @@
-"""Source-runtime contract tests."""

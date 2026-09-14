@@ -1,187 +1,70 @@
-# fkf — Fmind Knowledge Framework
+# FKF
 
-[![CI](https://github.com/fmind/fkf/actions/workflows/ci.yml/badge.svg)](https://github.com/fmind/fkf/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/fmind/fkf?sort=semver)](https://github.com/fmind/fkf/releases/latest) [![Python 3.14+](https://img.shields.io/badge/Python-3.14%2B-blue.svg)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+**Owned evidence. Small context.**
 
-**Your coding agent knows your repository. It does not know the meeting that set the constraint, the review that rejected the approach, or the ticket that explains why the code looks like that.**
+FKF keeps useful work history in JSON and Markdown and gives an agent a small, reproducible context pack with exact references. Python, one command, offline reads, and a disposable SQLite index. Provider commands own their credentials. FKF requires Python 3.14 or newer on Linux or macOS.
 
-`fkf` collects that work history into a git repository you own — plain JSON and Markdown, gathered by the provider CLIs you already trust — and hands your agent a small, budgeted, reproducible slice of it on demand.
+FKF has one current configuration and evidence format. Keep authored knowledge in Markdown and selected source evidence in normalized JSON.
 
-One command. No account, daemon, database, or telemetry. Stored reads are offline.
-
-## See it in 30 seconds
-
-No credentials, no network, no configuration:
+## Start locally
 
 ```bash
-fkf init ~/demo --demo 30
-fkf --format text context "retrieval boundary" --budget 1024 --explain --base ~/demo
+uv sync --locked
+uv run fkf init ~/knowledge
+# Write your project decisions in ~/knowledge/projects/.
+uv run fkf build --base ~/knowledge
+uv run fkf context "project constraints" --base ~/knowledge --budget 850
+uv run fkf read wiki/welcome.md --base ~/knowledge
 ```
 
-The demo base is synthetic, but it is a real base: 30 days of events across six sources, a wiki, project pages, and a graph. This abridged result shortens URIs, fields, and receipt values:
+This is an unreleased v7 checkout. Use `uv run fkf` or install a locally built wheel; publication is a separate step.
 
-```text
-350 wiki   wiki/retrieval-boundary.md  Retrieval boundary · tags=decision,retrieval
-           why=exact-identifier:+100(retrieval boundary),term:+100(retrieval …),exact-phrase:+50
-182 record events/…/git-commits.json#…            Design retrieval boundary (LG-77)
-182 record events/…/google-calendar-events.json#… Document retrieval boundary (GW-1203)
-182 record events/…/google-gmail-emails.json#…    Fix retrieval boundary (FK-412)
-182 record events/…/jira-issues.json#FK-418-4     Revert retrieval boundary (FK-418)
-... 3 more selected items ...
- 80 wiki   wiki/index.md  Wiki · navigation-page:-50(curated navigation ranks below concept pages)
-receipt pack for "retrieval boundary" · 9/736 selected · <1024 text tokens · floor 10
-window <30 days> · as_of <today> · digest <hex> · ranking v10 · dropped 717
-```
+## The core
 
-One decision, scattered across a commit, a calendar invite, an email, and a Jira issue, pulled back together under a token budget.
+| Operation                    | Purpose                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------ |
+| `collect SOURCE START END`   | Run one reviewed adapter over an explicit timezone-aware window and store an immutable capture.  |
+| `build`                      | Rebuild the disposable SQLite index.                                                             |
+| `find QUERY`                 | Find local evidence and explicit identities.                                                     |
+| `context QUERY`              | Assemble a bounded context pack.                                                                 |
+| `read URI`                   | Read exact durable evidence, without fetching anything.                                          |
+| `validate`, `status`, `eval` | Check content, index state and per-source capture freshness, and owner-authored retrieval cases. |
+| `mcp --base PATH`            | Expose only find, context and read to an agent over stdio.                                       |
 
-Three things make that pack usable by an agent rather than merely interesting:
+A base has `fkf.yaml`, authored `projects/`, `tasks/` and `wiki/`, and immutable `records/`. `.fkf/` contains disposable index artifacts. Sources are optional, base-owned commands that emit normalized records. There is no provider SDK, background agent, telemetry, model or embedding in retrieval. Ordinary search uses the latest known capture per source record; `find` and `context --history` can recover older observations with explicit snapshot labels. Latest capture does not imply a still-valid decision.
 
-1. **It fits.** You set the budget; `context` selects the strongest evidence and stops. No pack silently blows past the window.
-1. **It explains itself.** Every line carries the score and the reason it was chosen — and the receipt records what was dropped, so a wrong answer is debuggable instead of mysterious.
-1. **It is reproducible.** Ranking is deterministic, and indexed and fallback reads return the same semantic answer. The receipt records the effective inputs, semantic digest, selection boundaries, and execution path. There are no embeddings or model calls in the read path.
+## Guarantees
 
-Then look around the base with `fkf find`, `fkf graph repo:github.com/fmind/fkf --in`, and `fkf list projects --status active`. Delete `~/demo` when you are done.
+- Ordinary reads execute no command and make no network request.
+- Collected content is untrusted evidence and never becomes executable input.
+- Collection is explicit: `collect` runs the currently configured adapter. Review source commands before running them; adapters execute with your user permissions.
+- Collection uses direct argv from `/`, sanitized process startup inputs, bounded output and process-group cancellation. Failures write no partial capture.
+- Durable data is independent of SQLite. A ready index is opened read-only in place; a missing, stale or corrupt index falls back to the same retrieval algorithm in memory and names that path in its response.
+- Context budgets include the complete compact JSON response, including notice and diagnostics: four UTF-8 bytes per budget unit. MCP also counts its complete text/structured tool-result wrapper. This is a byte allowance, not a model-specific token count.
 
-## Install
+Scheduling, provider adapters, private skill installation, and ordinary knowledge editing belong to base maintenance and agent skills. The core does not install or supervise them.
 
-FKF is a Python 3.14 package. Install its stable `fkf` launcher with [uv](https://docs.astral.sh/uv/):
+## Agent skills
 
-```bash
-uv tool install fkf
-```
+The [skills catalog](skills/README.md) provides `fkf-use` for retrieval and `fkf-learn` for maintaining sourced knowledge. Copy the required skill directory into your base or agent host’s `.agents/skills/` directory and follow the host’s native discovery rules. These Markdown resources are maintained here separately from the Python distribution. Repository development uses [.agents/skills/fkf-contribute](.agents/skills/fkf-contribute/SKILL.md).
 
-Use `uvx fkf ...` for a one-shot command without a persistent installation. Harness and schedule integration intentionally require a stable installed launcher because their configuration must keep working after the invoking process exits.
+## Adapters
 
-Upgrade an installed tool through the package manager:
-
-```bash
-uv tool upgrade fkf
-```
-
-Wheel and source distributions are published to PyPI and attached to the [matching GitHub release](https://github.com/fmind/fkf/releases/latest) with build-provenance attestations.
-
-FKF supports Linux and macOS. WSL2 works when the base stays on its Linux filesystem; native Windows is out of scope because cancellation uses POSIX process groups.
-
-<details>
-<summary>Install from source</summary>
-
-```bash
-mise trust -y
-mise install --locked
-mise run install
-```
-
-To exercise the checkout without installing its launcher, run commands as `uv run fkf ...`.
-
-</details>
-
-## Connect your own work
-
-Start with one real source. The personal preset ships a reviewed GitHub Search helper — it needs `python3` and `gh` on your `PATH`, and `gh` owns the login:
-
-```bash
-gh auth status
-fkf init ~/brain --preset personal
-$EDITOR ~/brain/fkf.yaml                            # sources.github-pull-requests.enabled: true
-fkf config helpers --refresh --base ~/brain
-fkf trust --all --base ~/brain
-fkf status --base ~/brain                           # confirms every requirement is on PATH
-fkf sync github-pull-requests --days 30 --base ~/brain
-fkf context "repo:github.com/OWNER/REPOSITORY" --since 30d --explain --base ~/brain
-```
-
-Set `FKF_BASE=~/brain`, or run from inside the base, to drop `--base`.
-
-`fkf init` creates the five layers, `fkf.yaml`, managed git rules, the helpers your enabled sources need under `sources/`, three base-local agent skills under `.agents/skills/`, and an empty `skills/` catalog for private user-scope skills. It contacts no provider and asks for no token. Browser, mail, and shell-history sources stay disabled until you turn them on.
-
-An owner may add reviewed `skills/<name>/SKILL.md` packages to a private base, then run `fkf skills install`. FKF links them into `~/.agents/skills` without copying or replacing a same-named package, so private skills from several bases can coexist when their names are globally unique. No privacy prefix is required. The user catalog must be a real directory, never a link into a public repository. Installation is explicit on each computer; the base and its remote must remain private.
-
-From there, `fkf sync` is safe to re-run: existing event documents are skipped, due inventories refresh, the graph follows document writes, and the lexical cache rebuilds only when searchable bytes change. `fkf brief` gives you the daily loop — yesterday's digest, today's calendar, assigned work, failing CI, stale or login-blocked sources.
-
-## The model
-
-Four ideas cover most of FKF.
-
-**A base is a folder.** One git repository, five readable layers. `ls`, `rg`, and `jq` still work.
-
-```text
-events/YYYY-MM-DD/  one complete JSON document per event source
-inventories/              current point-in-time source documents
-tasks/              authored execution evidence and learned items
-projects/           active, paused, or completed efforts
-wiki/               reusable decisions, patterns, tools, and insights
-graphs/src.tsv           rebuildable relation cache at the base root
-```
-
-**A source is a command.** A source runs a reviewed command that prints one JSON document, and the named CLI owns its login. Adding GitHub, Google Workspace, Jira, or a local database needs no framework adapter — just YAML and, when the glue gets real, a small reviewed helper under the base's `sources/`:
-
-```yaml
-sources:
-  github-pull-requests:
-    enabled: true
-    layer: events
-    requires: [github-search-json.py, python3, gh]
-    window: true
-    run: [github-search-json.py, prs, assignee, "{{start}}", "{{end}}"]
-    fields:
-      id: .url
-      time: .updatedAt
-      title: .title
-      repo: .repository.nameWithOwner
-      repository: .repository_uri # relation: builds a graph edge
-      owner: [".assignee_uris[]"]
-    body: [gh, pr, view, "{{id}}", --repo, "{{repo}}", --json, "body,comments"]
-```
-
-**Relations are explicit URIs.** Records and pages link to file URIs or to entities such as `repo:github.com/fmind/fkf`. `graphs/src.tsv` is built from declared relation fields and authored links — FKF never guesses a relationship from prose.
-
-**Retrieval is bounded and reproducible.** `find` returns every lexical match; `context` selects under a budget and explains itself. By default, records are stored as metadata plus a link and bodies stay at the provider. The opt-in `cache` and `sync` body policies keep ignored, manifest-verified local copies after an explicit read or evidence sync.
-
-Full detail: [sources](https://fmind.github.io/fkf/docs/sources/), [URIs and the graph](https://fmind.github.io/fkf/docs/uris-graph/), [context packs](https://fmind.github.io/fkf/docs/context/), [configuration schema](https://fmind.github.io/fkf/docs/schema/).
-
-## Use it from your coding agent
-
-```bash
-fkf harness install --all --dry-run --base ~/brain
-fkf harness install --all --base ~/brain
-fkf harness install claude codex gemini kiro --workspace ~/fmind --base ~/brain
-```
-
-The first command shows exactly what FKF would manage. The second registers read-only MCP under the base-scoped key `fkf-<name>` in all ten adapters. The third opts the four adapters with verified passive output into automatic context for one physical workspace. FKF does not create global links to a base's skills. If you manage client configuration yourself, the primitive is `fkf mcp serve --base ~/brain`.
-
-The MCP server is read-only and bounded: `context`, `find`, `day`, `timeline`, `list`, `read`, and `graph`. It cannot write, run a shell, or fetch bodies. The agent asks for a pack when it needs one. Ordinary lookups use `context` and a cited `read`; configuration inspection and task traces belong to setup or meaningful work. The bundled `fkf-use`, `fkf-learn`, and `daily-brief` skills teach it how. See the [harness guide](https://fmind.github.io/fkf/docs/harnesses/).
-
-## Trust and privacy
-
-- **FKF reads no credential** and expands no secret environment variable. Provider credentials stay with the provider CLI.
-- **Collected content is untrusted data** — evidence, never instructions. A stored value never becomes shell syntax or an executable name.
-- **`fkf trust` hashes the executable plan**: the effective `auth:`, `run:`, `test:`, and `body:` argv plus every file under the base's `sources/` and `tests/`. A meaningful change requires review again. It detects change; it is not a sandbox.
-- **Stored reads are offline, including `brief`.** `read --body` is the explicit read-time fetch; `sync` may prefetch bodies under the opt-in `bodies: sync` policy. Explicit `status --live` runs only bounded trusted `auth:` probes.
-- **FKF encrypts nothing and provides no backup.** Protect the disk and the remote. Whether event and inventory documents enter git history is your choice at `init`, recorded in `.gitignore`.
-
-Details and the full threat boundary: [privacy and trust](https://fmind.github.io/fkf/docs/privacy/).
-
-## Scope
-
-FKF is intentionally small. Do not use it if you need semantic search, a dashboard, a hosted service, native Windows, or a local cache your organization's data policy forbids. Your editor, shell, and coding agent remain the interface.
-
-Configuration and stored documents each carry `fkf: 1`. Evidence-envelope additions stay compatible within that marker, so old evidence stays readable without re-fetching provider history.
+The [adapter catalog](adapters/README.md) provides reviewed standalone Python collectors for Git history, Google Calendar, Gmail, Tasks, Contacts, Drive meeting notes, Chat, GitHub issues, pull requests and notifications, and coding-agent sessions, task folders, Chrome bookmarks, Drive folders and Gmail labels. Copy the ones you need into your base's `sources/`, declare them in `fkf.yaml`, and review them like any code you run. They are maintained here separately from the Python distribution and tested with fake providers.
 
 ## Development
 
-Start with [CONTRIBUTING.md](CONTRIBUTING.md), [AGENTS.md](AGENTS.md), and the [Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities through a [private security advisory](https://github.com/fmind/fkf/security/advisories/new), never a public issue — see [SECURITY.md](SECURITY.md).
-
 ```bash
-mise run all      # format, check, branch-coverage tests, and package build
-mise run coverage # optional HTML branch-coverage report
+mise run all
+mise run benchmark
 ```
 
-The suite is hermetic and holds branch coverage to its ratcheted floor. Large graph observations remain opt-in test cases, never cross-machine thresholds.
+The gate formats, checks types and security, runs hermetic tests with an 85% branch-coverage floor, builds the documentation, and installs both distributions in isolated smoke environments. See [AGENTS.md](AGENTS.md), [contributing](CONTRIBUTING.md), and the [documentation](docs/docs/index.md).
 
-Full documentation: <https://fmind.github.io/fkf/>
+MIT. Runtime dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## License
+## Daily learning and separate bases
 
-MIT. See [LICENSE](LICENSE).
+Agents should actively recommend useful project/wiki updates or repository-local skillification after substantial work. The learning skill keeps routine verified edits within existing authority and proposes changes to accepted decisions or new skills. Tasks use `tasks/<task>/TASK.md` with `inputs/` and `outputs/`.
 
-Online apps without a provider CLI can declare one uv Python script each in `clients/` through root `clients:` configuration. Collection helpers live in `sources/`; source hooks live in `tests/`. All three execution trees are trust-covered. Repository checks and retrieval acceptance live under `operations/`, including `operations/queries.yaml`. See [app clients](docs/docs/sources.md#app-clients).
+Each base has a persistent id and independent configuration, evidence, index and recovery. Replies identify their base; exact qualified references fail in a different base. `find` and `context` support knowledge type/status and explicit folder/label membership filters. Current decisions and H2+ passages are searchable independently of retained history. See [base layout and contracts](docs/docs/base.md).

@@ -1,113 +1,71 @@
----
-title: The base and fkf.yaml
-description: "The five-layer base, open semantic schema, configuration discovery, local overrides, and generated contract."
----
+# Base layout and knowledge
 
-# The base and `fkf.yaml`
+A base is an ordinary directory, normally versioned with Git. Create each new base with `fkf init PATH --name NAME`. Keep the generated 32-character hexadecimal `id` when moving or copying the same base; a different base needs a different id. The human name need not be unique. An ignored `fkf.local.yaml` can override source settings only, never the identity.
 
-A base is one git repository of plain JSON and Markdown. Its committed `fkf.yaml` is both configuration and disclosure boundary: it says which layers exist, what semantic fields mean, and which commands may collect data. Two boundaries are two repositories, not two profiles in one file.
-
-## The five layers
-
-| Path                               | Holds                                                      |
-| ---------------------------------- | ---------------------------------------------------------- |
-| `events/YYYY-MM-DD/<source>.json`  | one complete collected document per source and day         |
-| `inventories/<name>.json`          | one current point-in-time document per inventory source    |
-| `tasks/YYYY-MM-DD/<slug>/TASKS.md` | request, work trace, changed files, evidence, and learning |
-| `projects/<slug>.md`               | intent and decisions over weeks; `status` is required      |
-| `wiki/<slug>.md`                   | durable approved knowledge, flat [OKF v0.2](okf.md)        |
-
-`graphs/src.tsv`, its destination-sorted `graphs/dst.tsv` twin, `graphs/offsets.tsv`, `graphs/meta.json`, and `graphs/generation.json` are one rebuildable cache generation. The source of truth is the relation schema stored with collected documents plus authored links, tags, and explicit Markdown `relations:`. `fkf build graph` marks the next generation as building before it replaces any artifact and publishes the current marker last. Readers check that bounded marker before and after opening the files, so they fail closed during the brief publication window rather than mix generations.
-
-The sidecar records URI, size, mtime, and SHA-256 for each input and graph artifact. It also carries separate SHA-256 inputs for events, inventories, projects, tasks, wiki, and the edge-relevant root schema, plus one aggregate. A stale read therefore names which logical component changed instead of reporting one opaque base-wide mismatch. Ordinary reads stat all inputs and hash only changed fingerprints; `fkf graph --verify` hashes everything explicitly.
-
-FKF keeps this plain-file design until measurements justify another storage layer. `mise run benchmark` builds a reproducible synthetic corpus of exactly 100,000 records and 500,000 edges, then reports wall time and maximum RAM for find, context, graph build, and navigation. Maximum RAM is the measured peak resident set size (RSS): the largest amount of physical memory occupied during that run. It is an optional observation with no pass/fail threshold and no database claim.
-
-Every layer is explicitly enabled:
-
-```yaml
-layers:
-  events: true
-  inventories: true
-  tasks: true
-  projects: true
-  wiki: true
+```text
+fkf.yaml
+projects/
+wiki/
+tasks/<task>/TASK.md
+tasks/<task>/inputs/
+tasks/<task>/outputs/
+records/<source>/*.json
+sources/
+scripts/
+indexes/structures.json
+.fkf/
 ```
 
-An absent layer entry is disabled. Disabled layers are not created, listed, served, scanned, or addressable.
-
-The remaining data folders have separate roles: `graphs/` contains the five generated graph artifacts, `indexes/index.tsv` and `indexes/meta.json` accelerate lexical retrieval, and `bodies/` holds manifest-verified fetched text. All three are Git-ignored and rebuildable. Base-owned maintenance and retrieval acceptance files belong in `operations/`; they are outside the published read path and execution-trust trees.
-
-The `inventories` layer is named the same way in configuration, CLI listings, and file URIs. Its stored v1 JSON envelope permanently retains `layer: "index"`. FKF translates that evidence marker at the document boundary; renaming a directory never requires rewriting collected values or fetching them again. The lexical builder remains `fkf build index`.
-
-## Finding a base
-
-FKF tries, in order:
-
-1. `--base <path>`;
-1. `$FKF_BASE`;
-1. the nearest ancestor containing `fkf.yaml`.
-
-A leading `~` is expanded by FKF, including in an argv-based MCP launch. Nothing creates a base implicitly; use `fkf init <path>`.
-
-## The configuration contract
-
-Every base configuration declares `fkf: 1`, and every stored document independently declares the same marker value for its distinct evidence envelope. The containing file identifies which contract applies. Compatible evidence additions stay within marker `1`; an incompatible configuration or evidence change requires an explicit new marker and release boundary.
+`projects/`, `wiki/` and `tasks/` contain authored Markdown. Task folders hold a description and TODO checklist in `TASK.md`, inputs and outputs. `sources/` holds collectors; `scripts/` holds operation scripts. `.fkf/` and `indexes/` are disposable and ignored by Git. Durable data must have a tested recovery path; a private Git remote is the default, or a separately configured encrypted backup for records excluded from Git.
 
 ```yaml
-fkf: 1
-name: brain
-
-schema:
-  id: { description: Stable record identity., cardinality: one }
-  time: { description: Event timestamp., cardinality: one }
-  repository: { description: Related repository., cardinality: optional, relation: true }
-
-layers:
-  events: true
-  inventories: true
-  tasks: true
-  projects: true
-  wiki: true
-
+# https://fmind.github.io/fkf/
+version: 1
+id: aabbccddeeff00112233445566778899 # Illustrative; retain the id generated by init.
+name: knowledge
 sources:
-  git-commits:
-    enabled: true
-    layer: events
-    requires: [git-log-json.py, python3, git]
-    window: true
-    run: [git-log-json.py, "{{start}}", "{{end}}", "{{home}}"]
-    fields: { id: .uid, time: .time, repository: .repository_uri }
-
-sync:
-  days: 30
-  inventory_max_age_hours: 168
-  timeout: 2m0s
-  concurrency: 4
+  activity:
+    command: [sources/activity.py, "{{start}}", "{{end}}"]
+  folders:
+    command: [sources/google-drive-folders.py, "{{start}}", "{{end}}"]
+    mode: snapshot
 ```
 
-Root `schema:` is the semantic dictionary shared by every source. The dedicated [Configuration schema](schema.md) guide defines cardinality and relation fields, explains source mappings, and shows how to bind an editor to the generated [`fkf.schema.json`](https://fmind.github.io/fkf/fkf.schema.json). `fkf config schema` prints the same artifact without requiring a base.
+Selection is explicit `--base`, then nonempty `FKF_BASE`, then the nearest ancestor `fkf.yaml`. Set the environment only for workspaces authorized to use that base. MCP requires an explicit base at server startup. There is no global catalog or implicit cross-base search. Replies identify the base; `fkf://<id>/<local-reference>` is refused in a different base. Local references remain convenient inside an explicitly selected base. Filesystem and process permissions provide the actual confidentiality boundary.
 
-## Machine-local overlay
+## Knowledge metadata
 
-The ignored `fkf.local.yaml` contains execution facts that differ by machine. It may add external `bin:` directories and override `enabled`, `run`, or `timeout` for a source already declared in `fkf.yaml`. It cannot introduce a source, redefine the schema, or declare environment values.
+```markdown
+---
+type: decision
+status: accepted
+reviewed: "2026-09-12"
+effective: "2026-09-10"
+sources: ["meeting:decision-1"]
+supersedes: ["../wiki/previous-decision.md"]
+---
 
-Extra `bin:` entries must be absolute or `~`-relative directories outside the base. Provider accounts and credentials remain process environment owned by the provider CLI; export a selector such as `GH_CONFIG_DIR` before launching FKF, or use a reviewed executable wrapper under `sources/`. FKF reads no env file, expands no `$VAR`, and owns no credential.
+# Retention
 
-The ordinary child command path is composed from `<base>/sources/`, declared external `bin:` directories, and safe inherited absolute entries. Relative entries and inherited entries resolving inside the base are removed. Source tests prepend the separately trust-digested `<base>/tests/` tree to that path; collection and body commands never search it.
+## Decision
 
-`fkf config` prints the merged result and the origin of every local override.
+Keep original evidence because providers can remove content. Cite the exact captured ref supporting the decision.
 
-## Trust follows execution
+## History
 
-`fkf trust` hashes a canonical execution plan, not YAML bytes. Changes to `auth:`, `run:`, `test:`, `body:`, enabled state, body-bound paths, timeouts, retries, pacing, extra executable directories, or files and executable bits under `sources/` or `tests/` re-arm trust. Comments, YAML key order, schema descriptions and examples, `requires:`, retrieval-only field-path changes, and the inherited process environment do not.
+The earlier proposal would have purged originals. It is retained here to explain the change.
+```
 
-The disclosure printed before trust remains the authority. Trust is local change detection, never a shell sandbox.
+Metadata is optional. `type` is a lowercase identifier chosen by the owner, such as decision or concept; the directory supplies project/task/wiki when omitted. `status` accepts draft, proposed, accepted, current, active, paused, blocked, done, superseded or archived. `reviewed` and `effective` require ISO dates. `sources` and `supersedes` are lists of explicit references. Other frontmatter remains searchable data. Titles, aliases, links and summaries retain their existing roles.
 
-Mutating CLI paths share one fail-fast cross-process lock keyed by the physical base, so symlink aliases cannot admit two FKF writers. Read-only commands and write-free checks or previews remain lock-free.
+Only an accepted/current note can supersede another whole note. Missing or ambiguous targets and supersession cycles fail indexing. Historical headings and explicitly superseded/archived notes are excluded from ordinary retrieval; request `--history` or the corresponding status explicitly. Dates never establish acceptance or provider freshness. Source references used as durable proof should be exact captured `ref` values; a stable alias is useful for navigation and follows later observations.
 
-## Managed repository files
+H2+ sections are separate search passages with exact heading references. A heading named `History` marks that section and descendants as superseded until the next heading of equal or higher level. Exact authored reads still return original file bytes or sections, including retained history. Authored files are editable; their paths are not immutable version references.
 
-`fkf init` refreshes marked blocks in `.gitignore` and `.gitattributes` without touching surrounding content. The ignore block covers local configuration, common secret-bearing files, all five artifacts under `graphs/`, and optional collected data according to the choice made at initialization. The attributes block prevents line-merging complete JSON documents. The graph files need no merge rule because they are rebuilt from source files.
+## Captures and source structure
 
-Use `fkf init` again to refresh FKF-owned skills and managed blocks and to create the root `skills/` private catalog when missing. It does not overwrite base-specific `AGENTS.md`, custom `.agents/skills/`, private `skills/<name>` packages, existing helpers under `sources/`, or source hooks under `tests/`. Use `fkf config helpers` to inspect installed official helpers and missing required ones, then `fkf config helpers --refresh` for an explicit refresh whose individual file replacements are atomic; unknown scripts remain user-owned.
+`records/<source>/*.json` holds immutable capture envelopes with metadata and complete normalized records. A record includes its id, title, text body, selected attributes, optional event time and explicit links/aliases. Captured-reference hashes bind the original capture bytes and record id. Older capture bytes are never rewritten to change projection or satisfy a check.
+
+Use record `kind: container` for folders and labels and `parents` for explicit membership identities. The generic core does not infer relationships from names. `fkf build` exports current containers and memberships to `indexes/structures.json`; the export identifies its base and SQLite generation. Browse the same graph with `find '*' --within ID`, or filter a content query with `--within ID`. Traversal stops with an actionable error above 10,000 members.
+
+Source `mode: window` is the default: missing items say nothing outside the requested window. `mode: snapshot` declares a complete catalog; older records absent from the newest complete snapshot become historical, including after an empty snapshot. Adapters must reject partial pagination before emitting a snapshot. Historical evidence remains exactly readable in either mode.

@@ -13,12 +13,9 @@ nav = [
   { "Overview" = "docs/index.md" },
   { "Getting started" = "docs/getting-started.md" },
   { "Understand FKF" = [
-    { "The base and fkf.yaml" = "docs/base.md" },
+    { "Notes, records and configuration" = "docs/base.md" },
     { "Sources are commands" = "docs/sources.md" },
-    { "URIs and the graph" = "docs/uris-graph.md" },
-    { "Context packs and receipts" = "docs/context.md" },
-    { "The wiki format" = "docs/okf.md" },
-    { "Identities" = "docs/identities.md" },
+    { "Bounded context" = "docs/context.md" },
   ] },
   { "Reference" = [
     { "Command reference" = "docs/commands.md" },
@@ -26,7 +23,6 @@ nav = [
   ] },
   { "Connect agents" = [
     { "MCP server" = "docs/mcp.md" },
-    { "Agent harnesses" = "docs/harnesses.md" },
   ] },
   { "Trust and legal" = [
     { "Privacy and security" = "docs/privacy.md" },
