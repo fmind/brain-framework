@@ -8,7 +8,7 @@ fkf context "repo:example/project" --base ~/knowledge --budget 850
 fkf read projects/example.md#reason --base ~/knowledge
 ```
 
-The reply names its index state: ready, missing, stale or corrupt. A ready index is opened read-only in place, so a concurrent build or collection cannot disturb the generation already open. Fallback builds the same FTS representation in memory, performs no network request, and writes no index. It can be slower; run `fkf build` explicitly after changing evidence.
+Indexed retrieval requires a ready index. Missing, stale or corrupt indexes return an actionable error: run `fkf build` for the selected base. A ready index is opened read-only in place, so a concurrent build or collection cannot disturb the generation already open. Reads never build an index. Exact Markdown paths and capture-file paths remain readable without an index for recovery; aliases and record references require the index.
 
 The budget applies to the entire compact JSON response and its final newline. For MCP it also includes both text and structured representations and the tool-result wrapper, so the same budget may deliver fewer items than the CLI. It includes selected excerpts, references, omitted-candidate count, budget, cache diagnostic and the untrusted-content notice. Four bytes per unit is an exact byte allowance, not a tokenizer estimate. Exact reads are bounded but never silently shortened.
 

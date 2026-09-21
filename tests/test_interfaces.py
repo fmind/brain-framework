@@ -12,7 +12,7 @@ from mcp.types import CallToolResult, TextContent
 from typer.testing import CliRunner
 
 from fkf.cli import app
-from fkf.index import build
+from fkf.index import CACHE, build
 from fkf.mcp import server
 from fkf.models import Collection, encode
 from fkf.storage import Store, writer
@@ -20,6 +20,7 @@ from fkf.storage import Store, writer
 
 def test_cli_lifecycle(tmp_path: Path, base: Store) -> None:
     runner = CliRunner()
+    build(base)
     assert runner.invoke(app, ["--help"]).exit_code == 0
     target = tmp_path / "new"
     assert runner.invoke(app, ["init", str(target)]).exit_code == 0
@@ -103,7 +104,7 @@ def test_mcp_read_only_tools_and_payload_parity(base: Store) -> None:
 
 
 def test_console_errors_are_private_and_on_stderr(base: Store) -> None:
-    for args in [["read", "fkf.yaml"], ["find", "query", "--limit", "0"]]:
+    for args in [["find", "offline"], ["read", "fkf.yaml"], ["find", "query", "--limit", "0"]]:
         result = subprocess.run(  # noqa: S603 - synthetic CLI boundary
             [sys.executable, "-m", "fkf", *args, "--base", str(base.root)], capture_output=True, text=True, check=False
         )
@@ -111,6 +112,8 @@ def test_console_errors_are_private_and_on_stderr(base: Store) -> None:
         assert not result.stdout
         assert "fkf:" in result.stderr
         assert str(base.root) not in result.stderr
+        if args == ["find", "offline"]:
+            assert "missing; run fkf build" in result.stderr
     assert "limit: " in result.stderr
     assert "greater than or equal to 1" in result.stderr
     dated = subprocess.run(  # noqa: S603 - synthetic CLI boundary
@@ -137,9 +140,8 @@ def test_initialization_obeys_existing_physical_writer_lock(tmp_path: Path) -> N
 
 
 def test_mcp_stdio_handshake_and_read_only_roundtrip(base: Store, tmp_path: Path) -> None:
-    from mcp.client.stdio import stdio_client
-
     from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
 
     build(base)
 
@@ -174,6 +176,8 @@ def test_mcp_stdio_handshake_and_read_only_roundtrip(base: Store, tmp_path: Path
 def test_mcp_limit_counts_text_and_structured_representations(base: Store) -> None:
     base.write("wiki/large.md", b"# Large\n\n" + b'"' * 1_000_000)
 
+    build(base)
+
     async def check() -> None:
         result = await server(base).call_tool("read", {"uri": "wiki/large.md"})
         assert isinstance(result, CallToolResult)
@@ -189,6 +193,8 @@ def test_mcp_context_budget_covers_complete_tool_result(base: Store) -> None:
 
     base.write("wiki/budget.md", ("# Budget\n\n" + "Budget evidence 日本語. " * 100).encode())
 
+    build(base)
+
     async def check() -> None:
         for budget in (128, 256, 850):
             result = await server(base).call_tool("context", {"query": "budget", "budget": budget})
@@ -200,3 +206,29 @@ def test_mcp_context_budget_covers_complete_tool_result(base: Store) -> None:
                 assert result.structured_content["items"]
 
     asyncio.run(check())
+
+
+def test_cli_and_mcp_explain_index_repair_without_writing(base: Store) -> None:
+    for state in ("missing", "stale", "corrupt"):
+        if state != "missing":
+            build(base)
+        if state == "stale":
+            base.write("wiki/new.md", b"# New evidence")
+        if state == "corrupt":
+            base.write(CACHE, b"broken")
+        before = {path: base.read(path) for path in base.files(".fkf")}
+        result = CliRunner().invoke(app, ["find", "offline", "--base", str(base.root)])
+        assert result.exit_code == 1
+        assert not result.stdout
+        assert f"index is {state}; run fkf build" in str(result.exception)
+        assert str(base.root) not in str(result.exception)
+
+        async def check(expected: str = state) -> None:
+            result = await server(base).call_tool("context", {"query": "offline"})
+            assert isinstance(result, CallToolResult)
+            assert result.is_error
+            assert isinstance(result.content[0], TextContent)
+            assert f"index is {expected}; run fkf build" in result.content[0].text
+
+        asyncio.run(check())
+        assert {path: base.read(path) for path in base.files(".fkf")} == before

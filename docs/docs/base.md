@@ -6,17 +6,41 @@ A base is an ordinary directory, normally versioned with Git. Create each new ba
 fkf.yaml
 projects/
 wiki/
-tasks/<task>/TASK.md
-tasks/<task>/inputs/
-tasks/<task>/outputs/
+tasks/YYYY-MM-DD_slug/TASK.md
+tasks/YYYY-MM-DD_slug/inputs/
+tasks/YYYY-MM-DD_slug/outputs/
 records/<source>/*.json
 sources/
 scripts/
+configs/
+inputs/
+skills/
+tests/
+logs/
 indexes/structures.json
 .fkf/
 ```
 
-`projects/`, `wiki/` and `tasks/` contain authored Markdown. Task folders hold a description and TODO checklist in `TASK.md`, inputs and outputs. `sources/` holds collectors; `scripts/` holds operation scripts. `.fkf/` and `indexes/` are disposable and ignored by Git. Durable data must have a tested recovery path; a private Git remote is the default, or a separately configured encrypted backup for records excluded from Git.
+`fkf init` creates `projects/`, `wiki/`, `tasks/`, `records/`, `sources/`, `scripts/`, `configs/`, `skills/` and `tests/`, plus `fkf.yaml`, `AGENTS.md` and `.gitignore`. It seeds wiki navigation and a welcome page. Create root `inputs/` and `logs/` only when needed; create task subfolders when delegating work. `fkf build` creates `.fkf/` and `indexes/`. Configure project-local skill discovery separately.
+
+| Directory           | Purpose                                                                      | Indexed                       | Lifecycle                                 |
+| ------------------- | ---------------------------------------------------------------------------- | ----------------------------- | ----------------------------------------- |
+| `projects/`         | Current project context, decisions and TODOs.                                | Markdown                      | Authored; retain.                         |
+| `wiki/`             | Reusable OKF knowledge and navigation.                                       | Markdown                      | Authored; retain.                         |
+| `tasks/`            | `TASK.md`, task-local `inputs/` and `outputs/`.                              | Markdown, including artifacts | Resumable work; retain.                   |
+| `records/`          | Normalized source captures.                                                  | Capture JSON                  | Immutable evidence; retain.               |
+| `sources/`          | Base-owned collector scripts.                                                | No                            | Reviewed code; retain.                    |
+| `scripts/`          | Base operations and maintenance commands.                                    | No                            | Reviewed code; retain.                    |
+| `tests/`            | Collector and maintenance tests, with synthetic fixtures and fake providers. | No                            | Regression coverage; retain.              |
+| `configs/`          | Maintained lists and script settings.                                        | No                            | Maintained inputs; retain.                |
+| `inputs/`           | Optional original imports, before projection into knowledge or records.      | No                            | Retain irreplaceable inputs.              |
+| `skills/`           | Canonical reusable workflow packages.                                        | No                            | Reviewed instructions; retain.            |
+| `indexes/`, `.fkf/` | Generated navigation and SQLite index.                                       | Derived output                | Disposable; rebuild.                      |
+| `logs/`             | Optional bounded operational receipts without payloads or credentials.       | No                            | Rotate under the base's retention policy. |
+
+Keep base tests next to the code they exercise in the same base, under `tests/`; never run live providers from the test suite. Python is recommended, but FKF does not prescribe a test runner. Small inline fixtures suffice; add `tests/fixtures/` only when useful. Retrieval acceptance cases in `queries.yaml` are separate and run with `fkf eval`.
+
+Durable data must have a tested recovery path, including source scripts, configuration, canonical skills and tests. A private Git remote is the default, or a separately configured encrypted backup for files excluded from Git. `.fkf/` and `indexes/` are disposable and ignored by Git. This is the layout of a user base; the FKF framework repository instead owns `src/fkf/`, `docs/`, `examples/` and its own `tests/`.
 
 ```yaml
 # https://fmind.github.io/fkf/
@@ -56,9 +80,9 @@ Keep original evidence because providers can remove content. Cite the exact capt
 The earlier proposal would have purged originals. It is retained here to explain the change.
 ```
 
-Metadata is optional. `type` is a lowercase identifier chosen by the owner, such as decision or concept; the directory supplies project/task/wiki when omitted. `status` accepts draft, proposed, accepted, current, active, paused, blocked, done, superseded or archived. `reviewed` and `effective` require ISO dates. `sources` and `supersedes` are lists of explicit references. Other frontmatter remains searchable data. Titles, aliases, links and summaries retain their existing roles.
+Project and task metadata is optional. Wiki concepts follow OKF v0.2 and require frontmatter with a nonempty `type`, such as `Concept` or `BigQuery Table`; unknown type names are supported. Retrieval tolerates incomplete pages, while `validate` checks wiki authoring conventions. Wiki lifecycle uses `draft`, `stable` (also the default) and `deprecated`. Projects and tasks additionally support proposed, accepted, current, active, paused, blocked, done, superseded and archived. `reviewed` and `effective` require ISO dates. `supersedes` is a list of explicit references. Wiki `sources` uses OKF mappings with a required `resource`; project/task notes may also use explicit reference strings; extra provenance fields remain in the exact authored file. Other frontmatter remains searchable data and is retained in exact reads. Titles, aliases, links and summaries retain their existing roles.
 
-Only an accepted/current note can supersede another whole note. Missing or ambiguous targets and supersession cycles fail indexing. Historical headings and explicitly superseded/archived notes are excluded from ordinary retrieval; request `--history` or the corresponding status explicitly. Dates never establish acceptance or provider freshness. Source references used as durable proof should be exact captured `ref` values; a stable alias is useful for navigation and follows later observations.
+Only an accepted/current note can supersede another whole note. Missing or ambiguous targets and supersession cycles fail indexing. Historical headings and explicitly superseded/archived/deprecated notes are excluded from ordinary retrieval; request `--history` or the corresponding status explicitly. Accepted/current notes receive a relevance boost; stable wiki concepts receive it only with a declared `reviewed` date or `verified` event. Default stable lifecycle alone does not assert review. Dates never establish acceptance or provider freshness. Source references used as durable proof should be exact captured `ref` values; a stable alias is useful for navigation and follows later observations.
 
 H2+ sections are separate search passages with exact heading references. A heading named `History` marks that section and descendants as superseded until the next heading of equal or higher level. Exact authored reads still return original file bytes or sections, including retained history. Authored files are editable; their paths are not immutable version references.
 
@@ -69,3 +93,15 @@ H2+ sections are separate search passages with exact heading references. A headi
 Use record `kind: container` for folders and labels and `parents` for explicit membership identities. The generic core does not infer relationships from names. `fkf build` exports current containers and memberships to `indexes/structures.json`; the export identifies its base and SQLite generation. Browse the same graph with `find '*' --within ID`, or filter a content query with `--within ID`. Traversal stops with an actionable error above 10,000 members.
 
 Source `mode: window` is the default: missing items say nothing outside the requested window. `mode: snapshot` declares a complete catalog; older records absent from the newest complete snapshot become historical, including after an empty snapshot. Adapters must reject partial pagination before emitting a snapshot. Historical evidence remains exactly readable in either mode.
+
+## Wiki authoring and task continuity
+
+Use `wiki/` as the knowledge bundle: one concept per Markdown file with a `type`, descriptive title and concise source-grounded explanation. `wiki/index.md` is a short directory of useful entry points; `wiki/log.md` is optional knowledge-change history, distinct from operational `logs/`. Use standard Markdown links. Within wiki pages, `/concept.md` resolves relative to `wiki/`; ordinary relative links also work. A `resource` supplies an explicit concept alias, and `description` supplies a summary when no FKF `summary` is given.
+
+FKF reads the structural conventions of [OKF v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md): open type names, resource identities, provenance mappings, and stable/deprecated lifecycle values. Deprecated notes require history or an explicit status filter. `validate` checks required wiki type metadata, reserved index/log structure and provenance/lifecycle shapes. It does not verify claims or execute attestations. Unknown metadata stays in exact reads; execution fields never authorize running code. Retrieval surfaces supplied `generated`, normalized `verified` events, derived trust tiers and `stale_after` timestamps when present. Missing verification means unverified. These are assertions in the document, not independent proof or execution authority. Staleness stays an explicit timestamp so offline query results remain reproducible.
+
+For delegated work, create `tasks/YYYY-MM-DD_slug/TASK.md` before implementation. Keep the objective, scope, TODOs, decisions, last verified state and exact next action there; link task-local inputs and outputs. On resume, read the task note before repeating work. Keep canonical project TODOs in `projects/`; update them when a task changes project state. Task Markdown, including artifact Markdown, is searchable within the selected base; task folders do not impose access control. Do not register a private base globally just to make one task convenient.
+
+Keep reusable workflow packages under `skills/` and expose only reviewed packages to the host's project-local `.agents/skills/`, using its supported links or copies. These instruction packages are never indexed as knowledge or inferred from collected content. Backups must cover the canonical skills and document how discovery links are recreated. `configs/` contains maintained collector inputs; `inputs/` can retain original imports. Neither enters retrieval until deliberately projected into records or authored knowledge.
+
+OKF separates who wrote a concept (`generated`) from who checked it (`verified`). A bare verification mapping is treated as one event. Only record known actors and actual timestamps; a metadata-format conversion is not human review. Keep `sources[].id` stable when using claim footnotes. `Attested Computation` documents may describe deterministic code and receipt contracts, but FKF's retrieval interfaces never run that code. See the [OKF v0.2 announcement](https://cloud.google.com/blog/products/data-analytics/okf-v0-2-adds-trust-signals) and linked specification for the full authoring contract.

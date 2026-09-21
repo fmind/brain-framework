@@ -18,9 +18,21 @@ MAX_CORPUS = 512 << 20
 NAME = r"^[a-z][a-z0-9-]{0,63}$"
 BASE_ID = r"^[0-9a-f]{32}$"
 AUTHORED = ("projects", "tasks", "wiki")
-NoteType = Annotated[str, Field(pattern=r"^(?:[a-z][a-z0-9-]{0,63})?$")]
+NoteType = Annotated[str, Field(max_length=128)]
 NoteStatus = Literal[
-    "", "draft", "proposed", "accepted", "current", "active", "paused", "blocked", "done", "superseded", "archived"
+    "",
+    "draft",
+    "proposed",
+    "accepted",
+    "current",
+    "active",
+    "paused",
+    "blocked",
+    "done",
+    "superseded",
+    "archived",
+    "stable",
+    "deprecated",
 ]
 
 
@@ -130,6 +142,7 @@ class Collection(Model):
     end: str = ""
     origin: str = ""
     mode: Literal["window", "snapshot"] = "window"
+    automatic: bool = False
     records: Annotated[list[Record], Field(max_length=100_000)]
 
     _captured = field_validator("captured")(timestamp)
@@ -174,6 +187,30 @@ def local_reference(base_id: str, uri: str) -> str:
     return target
 
 
+class KnowledgeSource(Model):
+    """OKF provenance is data, including producer-specific metadata."""
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+    resource: Annotated[str, Field(min_length=1, max_length=8192)]
+
+    _resource = field_validator("resource")(clean)
+
+
+class KnowledgeActor(Model):
+    """An asserted provenance or verification event, never execution authority."""
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+    by: Annotated[str, Field(min_length=1, max_length=512)]
+    at: str = ""
+
+    _by = field_validator("by")(clean)
+
+    @field_validator("at")
+    @classmethod
+    def instant(cls, value: str) -> str:
+        return timestamp(value) if value else ""
+
+
 class Knowledge(Model):
     """Only the metadata that changes retrieval is typed; other authored fields remain data."""
 
@@ -183,7 +220,35 @@ class Knowledge(Model):
     reviewed: str = ""
     effective: str = ""
     supersedes: list[str] = Field(default_factory=list)
-    sources: list[str] = Field(default_factory=list)
+    sources: list[str | KnowledgeSource] = Field(default_factory=list)
+    generated: KnowledgeActor | None = None
+    verified: list[KnowledgeActor] = Field(default_factory=list)
+    stale_after: str = ""
+
+    @field_validator("verified", mode="before")
+    @classmethod
+    def verifications(cls, value: object) -> object:
+        return [value] if isinstance(value, dict) else value
+
+    @field_validator("stale_after")
+    @classmethod
+    def stale_time(cls, value: str) -> str:
+        return timestamp(value) if value else ""
+
+    def signals(self) -> dict[str, object]:
+        result: dict[str, object] = {}
+        if self.generated:
+            result["generated"] = self.generated.model_dump(exclude_defaults=True)
+        if self.verified:
+            result["verified"] = [event.model_dump(exclude_defaults=True) for event in self.verified]
+            result["trust"] = (
+                "human-reviewed"
+                if any(event.by.startswith("human:") for event in self.verified)
+                else "machine-confirmed"
+            )
+        if self.stale_after:
+            result["stale_after"] = self.stale_after
+        return result
 
     @field_validator("reviewed", "effective")
     @classmethod
@@ -195,7 +260,7 @@ class Knowledge(Model):
             raise ValueError("expected YYYY-MM-DD") from None
         return value
 
-    @field_validator("supersedes", "sources")
+    @field_validator("supersedes")
     @classmethod
     def references(cls, values: list[str]) -> list[str]:
         return Record.references(values)
@@ -216,6 +281,10 @@ class Source(Model):
     mode: Literal["window", "snapshot"] = "window"
     timeout: Annotated[int, Field(ge=1, le=3600)] = 120
     max_bytes: Annotated[int, Field(ge=1, le=MAX_FILE)] = MAX_FILE
+    # Zero leaves collection manual. These are refresh policy, not an installed schedule.
+    refresh: Annotated[int, Field(ge=0, le=31_536_000)] = 0
+    lookback: Annotated[int, Field(ge=1, le=31_536_000)] = 86_400
+    overlap: Annotated[int, Field(ge=0, le=31_536_000)] = 300
 
     @field_validator("command")
     @classmethod

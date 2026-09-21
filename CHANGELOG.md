@@ -2,23 +2,28 @@
 
 All notable changes to `fkf` are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
-## Unreleased
+## [v7.0.0](https://github.com/fmind/fkf/releases/tag/v7.0.0) - 2026-09-21
 
 ### Breaking changes
 
-- Rewrite the core around one configuration and evidence format: authored `notes/`, immutable content-addressed `records/`, a disposable `.fkf/` SQLite index, eleven commands and three read-only MCP tools. Presets, harness installation, execution trust, the graph, learning proposals, briefs and bundled skills are removed; reusable skills live under `skills/` and adapters belong to the base.
+- Replace the Go implementation with one typed Python package and the `fkf` command. Python 3.14 or newer on Linux or macOS is required; install with `uv tool install --python 3.14 'fkf==7.0.0'`.
+- Use one current base format: `fkf.yaml`, authored `projects/`, `wiki/` and `tasks/`, immutable normalized `records/`, and disposable `.fkf/` and `indexes/`. Preserve a v6 base and executable separately; there is no in-place migration or compatibility command.
+- Remove bundled provider integrations, presets, harness installation, execution approval registries and learning proposal machinery. Bases own collectors, schedules and knowledge editing. Reusable Markdown skills and three source examples are maintained separately from the Python distribution.
+- Require an explicitly built, ready cache for indexed retrieval. Missing, stale or corrupt caches name the `fkf build` recovery command; direct authored and capture-file reads remain available.
+
+### Added
+
+- Explicit `update` with a side-effect-free dry-run, per-source refresh policy and durable successful automatic checkpoints. Failed windows stay due, manual collections do not move automatic progress, and `build --if-stale` skips a ready index.
+- Base-qualified exact evidence references, explicit source structure and membership filters, current versus historical capture retrieval, and authored section references.
+- OKF v0.2 wiki structure validation, provenance and asserted verification signals, lifecycle filters, and resumable task folders with inputs and outputs.
+- A runnable fictional base with a credential-free collector and retrieval acceptance cases; focused `fkf-use`, `fkf-learn`, `fkf-maintain` and repository-local `fkf-contribute` skills.
 
 ### Changed
 
-- Resolve an exact read by two indexed lookups. A view decided snapshot recency per row, so every read by alias or record URI scanned the corpus: on a 38,000-record base one read took about 295 seconds and now takes 0.3.
-- Carry each record's first alias in find and context results, so a note can cite an identity that follows the record across captures instead of one snapshot URI.
-- Report the MCP server version, so a host shows which build answers it.
-- Open a ready index read-only in place instead of hashing and deserializing it on every query; the manifest binds the exact cache file, and a concurrent build or collection no longer fails an open read.
-- Fold case and diacritics in matching, title weighting and excerpt selection, so `reunion` finds `réunion`.
-- Drop only English function words from queries; subject words such as `resume`, `active` and `latest` stay literal.
-- Report per-source capture counts and the newest capture time in `status`.
-- Name the invalid field and reason for rejected command or MCP arguments, and report an absent note or base explicitly.
-- Version `records/` by default: `fkf init` ignores only `.fkf/` and `fkf.local.yaml`.
+- Keep CLI and the three read-only MCP tools on shared services. Context includes the complete JSON and final newline within four UTF-8 bytes per budget unit; MCP also counts its response wrapper.
+- Match literal lexical terms with case and diacritic folding, explicit identities and authored-note preference. Keep event-time filtering separate from capture recency and decision validity.
+- Confine filesystem access, bound subprocess output and runtime, sanitize collection environments, and preserve atomic immutable evidence and a tested rebuild/recovery path.
+- Publish a documented installation and upgrade path, complete command reference, skill setup example, and contributor release checklist. Remove obsolete implementation proposals from the current tree.
 
 ## [v6.0.2](https://github.com/fmind/fkf/releases/tag/v6.0.2) - 2026-09-09
 

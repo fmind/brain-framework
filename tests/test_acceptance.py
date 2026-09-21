@@ -1,17 +1,14 @@
-"""The reusable synthetic acceptance corpus exercises delivered answers and fallback parity."""
+"""The reusable synthetic acceptance corpus exercises delivered answers."""
 
 from pathlib import Path
 
-import pytest
-
 from fkf.evaluate import evaluate
-from fkf.index import CACHE, build
+from fkf.index import build
 from fkf.models import Collection, Record, encode
 from fkf.storage import Store
 
 
-@pytest.mark.parametrize("state", ["missing", "ready", "corrupt"])
-def test_acceptance_corpus(tmp_path: Path, state: str) -> None:
+def test_acceptance_corpus(tmp_path: Path) -> None:
     root = tmp_path / "acceptance"
     root.mkdir()
     store = Store(root)
@@ -39,9 +36,6 @@ def test_acceptance_corpus(tmp_path: Path, state: str) -> None:
             ).model_dump()
         ),
     )
-    if state != "missing":
-        build(store)
-    if state == "corrupt":
-        store.write(CACHE, b"broken")
+    build(store)
     report = evaluate(store)
     assert report["passed"], report

@@ -8,6 +8,10 @@ import subprocess
 from pathlib import Path
 
 from conftest import Provider
+from fkf.index import build
+from fkf.models import Collection, Query, encode
+from fkf.retrieve import find
+from fkf.storage import Store
 
 PAGE_ONE = {
     "kind": "calendar#events",
@@ -104,8 +108,55 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
     assert commit.title == "owner/project: feat: keep durable evidence"
     assert commit.time == "2026-09-01T10:00:00.000000Z"
     assert "Because providers forget." in commit.text
-    assert commit.links == ["repo:local/owner/project"]
+    assert commit.links == ["person:email/owner@example.invalid", "repo:local/owner/project"]
     assert commit.aliases == [f"commit:local/{commit.id}"]
     assert provider.records("git-history.py", str(root), "2026-09-02T00:00:00Z", "2026-09-03T00:00:00Z") == []
     assert provider.run("git-history.py", str(tmp_path / "absent"), "2026-09-01T00:00:00Z", "x").returncode == 1
     assert json.loads(provider.run("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z").stdout)
+
+
+def test_people_and_repository_identities_join_across_providers(
+    provider: Provider, tmp_path: Path, base: Store
+) -> None:
+    root = tmp_path / "code"
+    (root / "project/.git").mkdir(parents=True)
+    provider.install(
+        "git",
+        [
+            {"match": ["remote"], "stdout": "git@github.com:Owner/Project.git\n"},
+            {
+                "match": ["log"],
+                "stdout": "abc\u00002026-09-01T10:00:00Z\u0000Owner@Example.invalid\u0000Keep evidence\u0000",
+            },
+        ],
+    )
+    commits = provider.records("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    assert "repo:github.com/owner/project" in commits[0].links
+    provider.install(
+        "gws",
+        [
+            {
+                "match": ["events"],
+                "stdout": {
+                    "kind": "calendar#events",
+                    "items": [
+                        {
+                            "id": "event",
+                            "summary": "Review",
+                            "organizer": {"email": "Owner@Example.invalid"},
+                            "attendees": [{"email": "colleague@example.invalid"}],
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    events = provider.records("google-calendar.py", "primary", "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    for source, records in [("git", commits), ("calendar", events)]:
+        base.write(
+            f"records/{source}/one.json",
+            encode(Collection(source=source, captured="2026-09-02T00:00:00Z", records=records).model_dump()),
+        )
+    build(base)
+    result = json.loads(encode(find(base, Query(text="person:email/owner@example.invalid"))))
+    assert {item["source"] for item in result["items"]} == {"git", "calendar"}

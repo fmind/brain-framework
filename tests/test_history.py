@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 
 from fkf.cli import app
 from fkf.evaluate import evaluate
-from fkf.index import CACHE, build
+from fkf.index import build
 from fkf.mcp import server
 from fkf.models import Collection, Query, Record, digest, encode, record_uri
 from fkf.retrieve import context, find, read
@@ -43,17 +43,11 @@ def observations(base: Store) -> tuple[str, str]:
     return uris[0], uris[1]
 
 
-@pytest.mark.parametrize("state", ["missing", "ready", "stale", "corrupt"])
-def test_latest_precedes_relevance_and_time_filtering(base: Store, state: str) -> None:
+def test_latest_precedes_relevance_and_time_filtering(base: Store) -> None:
     old, latest = observations(base)
-    if state != "missing":
-        build(base)
-    if state == "corrupt":
-        base.write(CACHE, b"broken")
-    if state == "stale":
-        base.write("wiki/new.md", b"# Unrelated\n")
+    build(base)
     result = json.loads(encode(find(base, Query(text="retention purge", source="decisions"))))
-    assert result["index"] == state
+    assert result["index"] == "ready"
     assert [(item["uri"], item["snapshot"]) for item in result["items"]] == [(latest, "latest")]
     assert "Keep originals" in result["items"][0]["excerpt"]
     assert not find(base, Query(text="obsolete", source="decisions"))["items"]
@@ -73,6 +67,7 @@ def test_latest_precedes_relevance_and_time_filtering(base: Store, state: str) -
 @pytest.mark.parametrize("operation", ["find", "context"])
 def test_history_is_available_through_cli_and_mcp(base: Store, operation: str) -> None:
     old, _latest = observations(base)
+    build(base)
     result = CliRunner().invoke(app, [operation, "obsolete", "--history", "--base", str(base.root)])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["items"][0]["uri"] == old
@@ -121,4 +116,5 @@ def test_evaluation_can_require_old_evidence_without_promoting_it(base: Store) -
             }
         ),
     )
+    build(base)
     assert evaluate(base)["passed"]

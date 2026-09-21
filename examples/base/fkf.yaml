@@ -1,0 +1,8 @@
+# https://fmind.github.io/fkf/
+version: 1
+id: 0123456789abcdef0123456789abcdef
+name: example
+sources:
+  demo:
+    command: [sources/demo.py, "{{start}}", "{{end}}"]
+    refresh: 3600

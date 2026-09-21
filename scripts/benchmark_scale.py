@@ -57,7 +57,6 @@ def main() -> None:
             store.write(f"wiki/{n}.md", f"# Project {n}\n\n{background}\n\nKeep durable evidence.\n".encode())
         measurements = {}
         for name, operation in [
-            ("fallback", lambda: context(store, Query(text="zirconium"))),
             ("build", lambda: build(store)),
             ("cached_selective", lambda: context(store, Query(text="zirconium"))),
             ("cached_common", lambda: context(store, Query(text="evidence"))),

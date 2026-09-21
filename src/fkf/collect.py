@@ -158,6 +158,7 @@ def collect(
     start: str,
     end: str,
     preview: bool = False,
+    automatic: bool = False,
     runner: Runner = run,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
@@ -180,7 +181,13 @@ def collect(
         try:
             records = TypeAdapter(list[Record]).validate_python(decode(raw))
             document = Collection(
-                source=name, captured=clock().isoformat(), start=start, end=end, records=records, mode=source.mode
+                source=name,
+                captured=clock().isoformat(),
+                start=start,
+                end=end,
+                records=records,
+                mode=source.mode,
+                automatic=automatic,
             )
         except ValidationError as error:
             raise Error("source must emit an array of valid records with unique ids and meaningful titles") from error

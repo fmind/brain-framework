@@ -5,6 +5,7 @@ from __future__ import annotations
 import posixpath
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urlsplit
 
@@ -89,11 +90,45 @@ def section(path: str, data: bytes, fragment: str) -> str:
     return "".join(source_lines[heading.line : end])
 
 
+def validate_wiki(path: str, data: bytes) -> None:
+    """Check authored OKF v0.2 structure; retrieval remains a tolerant consumer."""
+    markdown = parse(path, data)
+    attributes = markdown.attributes
+    filename = PurePosixPath(path).name
+    if filename == "index.md":
+        allowed = {"okf_version"} if path == "wiki/index.md" else set()
+        if attributes.keys() - allowed:
+            raise Error(f"{path}: OKF index frontmatter permits only the bundle-root okf_version")
+    elif filename == "log.md":
+        if attributes:
+            raise Error(f"{path}: keep OKF update logs as dated Markdown, without concept metadata")
+        for heading in markdown.headings:
+            if heading.level == 2:
+                try:
+                    if date.fromisoformat(heading.title).isoformat() != heading.title:
+                        raise ValueError
+                except ValueError:
+                    raise Error(f"{path}: OKF log dates must use YYYY-MM-DD") from None
+    else:
+        if not isinstance(attributes.get("type"), str) or not str(attributes["type"]).strip():
+            raise Error(f"{path}: OKF concepts require a nonempty type in YAML frontmatter")
+        knowledge = note(path, data).knowledge
+        if attributes.get("status", "stable") not in {"draft", "stable", "deprecated"}:
+            raise Error(f"{path}: OKF status must be draft, stable or deprecated")
+        if any(not event.at for event in knowledge.verified):
+            raise Error(f"{path}: OKF verification events require by and at")
+        if any(isinstance(source, str) for source in knowledge.sources):
+            raise Error(f"{path}: OKF sources require mappings with a resource")
+
+
 def reference(path: str, target: str) -> str:
     if urlsplit(target).scheme:
         return target
     name, _, fragment = unquote(target).partition("#")
-    joined = posixpath.normpath(posixpath.join(posixpath.dirname(path), name)) if name else path
+    if name.startswith("/") and path.startswith("wiki/"):
+        joined = posixpath.normpath("wiki/" + name.lstrip("/"))
+    else:
+        joined = posixpath.normpath(posixpath.join(posixpath.dirname(path), name)) if name else path
     if joined.split("/")[0] not in AUTHORED:
         return target
     return joined + ("#" + fragment if fragment else "")
@@ -109,6 +144,8 @@ def note(path: str, data: bytes) -> Item:
     if not knowledge.type:
         defaults: dict[str, NoteType] = {"projects": "project", "tasks": "task", "wiki": "wiki"}
         knowledge.type = defaults[path.split("/")[0]]
+    if path.startswith("wiki/") and PurePosixPath(path).name not in {"index.md", "log.md"} and not knowledge.status:
+        knowledge.status = "stable"
     title = attributes.get(
         "title", next((h.title for h in markdown.headings if h.level == 1), PurePosixPath(path).stem)
     )
@@ -119,7 +156,12 @@ def note(path: str, data: bytes) -> Item:
         raise Error(f"{path}: aliases must be strings")
     if not isinstance(links, list) or not all(isinstance(v, str) for v in links):
         raise Error(f"{path}: links must be strings")
-    summary = attributes.get("summary", "")
+    resource = attributes.get("resource", "")
+    if not isinstance(resource, str):
+        raise Error(f"{path}: resource must be a string")
+    if resource:
+        aliases = [*aliases, reference(path, resource)]
+    summary = attributes.get("summary", attributes.get("description", ""))
     if not isinstance(summary, str):
         raise Error(f"{path}: summary must be a string")
     # H2+ sections are separate retrieval passages, while exact reads retain their parent document.
@@ -154,11 +196,21 @@ def note(path: str, data: bytes) -> Item:
         uri=path,
         kind="note",
         title=title,
-        text="\n\n".join(p.text for p in passages if p.status not in {"superseded", "archived"}) or markdown.body,
+        text="\n\n".join(p.text for p in passages if p.status not in {"superseded", "archived", "deprecated"})
+        or markdown.body,
         path=path,
         aliases=sorted(set(aliases)),
         links=sorted(
-            set(links) | {reference(path, t) for t in [*markdown.links, *knowledge.sources, *knowledge.supersedes] if t}
+            set(links)
+            | {
+                reference(path, t)
+                for t in [
+                    *markdown.links,
+                    *(s if isinstance(s, str) else s.resource for s in knowledge.sources),
+                    *knowledge.supersedes,
+                ]
+                if t
+            }
         ),
         knowledge=knowledge,
         passages=passages,

@@ -12,6 +12,7 @@
           "type": "array"
         },
         "enabled": { "default": true, "title": "Enabled", "type": "boolean" },
+        "lookback": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" },
         "max_bytes": {
           "default": 16777216,
           "maximum": 16777216,
@@ -20,6 +21,8 @@
           "type": "integer"
         },
         "mode": { "default": "window", "enum": ["window", "snapshot"], "title": "Mode", "type": "string" },
+        "overlap": { "default": 300, "maximum": 31536000, "minimum": 0, "title": "Overlap", "type": "integer" },
+        "refresh": { "default": 0, "maximum": 31536000, "minimum": 0, "title": "Refresh", "type": "integer" },
         "timeout": { "default": 120, "maximum": 3600, "minimum": 1, "title": "Timeout", "type": "integer" }
       },
       "required": ["command"],

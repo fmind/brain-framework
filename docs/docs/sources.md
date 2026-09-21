@@ -12,7 +12,7 @@ The core expects one JSON array of normalized records on stdout. Adapters own pr
 }]
 ```
 
-The repository's `adapters/` catalog on GitHub provides reviewed Python collectors for common providers; copy the ones you need into `sources/`. Declare a bare external executable or a helper path beginning with sources/. Arguments are direct argv, never shell-reparsed. Exact placeholders are `{{base}}`, `{{home}}`, `{{start}}`, and `{{end}}`. The executable itself is literal. Use a helper with an explicit shebang for pipelines or provider-specific logic.
+The repository's `examples/sources/` provides three reviewed patterns: local Git history, windowed Calendar events and complete Drive folder snapshots; copy the ones you need into `sources/`. Declare a bare external executable or a helper path beginning with sources/. Arguments are direct argv, never shell-reparsed. Exact placeholders are `{{base}}`, `{{home}}`, `{{start}}`, and `{{end}}`. The executable itself is literal. Use a helper with an explicit shebang for pipelines or provider-specific logic.
 
 ```bash
 # Review fkf.yaml and the selected adapter before running it.
@@ -35,3 +35,30 @@ Adapters should emit a descriptive title and factual text that lets a reader und
 Use a stable `id` within each source across edits and cancellations. Captures of that source/id are observations of the same record, so ordinary retrieval uses the latest known capture and `--history` exposes older ones. Append a new capture after an authorized collection; never rewrite existing records to improve their projection. Historical evidence remains exact and independently readable.
 
 Test projections with synthetic provider data: a useful subject and body, missing optional fields, cancellation or changed status, event time versus modification time, explicit links, and bounded pagination failures. Assert that important facts reach text, not just attributes.
+
+## Incremental refresh
+
+`fkf update --base PATH --dry-run` plans without running commands or writing an index. `fkf update --base PATH` runs only enabled sources with a positive `refresh` interval whose latest successful automatic capture is due, then builds if stale. Sources default to `refresh: 0` (manual only). The interval, `lookback` (first window, default 86400) and `overlap` (default 300) are seconds, validated in `fkf.yaml`; source-only local overrides have the same precedence as command settings.
+
+```yaml
+# https://fmind.github.io/fkf/
+version: 1
+id: aabbccddeeff00112233445566778899
+name: knowledge
+sources:
+  activity:
+    command: [sources/activity.py, "{{start}}", "{{end}}"]
+    refresh: 3600
+    lookback: 86400
+    overlap: 300
+```
+
+A windowed source resumes at its last successful automatic window end minus overlap; a snapshot source requests its configured lookback each time and must return the complete catalog. Failed collections do not advance checkpoints. Other due sources may succeed, and the command exits 1 if any collection failed. No transaction spans a whole batch. Concurrent writers fail rather than corrupting evidence; configure the scheduler to avoid overlapping runs. Captures produced by `update` carry `automatic: true`; manual `collect` captures default to false and never advance or delay automatic progress. Durable automatic captures supply checkpoints, so deleting `.fkf/` loses no progress. Existing unmarked captures remain unchanged and do not seed automatic progress: the first automatic run uses the configured lookback. A collection records an observation even when its records are unchanged. A run with no due sources and a current index writes nothing.
+
+Overlap catches only late arrivals inside the requested window. Provider adapters that query event time cannot promise complete edit/deletion detection; use an explicit wider `collect` window for reconciliation. A long outage can exceed provider limits: reduce the source scope or adjust the adapter to handle the outstanding window before resuming. Manual backfills retain evidence but do not declare an automatic gap covered. Configure a suitable lookback for the first run and review the dry-run before enabling automation.
+
+A base-owned cron, systemd timer, launchd job or team scheduler invokes `fkf update --base /absolute/base`. FKF installs no schedule and upgrades no software. For example, an hourly cron job can call a reviewed `scripts/update.sh` containing `exec /absolute/path/to/fkf update --base /absolute/base`. Give the job the provider CLI environment it needs. Use the scheduler's logs or redirect compact receipts into rotated, private `logs/`; do not record provider output. Prefer one scheduler invocation at a time.
+
+## Shared identities
+
+Use the same literal identity across adapters: `person:email/<lowercase-address>` (UTF-8 percent-encoded, preserving `/ : @ +`, with `~` encoded), `repo:github.com/<lowercase-owner>/<lowercase-repo>`, and provider item ids. Mail, contacts, calendar participants, Git authors, chat senders and document owners can therefore share an email edge. Only source-provided fields establish relationships; no name matching or guessed email-to-GitHub-account mapping occurs. Query an identity directly with `fkf find 'person:email/person@example.invalid'`. The SQLite `edges`, `aliases` and `memberships` tables are derived views of this evidence, not a separate authoritative graph.

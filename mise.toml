@@ -300,14 +300,15 @@ trap 'rm -rf "$tmp"' EXIT
 for distribution in wheel sdist; do
   uv venv --python 3.14 "$tmp/$distribution-venv"
   # Seed the exact locked runtime closure without installing the checkout.
+  # Temporary smoke environments may be on another filesystem; copy without attempting hardlinks.
   VIRTUAL_ENV="$tmp/$distribution-venv" \
-    uv sync --project "$project_root" --locked --offline --no-dev --no-install-project --active
+    uv sync --project "$project_root" --locked --offline --no-dev --no-install-project --active --link-mode copy
 done
 cd "$tmp"
-uv pip install --offline --no-deps --python "$tmp/wheel-venv/bin/python" "$wheel"
+uv pip install --offline --no-deps --link-mode copy --python "$tmp/wheel-venv/bin/python" "$wheel"
 "$tmp/wheel-venv/bin/fkf" --version
 uv pip check --python "$tmp/wheel-venv/bin/python"
-uv pip install --offline --no-deps --python "$tmp/sdist-venv/bin/python" "$sdist"
+uv pip install --offline --no-deps --link-mode copy --python "$tmp/sdist-venv/bin/python" "$sdist"
 "$tmp/sdist-venv/bin/fkf" --version
 uv pip check --python "$tmp/sdist-venv/bin/python"
 # Exercise the installed CLI and derived reads in both artifacts, with no user base or state.

@@ -68,7 +68,7 @@ class Provider:
             "LANG": "C.UTF-8",
         }
         return subprocess.run(  # noqa: S603 - the subject is the adapter's own process boundary
-            [sys.executable, str(ROOT / "adapters" / adapter), *arguments],
+            [sys.executable, str(ROOT / "examples" / "sources" / adapter), *arguments],
             env=env,
             capture_output=True,
             text=True,
@@ -110,7 +110,7 @@ def base(tmp_path: Path) -> Store:
     store.write("fkf.yaml", b"version: 1\nid: aabbccddeeff00112233445566778899\nname: fixture\nsources: {}\n")
     store.write(
         "wiki/project.md",
-        b'---\ntitle: Offline retrieval decision\naliases: ["repo:example/project"]\n---\n# Retrieval\n\nKeep stored reads offline.\n\n## Reason\n\nProvider retention cannot guarantee historical evidence.\n',
+        b'---\ntype: wiki\ntitle: Offline retrieval decision\naliases: ["repo:example/project"]\n---\n# Retrieval\n\nKeep stored reads offline.\n\n## Reason\n\nProvider retention cannot guarantee historical evidence.\n',
     )
     capture = Collection(
         source="meetings",

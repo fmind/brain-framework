@@ -1,0 +1,18 @@
+# https://fmind.github.io/fkf/
+version: 1
+cases:
+  - name: retention-concept
+    query: retention
+    type: Concept
+    expect: [wiki/retention.md]
+    excerpts:
+      wiki/retention.md: [upstream content can disappear]
+  - name: retained-evidence
+    query: "demo:retention"
+    source: demo
+    expect: ["demo:retention"]
+    reads:
+      "demo:retention": [Keep original evidence]
+  - name: absent-evidence
+    query: nonexistent-quasar
+    empty: true

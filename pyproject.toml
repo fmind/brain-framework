@@ -1,3 +1,4 @@
+# https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "fkf"
 version = "7.0.0"
@@ -97,7 +98,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"adapters/**" = [
+"examples/sources/**" = [
   "S603", # Adapters invoke provider CLIs with literal argv lists; no shell is involved.
   "S607", # Provider CLIs are resolved by bare name on the PATH FKF sanitizes.
   "T201", # Adapters print exactly one JSON array to stdout.

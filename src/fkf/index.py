@@ -31,7 +31,7 @@ from fkf.models import (
 )
 from fkf.storage import Store, writer
 
-VERSION = 14
+VERSION = 16
 CACHE = ".fkf/index.sqlite"
 MANIFEST = ".fkf/index.json"
 _STOP = frozenset(
@@ -86,7 +86,7 @@ _STOP = frozenset(
 _SCHEMA = """
 CREATE TABLE entries(uri TEXT PRIMARY KEY, kind TEXT, title TEXT, text TEXT, source TEXT,
                      time TEXT, captured TEXT, path TEXT, key TEXT, is_latest INTEGER NOT NULL DEFAULT 1,
-                     note_type TEXT, status TEXT, reviewed TEXT, effective TEXT);
+                     note_type TEXT, status TEXT, reviewed TEXT, effective TEXT, signals TEXT);
 CREATE INDEX record_versions ON entries(source,key,captured,uri);
 CREATE TABLE captures(path TEXT PRIMARY KEY, source TEXT, captured TEXT, records INTEGER, mode TEXT);
 CREATE INDEX capture_snapshots ON captures(source,mode,captured);
@@ -183,7 +183,7 @@ def populate(connection: sqlite3.Connection, store: Store, names: list[str]) -> 
     for item in corpus(store, names, captures):
         count += 1
         connection.execute(
-            "INSERT INTO entries(uri,kind,title,text,source,time,captured,path,key,note_type,status,reviewed,effective) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO entries(uri,kind,title,text,source,time,captured,path,key,note_type,status,reviewed,effective,signals) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 item.uri,
                 item.kind,
@@ -198,6 +198,7 @@ def populate(connection: sqlite3.Connection, store: Store, names: list[str]) -> 
                 item.knowledge.status,
                 item.knowledge.reviewed,
                 item.knowledge.effective,
+                encode(item.knowledge.signals()).decode(),
             ),
         )
         for passage in item.passages or [Passage(title=item.title, text=item.text)]:
@@ -212,7 +213,10 @@ def populate(connection: sqlite3.Connection, store: Store, names: list[str]) -> 
                 ),
             )
         connection.executemany("INSERT OR IGNORE INTO aliases VALUES(?,?)", ((a, item.uri) for a in item.aliases))
-        connection.executemany("INSERT OR IGNORE INTO edges VALUES(?,?)", ((item.uri, t) for t in item.links))
+        connection.executemany(
+            "INSERT OR IGNORE INTO edges VALUES(?,?)",
+            ((item.uri, t.removeprefix(f"fkf://{config.id}/")) for t in item.links),
+        )
         connection.executemany("INSERT INTO memberships VALUES(?,?)", ((item.uri, p) for p in item.parents))
         connection.executemany(
             "INSERT INTO supersessions VALUES(?,?)",
@@ -284,9 +288,11 @@ def apply_supersessions(connection: sqlite3.Connection) -> None:
     )
 
 
-def build(store: Store) -> dict[str, object]:
+def build(store: Store, *, if_stale: bool = False) -> dict[str, object]:
     config = load(store)
     with writer(store):
+        if if_stale and cache_state(store) == "ready":
+            return {"index": "ready", "changed": False, "path": CACHE}
         before = fingerprints(store)
         hashes = {name: digest(store.read(name)) for name in before}
         connection = sqlite3.connect(":memory:")
@@ -337,13 +343,13 @@ def build(store: Store) -> dict[str, object]:
             raise Error("evidence changed during indexing; retry the build")
         if len(data) > MAX_CORPUS:
             raise Error("index exceeds 512 MiB")
-        # Two replacements may temporarily disagree; readers fall back instead of mixing generations.
+        # Two replacements may temporarily disagree; readers require repair instead of mixing generations.
         store.write(CACHE, data)
         manifest = {"version": VERSION, "cache": list(store.fingerprint(CACHE)), "files": before, "hashes": hashes}
         store.write(MANIFEST, encode(manifest))
         store.write("indexes/structures.json", export)
 
-    return {"entries": count, "bytes": len(data), "path": CACHE}
+    return {"entries": count, "bytes": len(data), "path": CACHE, "changed": True}
 
 
 def _input_state(store: Store, manifest: object, current: dict[str, list[int]]) -> str:
@@ -387,26 +393,17 @@ def cache_state(store: Store) -> str:
 
 @contextmanager
 def database(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
-    """Offline fallback uses the exact same FTS and ranking semantics in memory."""
+    """Open a ready generation read-only; retrieval never builds an index."""
     load(store)
-    state, current = snapshot(store)
+    state, _current = snapshot(store)
+    if state != "ready":
+        raise Error(f"index is {state}; run fkf build for the selected base")
     connection: sqlite3.Connection | None = None
     try:
-        if state == "ready":
-            # Immutable read-only access keeps the opened inode even when a build replaces the file.
-            connection = sqlite3.connect(f"file:{quote(str(store.root / CACHE))}?mode=ro&immutable=1", uri=True)
-            try:
-                connection.execute("PRAGMA trusted_schema=OFF", ())
-                connection.execute("PRAGMA query_only=ON", ())
-                connection.execute("SELECT count(*) FROM search WHERE search MATCH '\"\"'", ()).fetchone()
-            except sqlite3.Error:
-                connection.close()
-                connection = None
-                state = "corrupt"
-        if connection is None:
-            connection = sqlite3.connect(":memory:")
-            populate(connection, store, list(current))
-            connection.execute("PRAGMA query_only=ON", ())
+        # Immutable read-only access keeps the opened inode even when a build replaces the file.
+        connection = sqlite3.connect(f"file:{quote(str(store.root / CACHE))}?mode=ro&immutable=1", uri=True)
+        connection.execute("PRAGMA trusted_schema=OFF", ())
+        connection.execute("PRAGMA query_only=ON", ())
         connection.row_factory = sqlite3.Row
         yield connection, state
     except sqlite3.Error as error:
@@ -423,12 +420,16 @@ def status(store: Store) -> dict[str, object]:
         name: {"enabled": source.enabled, "captures": 0, "records": 0, "latest": ""}
         for name, source in config.sources.items()
     }
-    with database(store) as (connection, state):
-        # A capture with zero records is still a fresh observation, so freshness comes from capture files.
-        rows = connection.execute(
-            "SELECT source, count(*), sum(records), max(captured) FROM captures GROUP BY source", ()
-        ).fetchall()
-    for source, captures, records, latest in rows:
+    # Diagnostics remain available without an index and never construct an FTS database.
+    state, current = snapshot(store)
+    totals: dict[str, tuple[int, int, str]] = {}
+    for path in current:
+        if not path.startswith("records/"):
+            continue
+        capture = document(store, path)
+        count, records, latest = totals.get(capture.source, (0, 0, ""))
+        totals[capture.source] = (count + 1, records + len(capture.records), max(latest, capture.captured))
+    for source, (captures, records, latest) in totals.items():
         entry = sources.setdefault(source, {"enabled": False, "captures": 0, "records": 0, "latest": ""})
         entry.update({"captures": captures, "records": records, "latest": latest})
     return {"name": config.name, "base": {"id": config.id, "name": config.name}, "index": state, "sources": sources}
@@ -484,25 +485,27 @@ def search(connection: sqlite3.Connection, query: Query) -> list[dict[str, objec
         UNION ALL SELECT uri,'','',0.0,NULL FROM entries WHERE :text='*' AND :within!=''
       ), scored AS (
         SELECT e.*,c.fragment,
-          CASE WHEN e.status IN ('superseded','archived') THEN e.status ELSE coalesce(nullif(c.status,''),e.status) END AS passage_status,
+          CASE WHEN e.status IN ('superseded','archived','deprecated') THEN e.status ELSE coalesce(nullif(c.status,''),e.status) END AS passage_status,
           coalesce(c.excerpt,substr(e.text,1,800)) AS excerpt,
           c.score*(CASE WHEN e.kind='note' THEN 3.0 ELSE 1.0 END)
-            *(CASE WHEN e.status IN ('accepted','current') THEN 2.0 ELSE 1.0 END)
+            *(CASE WHEN e.status IN ('accepted','current') OR
+                (e.status='stable' AND (e.reviewed!='' OR json_array_length(e.signals,'$.verified')>0))
+                THEN 2.0 ELSE 1.0 END)
             +8*title_overlap(e.title)+2*body_overlap(c.excerpt) AS score
         FROM candidates c JOIN entries e ON e.uri=c.uri
         WHERE (:source='' OR e.source=:source) AND (:type='' OR e.note_type=:type)
           AND (:within='' OR e.uri IN members)
           AND (:history OR e.is_latest OR e.uri=:text)
-          AND (:history OR :status IN ('superseded','archived') OR
-               (e.status NOT IN ('superseded','archived') AND c.status NOT IN ('superseded','archived')))
+          AND (:history OR :status IN ('superseded','archived','deprecated') OR
+               (e.status NOT IN ('superseded','archived','deprecated') AND c.status NOT IN ('superseded','archived','deprecated')))
           AND (e.kind='note' OR (((:after='' AND :before='') OR e.time!='')
                AND (:after='' OR e.time>=:after) AND (:before='' OR e.time<:before)))
       ), ranked AS (
         SELECT *,row_number() OVER (PARTITION BY uri ORDER BY score DESC,fragment) AS position
         FROM scored WHERE :status='' OR passage_status=:status
       ) SELECT uri,kind,title,excerpt,source,time,captured,score,is_latest,fragment,
-               note_type,passage_status AS status,reviewed,effective,
-               CASE WHEN kind='note' AND fragment='' AND passage_status NOT IN ('superseded','archived') THEN substr(text,1,240) ELSE '' END AS lead,
+               note_type,passage_status AS status,reviewed,effective,signals,
+               CASE WHEN kind='note' AND fragment='' AND passage_status NOT IN ('superseded','archived','deprecated') THEN substr(text,1,240) ELSE '' END AS lead,
                CASE WHEN kind!='note' THEN (SELECT min(alias) FROM aliases WHERE uri=ranked.uri) END AS alias
         FROM ranked WHERE position=1
         ORDER BY CASE WHEN :order='recent' THEN time ELSE '' END DESC,score DESC,captured DESC,uri LIMIT :limit
@@ -512,6 +515,10 @@ def search(connection: sqlite3.Connection, query: Query) -> list[dict[str, objec
     items = []
     for row in matches:
         item = dict(row)
+        signals = decode(item.pop("signals").encode())
+        if not isinstance(signals, dict):
+            raise Error("invalid knowledge signals in index; rebuild it")
+        item.update(signals)
         lead = item.pop("lead")
         passage = item["excerpt"]
         if lead and lead not in passage and passage not in lead:

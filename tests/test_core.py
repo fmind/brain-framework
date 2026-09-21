@@ -35,26 +35,36 @@ def read(store: Store, uri: str) -> dict[str, Any]:
     return json.loads(encode(service_read(store, uri)))
 
 
-def test_decision_recovery_and_differential_fallback(base: Store) -> None:
-    query = Query(text="offline retrieval")
-    fallback = find(base, query)
-    assert fallback["index"] == "missing"
-    report = build(base)
-    assert report["entries"] == 3
-    indexed = find(base, query)
-    assert indexed["index"] == "ready"
-    assert indexed["items"] == fallback["items"]
-    assert indexed["items"][0]["uri"] == "wiki/project.md"
-    base.write(CACHE, b"broken")
-    corrupt = find(base, query)
-    assert corrupt["index"] == "corrupt"
-    assert corrupt["items"] == fallback["items"]
+@pytest.mark.parametrize("state", ["missing", "stale", "corrupt"])
+def test_retrieval_requires_explicit_index_repair(base: Store, state: str) -> None:
+    if state != "missing":
+        build(base)
+    if state == "stale":
+        base.write("wiki/new.md", b"# New evidence")
+    if state == "corrupt":
+        base.write(CACHE, b"broken")
+    before = {path: base.read(path) for path in base.files(".fkf")}
+    for operation in (
+        lambda: find(base, Query(text="offline")),
+        lambda: context(base, Query(text="offline")),
+        lambda: read(base, "meeting:decision-1"),
+    ):
+        with pytest.raises(Error, match=f"index is {state}; run fkf build"):
+            operation()
+    assert {path: base.read(path) for path in base.files(".fkf")} == before
+    assert "Keep stored" in read(base, "wiki/project.md")["text"]
+    assert read(base, "records/meetings/fixture.json")["collection"]["records"]
+    build(base)
+    assert find(base, Query(text="offline retrieval"))["items"][0]["uri"] == "wiki/project.md"
 
 
 def test_stale_changed_added_removed_notes(base: Store) -> None:
     build(base)
     base.write("wiki/new.md", b"# New decision\n\nUse simpler retrieval.\n")
     assert cache_state(base) == "stale"
+    with pytest.raises(Error, match="stale; run fkf build"):
+        find(base, Query(text="simpler"))
+    build(base)
     assert find(base, Query(text="simpler"))["items"][0]["uri"] == "wiki/new.md"
     build(base)
     base.write("wiki/new.md", b"# Superseded\n\nUse durable files.\n")
@@ -64,7 +74,7 @@ def test_stale_changed_added_removed_notes(base: Store) -> None:
     assert cache_state(base) == "stale"
 
 
-def test_touch_is_fresh_and_manifest_damage_falls_back(base: Store) -> None:
+def test_touch_is_fresh_and_manifest_damage_requires_repair(base: Store) -> None:
     build(base)
     path = base.root / "wiki/project.md"
     os.utime(path, ns=(1, 1))
@@ -72,6 +82,9 @@ def test_touch_is_fresh_and_manifest_damage_falls_back(base: Store) -> None:
     for value in [b"null", b"[]", b"{}", b'{"version":1,"files":null}', b"invalid"]:
         base.write(MANIFEST, value)
         assert cache_state(base) == "corrupt"
+        with pytest.raises(Error, match="corrupt; run fkf build"):
+            find(base, Query(text="offline"))
+        build(base)
         assert find(base, Query(text="offline"))["items"]
 
 
@@ -90,6 +103,7 @@ def test_exact_identity_source_filter_time_and_empty_query(base: Store) -> None:
 @pytest.mark.parametrize("budget", [128, 129, 256, 850, 4096])
 def test_context_budget_includes_notice_receipt_and_multibyte_text(base: Store, budget: int) -> None:
     base.write("wiki/unicode.md", ("# Retrieval\n\n" + "retrieval été 日本語 " * 500).encode())
+    build(base)
     pack = context(base, Query(text="retrieval"), budget)
     assert len(encode(pack)) <= budget * 4
     assert pack["notice"]
@@ -103,6 +117,7 @@ def test_invalid_budget(base: Store, budget: int) -> None:
 
 
 def test_exact_reads_notes_fragments_captures_aliases_and_missing(base: Store) -> None:
+    build(base)
     assert "Provider retention" in read(base, "wiki/project.md#reason")["text"]
     assert "Keep stored" in read(base, "repo:example/project")["text"]
     stored = read(base, "meeting:decision-1")
@@ -140,8 +155,11 @@ def test_concurrent_change_keeps_the_open_generation_and_is_named_afterwards(bas
         base.write("wiki/concurrent.md", b"# Concurrent edit\n\nHelium evidence.\n")
         assert state == "ready"
         assert connection.execute("SELECT count(*) FROM entries").fetchone()[0] == 3
+    with pytest.raises(Error, match="stale; run fkf build"):
+        find(base, Query(text="helium"))
+    build(base)
     later = find(base, Query(text="helium"))
-    assert later["index"] == "stale"
+    assert later["index"] == "ready"
     assert later["items"][0]["uri"] == "wiki/concurrent.md"
 
 
@@ -151,6 +169,7 @@ def test_read_only_index_survives_a_rebuild_while_open(base: Store) -> None:
         base.write("wiki/replaced.md", b"# Replaced generation\n")
         build(base)
         assert connection.execute("SELECT count(*) FROM entries").fetchone()[0] == 3
+    build(base)
     assert find(base, Query(text="replaced"))["index"] == "ready"
 
 
@@ -202,6 +221,7 @@ cases:
     empty: true
 """,
     )
+    build(base)
     assert evaluate(base)["passed"]
     base.write(
         "queries.yaml",
@@ -214,6 +234,7 @@ cases:
     excerpts: {wiki/project.md: [missing text]}
 """,
     )
+    build(base)
     assert not evaluate(base)["passed"]
     for data in [b"cases: []", b"cases: [{name: bad, query: lunch}]"]:
         base.write("queries.yaml", data)
@@ -337,6 +358,7 @@ def test_discovery_and_state_boundary(base: Store, monkeypatch: pytest.MonkeyPat
 
 
 def test_precise_unknown_identity_does_not_match_shared_words(base: Store) -> None:
+    build(base)
     assert not find(base, Query(text="repo:example/absent"))["items"]
     assert "Provider retention" in read(base, "repo:example/project#reason")["text"]
 
@@ -349,6 +371,7 @@ def test_windows_recent_order_and_capture_deduplication(base: Store) -> None:
     for day in (1, 2):
         capture = Collection(source="timeline", captured=f"2026-09-0{day}T00:00:00Z", records=records)
         base.write(f"records/timeline/{day}.json", encode(capture.model_dump()))
+    build(base)
     result = find(base, Query(text="retrieval", source="timeline", order="recent"))["items"]
     assert len(result) == 2
     assert result[0]["time"] == "2026-09-01T00:00:00.000000Z"
@@ -361,11 +384,13 @@ def test_windows_recent_order_and_capture_deduplication(base: Store) -> None:
 
 
 def test_capture_references_bind_original_bytes(base: Store) -> None:
+    build(base)
     original = read(base, "meeting:decision-1")
     path = original["path"]
     raw = base.read(path)
     # Re-serialization changes immutable bytes even when the decoded meaning agrees.
     base.write(path, raw + b" ")
+    build(base)
     replacement = read(base, "meeting:decision-1")
     assert replacement["uri"] != original["uri"]
     with pytest.raises(Error, match="not found"):
@@ -377,6 +402,7 @@ def test_summary_and_authored_metadata_are_searchable(base: Store) -> None:
         "wiki/metadata.md",
         b"---\ntitle: Project\nsummary: Keep the xenon decision.\ntopic: zirconium\n---\n# Project\n",
     )
+    build(base)
     assert find(base, Query(text="zirconium"))["items"][0]["uri"] == "wiki/metadata.md"
     assert "Keep the xenon decision" in context(base, Query(text="xenon"))["items"][0]["excerpt"]
 
@@ -388,6 +414,7 @@ def test_microsecond_window_boundary_and_deep_traversal(base: Store) -> None:
         records=[Record(id="fraction", title="Precise observation", time="2026-09-01T00:00:00.000001Z")],
     )
     base.write("records/precise/capture.json", encode(capture.model_dump()))
+    build(base)
     assert find(base, Query(text="precise", after="2026-09-01T00:00:00Z"))["items"]
     assert not find(base, Query(text="precise", before="2026-09-01T00:00:00Z"))["items"]
     deep = base.root / "wiki"
@@ -426,6 +453,7 @@ def test_context_delivers_late_passage_and_fits_small_budget(base: Store) -> Non
         "wiki/long.md",
         ("# Planning\n\n" + "Background material. " * 100 + "\nZirconium requires retained backups.").encode(),
     )
+    build(base)
     for budget in (128, 256, 850):
         pack = context(base, Query(text="zirconium"), budget)
         assert pack["items"]
@@ -436,6 +464,7 @@ def test_context_delivers_late_passage_and_fits_small_budget(base: Store) -> Non
 
 def test_literal_discovery_preserves_domain_words_and_single_letters(base: Store) -> None:
     base.write("wiki/languages.md", b"# Active changes\n\nC and R interoperability\n")
+    build(base)
     for text in ("active", "changes", "C", "R"):
         assert find(base, Query(text=text))["items"][0]["uri"] == "wiki/languages.md"
 
@@ -445,6 +474,7 @@ def test_before_only_excludes_undated_records(base: Store) -> None:
         source="undated", captured="2026-09-01T00:00:00Z", records=[Record(id="one", title="Unknown date")]
     )
     base.write("records/undated.json", encode(capture.model_dump()))
+    build(base)
     assert not find(base, Query(text="unknown", before="2026-01-01T00:00:00Z"))["items"]
 
 
@@ -455,8 +485,11 @@ def test_same_size_edit_with_preserved_mtime_invalidates_cache(base: Store) -> N
     info = path.stat()
     path.write_bytes(b"# Potassium\n")
     os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+    with pytest.raises(Error, match="stale; run fkf build"):
+        find(base, Query(text="potassium"))
+    build(base)
     result = find(base, Query(text="potassium"))
-    assert result["index"] == "stale"
+    assert result["index"] == "ready"
     assert result["items"][0]["uri"] == "wiki/edit.md"
     assert not find(base, Query(text="zirconium"))["items"]
 
@@ -488,12 +521,14 @@ def test_short_evidence_preserves_answer_beyond_matched_words(base: Store) -> No
             + "Queryneedle locates this decision."
         ).encode(),
     )
+    build(base)
     result = context(base, Query(text="queryneedle"))
     assert "preserve originals" in result["items"][0]["excerpt"]
 
 
 def test_subject_words_survive_cleanup_and_diacritics_never_separate_terms(base: Store) -> None:
     base.write("wiki/resume.md", "# Résumé\n\nCareer summary for the réunion with the team.\n".encode())
+    build(base)
     for text in ("update my resume with fkf", "resume", "RÉSUMÉ", "reunion", "réunion"):
         assert find(base, Query(text=text))["items"][0]["uri"] == "wiki/resume.md", text
     assert "réunion" in context(base, Query(text="reunion"), 128)["items"][0]["excerpt"]
@@ -508,6 +543,7 @@ def test_long_note_keeps_authored_lead_and_matching_passage(base: Store) -> None
             + "\nQueryneedle explains the constraints."
         ).encode(),
     )
+    build(base)
     result = context(base, Query(text="queryneedle"))
     assert "Keep durable originals" in result["items"][0]["excerpt"]
     assert "Queryneedle" in result["items"][0]["excerpt"]

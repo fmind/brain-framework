@@ -14,6 +14,10 @@ Describe the requested outcome, scope and constraints.
 - [ ] Validate the observable outcome and realistic failure cases.
 - [ ] Record the outcome and recommend useful project, wiki or skill learning.
 
+## Resume
+
+Last verified state, decisions, remaining blockers and the exact next action. Update before stopping so another session can continue without repeating completed work.
+
 ## Inputs
 
 Keep task inputs in `inputs/`; link to canonical evidence instead of copying it unnecessarily.

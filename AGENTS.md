@@ -5,13 +5,13 @@ FKF is one typed Python package and one console command. Its purpose is to prese
 ## Scope
 
 - Keep only the current configuration and evidence format. Do not add legacy code, migration tooling, provider SDKs, or compatibility command surfaces.
-- `projects/`, `tasks/` and `wiki/` contain authored Markdown. Tasks use `tasks/<task>/TASK.md` plus `inputs/` and `outputs/`. `records/` contains immutable version-1 normalized captures. `.fkf/` is a disposable SQLite cache; `indexes/` holds a generated source-structure export. `scripts/` holds operation scripts and `sources/` holds collectors. One `fkf.yaml` defines the base; ignored `fkf.local.yaml` may override source settings only.
+- `projects/`, `tasks/` and `wiki/` contain authored Markdown; wiki concepts follow OKF v0.2. Tasks use `tasks/YYYY-MM-DD_slug/TASK.md` plus `inputs/` and `outputs/`. `records/` contains immutable version-1 normalized captures. `.fkf/` is a disposable SQLite cache; `indexes/` holds a generated source-structure export. `scripts/` holds operation scripts, `sources/` collectors, `configs/` maintained inputs, optional root `inputs/` original imports, `tests/` base-owned tests and synthetic fixtures, and `skills/` workflow packages; optional `logs/` holds bounded operational receipts. One `fkf.yaml` defines the base; ignored `fkf.local.yaml` may override source settings only.
 - Sources emit records with `id`, `title`, optional `text`, `time`, `url`, `links`, `aliases`, and `attributes`. Provider-specific projection belongs in base-owned adapters. No provider SDK, model, embedding, scheduler, harness installer, or general plugin framework belongs in the core.
 - CLI and MCP call the same services. MCP exposes exactly find, context, and read, with no execution or write operation.
 
 ## Invariants
 
-- Ordinary retrieval is offline, bounded and reproducible. FTS uses literal terms; SQL uses parameters. Cached and in-memory fallback paths use the same indexing and ranking semantics. Replies name missing, stale or corrupt caches.
+- Ordinary retrieval is offline, bounded and reproducible. FTS uses literal terms; SQL uses parameters. Indexed retrieval requires a ready cache. Name missing, stale or corrupt caches and instruct the caller to run `fkf build`; never rebuild implicitly during a read. Direct authored and capture-file reads stay available for recovery.
 - Every selected reference resolves to durable evidence. References to a captured record bind the exact capture bytes and record id, independently of model defaults. Explicit aliases and authored links provide identity and relationship evidence; prose and human-name similarity do not create graph edges.
 - Context's complete JSON plus final newline must fit four UTF-8 bytes per budget unit. Reject unsupported budgets and oversized exact reads rather than truncating evidence silently.
 - Use the confined Store for base access. Refuse symlinks and special files below the base, bound traversal and bytes, write atomically, and serialize writers by physical base identity. Private lock state stays outside the base.
@@ -20,17 +20,18 @@ FKF is one typed Python package and one console command. Its purpose is to prese
 
 ## Code map
 
-| Module         | Responsibility                                                                    |
-| -------------- | --------------------------------------------------------------------------------- |
-| models.py      | Strict evidence, configuration, query and output models; bounded JSON.            |
-| storage.py     | Confined filesystem operations, private state, physical-base lock.                |
-| config.py      | Strict YAML and source-only local overrides.                                      |
-| collect.py     | Process boundary and immutable normalized collection.                             |
-| index.py       | Markdown projections, explicit links, SQLite build/freshness/fallback and search. |
-| retrieve.py    | Exact evidence reads and byte-budgeted context.                                   |
-| evaluate.py    | Delivered-reference and answer-bearing-text acceptance cases.                     |
-| cli.py, mcp.py | Thin public adapters.                                                             |
-| markdown.py    | Shared Markdown projection, heading identities and exact section boundaries.      |
+| Module         | Responsibility                                                               |
+| -------------- | ---------------------------------------------------------------------------- |
+| models.py      | Strict evidence, configuration, query and output models; bounded JSON.       |
+| storage.py     | Confined filesystem operations, private state, physical-base lock.           |
+| config.py      | Strict YAML and source-only local overrides.                                 |
+| collect.py     | Process boundary and immutable normalized collection.                        |
+| index.py       | Markdown projections, explicit links, SQLite build/freshness and search.     |
+| retrieve.py    | Exact evidence reads and byte-budgeted context.                              |
+| update.py      | Explicit due-source refresh; automatic capture checkpoints, no scheduler.    |
+| evaluate.py    | Delivered-reference and answer-bearing-text acceptance cases.                |
+| cli.py, mcp.py | Thin public adapters.                                                        |
+| markdown.py    | Shared Markdown projection, heading identities and exact section boundaries. |
 
 ## Workflow
 
@@ -42,7 +43,7 @@ FKF is one typed Python package and one console command. Its purpose is to prese
 
 ## Skills
 
-`skills/` contains reusable user workflows distributed as Markdown resources, and `adapters/` contains reviewed standalone Python collectors that bases copy into `sources/`. `.agents/skills/fkf-contribute/` owns repository maintenance. Keep each workflow in one place; the Python package neither bundles nor installs skills or adapters. Adapters use the standard library only, call provider CLIs with literal argv, fail closed before partial output, and are tested with fake providers in `tests/test_adapters_*.py`. Start contribution work with that local skill.
+`skills/` contains reusable user workflows distributed as Markdown resources, and `examples/sources/` contains three reviewed standalone Python collectors that bases copy into `sources/`. `.agents/skills/fkf-contribute/` owns repository maintenance. Keep each workflow in one place; the Python package neither bundles nor installs skills or adapters. Adapters use the standard library only, call provider CLIs with literal argv, fail closed before partial output, and are tested with fake providers in `tests/test_adapters_*.py`. Start contribution work with that local skill.
 
 ## Active learning
 
