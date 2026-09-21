@@ -2,11 +2,17 @@
 
 All notable changes to `fkf` are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
-## [v7.0.0](https://github.com/fmind/fkf/releases/tag/v7.0.0) - 2026-09-21
+## [v7.0.1](https://github.com/fmind/fkf/releases/tag/v7.0.1) - 2026-09-21
+
+First published v7 release. The v7.0.0 candidate stopped at the macOS package gate before publication; its tag remains unchanged.
+
+### Fixed
+
+- Resolve temporary smoke environments to physical paths, including macOS `/var`, so strict private-state symlink protection remains enabled during distribution checks. Copy packages explicitly when temporary environments and the cache use different filesystems.
 
 ### Breaking changes
 
-- Replace the Go implementation with one typed Python package and the `fkf` command. Python 3.14 or newer on Linux or macOS is required; install with `uv tool install --python 3.14 'fkf==7.0.0'`.
+- Replace the Go implementation with one typed Python package and the `fkf` command. Python 3.14 or newer on Linux or macOS is required; install with `uv tool install --python 3.14 'fkf==7.0.1'`.
 - Use one current base format: `fkf.yaml`, authored `projects/`, `wiki/` and `tasks/`, immutable normalized `records/`, and disposable `.fkf/` and `indexes/`. Preserve a v6 base and executable separately; there is no in-place migration or compatibility command.
 - Remove bundled provider integrations, presets, harness installation, execution approval registries and learning proposal machinery. Bases own collectors, schedules and knowledge editing. Reusable Markdown skills and three source examples are maintained separately from the Python distribution.
 - Require an explicitly built, ready cache for indexed retrieval. Missing, stale or corrupt caches name the `fkf build` recovery command; direct authored and capture-file reads remain available.

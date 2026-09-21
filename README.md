@@ -9,7 +9,7 @@ Use FKF to resume a project, recover why a decision was made, or give an agent c
 ## Start locally
 
 ```bash
-uv tool install --python 3.14 'fkf==7.0.0'
+uv tool install --python 3.14 'fkf==7.0.1'
 fkf init ~/knowledge
 fkf build --base ~/knowledge
 fkf context "project decisions" --base ~/knowledge --budget 850

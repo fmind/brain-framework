@@ -275,6 +275,7 @@ shell = "bash -c"
 run = '''
 set -euo pipefail
 fkf_test_home=$(mktemp -d)
+fkf_test_home=$(cd "$fkf_test_home" && pwd -P)
 trap 'rm -rf "$fkf_test_home"' EXIT
 env -u FKF_BASE HOME="$fkf_test_home" XDG_STATE_HOME="$fkf_test_home/state" \
   uv run pytest --basetemp="$fkf_test_home/pytest" \
@@ -296,6 +297,8 @@ project_root=$PWD
 wheel="$project_root/$(find dist -maxdepth 1 -type f -name 'fkf-*.whl')"
 sdist="$project_root/$(find dist -maxdepth 1 -type f -name 'fkf-*.tar.gz')"
 tmp=$(mktemp -d)
+# macOS /var and user-supplied TMPDIR may be symlinks; private state needs the physical path.
+tmp=$(cd "$tmp" && pwd -P)
 trap 'rm -rf "$tmp"' EXIT
 for distribution in wheel sdist; do
   uv venv --python 3.14 "$tmp/$distribution-venv"

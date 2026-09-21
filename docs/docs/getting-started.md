@@ -3,7 +3,7 @@
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then install FKF on Linux or macOS. uv supplies Python 3.14 if needed. If `fkf` is not on PATH, run `uv tool update-shell` and open a new shell.
 
 ```bash
-uv tool install --python 3.14 'fkf==7.0.0'
+uv tool install --python 3.14 'fkf==7.0.1'
 fkf --version
 ```
 

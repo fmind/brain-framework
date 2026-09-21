@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import sys
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 from mcp.types import CallToolResult, TextContent
@@ -127,7 +128,7 @@ def test_console_errors_are_private_and_on_stderr(base: Store) -> None:
     assert "timezone" in dated.stderr
     version = subprocess.run([sys.executable, "-m", "fkf", "--version"], capture_output=True, text=True, check=False)
     assert version.returncode == 0
-    assert version.stdout.strip() == "7.0.0"
+    assert version.stdout.strip() == distribution_version("fkf")
 
 
 def test_initialization_obeys_existing_physical_writer_lock(tmp_path: Path) -> None:
@@ -155,7 +156,8 @@ def test_mcp_stdio_handshake_and_read_only_roundtrip(base: Store, tmp_path: Path
             stdio_client(parameters) as (incoming, outgoing),
             ClientSession(incoming, outgoing, read_timeout_seconds=10) as session,
         ):
-            await session.initialize()
+            initialized = await session.initialize()
+            assert initialized.server_info.version == distribution_version("fkf")
             listing = await session.list_tools()
             assert {tool.name for tool in listing.tools} == {"find", "context", "read"}
             found = await session.call_tool("context", {"query": "offline", "budget": 850})
