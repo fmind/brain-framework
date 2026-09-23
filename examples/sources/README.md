@@ -2,11 +2,11 @@
 
 Standalone collectors for common providers. Copy the ones you need into a base's `sources/`, declare them in `fkf.yaml`, and adapt and test them there; they then belong to the base. The Python package neither bundles nor installs them.
 
-| Collector                 | Arguments            | Records                                                                                                  |
-| ------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------- |
-| `git-history.py`          | `ROOT START END`     | Commits, author email identities and recognized GitHub repository links, one or two levels below `ROOT`. |
-| `google-calendar.py`      | `CALENDAR START END` | Events of one calendar, including cancellations, all-day boundaries and participant email identities.    |
-| `google-drive-folders.py` | `[START END]`        | The complete folder catalog, each folder linked to its parents; the window is ignored.                   |
+| Collector                 | Arguments                         | Records                                                                                                                                                                         |
+| ------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git-history.py`          | `ROOT START END [--skip REPO]...` | Commits, author email identities and recognized GitHub repository links, one or two levels below `ROOT`; skips hidden repositories, named repositories and bot or test authors. |
+| `google-calendar.py`      | `CALENDAR START END`              | Events of one calendar, including cancellations, all-day boundaries and participant email identities.                                                                           |
+| `google-drive-folders.py` | `[START END]`                     | The complete folder catalog, each folder linked to its parents; the window is ignored.                                                                                          |
 
 ```yaml
 # https://fmind.github.io/fkf/

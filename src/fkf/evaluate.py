@@ -56,7 +56,7 @@ def evaluate(store: Store, path: str = "queries.yaml") -> dict[str, object]:
             status=case.status,
             limit=case.limit,
         )
-        items = cast("list[dict[str, object]]", search([store], query)["items"])
+        items = cast("list[dict[str, object]]", search([store], query, counted=False)["items"])
         refs = [str(item["ref"]) for item in items]
         delivered = "\n".join(f"{item.get('title', '')}\n{item.get('excerpt', '')}" for item in items)
         missing = [ref for ref in case.expect if not _matches(ref, refs)]

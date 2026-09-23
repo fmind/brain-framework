@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
 import pytest
 
 from conftest import records_file
-from fkf import index
+from fkf import index, usage
 from fkf.config import register
 from fkf.models import Error, Query, Record, timestamp
 from fkf.retrieve import read, search
-from fkf.storage import Store, writer
+from fkf.storage import Store, state_store, writer
 
 
 def refs(store: Store | list[Store], text: str = "", **options: object) -> list[str]:
@@ -191,3 +192,38 @@ def test_oversized_replies_are_rejected_not_truncated(base: Store) -> None:
     base.write("wiki/large.md", b"# Large\n\n" + b"x" * (5 << 20))
     with pytest.raises(Error, match="exceeds"):
         read([base], "wiki/large.md")
+
+
+def test_status_lists_active_projects_due_for_review(base: Store) -> None:
+    base.write("projects/fresh.md", b"---\nstatus: active\nupdated: 2026-09-20\n---\n# Fresh\n")
+    base.write("projects/undated.md", b"---\nstatus: blocked\n---\n# Undated\n")
+    base.write("projects/closed.md", b"---\nstatus: done\nupdated: 2026-01-01\n---\n# Closed\n")
+    review = index.status(base, now=datetime(2026, 9, 22, tzinfo=UTC))["review"]
+    assert review == [
+        {"ref": "projects/undated.md", "title": "Undated", "updated": ""},
+        {"ref": "projects/offline.md", "title": "Offline retrieval", "updated": "2026-09-01"},
+    ]
+
+
+def test_usage_counts_searches_empty_results_and_reads_without_queries(base: Store) -> None:
+    refs(base, "offline")
+    refs(base, "zzabsent")
+    read([base], "meetings:lunch")
+    search([base], Query(text="offline"), counted=False)
+    log = state_store(base.root).root / usage.USAGE
+    assert "offline" not in log.read_text()
+    assert usage.summary(base) == {
+        "7d": {"search": 2, "empty": 1, "read": 1},
+        "30d": {"search": 2, "empty": 1, "read": 1},
+    }
+    later = datetime.now(UTC) + timedelta(days=10)
+    assert usage.summary(base, now=later)["7d"] == {"search": 0, "empty": 0, "read": 0}
+    log.write_text(log.read_text() + "not json\n" + '{"at": "x"}\n')
+    assert usage.summary(base)["30d"]["search"] == 2
+    log.write_bytes(b'{"at":"2026-01-01T00:00:00+00:00","op":"search","results":1}\n' * 40_000)
+    usage.note(base, "search", 3)
+    assert log.stat().st_size <= usage.LIMIT // 2 + 200
+    log.unlink()
+    log.mkdir()
+    usage.note(base, "search", 1)  # an unwritable log never breaks retrieval
+    assert usage.summary(base)["7d"]["search"] == 0

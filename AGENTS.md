@@ -14,7 +14,7 @@ FKF is one typed Python package and one console command. Its purpose is to keep 
 - Search and read never run collectors or contact the network. They may refresh the disposable cache incrementally; a file that fails to parse is skipped and reported, never fatal. FTS uses quoted literal terms; SQL uses parameters.
 - Every result carries a readable ref that resolves to a file: `path`, `path#section` or `source:id`. The cache may locate a record, but the answer always comes from the record file.
 - Explicit aliases and links provide identity and relationship evidence; prose and name similarity never create relations.
-- Use the confined Store for base access. Refuse symlinks and special files below the base, bound traversal and bytes, write atomically, and serialize writers by physical base identity. Private lock, run state and collector logs stay outside the base.
+- Use the confined Store for base access. Refuse symlinks and special files below the base, bound traversal and bytes, write atomically, and serialize writers by physical base identity. Private lock, run state, usage counts and collector logs stay outside the base; usage never records queries or refs.
 - Collection is explicit, uses direct configured argv from the base root, and requires per-machine trust in the user configuration. Remove loader-injection variables, kill process groups on timeout, cancellation or output overflow, write nothing on failure, and keep provider stdout/stderr out of errors (stderr goes to a bounded private log).
 - Files are the only source of truth. Deleting `.fkf/` or the state directory loses nothing but convenience.
 
@@ -33,6 +33,7 @@ FKF is one typed Python package and one console command. Its purpose is to keep 
 | update.py      | Collect due sources of trusted bases, then refresh caches.                   |
 | validate.py    | Whole-base offline checks.                                                   |
 | evaluate.py    | Owner-written retrieval cases.                                               |
+| usage.py       | Local usage counts in private state: operation and result count, no query.   |
 | cli.py, mcp.py | Thin public adapters.                                                        |
 
 ## Workflow

@@ -11,7 +11,7 @@ import typer
 from pydantic import ValidationError
 from typer.completion import completion_init
 
-from fkf import __version__, index
+from fkf import __version__, index, usage
 from fkf.collect import collect, log_path, state
 from fkf.config import load, may_collect, one, register, select
 from fkf.evaluate import evaluate
@@ -189,7 +189,14 @@ def report(
             sources[name] = {key: value for key, value in entry.items() if value != ""}
         healthy &= not summary["problems"]
         bases.append(
-            {"base": config.name, "path": str(store.root), "collect": may_collect(store), **summary, "sources": sources}
+            {
+                "base": config.name,
+                "path": str(store.root),
+                "collect": may_collect(store),
+                **summary,
+                "sources": sources,
+                "usage": usage.summary(store),
+            }
         )
     emit({"healthy": healthy, "bases": bases})
     if check and not healthy:

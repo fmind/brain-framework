@@ -5,7 +5,7 @@
 FKF is a small, file-based knowledge framework for a person or a team. You write decisions and reusable knowledge in Markdown; collectors on your laptop turn mail, calendar, Git, chat or anything else into JSON Lines records; one command lets any coding agent search both, offline, and read the exact source behind an answer. Python, one package, no model, no server.
 
 ```bash
-uv tool install --python 3.14 'fkf==8.0.1'
+uv tool install --python 3.14 'fkf==8.1.0'
 fkf init ~/knowledge                       # creates and registers a base
 fkf search "retention decision"            # words, from any directory
 fkf search --since yesterday               # what happened, newest first
@@ -31,14 +31,14 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first; it 
 
 ## Commands
 
-| Command                                  | Purpose                                                                     |
-| ---------------------------------------- | --------------------------------------------------------------------------- |
-| `init PATH`, `register PATH [--collect]` | Create a base, or add an existing one (a cloned team base) to your search.  |
-| `search [QUERY] [--since] [--until]`     | Search words or identities, or list by time, source, type or status.        |
-| `read REF`                               | Read a note, a section, a record or an identity.                            |
-| `update [--dry-run]`, `collect SOURCE`   | Collect due sources, or run one source now for a backfill or debugging.     |
-| `status [--check]`, `validate`, `eval`   | Freshness and errors, broken links and records, retrieval regression cases. |
-| `mcp`, `build`, `schema`                 | Read-only MCP server, full cache rebuild, `fkf.yaml` JSON Schema.           |
+| Command                                  | Purpose                                                                           |
+| ---------------------------------------- | --------------------------------------------------------------------------------- |
+| `init PATH`, `register PATH [--collect]` | Create a base, or add an existing one (a cloned team base) to your search.        |
+| `search [QUERY] [--since] [--until]`     | Search words or identities, or list by time, source, type or status.              |
+| `read REF`                               | Read a note, a section, a record or an identity.                                  |
+| `update [--dry-run]`, `collect SOURCE`   | Collect due sources, or run one source now for a backfill or debugging.           |
+| `status [--check]`, `validate`, `eval`   | Freshness, errors, notes due for review and usage; broken links; retrieval cases. |
+| `mcp`, `build`, `schema`                 | Read-only MCP server, full cache rebuild, `fkf.yaml` JSON Schema.                 |
 
 ## Personal and team bases
 

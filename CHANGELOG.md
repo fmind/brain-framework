@@ -2,6 +2,17 @@
 
 All notable changes to `fkf` are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v8.1.0](https://github.com/fmind/fkf/releases/tag/v8.1.0) - 2026-09-23
+
+### Added
+
+- `fkf status` lists active or blocked project notes whose `updated` date is more than 14 days old under `review`, as a reminder rather than a failure.
+- `search` and `read` keep local usage counts in the private state directory (time, operation and result count, never the query), summarized by `fkf status` over 7 and 30 days so an owner can see whether agents use a base. Retrieval cases are not counted.
+
+### Changed
+
+- The example Git collector skips hidden repositories, repositories named with `--skip`, and bot or reserved-test-domain authors.
+
 ## [v8.0.1](https://github.com/fmind/fkf/releases/tag/v8.0.1) - 2026-09-23
 
 ### Changed

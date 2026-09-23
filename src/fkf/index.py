@@ -6,6 +6,7 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager, suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -15,6 +16,8 @@ from fkf.models import AUTHORED, DEMOTED, Error, Query, Record
 from fkf.storage import BusyError, Store, writer
 
 SCHEMA = 9
+# Active projects whose note is older than this are listed for review; a reminder, never a failure.
+REVIEW_DAYS = 14
 CACHE = ".fkf/index.sqlite"
 _DDL = """
 CREATE TABLE files(path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, ctime INTEGER, inode INTEGER,
@@ -386,7 +389,9 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in row.items() if value not in ("", None)}
 
 
-def status(store: Store) -> dict[str, object]:
+def status(store: Store, now: datetime | None = None) -> dict[str, object]:
+    """Cache state, counts, skipped files, and active projects whose note has not been updated recently."""
+    cutoff = ((now or datetime.now(UTC)) - timedelta(days=REVIEW_DAYS)).strftime("%Y-%m-%d")
     with database(store) as (connection, state):
         sources = {
             row["source"]: {"records": row["records"], "latest": row["latest"] or ""}
@@ -398,4 +403,12 @@ def status(store: Store) -> dict[str, object]:
         problems = [
             f"{row['path']}: {row['error']}" for row in connection.execute("SELECT * FROM files WHERE error!=''")
         ]
-    return {"index": state, "notes": notes, "sources": sources, "problems": problems}
+        review = [
+            {"ref": row["ref"], "title": row["title"], "updated": row["time"][:10]}
+            for row in connection.execute(
+                """SELECT ref,title,time FROM items WHERE kind='note' AND type='project'
+                   AND status IN ('active','blocked') AND (time='' OR time<?) ORDER BY time,ref""",
+                (cutoff,),
+            )
+        ]
+    return {"index": state, "notes": notes, "sources": sources, "problems": problems, "review": review}

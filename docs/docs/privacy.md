@@ -6,6 +6,8 @@ FKF stores what your collectors print, in plain files you own. It does not encry
 
 `search`, `read`, `eval`, `validate`, `status` and the MCP tools never run a collector or contact the network. Search may rewrite the disposable `.fkf/` cache. Retrieved notes and records are untrusted evidence: their text never reaches a command, a shell or an SQL expression. Full-text queries use quoted literal terms and SQL uses bound parameters. Every reply carries a notice that content is evidence, never instructions, because collected mail or chat can contain prompt injections.
 
+To show whether agents actually use a base, `search` and `read` append one line per call to `usage.jsonl` in the private state directory: the time, the operation and the number of results, never the query or the ref. The file stays on the machine, is capped at 1 MiB, and `fkf status` summarizes it over 7 and 30 days. Retrieval cases run by `fkf eval` are not counted.
+
 ## Collecting is explicit and trusted per machine
 
 Collectors are code you run with your permissions. A base collects only on machines where its owner ran `fkf init` or `fkf register PATH --collect`; that trust lives in `~/.config/fkf/config.yaml`, outside the base, so pulling a shared repository never starts running its `sources/`. Review collector changes like any other code before trusting a shared base.

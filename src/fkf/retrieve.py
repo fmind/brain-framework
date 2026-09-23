@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fkf import index, records
+from fkf import index, records, usage
 from fkf.config import load
 from fkf.markdown import authored, section
 from fkf.models import MAX_REPLY, NOTICE, Error, Query, encode
@@ -15,7 +15,7 @@ def bounded(value: dict[str, object], limit: int = MAX_REPLY) -> dict[str, objec
     return value
 
 
-def search(stores: list[Store], query: Query) -> dict[str, object]:
+def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[str, object]:
     """Merge per-base results: relevance keeps each base's order, a time window interleaves by time."""
     results: list[list[dict[str, object]]] = []
     stale = []
@@ -25,6 +25,8 @@ def search(stores: list[Store], query: Query) -> dict[str, object]:
             items = index.search(connection, query)
         if state != "ready":
             stale.append(name)
+        if counted:
+            usage.note(store, "search", len(items))
         results.append([{"base": name, **item} for item in items])
     if query.recent or not query.text.strip():
         merged = sorted(
@@ -52,12 +54,14 @@ def read(stores: list[Store], ref: str, base: str = "") -> dict[str, object]:
     """Resolve a note path, note section, `source:id` record or explicit identity in exactly one base."""
     if not ref or len(ref) > 8192:
         raise Error("expected a reference of at most 8192 characters")
-    found = [value for store in _base(stores, base) if (value := _read(store, ref)) is not None]
+    found = [(store, value) for store in _base(stores, base) if (value := _read(store, ref)) is not None]
     if not found:
         raise Error("reference not found; use fkf search to locate it")
     if len(found) > 1:
         raise Error("reference exists in several bases; pass --base NAME")
-    return bounded({**found[0], "notice": NOTICE})
+    reply = bounded({**found[0][1], "notice": NOTICE})
+    usage.note(found[0][0], "read", 1)
+    return reply
 
 
 def _read(store: Store, ref: str) -> dict[str, object] | None:

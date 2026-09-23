@@ -96,7 +96,7 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
         subprocess.run(["git", "-C", str(repository), *args], env=env, check=True, capture_output=True)  # noqa: S603,S607
 
     run("init", "-q", "-b", "main")
-    run("config", "user.email", "owner@example.invalid")
+    run("config", "user.email", "owner@fmind.dev")
     run("config", "user.name", "Owner")
     (repository / "note.md").write_text("decision\n")
     run("add", "note.md")
@@ -108,11 +108,21 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
     assert commit.title == "owner/project: feat: keep durable evidence"
     assert commit.time == "2026-09-01T10:00:00.000000Z"
     assert "Because providers forget." in commit.text
-    assert commit.links == ["person:email/owner@example.invalid", "repo:local/owner/project"]
+    assert commit.links == ["person:email/owner@fmind.dev", "repo:local/owner/project"]
     assert commit.aliases == [f"commit:local/{commit.id}"]
     assert provider.records("git-history.py", str(root), "2026-09-02T00:00:00Z", "2026-09-03T00:00:00Z") == []
     assert provider.run("git-history.py", str(tmp_path / "absent"), "2026-09-01T00:00:00Z", "x").returncode == 1
     assert json.loads(provider.run("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z").stdout)
+    # Automated history stays out: bot and test authors, hidden repositories and skipped loops.
+    for email in ("dependabot[bot]@users.noreply.github.com", "test@example.invalid"):
+        run("-c", f"user.email={email}", "commit", "-q", "--allow-empty", "-m", "chore: automated")
+    hidden = root / ".codex" / "memories"
+    hidden.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(hidden), "init", "-q"], env=env, check=True, capture_output=True)  # noqa: S603,S607
+    window = (str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    assert len(provider.records("git-history.py", *window)) == 1
+    assert provider.records("git-history.py", *window, "--skip", "owner/project") == []
+    assert provider.run("git-history.py", *window, "--bad").returncode == 1
 
 
 def test_people_and_repository_identities_join_across_providers(
@@ -126,7 +136,7 @@ def test_people_and_repository_identities_join_across_providers(
             {"match": ["remote"], "stdout": "git@github.com:Owner/Project.git\n"},
             {
                 "match": ["log"],
-                "stdout": "abc\u00002026-09-01T10:00:00Z\u0000Owner@Example.invalid\u0000Keep evidence\u0000",
+                "stdout": "abc\u00002026-09-01T10:00:00Z\u0000Owner@Fmind.dev\u0000Keep evidence\u0000",
             },
         ],
     )
@@ -143,7 +153,7 @@ def test_people_and_repository_identities_join_across_providers(
                         {
                             "id": "event",
                             "summary": "Review",
-                            "organizer": {"email": "Owner@Example.invalid"},
+                            "organizer": {"email": "Owner@Fmind.dev"},
                             "attendees": [{"email": "colleague@example.invalid"}],
                         }
                     ],
@@ -154,6 +164,6 @@ def test_people_and_repository_identities_join_across_providers(
     events = provider.records("google-calendar.py", "primary", "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     for source, records in [("git", commits), ("calendar", events)]:
         records_file(base, source, "undated", records)
-    result = search([base], Query(text="person:email/owner@example.invalid"))
+    result = search([base], Query(text="person:email/owner@fmind.dev"))
     items = cast("list[dict[str, object]]", result["items"])
     assert {item["source"] for item in items} == {"git", "calendar"}

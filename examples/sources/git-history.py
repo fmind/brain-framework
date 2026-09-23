@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Collect bounded local Git history as FKF records; no provider authentication."""
+"""Collect bounded local Git history as FKF records; no provider authentication.
+
+Usage: git-history.py ROOT START END [--skip RELATIVE_REPO]...
+Automated history stays out: hidden repositories (such as ~/.codex/memories), repositories named with
+--skip (such as an autonomous agent loop), and commits by bots or reserved test domains.
+"""
 
 import json
 import re
@@ -31,12 +36,22 @@ def github(repository: Path) -> str:
     return "repo:github.com/" + match[1].lower() if match else ""
 
 
-def collect(root: Path, start: str, end: str) -> list[dict[str, object]]:
+AUTOMATED = re.compile(r"(\[bot\]@users\.noreply\.github\.com|@([a-z0-9-]+\.)*(invalid|test|example|localhost))$")
+
+
+def collect(root: Path, start: str, end: str, skip: frozenset[str] = frozenset()) -> list[dict[str, object]]:
     if not root.is_dir():
         raise ValueError("root is not a directory")
-    repositories = sorted(p.parent for p in root.glob("*/*/.git") if not p.parent.is_symlink())
-    repositories.extend(p.parent for p in root.glob("*/.git") if not p.parent.is_symlink())
-    repositories = sorted(set(repositories))
+    candidates = [p.parent for pattern in ("*/*/.git", "*/.git") for p in root.glob(pattern)]
+    repositories = sorted(
+        {
+            p
+            for p in candidates
+            if not p.is_symlink()
+            and not any(part.startswith(".") for part in p.relative_to(root).parts)
+            and p.relative_to(root).as_posix() not in skip
+        }
+    )
     if len(repositories) > 200:
         raise ValueError("repository count exceeds 200")
     records: list[dict[str, object]] = []
@@ -75,6 +90,8 @@ def collect(root: Path, start: str, end: str) -> list[dict[str, object]]:
         for offset in range(0, len(fields) - 1, 4):
             commit, when, author, message = fields[offset : offset + 4]
             author = author.strip().lower()
+            if AUTOMATED.search(author):
+                continue
             links = ["repo:local/" + relative, *([remote] if remote else [])]
             if "@" in author:
                 links.append("person:email/" + quote(author, safe="/:@+").replace("~", "%7E"))
@@ -101,7 +118,10 @@ def collect(root: Path, start: str, end: str) -> list[dict[str, object]]:
 
 if __name__ == "__main__":
     try:
-        result = collect(Path(sys.argv[1]), sys.argv[2], sys.argv[3])
+        options = sys.argv[4:]
+        if len(options) % 2 or any(flag != "--skip" for flag in options[::2]):
+            raise ValueError("expected --skip RELATIVE_REPO pairs")
+        result = collect(Path(sys.argv[1]), sys.argv[2], sys.argv[3], frozenset(options[1::2]))
         payload = json.dumps(result, ensure_ascii=False, allow_nan=False)
         if len(payload.encode()) > 16 << 20:
             raise ValueError("normalized history exceeds 16 MiB")

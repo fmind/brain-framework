@@ -57,7 +57,7 @@ The current state, in a short paragraph.
 | `summary`, `description`   | The note's lead in results.                                                                                                                                 |
 | `tags`, `aliases`, `links` | Searchable; `aliases` are exact identities that resolve to the note; `links` add explicit relations.                                                        |
 
-Keep notes current rather than cumulative: Git holds their history, so replace outdated text instead of appending history sections. Each H2 or deeper section is its own search passage, and `path#section` reads exactly that section. Markdown links between notes, to base files and to records (`[meeting](meetings:retention-1)`) are checked by `fkf validate`.
+Keep notes current rather than cumulative. `fkf status` lists active or blocked project notes whose `updated` date is more than 14 days old under `review`, as a reminder rather than a failure. Git holds history, so replace outdated text instead of appending history sections. Each H2 or deeper section is its own search passage, and `path#section` reads exactly that section. Markdown links between notes, to base files and to records (`[meeting](meetings:retention-1)`) are checked by `fkf validate`.
 
 `wiki/` follows [OKF v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md): each concept declares a `type`; lifecycle is `draft`, `stable` or `deprecated`; `sources` are mappings with a `resource`; `verified` events carry `by` and `at`. `wiki/index.md` may only declare `okf_version`, and an optional `wiki/log.md` groups changes under ISO date headings. `fkf validate` checks this structure; it does not verify claims.
 
