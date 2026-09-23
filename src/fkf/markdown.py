@@ -124,7 +124,7 @@ def section(path: str, data: bytes, fragment: str) -> str:
 
 def reference(path: str, target: str) -> str:
     """Resolve a relative note link to a base-relative path; identities and URLs stay unchanged."""
-    if urlsplit(target).scheme:
+    if scheme(path, target):
         return target
     name, _, fragment = unquote(target).partition("#")
     if name.startswith("/") and path.startswith("wiki/"):
@@ -132,6 +132,24 @@ def reference(path: str, target: str) -> str:
     else:
         joined = posixpath.normpath(posixpath.join(posixpath.dirname(path), name)) if name else path
     return joined + ("#" + fragment if fragment else "")
+
+
+def scheme(path: str, target: str) -> str:
+    """Malformed URLs are file diagnostics, never exceptions escaping retrieval."""
+    try:
+        return urlsplit(target).scheme
+    except ValueError as error:
+        raise Error(f"{path}: invalid link") from error
+
+
+def _sources(path: str, attributes: dict[str, object]) -> list[str]:
+    sources = attributes.get("sources", [])
+    if not isinstance(sources, list) or any(
+        not isinstance(source, dict) or not isinstance(source.get("resource"), str) or not source["resource"].strip()
+        for source in sources
+    ):
+        raise Error(f"{path}: OKF sources require mappings with a nonempty resource string")
+    return [str(source["resource"]) for source in sources]
 
 
 def _plain(markdown: str) -> str:
@@ -170,6 +188,19 @@ def note(path: str, data: bytes) -> Note:
     lead = _plain(summary or introduction.replace(f"# {title}", "", 1))
     if not lead and len(passages) > 1:
         lead = _plain(passages[1].text)
+    targets = sorted(
+        {
+            target
+            for target in [
+                *markdown.links,
+                *knowledge.links,
+                *(_sources(path, markdown.attributes) if path.startswith("wiki/") else []),
+            ]
+            if target
+        }
+    )
+    for target in targets:
+        reference(path, target)
     return Note(
         path=path,
         title=title,
@@ -177,7 +208,7 @@ def note(path: str, data: bytes) -> Note:
         lead=lead[:LEAD],
         passages=passages,
         slugs={h.slug for h in markdown.headings},
-        targets=sorted({t for t in [*markdown.links, *knowledge.links] if t}),
+        targets=targets,
     )
 
 
@@ -185,7 +216,7 @@ def broken(note: Note, exists: set[str], slugs: dict[str, set[str]]) -> list[str
     """Relative links must name an existing base file and, for notes, an existing heading."""
     problems = []
     for target in note.targets:
-        if urlsplit(target).scheme or target == "#":
+        if scheme(note.path, target) or target == "#":
             continue
         name, _, fragment = reference(note.path, target).partition("#")
         if name == ".." or name.startswith("../"):
@@ -221,9 +252,7 @@ def validate_wiki(path: str, data: bytes) -> None:
         raise Error(f"{path}: OKF concepts require a nonempty type in YAML frontmatter")
     if attributes.get("status", "stable") not in {"draft", "stable", "deprecated"}:
         raise Error(f"{path}: OKF status must be draft, stable or deprecated")
-    sources = attributes.get("sources", [])
-    if not isinstance(sources, list) or any(not isinstance(s, dict) or not s.get("resource") for s in sources):
-        raise Error(f"{path}: OKF sources require mappings with a resource")
+    _sources(path, attributes)
     verified = attributes.get("verified", [])
     events = [verified] if isinstance(verified, dict) else verified
     if not isinstance(events, list) or any(

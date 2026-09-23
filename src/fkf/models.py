@@ -78,21 +78,27 @@ def timestamp(value: str) -> str:
         raise ValueError("expected an ISO 8601 timestamp with timezone") from error
     if parsed.tzinfo is None:
         raise ValueError("timestamp requires a timezone")
-    return parsed.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    try:
+        return parsed.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    except (ValueError, OverflowError) as error:
+        raise ValueError("timestamp is outside the supported UTC range") from error
 
 
 def moment(value: str, now: datetime | None = None) -> str:
     """Resolve today, yesterday, 7d/12h/2w durations, local dates or aware timestamps to canonical UTC."""
     now = (now or datetime.now(UTC)).astimezone()
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     value = value.strip()
-    if value in {"now", "today", "yesterday"}:
-        resolved = {"now": now, "today": midnight, "yesterday": midnight - timedelta(days=1)}[value]
+    if value == "now":
+        resolved = now
+    elif value in {"today", "yesterday"}:
+        day = now.date() - timedelta(days=value == "yesterday")
+        # A naive datetime resolves the local offset at that date, including DST transitions.
+        resolved = datetime.combine(day, datetime.min.time()).astimezone()
     elif match := re.fullmatch(r"(\d{1,5})([hdw])", value):
         resolved = now - timedelta(hours=int(match[1]) * {"h": 1, "d": 24, "w": 168}[match[2]])
     elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
         try:
-            resolved = datetime.combine(date.fromisoformat(value), datetime.min.time(), tzinfo=now.tzinfo)
+            resolved = datetime.combine(date.fromisoformat(value), datetime.min.time()).astimezone()
         except ValueError as error:
             raise Error(f"invalid date: {value}") from error
     else:
@@ -136,6 +142,30 @@ class Record(Model):
     @classmethod
     def valid_time(cls, value: str) -> str:
         return timestamp(value) if value else ""
+
+    @field_validator("attributes")
+    @classmethod
+    def provenance(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        value = dict(value)
+        for key in ("updated", "observed"):
+            if key in value:
+                instant = value[key]
+                if not isinstance(instant, str):
+                    raise ValueError(f"attributes.{key} requires a timestamp string")
+                value[key] = timestamp(instant) if instant else ""
+        if "partial" in value and not isinstance(value["partial"], bool):
+            raise ValueError("attributes.partial requires a boolean")
+        return value
+
+    @property
+    def updated(self) -> str:
+        value = self.attributes.get("updated", "")
+        return value if isinstance(value, str) else ""
+
+    @property
+    def observed(self) -> str:
+        value = self.attributes.get("observed", "")
+        return value if isinstance(value, str) else ""
 
 
 class Knowledge(BaseModel):
@@ -230,15 +260,19 @@ class Query(Model):
     since: str = ""
     until: str = ""
     recent: bool = False
+    changed_since: str = ""
+    current: bool = False
 
-    @field_validator("since", "until")
+    @field_validator("since", "until", "changed_since")
     @classmethod
     def instant(cls, value: str) -> str:
         return timestamp(value) if value else ""
 
     @model_validator(mode="after")
     def bounded(self) -> Query:
-        if not self.text.strip() and not (self.since or self.until or self.source or self.type or self.status):
+        if not self.text.strip() and not (
+            self.since or self.until or self.source or self.type or self.status or self.changed_since or self.current
+        ):
             raise ValueError("give a query, a time window (--since/--until) or a filter (--source/--type/--status)")
         if self.since and self.until and self.since >= self.until:
             raise ValueError("since must be earlier than until")

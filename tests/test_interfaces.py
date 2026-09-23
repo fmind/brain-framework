@@ -50,6 +50,8 @@ def test_cli_lifecycle(tmp_path: Path, base: Store) -> None:
         "records": 2,
         "latest": "2026-08-31T12:00:00.000000Z",
         "configured": False,
+        "state": "historical",
+        "freshness": "unknown",
     }
     base.write(
         "queries.yaml",

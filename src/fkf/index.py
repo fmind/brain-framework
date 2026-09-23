@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
 
 from fkf import records
 from fkf.markdown import authored, note
-from fkf.models import AUTHORED, DEMOTED, Error, Query, Record
-from fkf.storage import BusyError, Store, writer
+from fkf.models import AUTHORED, Error, Query, Record, moment
+from fkf.storage import BusyError, Store, reader, writer
 
-SCHEMA = 9
+SCHEMA = 11
 # Active projects whose note is older than this are listed for review; a reminder, never a failure.
 REVIEW_DAYS = 14
 CACHE = ".fkf/index.sqlite"
@@ -24,7 +24,8 @@ CREATE TABLE files(path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, ctime INT
                    error TEXT NOT NULL DEFAULT '');
 CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT NOT NULL, kind TEXT NOT NULL,
                    source TEXT NOT NULL, title TEXT NOT NULL, time TEXT NOT NULL, type TEXT NOT NULL,
-                   status TEXT NOT NULL, lead TEXT NOT NULL, url TEXT NOT NULL);
+                   status TEXT NOT NULL, lead TEXT NOT NULL, url TEXT NOT NULL,
+                   updated TEXT NOT NULL, observed TEXT NOT NULL, partial INTEGER NOT NULL);
 CREATE INDEX items_path ON items(path);
 CREATE INDEX items_time ON items(time);
 CREATE TABLE passages(id INTEGER PRIMARY KEY, item INTEGER NOT NULL, fragment TEXT NOT NULL, title TEXT NOT NULL);
@@ -82,6 +83,67 @@ _STOP = frozenset(
         "would",
         "you",
         "your",
+        "au",
+        "aux",
+        "avec",
+        "ce",
+        "ces",
+        "cet",
+        "cette",
+        "comment",
+        "d",
+        "dans",
+        "de",
+        "des",
+        "du",
+        "elle",
+        "elles",
+        "en",
+        "est",
+        "et",
+        "eux",
+        "il",
+        "ils",
+        "je",
+        "l",
+        "la",
+        "le",
+        "les",
+        "leur",
+        "leurs",
+        "lui",
+        "mais",
+        "mes",
+        "mon",
+        "nos",
+        "notre",
+        "nous",
+        "où",
+        "par",
+        "pour",
+        "pourquoi",
+        "qu",
+        "que",
+        "quel",
+        "quelle",
+        "quelles",
+        "quels",
+        "qui",
+        "sa",
+        "se",
+        "ses",
+        "son",
+        "sur",
+        "tes",
+        "toi",
+        "ton",
+        "tu",
+        "un",
+        "une",
+        "vos",
+        "votre",
+        "vous",
+        "à",
     ]
 )
 _IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
@@ -103,8 +165,9 @@ def _path(store: Store) -> Path:
         raise Error(".fkf must be a directory")
     directory.mkdir(mode=0o700, exist_ok=True)
     path = store.root / CACHE
-    if path.is_symlink():
-        raise Error(f"{CACHE} must be a regular file")
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        with suppress(FileNotFoundError):
+            store.fingerprint(CACHE + suffix)
     return path
 
 
@@ -117,6 +180,16 @@ def _open(store: Store) -> sqlite3.Connection | None:
     connection.row_factory = sqlite3.Row
     try:
         if connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA:
+            # Version alone does not establish that an interrupted or damaged cache is usable.
+            for statement in (
+                "SELECT path,size,mtime,ctime,inode,error FROM files LIMIT 0",
+                "SELECT ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial FROM items LIMIT 0",
+                "SELECT id,item,fragment,title FROM passages LIMIT 0",
+                "SELECT name,item FROM names LIMIT 0",
+                "SELECT item,target FROM links LIMIT 0",
+                "SELECT title,text,names FROM search LIMIT 0",
+            ):
+                connection.execute(statement)
             return connection
     except sqlite3.DatabaseError:
         pass
@@ -126,10 +199,11 @@ def _open(store: Store) -> sqlite3.Connection | None:
 
 def _create(store: Store) -> sqlite3.Connection:
     path = _path(store)
-    for suffix in ("", "-wal", "-shm"):
+    for suffix in ("", "-wal", "-shm", "-journal"):
         path.with_name(path.name + suffix).unlink(missing_ok=True)
     connection = sqlite3.connect(path, timeout=30)
-    connection.executescript(_DDL + f"PRAGMA user_version={SCHEMA};")
+    # Version zero withholds this generation until the ingestion transaction commits.
+    connection.executescript(_DDL)
     connection.execute("PRAGMA journal_mode=WAL")
     connection.row_factory = sqlite3.Row
     return connection
@@ -154,15 +228,15 @@ def _drop(connection: sqlite3.Connection, path: str) -> None:
 
 def _insert(
     connection: sqlite3.Connection,
-    values: dict[str, str],
+    values: dict[str, str | int],
     passages: list[tuple[str, str, str, str, str]],
     names: list[str],
     links: list[str],
 ) -> None:
     try:
         cursor = connection.execute(
-            "INSERT INTO items(ref,path,kind,source,title,time,type,status,lead,url) "
-            "VALUES(:ref,:path,:kind,:source,:title,:time,:type,:status,:lead,:url)",
+            "INSERT INTO items(ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial) "
+            "VALUES(:ref,:path,:kind,:source,:title,:time,:type,:status,:lead,:url,:updated,:observed,:partial)",
             values,
         )
     except sqlite3.IntegrityError:
@@ -199,6 +273,9 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
                 "status": knowledge.status,
                 "lead": projection.lead,
                 "url": "",
+                "updated": f"{knowledge.updated}T00:00:00.000000Z" if knowledge.updated else "",
+                "observed": "",
+                "partial": 0,
             },
             [
                 (p.fragment, p.title, p.heading, p.text, projection.title if p.fragment else metadata)
@@ -226,6 +303,9 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
                     "status": "",
                     "lead": lead(record),
                     "url": record.url,
+                    "updated": record.updated,
+                    "observed": record.observed,
+                    "partial": int(record.attributes.get("partial") is True),
                 },
                 [("", record.title, record.title, record.text, identity)],
                 record.aliases,
@@ -242,14 +322,30 @@ def lead(record: Record) -> str:
 
 def refresh(store: Store, *, full: bool = False, wait: float = 30) -> dict[str, object]:
     """Re-index only changed files; a file that fails to parse is skipped and reported, not fatal."""
+    try:
+        return _refresh(store, full=full, wait=wait)
+    except sqlite3.DatabaseError as error:
+        raise Error("could not refresh the search cache; check free space and run fkf build") from error
+
+
+def _refresh(store: Store, *, full: bool, wait: float) -> dict[str, object]:
     with writer(store, wait):
+        if full:
+            records.recover(store)
+        else:
+            records.require_ready(store)
         connection = (None if full else _open(store)) or _create(store)
         with closing(connection):
             current = inputs(store)
             known = _known(connection)
             changed = sorted(path for path, info in current.items() if known.get(path) != info)
             removed = sorted(known.keys() - current.keys())
+            if changed or removed:
+                # A duplicate can disappear because another partition changed; its own bytes need not change.
+                retry = {row[0] for row in connection.execute("SELECT path FROM files WHERE error!=''")}
+                changed = sorted(set(changed) | (retry & current.keys()))
             with connection:
+                connection.execute("BEGIN")
                 for path in removed + changed:
                     _drop(connection, path)
                 for path in changed:
@@ -259,6 +355,9 @@ def refresh(store: Store, *, full: bool = False, wait: float = 30) -> dict[str, 
                     except (Error, UnicodeError) as problem:
                         connection.execute("ROLLBACK TO file")
                         problems = [str(problem) or "invalid file"]
+                    except OSError:
+                        connection.execute("ROLLBACK TO file")
+                        problems = ["inaccessible file; check permissions"]
                     connection.execute("RELEASE file")
                     error = (
                         problems[0] + (f" (and {len(problems) - 1} more)" if len(problems) > 1 else "")
@@ -266,6 +365,8 @@ def refresh(store: Store, *, full: bool = False, wait: float = 30) -> dict[str, 
                         else ""
                     )
                     connection.execute("INSERT INTO files VALUES(?,?,?,?,?,?)", (path, *current[path], error))
+                # PRAGMA has no bound-parameter form; SCHEMA is an internal integer constant.
+                connection.execute(f"PRAGMA user_version={SCHEMA}")  # nosemgrep: formatted-sql-query
             skipped = connection.execute("SELECT count(*) FROM files WHERE error!=''").fetchone()[0]
         return {"files": len(current), "changed": len(changed), "removed": len(removed), "problems": skipped}
 
@@ -273,10 +374,18 @@ def refresh(store: Store, *, full: bool = False, wait: float = 30) -> dict[str, 
 def fresh(store: Store) -> str:
     """Refresh a stale cache, or keep serving it as `stale` while another writer holds the base."""
     connection = _open(store)
-    if connection is not None:
-        with closing(connection):
-            if _known(connection) == inputs(store):
+    try:
+        with reader(store, wait=0):
+            # A live writer may have a pending journal; only an abandoned one blocks cached reads.
+            records.require_ready(store)
+            if connection is not None and _known(connection) == inputs(store):
                 return "ready"
+    except BusyError:
+        if connection is not None:
+            return "stale"
+    finally:
+        if connection is not None:
+            connection.close()
     try:
         # Without any usable generation there is nothing to serve, so wait for the other writer.
         refresh(store, wait=0 if connection is not None else 120)
@@ -287,9 +396,14 @@ def fresh(store: Store) -> str:
 
 @contextmanager
 def database(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
-    state = fresh(store)
-    connection = _open(store)
-    if connection is None:
+    # A full rebuild may replace the generation between the freshness check and open.
+    # Retry once: fresh() waits for an in-progress generation instead of serving it.
+    for _ in range(2):
+        state = fresh(store)
+        connection = _open(store)
+        if connection is not None:
+            break
+    else:
         raise Error("the search cache is unavailable; run fkf build")
     with closing(connection):
         connection.execute("PRAGMA query_only=ON")
@@ -301,17 +415,49 @@ def terms(text: str) -> list[str]:
     return ([w for w in words if w not in _STOP] or words)[:32]
 
 
-_FIELDS = "i.ref,i.kind,i.source,i.time,i.type,i.status,i.url"
-_FILTERS = """(:source='' OR i.source=:source) AND (:type='' OR i.type=:type) AND (:status='' OR i.status=:status)
-  AND ((:since='' AND :until='') OR i.time!='') AND (:since='' OR i.time>=:since) AND (:until='' OR i.time<:until)"""
+def identity(text: str) -> bool:
+    return _IDENTITY.fullmatch(text.strip()) is not None
+
+
+def identity_owners(connection: sqlite3.Connection, text: str) -> set[str]:
+    """Explicit owners for cross-base identity ordering, kept separate from public results."""
+    return {
+        row[0]
+        for row in connection.execute(
+            "SELECT ref FROM items WHERE ref=? OR id IN (SELECT item FROM names WHERE name=?)",
+            (text.strip(), text.strip()),
+        )
+    }
+
+
+def _note_time(value: str) -> str:
+    # Notes carry dates, not instants. Resolve midnight on the reading machine, including DST,
+    # at query time so changing timezone never requires rebuilding a shared/disposable cache.
+    return moment(value[:10]) if value else ""
+
+
+_TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE i.time END"
+_UPDATED = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i.updated,''),i.time) END"
+_FIELDS = f"i.ref,i.kind,i.source,({_TIME}) AS time,i.type,i.status,i.url,i.updated,i.observed,i.partial"
+_FILTERS = f"""(:source='' OR i.source=:source) AND (:type='' OR i.type=:type) AND (:status='' OR i.status=:status)
+  AND ((:since='' AND :until='') OR i.time!='') AND (:since='' OR ({_TIME})>=:since) AND (:until='' OR ({_TIME})<:until)
+  AND (:changed_since='' OR ({_UPDATED})>=:changed_since)
+  AND (:current=0 OR i.kind='note' OR i.source IN (SELECT value FROM json_each(:active_sources)))"""  # noqa: S608 - fixed SQL fragments
 
 
 def _lexical(connection: sqlite3.Connection, params: dict[str, object], match: str) -> list[dict[str, object]]:
     rows = connection.execute(
-        f"""SELECT {_FIELDS},p.fragment,p.title,-bm25(search,10.0,1.0,0.5) AS score,
+        f"""WITH matches AS MATERIALIZED (
+           SELECT {_FIELDS},p.fragment,p.title,-bm25(search,10.0,1.0,0.5) AS score,
                   snippet(search,1,'','',' … ',48) AS excerpt
            FROM search JOIN passages p ON p.id=search.rowid JOIN items i ON i.id=p.item
-           WHERE search MATCH :match AND {_FILTERS} ORDER BY score DESC LIMIT 2000""",  # noqa: S608 - fixed SQL
+           WHERE search MATCH :match AND {_FILTERS}),
+           ranked AS (SELECT *,row_number() OVER (PARTITION BY ref ORDER BY score DESC,fragment) AS position
+                      FROM matches)
+           SELECT * FROM ranked WHERE position=1
+           ORDER BY CASE WHEN :recent THEN time END DESC,CASE WHEN :recent THEN ref END DESC,
+                    status IN ('deprecated','archived'),score * CASE WHEN kind='note' THEN 2 ELSE 1 END DESC,ref
+           LIMIT :limit""",  # noqa: S608 - fixed SQL
         {**params, "match": match},
     ).fetchall()
     return [dict(row) for row in rows]
@@ -319,64 +465,51 @@ def _lexical(connection: sqlite3.Connection, params: dict[str, object], match: s
 
 def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> list[dict[str, object]]:
     rows = connection.execute(
-        f"""SELECT {_FIELDS},'' AS fragment,i.title,c.score,i.lead AS excerpt FROM (
-              SELECT id AS item,1e6 AS score FROM items WHERE ref=:text
+        f"""WITH candidates AS (
+              SELECT id AS item,2e6 AS score FROM items WHERE ref=:text
               UNION ALL SELECT item,1e6 FROM names WHERE name=:text
-              UNION ALL SELECT item,1e3 FROM links WHERE target=:text) c
+              UNION ALL SELECT item,1e3 FROM links WHERE target=:text),
+              owners AS (SELECT item,max(score) AS score FROM candidates GROUP BY item)
+           SELECT {_FIELDS},'' AS fragment,i.title,c.score,i.lead AS excerpt FROM owners c
            JOIN items i ON i.id=c.item WHERE {_FILTERS}
-           ORDER BY c.score DESC,i.time DESC LIMIT 2000""",  # noqa: S608 - fixed SQL
+           ORDER BY c.score DESC,time DESC,i.ref LIMIT :limit""",  # noqa: S608 - fixed SQL
         params,
     ).fetchall()
     return [dict(row) for row in rows]
 
 
-def _rank(row: dict[str, object]) -> float:
-    score = float(cast("float", row["score"]))
-    # Authored knowledge is the distilled answer; records are its supporting evidence.
-    return score * 2 if row["kind"] == "note" else score
-
-
-def _order(row: dict[str, object]) -> tuple[bool, float, str]:
-    """Deprecated and archived notes stay visible but rank after current matches of the same kind."""
-    return row["status"] in DEMOTED, -_rank(row), str(row["ref"])
-
-
-def search(connection: sqlite3.Connection, query: Query) -> list[dict[str, object]]:
-    """Exact identities, then notes and records matching every term, then any term; or a filtered listing."""
+def search(
+    connection: sqlite3.Connection, query: Query, *, active_sources: set[str] | None = None
+) -> list[dict[str, object]]:
+    """Exact identities, lexical all-term then any-term matches, or a filtered listing."""
+    connection.create_function("note_time", 1, _note_time, deterministic=True)
     params: dict[str, object] = query.model_dump()
     params["text"] = query.text.strip()
+    params["active_sources"] = json.dumps(sorted(active_sources or ()))
     if not params["text"]:
         rows = connection.execute(
             f"""SELECT {_FIELDS},'' AS fragment,i.title,0 AS score,i.lead AS excerpt FROM items i
-               WHERE {_FILTERS} ORDER BY i.time DESC,i.ref LIMIT :limit""",  # noqa: S608 - fixed SQL
+               WHERE {_FILTERS} ORDER BY time DESC,i.ref LIMIT :limit""",  # noqa: S608 - fixed SQL
             params,
         ).fetchall()
         return [_clean(dict(row)) for row in rows]
+    if identity(str(params["text"])):
+        return [_clean(row) for row in _identity(connection, params)]
     groups = []
-    identity = bool(_IDENTITY.fullmatch(str(params["text"])))
-    if identity:
-        groups.append(_identity(connection, params))
     tokens = terms(str(params["text"]))
     if tokens:
         quoted = ['"' + t.replace('"', '""') + '"' for t in tokens]
         groups.append(_lexical(connection, params, " ".join(quoted)))
-        # An identity is precise: its parts matching anywhere would only add noise.
-        if len(tokens) > 1 and not identity:
+        if len(tokens) > 1:
             groups.append(_lexical(connection, params, " OR ".join(quoted)))
     selected: dict[str, dict[str, object]] = {}
     for group in groups:
-        best: dict[str, dict[str, object]] = {}
         for row in group:
-            ref = str(row["ref"])
-            if ref not in selected and (ref not in best or _rank(row) > _rank(best[ref])):
-                best[ref] = row
-        for row in sorted(best.values(), key=_order):
-            if len(selected) < query.limit:
-                selected[str(row["ref"])] = row
+            selected.setdefault(str(row["ref"]), row)
     items = list(selected.values())
     if query.recent:
         items.sort(key=lambda r: (str(r["time"]), str(r["ref"])), reverse=True)
-    return [_clean(row) for row in items]
+    return [_clean(row) for row in items[: query.limit]]
 
 
 def _clean(row: dict[str, object]) -> dict[str, object]:
@@ -384,9 +517,23 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
     if fragment:
         row["ref"] = f"{row['ref']}#{fragment}"
     row.pop("score", None)
+    row.pop("position", None)
+    if row.get("partial"):
+        row["partial"] = True
+    else:
+        row.pop("partial", None)
     if row["kind"] == "note":
         row.pop("source", None)
+        row.pop("updated", None)
     return {key: value for key, value in row.items() if value not in ("", None)}
+
+
+def problems(connection: sqlite3.Connection) -> list[str]:
+    """Bound diagnostics shared by search and status; full validation remains available."""
+    return [
+        f"{row['path']}: {row['error']}"
+        for row in connection.execute("SELECT path,error FROM files WHERE error!='' ORDER BY path LIMIT 200")
+    ]
 
 
 def status(store: Store, now: datetime | None = None) -> dict[str, object]:
@@ -400,9 +547,7 @@ def status(store: Store, now: datetime | None = None) -> dict[str, object]:
             )
         }
         notes = connection.execute("SELECT count(*) FROM items WHERE kind='note'").fetchone()[0]
-        problems = [
-            f"{row['path']}: {row['error']}" for row in connection.execute("SELECT * FROM files WHERE error!=''")
-        ]
+        skipped = problems(connection)
         review = [
             {"ref": row["ref"], "title": row["title"], "updated": row["time"][:10]}
             for row in connection.execute(
@@ -411,4 +556,4 @@ def status(store: Store, now: datetime | None = None) -> dict[str, object]:
                 (cutoff,),
             )
         ]
-    return {"index": state, "notes": notes, "sources": sources, "problems": problems, "review": review}
+    return {"index": state, "notes": notes, "sources": sources, "problems": skipped, "review": review}

@@ -83,3 +83,22 @@ def test_note_projection_sections_and_titles() -> None:
     for bad in [b"---\ntitle: x\n", b"\xff", b"---\ntags: x\n---\n"]:
         with pytest.raises(Error):
             note("wiki/x.md", bad)
+
+
+def test_malformed_links_report_one_file_without_blocking_validation(base: Store) -> None:
+    base.write("projects/bad-url.md", b'---\nlinks: ["https://["]\n---\n# Invalid link\n')
+    result = validate(base)
+    assert not result["valid"]
+    assert "projects/bad-url.md: invalid link" in str(result["problems"])
+
+
+def test_okf_sources_are_checked_explicit_relations(base: Store) -> None:
+    data = b'---\ntype: concept\nsources:\n  - resource: "meetings:absent"\n---\n# Concept\n'
+    base.write("wiki/concept.md", data)
+    assert note("wiki/concept.md", data).links == ["meetings:absent"]
+    assert "wiki/concept.md: missing record meetings:absent" in str(validate(base)["problems"])
+
+
+def test_duplicate_aliases_are_reported(base: Store) -> None:
+    base.write("projects/duplicate.md", b'---\naliases: ["repo:example/project"]\n---\n# Duplicate owner\n')
+    assert "ambiguous identity repo:example/project" in str(validate(base)["problems"])

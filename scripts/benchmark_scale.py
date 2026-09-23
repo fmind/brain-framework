@@ -15,7 +15,7 @@ from fkf import records
 from fkf.index import refresh
 from fkf.models import Query, Record
 from fkf.retrieve import read, search
-from fkf.storage import Store
+from fkf.storage import Store, writer
 
 
 def main() -> None:
@@ -53,6 +53,27 @@ def main() -> None:
         for n in range(args.notes):
             store.write(f"wiki/{n}.md", f"# Project {n}\n\n{background}\n\nKeep durable evidence.\n".encode())
         measurements = {}
+        revision = 0
+
+        def change_record() -> None:
+            nonlocal revision
+            revision += 1
+            with writer(store):
+                records.upsert(
+                    store,
+                    "benchmark",
+                    [items[0].model_copy(update={"title": f"Edited decision {revision}"})],
+                    snapshot=False,
+                )
+            refresh(store)
+
+        def unchanged_record() -> None:
+            found = records.find(store, "benchmark", "0")
+            if found is None:
+                raise RuntimeError("benchmark fixture record is missing")
+            with writer(store):
+                records.upsert(store, "benchmark", [found[1]], snapshot=False)
+
         for name, operation in [
             ("build", lambda: refresh(store, full=True)),
             (
@@ -66,6 +87,8 @@ def main() -> None:
             ("common", lambda: search([store], Query(text="evidence"))),
             ("timeline", lambda: search([store], Query(since="2026-06-01T00:00:00.000000Z", limit=50))),
             ("exact_read", lambda: read([store], "decision:0")),
+            ("changed_record", change_record),
+            ("unchanged_record", unchanged_record),
         ]:
             timings = []
             for _ in range(args.repeats):

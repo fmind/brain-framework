@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from fkf.config import load, may_collect, one, register, select, user_config, user_path, yaml_object
 from fkf.models import Config, Error, Knowledge, Query, Record, Source, decode, moment, timestamp
-from fkf.storage import BusyError, Store, relative, state_store, writer
+from fkf.storage import BusyError, Store, collecting, reader, relative, state_store, writer
 
 
 def test_path_grammar() -> None:
@@ -67,6 +67,33 @@ def test_writer_lock_is_exclusive_and_waits(base: Store) -> None:
         pass
     with writer(base):
         pass
+
+
+def test_shared_read_locks_and_independent_collector_lock(base: Store) -> None:
+    with reader(base), reader(base), pytest.raises(BusyError), writer(base):
+        pass
+    with writer(base), pytest.raises(BusyError), reader(base, wait=0):
+        pass
+    with (
+        collecting(base, "source"),
+        writer(base),
+        collecting(base, "other"),
+        pytest.raises(BusyError),
+        collecting(base, "source"),
+    ):
+        pass
+
+
+def test_rmdir_refuses_files_and_symlinks(base: Store) -> None:
+    base.write("empty/item", b"data")
+    with pytest.raises(Error, match="directory"):
+        base.rmdir("empty/item")
+    (base.root / "redirect").symlink_to(base.root / "empty", target_is_directory=True)
+    with pytest.raises(Error, match="directory"):
+        base.rmdir("redirect")
+    base.delete("empty/item")
+    base.rmdir("empty")
+    assert not (base.root / "empty").exists()
 
 
 def test_state_stays_outside_the_base_and_private(base: Store, monkeypatch: pytest.MonkeyPatch) -> None:

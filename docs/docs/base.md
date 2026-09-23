@@ -53,7 +53,7 @@ The current state, in a short paragraph.
 | `title`                    | Result title; otherwise the first H1, then the file name.                                                                                                   |
 | `type`                     | Filter with `--type`; defaults to `project`, `task` or `wiki` from the folder.                                                                              |
 | `status`                   | One of `draft`, `active`, `paused`, `blocked`, `done`, `stable`, `deprecated`, `archived`; filter with `--status`. Deprecated and archived notes rank last. |
-| `updated`                  | `YYYY-MM-DD`; places the note in time windows such as `--since 7d`.                                                                                         |
+| `updated`                  | `YYYY-MM-DD`; interpreted at local midnight on the reading machine for time windows such as `--since 7d`.                                                   |
 | `summary`, `description`   | The note's lead in results.                                                                                                                                 |
 | `tags`, `aliases`, `links` | Searchable; `aliases` are exact identities that resolve to the note; `links` add explicit relations.                                                        |
 
@@ -76,14 +76,18 @@ A record is one source item. Collectors print them; FKF stores one JSON object p
 | `aliases`    | Other exact identities of this item.                                                     |
 | `attributes` | Structured details kept for exact reads, not searched.                                   |
 
-Collecting the same id again replaces its line, moving it if its month changed; each id appears once per source. History lives in Git or in your backups, not in duplicate records.
+Collecting the same id again replaces its line, moving it if its month changed; each id appears once per source. If both revisions declare `attributes.updated`, an older revision cannot overwrite a newer one. History lives in Git or in your backups, not in duplicate records.
+
+Three reserved attributes describe evidence quality: `updated` is the upstream modification timestamp, `observed` is when FKF first collected this revision, and `partial: true` marks intentionally incomplete content. Timestamps require a timezone. `time` keeps its event meaning; `--changed-since` uses `updated`, falling back to event time when unavailable. Collection preserves `observed` when content has not changed. Other attributes remain provider-specific.
+
+Record writes use a recoverable transaction under `records/.pending/`. It holds originals only while a write is incomplete; explicit `fkf build`, collection or backup recovers it after an interruption; ordinary reads report the pending transaction without changing evidence. Keep this directory with the records when backing up a stopped base, and never delete it as cache. A live backup must hold the same base writer lock while copying files.
 
 ## Personal and team bases
 
 Separate bases by who may read them. A directory is a context boundary, not an access-control system: use separate repositories and filesystem permissions for different audiences.
 
 - **Personal base**: private repository, laptop collectors (mail, calendar, Git, shell, browser, agent sessions), registered with `--collect`. Keep bulky or sensitive `records/` out of the Git remote and back them up encrypted instead.
-- **Team base**: shared repository of projects, decisions, wiki and tasks, plus records of team-scoped sources (organization issues and pull requests, shared meeting notes). Collect them in CI, for example a nightly job running `fkf register . --collect && fkf update` and committing `records/`, so no laptop runs shared collector code.
+- **Team base**: shared repository of projects, decisions, wiki and tasks, plus records of team-scoped sources (organization issues and pull requests, shared meeting notes). Collect them in CI, for example a nightly job running `fkf register . --collect && fkf update` and committing `records/`, so no laptop runs shared collector code. New bases ignore `records/` by default: explicitly opt reviewed team-source paths into version control before relying on CI publication.
 
 Registered bases live in `~/.config/fkf/config.yaml`:
 

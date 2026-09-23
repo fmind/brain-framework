@@ -6,7 +6,7 @@ FKF is one typed Python package and one console command. Its purpose is to keep 
 
 - Keep only the current configuration and base format. Do not add legacy code, migration tooling, provider SDKs or compatibility command surfaces.
 - `projects/`, `tasks/` and `wiki/` contain authored Markdown; wiki concepts follow OKF v0.2. Tasks use `tasks/YYYY-MM-DD_slug/TASK.md` plus `inputs/` and `outputs/`. `records/<source>/<YYYY-MM>.jsonl` holds one line per source item, upserted by id (`undated.jsonl`, `snapshot.jsonl` for snapshot sources). `.fkf/` is a disposable SQLite cache. `sources/` holds collectors, `scripts/`, `configs/` and `tests/` base maintenance, `skills/` workflow packages. One `fkf.yaml` (version 2) defines the base; `~/.config/fkf/config.yaml` registers bases per user and grants collection trust per machine.
-- Records have `id`, `title`, optional `text`, `time`, `url`, `links`, `aliases` and `attributes`. Provider-specific projection belongs in base-owned collectors. No provider SDK, model, embedding, scheduler, harness installer or plugin framework belongs in the core.
+- Records have `id`, `title`, optional `text`, `time`, `url`, `links`, `aliases` and `attributes`. Provider-specific projection belongs in base-owned collectors. Reserved attributes `updated`, `observed` and `partial` describe revision provenance. No provider SDK, model, embedding, scheduler, harness installer or plugin framework belongs in the core.
 - CLI and MCP call the same services. MCP exposes exactly `search` and `read`, with no execution or write operation.
 
 ## Invariants
@@ -15,7 +15,7 @@ FKF is one typed Python package and one console command. Its purpose is to keep 
 - Every result carries a readable ref that resolves to a file: `path`, `path#section` or `source:id`. The cache may locate a record, but the answer always comes from the record file.
 - Explicit aliases and links provide identity and relationship evidence; prose and name similarity never create relations.
 - Use the confined Store for base access. Refuse symlinks and special files below the base, bound traversal and bytes, write atomically, and serialize writers by physical base identity. Private lock, run state, usage counts and collector logs stay outside the base; usage never records queries or refs.
-- Collection is explicit, uses direct configured argv from the base root, and requires per-machine trust in the user configuration. Remove loader-injection variables, kill process groups on timeout, cancellation or output overflow, write nothing on failure, and keep provider stdout/stderr out of errors (stderr goes to a bounded private log).
+- Collection is explicit, uses direct configured argv from the base root, and requires per-machine trust in the user configuration. Remove loader-injection variables, kill process groups on timeout, cancellation or output overflow, write nothing on provider failure and recover interrupted commits from `records/.pending/`, and keep provider stdout/stderr out of errors (stderr goes to a bounded private log).
 - Files are the only source of truth. Deleting `.fkf/` or the state directory loses nothing but convenience.
 
 ## Code map
@@ -33,6 +33,7 @@ FKF is one typed Python package and one console command. Its purpose is to keep 
 | update.py      | Collect due sources of trusted bases, then refresh caches.                   |
 | validate.py    | Whole-base offline checks.                                                   |
 | evaluate.py    | Owner-written retrieval cases.                                               |
+| health.py      | Source coverage and freshness from configuration and private run state.      |
 | usage.py       | Local usage counts in private state: operation and result count, no query.   |
 | cli.py, mcp.py | Thin public adapters.                                                        |
 
@@ -46,7 +47,7 @@ FKF is one typed Python package and one console command. Its purpose is to keep 
 
 ## Skills
 
-`skills/` contains the user workflows (`fkf-use`, `fkf-learn`, `fkf-maintain`) distributed as Markdown, and `examples/sources/` three reviewed standalone collectors that bases copy into `sources/`. `.agents/skills/fkf-contribute/` owns repository maintenance; start contribution work there. The Python package neither bundles nor installs skills or collectors. Collectors use the standard library only, call provider CLIs with literal argv, fail closed before partial output, and are tested with fake providers in `tests/test_adapters_*.py`.
+`skills/` contains the user workflows (`fkf-use`, `fkf-learn`, `fkf-maintain`) distributed as Markdown, and `examples/sources/` four reviewed standalone collectors that bases copy into `sources/`. `.agents/skills/fkf-contribute/` owns repository maintenance; start contribution work there. The Python package neither bundles nor installs skills or collectors. Collectors use the standard library only, call provider CLIs with literal argv, fail closed before partial output, and are tested with fake providers in `tests/test_adapters_*.py`.
 
 ## Active learning
 

@@ -3,7 +3,7 @@
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then FKF. uv supplies Python 3.14 if needed. If `fkf` is not on PATH, run `uv tool update-shell` and open a new shell.
 
 ```bash
-uv tool install --python 3.14 'fkf==8.1.0'
+uv tool install --python 3.14 'fkf==8.2.0'
 fkf --version
 ```
 
@@ -18,13 +18,44 @@ fkf read wiki/welcome.md
 
 Write one note per project in `projects/` and reusable knowledge in `wiki/`. Search notices edits by itself. Add a collector only when it answers a question you ask repeatedly; see [collectors](sources.md), then schedule `fkf update`.
 
+## Save a decision
+
+Create `projects/archive.md` in the base:
+
+```markdown
+---
+type: project
+status: active
+summary: Keep original evidence so decisions remain explainable.
+---
+
+# Archive
+
+## Decision
+
+Keep original evidence because providers may delete old content.
+
+## Next actions
+
+- [ ] Document the retention policy.
+```
+
+```bash
+fkf search "original evidence"
+fkf read projects/archive.md#decision
+fkf validate
+```
+
+The result names the file and section; `read` returns that section directly. No indexing command is needed. As the project changes, update the note in place and let Git keep its history. Add dates, evidence links and retrieval cases as the note grows; see [notes](base.md#notes) and [retrieval cases](search.md#retrieval-cases).
+
 ## Join a team base
 
-Clone the team repository and register it. Search then covers your personal base and the team base, and labels each result with its base.
+Clone the team's private repository and register it. Run the search outside either base to cover both, with each result labelled by its base.
 
 ```bash
 git clone git@github.com:team/knowledge.git ~/team-knowledge
 fkf register ~/team-knowledge
+cd ~
 fkf search "release process"
 ```
 
@@ -51,3 +82,5 @@ FKF 8 changes the base format: `fkf.yaml` is version 2 without an `id`, records 
 | A source fails in `update`   | `fkf status` shows its last error and the path of its private stderr log.                   |
 | Collection refused           | Trust the base on this machine with `fkf register PATH --collect`.                          |
 | Search results look outdated | Another writer held the base; results say `stale`. Retry, or run `fkf build` to start over. |
+
+If an operation reports a pending record transaction, preserve `records/.pending/`, inspect the base and run `fkf build` to recover durable originals and rebuild. Ordinary search/read never apply a journal from an untrusted base.

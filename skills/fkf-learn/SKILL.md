@@ -12,6 +12,7 @@ Knowledge is Markdown in the base; Git keeps its history. Keep each note short a
 1. Choose the place: a project's state, decisions and next actions in `projects/<project>.md`; reusable knowledge in `wiki/<concept>.md`; a delegated or multi-session job in `tasks/YYYY-MM-DD_slug/TASK.md` with `inputs/` and `outputs/`; a repeated procedure in the base's `skills/`.
 1. Edit in place. Replace outdated statements instead of appending history sections; add a dated one-line entry under `## Decisions` for each decision, with its reason and a ref to the evidence (`[meeting](source:id)`). Set `updated: YYYY-MM-DD`.
 1. Only write what you verified or the user stated. Mark proposals as proposals. Never invent provenance, verification or dates.
+1. When records disagree, compare upstream revision time, observation time and declared collection coverage; do not silently turn a partial or historical record into a current fact. Promote only reviewed, shareable summaries into a team base, with evidence teammates can access.
 1. Run `fkf validate` and fix every broken link or missing record it reports. `fkf status` lists active project notes due for `review` (not updated for 14 days); refresh one when you touch its project. Show the diff; commit only when the user's standing instructions allow it.
 
 Project notes follow this shape:

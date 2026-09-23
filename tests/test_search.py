@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from typing import cast
 
 import pytest
@@ -139,6 +142,82 @@ def test_a_busy_writer_serves_the_current_cache_as_stale(base: Store) -> None:
     assert refs(base, "latecomer") == ["wiki/late.md"]
 
 
+@pytest.mark.parametrize("outdated", [False, True])
+def test_concurrent_first_search_waits_for_a_complete_cache(
+    base: Store, monkeypatch: pytest.MonkeyPatch, outdated: bool
+) -> None:
+    if outdated:
+        index.refresh(base)
+        with closing(sqlite3.connect(base.root / index.CACHE)) as connection:
+            connection.execute(f"PRAGMA user_version={index.SCHEMA - 1}")
+    ingest_started, release_ingest, reader_refreshing = Event(), Event(), Event()
+    original_index, original_refresh = index._index, index.refresh  # noqa: SLF001 - coordinated ingestion failure boundary
+    waits: list[float] = []
+
+    def paused(connection: sqlite3.Connection, store: Store, path: str) -> list[str]:
+        ingest_started.set()
+        assert release_ingest.wait(10)
+        return original_index(connection, store, path)
+
+    def observe_refresh(store: Store, *, full: bool = False, wait: float = 30) -> dict[str, object]:
+        waits.append(wait)
+        reader_refreshing.set()
+        return original_refresh(store, full=full, wait=wait)
+
+    monkeypatch.setattr(index, "_index", paused)
+    monkeypatch.setattr(index, "refresh", observe_refresh)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        build = executor.submit(original_refresh, base)
+        try:
+            assert ingest_started.wait(10)
+            result = executor.submit(search, [base], Query(text="offline retrieval"), counted=False)
+            assert reader_refreshing.wait(10)
+            assert waits == [120]  # Incomplete generations cannot be served as stale evidence.
+        finally:
+            release_ingest.set()
+        assert build.result(timeout=10)["files"] == 3
+        reply = result.result(timeout=10)
+    assert "stale" not in reply
+    assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])][:2] == [
+        "projects/offline.md",
+        "meetings:decision-1",
+    ]
+
+
+def test_failed_full_rebuild_does_not_publish_an_incomplete_cache(base: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    index.refresh(base)
+    original_index = index._index  # noqa: SLF001 - inject failure after a file was indexed
+    indexed: list[str] = []
+
+    def fail_second(connection: sqlite3.Connection, store: Store, path: str) -> list[str]:
+        if indexed:
+            raise sqlite3.OperationalError("simulated disk full")
+        indexed.append(path)
+        return original_index(connection, store, path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(index, "_index", fail_second)
+        with pytest.raises(Error, match="check free space"):
+            index.refresh(base, full=True)
+    assert len(indexed) == 1
+    with closing(sqlite3.connect(base.root / index.CACHE)) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM items").fetchone()[0] == 0
+    assert refs(base, "offline retrieval")[0] == "projects/offline.md"
+
+
+def test_live_pending_commit_serves_stale_cache_but_abandoned_commit_errors(base: Store) -> None:
+    expected = refs(base, "offline retrieval")
+    with writer(base):
+        base.write("records/.pending/0.before", b"staged original")
+        reply = search([base], Query(text="offline retrieval"), counted=False)
+    assert reply["stale"] == ["fixture"]
+    assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == expected
+    with pytest.raises(Error, match="interrupted transaction"):
+        search([base], Query(text="offline retrieval"), counted=False)
+    assert base.read("records/.pending/0.before") == b"staged original"
+
+
 def test_several_bases_interleave_and_reads_name_their_base(base: Store, tmp_path: Path) -> None:
     root = tmp_path / "team"
     root.mkdir()
@@ -227,3 +306,311 @@ def test_usage_counts_searches_empty_results_and_reads_without_queries(base: Sto
     log.mkdir()
     usage.note(base, "search", 1)  # an unwritable log never breaks retrieval
     assert usage.summary(base)["7d"]["search"] == 0
+
+
+def test_recent_limits_after_ordering_all_matching_records(base: Store) -> None:
+    records_file(
+        base,
+        "updates",
+        "2026-09",
+        [
+            Record(id="old", title="Needle needle needle", time="2026-09-01T00:00:00Z"),
+            Record(id="new", title="Latest update", text="needle " + "detail " * 100, time="2026-09-23T00:00:00Z"),
+        ],
+    )
+    assert refs(base, "needle", recent=True, limit=1) == ["updates:new"]
+
+
+def test_identity_relations_keep_newest_first(base: Store) -> None:
+    records_file(
+        base,
+        "updates",
+        "2026-09",
+        [
+            Record(id="a", title="Old", links=["repo:unique-evidence"], time="2026-09-01T00:00:00Z"),
+            Record(id="b", title="New", links=["repo:unique-evidence"], time="2026-09-23T00:00:00Z"),
+        ],
+    )
+    assert refs(base, "repo:unique-evidence") == ["updates:b", "updates:a"]
+
+
+def test_malformed_link_does_not_block_other_notes(base: Store) -> None:
+    base.write("projects/bad-url.md", b'---\nlinks: ["https://["]\n---\n# Invalid link\n')
+    assert refs(base, "offline retrieval")[0] == "projects/offline.md"
+    assert "invalid link" in str(index.status(base)["problems"])
+
+
+def test_removing_a_duplicate_retries_its_other_partition(base: Store) -> None:
+    for month in ("2026-08", "2026-09"):
+        records_file(base, "duplicates", month, [Record(id="same", title="Needle", time=f"{month}-01T00:00:00Z")])
+    assert refs(base, "needle") == ["duplicates:same"]
+    base.delete("records/duplicates/2026-08.jsonl")
+    assert refs(base, "needle") == ["duplicates:same"]
+    assert index.status(base)["problems"] == []
+
+
+def test_current_schema_cache_with_missing_table_rebuilds(base: Store) -> None:
+    refs(base, "offline")
+    with sqlite3.connect(base.root / index.CACHE) as connection:
+        connection.execute("DROP TABLE files")
+    connection.close()
+    assert refs(base, "offline")[0] == "projects/offline.md"
+    assert read([base], "meetings:decision-1")["ref"] == "meetings:decision-1"
+
+
+def test_direct_record_read_survives_unavailable_cache(base: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(_store: Store) -> str:
+        raise Error("cache unavailable")
+
+    monkeypatch.setattr(index, "fresh", unavailable)
+    base.write("records/meetings/2026-09.jsonl", b"malformed unrelated newer partition\n")
+    assert read([base], "meetings:decision-1")["ref"] == "meetings:decision-1"
+
+
+@pytest.mark.parametrize("hint", ["records/other/2026-09.jsonl", "records/meetings/2026-09.jsonl"])
+def test_record_cache_hint_cannot_change_the_requested_source(base: Store, hint: str) -> None:
+    records_file(
+        base,
+        "other",
+        "2026-09",
+        [Record(id="decision-1", title="Evidence from another source", time="2026-09-01T00:00:00Z")],
+    )
+    base.write("records/meetings/2026-09.jsonl", b"malformed unrelated newer partition\n")
+    index.refresh(base)
+    with closing(sqlite3.connect(base.root / index.CACHE)) as connection, connection:
+        connection.execute("UPDATE items SET path=? WHERE ref=?", (hint, "meetings:decision-1"))
+    reply = read([base], "meetings:decision-1")
+    assert reply["path"] == "records/meetings/2026-08.jsonl"
+    assert cast("dict[str, object]", reply["record"])["title"] == "Preserve durable evidence"
+
+
+def test_large_note_does_not_consume_other_items_candidates(base: Store) -> None:
+    base.write(
+        "projects/large.md", ("# Large\n\n" + "".join(f"## Needle {i}\n\nneedle\n\n" for i in range(2100))).encode()
+    )
+    base.write("projects/other.md", ("# Other\n\nneedle " + "detail " * 1000).encode())
+    assert refs(base, "needle", limit=50) == ["projects/large.md#needle-0", "projects/other.md"]
+
+
+def test_ambiguous_identity_requires_an_exact_ref(base: Store) -> None:
+    base.write("projects/duplicate.md", b'---\naliases: ["repo:example/project"]\n---\n# Duplicate owner\n')
+    with pytest.raises(Error, match=r"ambiguous.*exact ref"):
+        read([base], "repo:example/project")
+
+
+def test_changed_since_uses_modification_time_without_changing_event_time(base: Store) -> None:
+    records_file(
+        base,
+        "updates",
+        "2026-01",
+        [
+            Record(
+                id="old",
+                title="Changed event",
+                time="2026-01-01T00:00:00Z",
+                attributes={"partial": True, "updated": "2026-09-23T00:00:00Z", "observed": "2026-09-23T01:00:00Z"},
+            ),
+        ],
+    )
+    records_file(
+        base,
+        "updates",
+        "2026-09",
+        [
+            Record(id="recent", title="New event", time="2026-09-22T00:00:00Z"),
+        ],
+    )
+    assert refs(base, source="updates", changed_since=timestamp("2026-09-21T00:00:00Z")) == [
+        "updates:recent",
+        "updates:old",
+    ]
+    assert refs(base, source="updates", since=timestamp("2026-09-21T00:00:00Z")) == ["updates:recent"]
+    items = search([base], Query(source="updates", changed_since=timestamp("2026-09-23T00:00:00Z")))["items"]
+    assert isinstance(items, list)
+    item = items[0]
+    assert item["time"] == timestamp("2026-01-01T00:00:00Z")
+    assert item["updated"] == timestamp("2026-09-23T00:00:00Z")
+    assert item["observed"] == timestamp("2026-09-23T01:00:00Z")
+    assert item["partial"] is True
+
+
+def test_current_selects_enabled_sources_and_reports_collection_coverage(base: Store) -> None:
+    base.write(
+        "fkf.yaml",
+        b"version: 2\nname: fixture\nsources:\n  meetings:\n    command: [true-command]\n    refresh: 3600\n  disabled:\n    command: [true-command]\n    enabled: false\n",
+    )
+    for source in ("disabled", "historical"):
+        records_file(base, source, "undated", [Record(id="x", title="Offline retrieval")])
+    items = search([base], Query(text="offline retrieval", current=True))["items"]
+    assert isinstance(items, list)
+    assert any(item["kind"] == "note" for item in items)
+    assert {item["source"] for item in items if item["kind"] == "record"} == {"meetings"}
+    for source, expected in (("meetings", "active"), ("disabled", "disabled"), ("historical", "historical")):
+        result = search([base], Query(source=source))
+        sources = result["sources"]
+        assert isinstance(sources, list)
+        assert sources[0]["state"] == expected
+    result = search([base], Query(source="absent", current=True))
+    assert result["items"] == []
+    assert result["sources"] == [{"base": "fixture", "source": "absent", "state": "historical", "freshness": "unknown"}]
+    collection = read([base], "meetings:decision-1")["collection"]
+    assert isinstance(collection, dict)
+    assert collection["freshness"] == "never"
+
+
+def test_okf_provenance_resources_are_searchable_identity_links(base: Store) -> None:
+    base.write("wiki/concept.md", b'---\ntype: concept\nsources:\n  - resource: "repo:unique-source"\n---\n# Concept\n')
+    assert refs(base, "repo:unique-source") == ["wiki/concept.md"]
+
+
+def test_identity_search_does_not_infer_relations_from_words(base: Store) -> None:
+    base.write("projects/prose.md", b"# Repo example\n\nThese words do not declare an identity.\n")
+    assert refs(base, "repo:example") == []
+    assert refs(base, "repo:example/project") == ["projects/offline.md", "meetings:decision-1"]
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_cache_sidecars_cannot_redirect_reads(base: Store, suffix: str) -> None:
+    cache = base.root / index.CACHE
+    cache.parent.mkdir()
+    cache.with_name(cache.name + suffix).symlink_to(base.root / "fkf.yaml")
+    before = base.read("fkf.yaml")
+    with pytest.raises(Error, match="regular file"):
+        refs(base, "offline")
+    assert base.read("fkf.yaml") == before
+
+
+def test_cache_write_failure_is_a_safe_actionable_error(base: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(_store: Store) -> sqlite3.Connection:
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(index, "_create", fail)
+    with pytest.raises(Error, match="check free space") as raised:
+        index.refresh(base)
+    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
+
+
+def test_french_question_words_do_not_outweigh_the_subject(base: Store) -> None:
+    base.write("projects/storage.md", b"# Stockage\n\nLes fichiers gardent les preuves hors ligne.\n")
+    base.write("projects/noise.md", b"# Pourquoi les\n\nUn titre sans rapport avec le sujet.\n")
+    assert refs(base, "Pourquoi les fichiers ?")[0] == "projects/storage.md"
+    assert "projects/noise.md" in refs(base, "pourquoi")  # all-stopword queries remain literal
+
+
+def test_recent_identity_keeps_owners_ahead_of_newer_relations_across_bases(base: Store, tmp_path: Path) -> None:
+    records_file(
+        base,
+        "updates",
+        "2026-09",
+        [
+            Record(id="latest", title="Latest activity", time="2026-09-23T00:00:00Z", links=["repo:example/project"]),
+        ],
+    )
+    assert refs(base, "repo:example/project", recent=True) == [
+        "projects/offline.md",
+        "updates:latest",
+        "meetings:decision-1",
+    ]
+    folder = tmp_path / "shared"
+    folder.mkdir()
+    team = Store(folder)
+    team.write("fkf.yaml", b"version: 2\nname: team\n")
+    team.write("projects/owner.md", b'---\nupdated: 2026-08-01\naliases: ["repo:example/project"]\n---\n# Owner\n')
+    result = search([team, base], Query(text="repo:example/project", recent=True))["items"]
+    assert isinstance(result, list)
+    assert [(item["base"], item["ref"]) for item in result] == [
+        ("fixture", "projects/offline.md"),
+        ("team", "projects/owner.md"),
+        ("fixture", "updates:latest"),
+        ("fixture", "meetings:decision-1"),
+    ]
+    assert all(not any(key.startswith("_") or key in {"score", "position"} for key in item) for item in result)
+
+
+def test_an_exact_record_ref_takes_precedence_over_a_colliding_alias(base: Store) -> None:
+    base.write("projects/alias.md", b'---\nupdated: 2026-09-23\naliases: ["meetings:lunch"]\n---\n# Alias\n')
+    assert refs(base, "meetings:lunch", recent=True)[0] == "meetings:lunch"
+    assert read([base], "meetings:lunch")["ref"] == "meetings:lunch"
+
+
+def test_search_reports_omitted_files_and_isolates_unavailable_bases(base: Store, tmp_path: Path) -> None:
+    base.write("projects/broken.md", b"---\nstatus: typo\n---\n# Hidden answer\n")
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    other = Store(broken)
+    other.write("fkf.yaml", b"version: 2\nname: interrupted\n")
+    other.write("records/.pending/0.before", b"preserve this original")
+    reply = search([base, other], Query(text="offline retrieval"), counted=False)
+    assert isinstance(reply["items"], list)
+    assert isinstance(reply["problems"], list)
+    assert reply["items"][0]["base"] == "fixture"
+    assert reply["problems"][0]["base"] == "fixture"
+    assert "projects/broken.md" in reply["problems"][0]["files"][0]
+    assert reply["problems"][1]["base"] == "interrupted"
+    assert "interrupted transaction" in reply["problems"][1]["error"]
+    assert other.read("records/.pending/0.before") == b"preserve this original"
+    empty = search([base], Query(text="hidden answer"), counted=False)
+    assert not empty["items"]
+    assert empty["problems"]
+    # Exact reads cannot silently assume a broken base contains no competing identity.
+    with pytest.raises(Error):
+        read([base, other], "meetings:lunch")
+    other.write("fkf.yaml", b"version: 2\nname: [invalid]\n")
+    assert search([base, other], Query(text="offline"), counted=False)["items"]
+    with pytest.raises(Error, match="no selected base"):
+        search([other, other], Query(text="offline"), counted=False)
+
+
+def test_search_waits_if_a_rebuild_replaces_the_checked_generation(
+    base: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index.refresh(base)
+    checked, reopen, ingesting, finish, retrying = (Event() for _ in range(5))
+    original_fresh, original_index = index.fresh, index._index  # noqa: SLF001 - coordinate a real generation replacement
+    checks = 0
+
+    def paused_fresh(store: Store) -> str:
+        nonlocal checks
+        checks += 1
+        if checks > 1:
+            retrying.set()
+        state = original_fresh(store)
+        if checks == 1:
+            checked.set()
+            assert reopen.wait(10)
+        return state
+
+    def paused_index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]:
+        ingesting.set()
+        assert finish.wait(10)
+        return original_index(connection, store, path)
+
+    monkeypatch.setattr(index, "fresh", paused_fresh)
+    monkeypatch.setattr(index, "_index", paused_index)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        query = executor.submit(search, [base], Query(text="offline"), counted=False)
+        try:
+            assert checked.wait(10)
+            rebuild = executor.submit(index.refresh, base, full=True)
+            assert ingesting.wait(10)
+            reopen.set()
+            assert retrying.wait(10)
+        finally:
+            reopen.set()
+            finish.set()
+        assert rebuild.result(timeout=10)["files"] == 3
+        reply = query.result(timeout=10)
+    assert isinstance(reply["items"], list)
+    assert reply["items"][0]["ref"] == "projects/offline.md"
+    assert "problems" not in reply
+
+
+def test_evaluation_rejects_incomplete_empty_answers(base: Store) -> None:
+    from fkf.evaluate import evaluate
+
+    base.write("projects/broken.md", b"---\nstatus: typo\n---\n# Lost answer\n")
+    base.write("queries.yaml", b"version: 2\ncases:\n  - name: absent\n    query: lost answer\n    empty: true\n")
+    reply = evaluate(base)
+    assert not reply["passed"]
+    assert isinstance(reply["cases"], list)
+    assert reply["cases"][0]["problems"]

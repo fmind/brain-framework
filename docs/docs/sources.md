@@ -40,7 +40,7 @@ sources:
 | `timeout`   | `300`    | Seconds before the process group is killed.                                                  |
 | `max_bytes` | 64 MiB   | Maximum stdout size.                                                                         |
 
-Collectors run from the base root with your environment minus loader-injection variables, stdin closed, and stderr captured to a private per-source log of at most 256 KiB under `~/.local/state/fkf/`. Errors name the log, never its content. The [example collectors](https://github.com/fmind/fkf/tree/main/examples/sources) show local Git history, a windowed Google Calendar and a complete Drive folder snapshot; copy them into `sources/` and adapt them with tests.
+Collectors run from the base root with your environment minus loader-injection variables, stdin closed, and stderr captured to a private per-source log of at most 256 KiB under `~/.local/state/fkf/`. Errors name the log, never its content. The [example collectors](https://github.com/fmind/fkf/tree/main/examples/sources) show local Git history, Google Calendar, a complete Drive folder snapshot and scoped local documents; copy them into `sources/` and adapt them with tests.
 
 ## Collect and update
 
@@ -52,6 +52,16 @@ fkf update                                      # run them all, then refresh sea
 ```
 
 `update` runs every enabled source whose `refresh` elapsed since its last success, in every base trusted on this machine. A window source resumes from its last collected window minus `overlap`, catching up at most 30 days after a long pause; upserts make repeated items harmless. A failed source stays due and never blocks the others; the command exits 1 when any failed. Run state lives in `~/.local/state/fkf/`, so losing it only means the next run uses `lookback`.
+
+Runs of the same source are serialized. Other sources can collect concurrently; record commits and run-state updates serialize briefly. `status` separates indexed totals from `last_run` counts (added, updated, unchanged and removed), and reports disabled and historical evidence separately from enabled sources. A manual backfill does not claim coverage across an uncollected gap.
+
+## Define the scope before adding a source
+
+Keep each collector's contract beside its code: selected account/folders/channels, stable identity, event and modification time, projected fields, size limits, deletion behavior and fake-provider tests. Prefer an explicit folder, repository or channel list over whole-account ingestion. Preserve source URLs and explicit identities so teammates can verify evidence.
+
+Use snapshots for bounded current catalogs (contacts, folders, a rolling future agenda, selected local documents). Use windows for history (commits, messages, meetings), with a documented reconciliation horizon for mutable records. Window collection does not remove disappeared items; a snapshot does. A past-event feed cannot answer tomorrow's agenda: collect a separate future snapshot. Mark truncated content with `attributes.partial`, retain upstream modification time as `attributes.updated`, and let FKF stamp `attributes.observed`.
+
+Start with records that answer recurring questions. Add richer mail bodies, comments, document text or curated feeds only when useful, with explicit scope. Reuse provider CLIs and native file formats; keep model inference, crawling, scheduling and credential storage outside collectors and the core.
 
 ## Schedule it
 
@@ -71,18 +81,20 @@ TimeoutStartSec=45min
 ```ini
 # ~/.config/systemd/user/fkf-update.timer
 [Unit]
-Description=Collect due FKF sources hourly
+Description=Check for due FKF sources every 15 minutes
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*:0/15
 Persistent=true
-RandomizedDelaySec=5min
+RandomizedDelaySec=1min
 
 [Install]
 WantedBy=timers.target
 ```
 
-Enable it with `systemctl --user enable --now fkf-update.timer` and read runs with `journalctl --user -u fkf-update`. On macOS, a launchd agent with `StartInterval` 3600 runs the same command. Give the job the PATH its collectors need (`gh`, `gws`, `git`). `fkf status --check` exits 1 when a scheduled source has not succeeded within twice its `refresh`, which suits a monitoring check.
+Run `systemctl --user daemon-reload`, enable it with `systemctl --user enable --now fkf-update.timer`, and read runs with `journalctl --user -u fkf-update`. On macOS, a launchd agent with `StartInterval` 900 checks for due sources every 15 minutes. Give the job the PATH its collectors need (`gh`, `gws`, `git`). `fkf status --check` exits 1 when a scheduled source has not succeeded within twice its `refresh`, which suits a monitoring check.
+
+Choose a timer interval comfortably shorter than the smallest nonzero `refresh`. An hourly timer with random delay can run just before an hourly source is due and skip it until the following hour. A 15-minute check avoids that extra hour of delay; it still collects only due sources. `Persistent=true` coalesces missed calendar triggers when the user manager returns; it does not keep a sleeping laptop running. Cache and provider failures make `update` exit 1.
 
 ## Good records
 

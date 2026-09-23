@@ -6,7 +6,8 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,7 +93,7 @@ def provider(tmp_path: Path) -> Provider:
 
 
 @pytest.fixture(autouse=True)
-def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -103,6 +104,17 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for key in tuple(os.environ):
         if key.startswith("GIT_"):
             monkeypatch.delenv(key)
+    previous_timezone = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous_timezone is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_timezone
+        time.tzset()
 
 
 PROJECT = b"""---

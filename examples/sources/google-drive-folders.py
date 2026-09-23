@@ -2,13 +2,54 @@
 """Capture the current Drive folder catalog, linking each folder to its parents, through gws."""
 
 import json
+import os
+import selectors
 import subprocess
 import sys
-import tempfile
+import time
+from contextlib import suppress
 from urllib.parse import quote
 
 MAX_BYTES = 16 << 20
 FOLDER = "application/vnd.google-apps.folder"
+
+
+def run(argv: list[str], limit: int, timeout: int) -> bytes:
+    """Bound provider output while it runs; inherit FKF's cancellable process group."""
+    # Only literal provider commands reach this helper; no shell interprets argv.
+    child = subprocess.Popen(  # nosemgrep: dangerous-subprocess-use-audit
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        if child.stdout is None:
+            raise ValueError("provider pipe is missing")
+        with selectors.DefaultSelector() as selector:
+            os.set_blocking(child.stdout.fileno(), False)
+            selector.register(child.stdout, selectors.EVENT_READ)
+            while selector.get_map() or child.poll() is None:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("provider exceeded its timeout")
+                if not selector.get_map():
+                    with suppress(subprocess.TimeoutExpired):
+                        child.wait(timeout=0.05)
+                for key, _ in selector.select(0.05):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    output.extend(chunk)
+                    if len(output) > limit:
+                        raise ValueError("provider output exceeds its byte limit")
+        if code := child.wait():
+            raise subprocess.CalledProcessError(code, argv)
+        return bytes(output)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+        if child.stdout is not None:
+            child.stdout.close()
 
 
 def collect() -> list[dict[str, object]]:
@@ -22,25 +63,15 @@ def collect() -> list[dict[str, object]]:
             "q": f"trashed=false and mimeType='{FOLDER}'",
             "corpora": "user",
             "pageSize": 1000,
-            "fields": "nextPageToken,incompleteSearch,files(id,name,mimeType,parents,createdTime,modifiedTime,webViewLink)",
+            "fields": "kind,nextPageToken,incompleteSearch,files(id,name,mimeType,parents,createdTime,modifiedTime,webViewLink)",
         }
         if token:
             params["pageToken"] = token
-        with tempfile.TemporaryFile() as output:
-            subprocess.run(
-                ["gws", "drive", "files", "list", "--params", json.dumps(params)],
-                check=True,
-                stdout=output,
-                stderr=subprocess.DEVNULL,
-                timeout=120,
-            )
-            output.seek(0)
-            data = output.read(MAX_BYTES + 1)
-        if len(data) > MAX_BYTES:
-            raise ValueError("folder page exceeds limit")
+        data = run(["gws", "drive", "files", "list", "--params", json.dumps(params)], MAX_BYTES, 120)
         page = json.loads(data)
         if (
             not isinstance(page, dict)
+            or page.get("kind") != "drive#fileList"
             or page.get("incompleteSearch", False) is not False
             or not isinstance(page.get("files", []), list)
         ):

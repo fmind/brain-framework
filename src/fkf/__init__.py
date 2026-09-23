@@ -1,6 +1,6 @@
 """Owned knowledge for people and their agents."""
 
-__version__ = "8.1.0"
+__version__ = "8.2.0"
 
 
 def main() -> None:

@@ -15,12 +15,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter, ValidationError, field_validator
 
 from fkf import records
 from fkf.config import load, may_collect
-from fkf.models import Error, Record, Source, decode, encode, explain, timestamp
-from fkf.storage import Store, relative, state_store, writer
+from fkf.models import NAME, Error, Model, Record, Source, decode, encode, explain, timestamp
+from fkf.storage import Store, collecting, relative, state_store, writer
 
 _LOG = 256 << 10
 _STARTUP = (
@@ -31,7 +31,37 @@ _STARTUP = (
     "DYLD_LIBRARY_PATH",
     "BASH_ENV",
     "ENV",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONSTARTUP",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "RUBYOPT",
+    "RUBYLIB",
+    "PERL5OPT",
+    "PERL5LIB",
+    "PERLLIB",
 )
+
+
+class _Run(Model):
+    run: str = ""
+    success: str = ""
+    start: str = ""
+    end: str = ""
+    error: str = ""
+    records: int = Field(default=0, ge=0)
+    added: int = Field(default=0, ge=0)
+    updated: int = Field(default=0, ge=0)
+    unchanged: int = Field(default=0, ge=0)
+    removed: int = Field(default=0, ge=0)
+
+    @field_validator("run", "success", "start", "end")
+    @classmethod
+    def instant(cls, value: str) -> str:
+        if value:
+            timestamp(value)
+        return value
 
 
 class Runner(Protocol):
@@ -51,7 +81,11 @@ def run(argv: list[str], source: Source, store: Store, log: Path) -> bytes:
         raise Error(f"{executable} is not on PATH")
     else:
         executable = found
-    env = {key: value for key, value in os.environ.items() if key not in _STARTUP}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _STARTUP and not key.startswith(("LD_", "DYLD_", "BASH_FUNC_"))
+    }
     try:
         child = subprocess.Popen(  # noqa: S603  # nosemgrep: dangerous-subprocess-use-audit
             # Direct argv from the owner's fkf.yaml; no shell interprets it.
@@ -101,20 +135,32 @@ def run(argv: list[str], source: Source, store: Store, log: Path) -> bytes:
         for pipe in (child.stdout, child.stderr):
             if pipe is not None:
                 pipe.close()
-        log.write_bytes(bytes(errors[-_LOG:]))
-        log.chmod(0o600)
+        # Use the same confined atomic writer as other private state.
+        Store(log.parent).write(log.name, bytes(errors[-_LOG:]))
 
 
 def state(store: Store) -> dict[str, dict[str, object]]:
     """Per-source run history, kept on this machine outside the base."""
     try:
         value = decode(state_store(store.root).read("sources.json"))
-    except FileNotFoundError:
+    except FileNotFoundError, Error:
         return {}
-    return value if isinstance(value, dict) else {}  # type: ignore[return-value]
+    if not isinstance(value, dict):
+        return {}
+    valid = {}
+    for name, entry in value.items():
+        if not isinstance(name, str) or not re.fullmatch(NAME, name):
+            continue
+        try:
+            valid[name] = _Run.model_validate(entry).model_dump(exclude_unset=True)
+        except ValidationError:
+            # Disposable run history must not stop evidence recovery or other sources.
+            continue
+    return valid
 
 
 def _remember(store: Store, name: str, **values: object) -> None:
+    """Update local history while the caller holds the base writer lock."""
     current = state(store)
     current[name] = {**current.get(name, {}), **values}
     state_store(store.root).write("sources.json", encode(current))
@@ -149,27 +195,60 @@ def collect(
     values = {"base": str(store.root), "home": str(Path.home()), "start": start, "end": end}
     argv = [re.sub(r"\{\{(base|home|start|end)\}\}", lambda match: values[match[1]], arg) for arg in source.command]
     log = log_path(store, name)
-    started = clock()
-    try:
-        raw = runner(argv, source, store, log)
+    with collecting(store, name):
+        started = clock()
+        committed = False
         try:
-            incoming = TypeAdapter(list[Record]).validate_python(decode(raw))
-        except ValidationError as error:
-            raise Error("collector must print one JSON array of records: " + explain(error)) from error
-        if len({r.id for r in incoming}) != len(incoming):
-            raise Error("collector returned duplicate record ids")
-        result: dict[str, object] = {"source": name, "records": len(incoming)}
-        if dry_run:
-            return {**result, "samples": [r.model_dump(exclude_defaults=True) for r in incoming[:3]]}
-        with writer(store, wait=120):
-            result.update(records.upsert(store, name, incoming, snapshot=source.mode == "snapshot"))
-    except Error as error:
-        if not dry_run:
-            _remember(store, name, run=started.isoformat(), error=str(error))
-        raise Error(f"{name}: {error}; see {log}") from error
-    previous = str(state(store).get(name, {}).get("end", ""))
-    _remember(store, name, run=started.isoformat(), success=started.isoformat(), end=max(previous, end), error="")
-    return result
+            raw = runner(argv, source, store, log)
+            try:
+                incoming = TypeAdapter(list[Record]).validate_python(decode(raw))
+            except ValidationError as error:
+                raise Error("collector must print one JSON array of records: " + explain(error)) from error
+            if len({r.id for r in incoming}) != len(incoming):
+                raise Error("collector returned duplicate record ids")
+            observed = timestamp(started.isoformat())
+            incoming = [
+                record.model_copy(update={"attributes": {**record.attributes, "observed": observed}})
+                for record in incoming
+            ]
+            result: dict[str, object] = {"source": name, "records": len(incoming)}
+            if dry_run:
+                return {**result, "samples": [r.model_dump(exclude_defaults=True) for r in incoming[:3]]}
+            with writer(store, wait=120):
+                result.update(records.upsert(store, name, incoming, snapshot=source.mode == "snapshot"))
+                committed = True
+                previous = state(store).get(name, {})
+                # Coverage is a contiguous interval, not an assertion that omitted windows were collected.
+                previous_start, previous_end = str(previous.get("start", "")), str(previous.get("end", ""))
+                coverage_start, coverage_end = start, end
+                if previous_start and previous_end and start <= previous_end and end >= previous_start:
+                    coverage_start, coverage_end = min(start, previous_start), max(end, previous_end)
+                _remember(
+                    store,
+                    name,
+                    run=started.isoformat(),
+                    success=started.isoformat(),
+                    start=coverage_start,
+                    end=coverage_end,
+                    error="",
+                    **{key: value for key, value in result.items() if key != "source"},
+                )
+        except (Error, OSError, UnicodeError) as error:
+            message = (
+                str(error)
+                if isinstance(error, Error)
+                else ("collector files are inaccessible; check its executable, record permissions and free space")
+            )
+            if committed:
+                message = "records were committed but local run history could not be saved; retry is safe"
+            if not dry_run:
+                try:
+                    with writer(store, wait=120):
+                        _remember(store, name, run=started.isoformat(), error=message)
+                except (Error, OSError) as history_error:
+                    raise Error(f"{name}: {message}; run history could not be saved") from history_error
+            raise Error(f"{name}: {message}; see {log}") from error
+        return result
 
 
 def due(store: Store, now: datetime) -> list[tuple[str, str, str]]:

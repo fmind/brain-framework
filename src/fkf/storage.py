@@ -46,8 +46,13 @@ class Store:
         try:
             for part in parts[:-1]:
                 if create:
-                    with suppress(FileExistsError):
+                    try:
                         os.mkdir(part, 0o700, dir_fd=descriptor)
+                    except FileExistsError:
+                        pass
+                    else:
+                        # Persist the new directory entry before a transaction can depend on its files.
+                        os.fsync(descriptor)
                 child = os.open(part, _DIR, dir_fd=descriptor)
                 os.close(descriptor)
                 descriptor = child
@@ -94,6 +99,14 @@ class Store:
             if not stat.S_ISREG(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode):
                 raise Error(f"{name}: refusing to delete a non-regular file")
             os.unlink(leaf, dir_fd=parent)
+            os.fsync(parent)
+
+    def rmdir(self, name: str) -> None:
+        """Remove an empty directory without following links."""
+        with self.parent(name) as (parent, leaf):
+            if not stat.S_ISDIR(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode):
+                raise Error(f"{name}: expected a directory")
+            os.rmdir(leaf, dir_fd=parent)
             os.fsync(parent)
 
     def files(self, directory: str) -> list[str]:
@@ -161,10 +174,9 @@ def state_store(root: Path) -> Store:
 
 
 @contextmanager
-def writer(store: Store, wait: float = 0) -> Iterator[None]:
-    """Serialize writers of one physical base; wait up to `wait` seconds for another writer."""
+def _lock(store: Store, name: str, wait: float, *, shared: bool = False) -> Iterator[None]:
     state = state_store(store.root)
-    with state.parent("write.lock") as (parent, leaf):
+    with state.parent(name) as (parent, leaf):
         fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -172,7 +184,7 @@ def writer(store: Store, wait: float = 0) -> Iterator[None]:
         deadline = time.monotonic() + wait
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
                 break
             except BlockingIOError as error:
                 if time.monotonic() >= deadline:
@@ -181,3 +193,25 @@ def writer(store: Store, wait: float = 0) -> Iterator[None]:
         yield
     finally:
         os.close(fd)
+
+
+@contextmanager
+def writer(store: Store, wait: float = 0) -> Iterator[None]:
+    """Serialize writers of one physical base; wait up to `wait` seconds for another writer."""
+    with _lock(store, "write.lock", wait):
+        yield
+
+
+@contextmanager
+def reader(store: Store, wait: float = 120) -> Iterator[None]:
+    """Keep record partitions stable during one exact read; readers can run concurrently."""
+    with _lock(store, "write.lock", wait, shared=True):
+        yield
+
+
+@contextmanager
+def collecting(store: Store, source: str, wait: float = 0) -> Iterator[None]:
+    """Order runs of one source without blocking offline reads while its provider is running."""
+    relative(source)
+    with _lock(store, f"collect-{source}.lock", wait):
+        yield

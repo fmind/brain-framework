@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from typing import Any, cast
 
 import pytest
@@ -13,7 +21,7 @@ from fkf import records
 from fkf.collect import collect, due, log_path, run, state
 from fkf.config import register
 from fkf.models import Error, Source
-from fkf.storage import Store
+from fkf.storage import BusyError, Store, writer
 from fkf.update import update
 
 START = "2026-09-01T00:00:00.000000Z"
@@ -65,7 +73,14 @@ def test_collect_dry_run_then_upsert(configured: Store) -> None:
     result = collect(configured, "sample", start=START, end=END, runner=fake, clock=lambda: NOW)
     assert result == {"source": "sample", "records": 1, "added": 1, "updated": 0, "unchanged": 0, "removed": 0}
     assert records.partitions(configured, "sample") == ["records/sample/2026-09.jsonl"]
-    assert state(configured)["sample"] == {"run": NOW.isoformat(), "success": NOW.isoformat(), "end": END, "error": ""}
+    assert state(configured)["sample"] == {
+        "run": NOW.isoformat(),
+        "success": NOW.isoformat(),
+        "start": START,
+        "end": END,
+        "error": "",
+        **{key: value for key, value in result.items() if key != "source"},
+    }
 
 
 @pytest.mark.parametrize(
@@ -189,3 +204,182 @@ def test_placeholders_are_expanded_once(configured: Store, monkeypatch: pytest.M
         return b"[]"
 
     assert collect(configured, "sample", start=START, end=END, dry_run=True, runner=fake)["records"] == 0
+
+
+def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
+    configured.write(
+        "fkf.yaml",
+        b"version: 2\nname: fixture\nsources:\n"
+        b"  a-missing:\n    command: [sources/missing.py]\n    refresh: 3600\n"
+        b'  b-good:\n    command: [echo, "[]"]\n    refresh: 3600\n',
+    )
+    report = cast("Any", update([configured], now=NOW))
+    assert not report["ok"]
+    assert [item["status"] for item in report["bases"][0]["sources"]] == ["failed", "collected"]
+    assert state(configured)["a-missing"]["error"]
+    assert state(configured)["b-good"]["success"]
+
+
+def test_success_and_failure_history_are_serialized(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = Store.write
+    writes = []
+
+    def checked(self: Store, name: str, data: bytes) -> None:
+        if name == "sources.json":
+            with pytest.raises(BusyError), writer(configured):
+                pass
+            writes.append(name)
+        original(self, name, data)
+
+    monkeypatch.setattr(Store, "write", checked)
+    collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]")
+    with pytest.raises(Error, match="JSON"):
+        collect(configured, "folders", start=START, end=END, runner=lambda *_: b"broken")
+    assert writes == ["sources.json", "sources.json"]
+    assert set(state(configured)) == {"sample", "folders"}
+
+
+def test_overlapping_source_run_cannot_overwrite_newer_snapshot(configured: Store) -> None:
+    entered, release = Event(), Event()
+
+    def slow(*_: object) -> bytes:
+        entered.set()
+        assert release.wait(5)
+        return emit({"id": "one", "title": "First run"})
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        active = executor.submit(collect, configured, "folders", start=START, end=END, runner=slow)
+        try:
+            assert entered.wait(5)
+            with pytest.raises(BusyError):
+                collect(configured, "folders", start=START, end=END, runner=lambda *_: b"[]")
+        finally:
+            release.set()
+        assert active.result()["added"] == 1
+    assert records.find(configured, "folders", "one") is not None
+
+
+def test_interpreter_startup_injection_is_removed(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    for key in ("PYTHONPATH", "PYTHONHOME", "NODE_OPTIONS", "RUBYOPT", "PERL5OPT", "DYLD_FALLBACK_LIBRARY_PATH"):
+        monkeypatch.setenv(key, "startup-injection")
+    source = Source(command=["sh"])
+    output = run(
+        ["sh", "-c", 'printf "%s" "$PYTHONPATH$PYTHONHOME$NODE_OPTIONS$RUBYOPT$PERL5OPT$DYLD_FALLBACK_LIBRARY_PATH"'],
+        source,
+        configured,
+        log_path(configured, "sample"),
+    )
+    assert output == b""
+
+
+def test_sigterm_cancels_collector_and_descendants(configured: Store, tmp_path: Path) -> None:
+    marker = tmp_path / "children"
+    configured.write("sources/wait.sh", b'#!/bin/sh\nsleep 60 &\nprintf "%s %s\\n" "$$" "$!" > "$1"\nwait\n')
+    (configured.root / "sources/wait.sh").chmod(0o700)
+    configured.write(
+        "fkf.yaml",
+        json.dumps(
+            {
+                "version": 2,
+                "name": "fixture",
+                "sources": {"sample": {"command": ["sources/wait.sh", str(marker)]}},
+            }
+        ).encode(),
+    )
+    child = subprocess.Popen(  # noqa: S603 - exercise the CLI boundary with a temporary, synthetic collector
+        [
+            sys.executable,
+            "-m",
+            "fkf",
+            "collect",
+            "sample",
+            "--base",
+            str(configured.root),
+            "--since",
+            START,
+            "--until",
+            END,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+    pids: list[int] = []
+    try:
+        deadline = time.monotonic() + 20
+        while not marker.exists() and time.monotonic() < deadline and child.poll() is None:
+            time.sleep(0.02)
+        assert marker.exists(), "collector did not start"
+        pids = [int(value) for value in marker.read_text().split()]
+        child.send_signal(signal.SIGTERM)
+        stdout, stderr = child.communicate(timeout=10)
+        assert child.returncode == 130, stderr.decode()
+        assert stdout == b""
+        for pid in pids:
+            status = subprocess.run(  # noqa: S603 - inspect only process ids from the synthetic collector
+                ["ps", "-o", "stat=", "-p", str(pid)],  # noqa: S607 - POSIX process-boundary check
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            ).stdout.strip()
+            assert not status or status.startswith("Z"), f"collector process {pid} survived"
+        assert records.partitions(configured, "sample") == []
+    finally:
+        if pids:
+            with suppress(ProcessLookupError):
+                os.killpg(pids[0], signal.SIGKILL)
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)
+
+
+def test_invalid_history_and_other_base_errors_do_not_stop_update(configured: Store, tmp_path: Path) -> None:
+    from fkf.storage import state_store
+
+    state_store(configured.root).write("sources.json", b'{"sample":{"success":"not-a-date"},"folders":[]}')
+    assert state(configured) == {}
+    state_store(configured.root).write("sources.json", b"broken")
+    assert state(configured) == {}
+    other = tmp_path / "broken-base"
+    other.mkdir()
+    broken = Store(other)
+    broken.write("fkf.yaml", b"invalid: true\n")
+    configured.write(".fkf", b"not a directory")
+    report = cast("Any", update([broken, configured], now=NOW, runner=lambda *_: b"[]"))
+    assert not report["ok"]
+    assert report["bases"][0]["error"]
+    assert report["bases"][1]["index"]["error"]
+    assert [item["status"] for item in report["bases"][1]["sources"]] == ["collected", "collected"]
+
+
+def test_observation_and_coverage_describe_collected_evidence(configured: Store) -> None:
+    incoming = emit({"id": "item", "title": "Evidence", "attributes": {"updated": "2026-08-30T00:00:00Z"}})
+    collect(configured, "sample", start=START, end=END, runner=lambda *_: incoming, clock=lambda: NOW)
+    found = records.find(configured, "sample", "item")
+    assert found is not None
+    assert found[1].updated == "2026-08-30T00:00:00.000000Z"
+    assert found[1].observed == END
+    collect(configured, "sample", start="2026-08-31T00:00:00Z", end=START, runner=lambda *_: b"[]", clock=lambda: NOW)
+    assert state(configured)["sample"]["start"] == "2026-08-31T00:00:00.000000Z"
+    assert state(configured)["sample"]["end"] == END
+    collect(configured, "sample", start="2026-01-01T00:00:00Z", end="2026-01-02T00:00:00Z", runner=lambda *_: b"[]")
+    assert state(configured)["sample"]["start"] == "2026-01-01T00:00:00.000000Z"
+    assert state(configured)["sample"]["end"] == "2026-01-02T00:00:00.000000Z"
+
+
+def test_failed_run_history_reports_that_records_were_committed(
+    configured: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = Store.write
+
+    def fail_history(self: Store, name: str, data: bytes) -> None:
+        if name == "sources.json":
+            raise PermissionError("synthetic state failure")
+        original(self, name, data)
+
+    monkeypatch.setattr(Store, "write", fail_history)
+    with pytest.raises(Error, match="records were committed"):
+        collect(configured, "sample", start=START, end=END, runner=lambda *_: emit({"id": "one", "title": "Saved"}))
+    assert records.find(configured, "sample", "one") is not None

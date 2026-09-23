@@ -2,6 +2,29 @@
 
 All notable changes to `fkf` are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v8.2.0](https://github.com/fmind/fkf/releases/tag/v8.2.0) - 2026-09-23
+
+FKF 8.2 makes incomplete results visible, preserves evidence through interrupted writes, and helps distinguish recently edited knowledge from historical records. Existing version 2 bases need no conversion; disposable search caches rebuild automatically.
+
+### Added
+
+- `search --changed-since` and `--current` in the CLI, MCP and retrieval cases, with active, disabled and historical source coverage, freshness and change counts.
+- Reserved record attributes `updated`, `observed` and `partial` distinguish upstream revision, collection time and incomplete content from event time.
+- Scoped local document extraction and optional Calendar agenda snapshots in the standalone collector examples.
+
+### Fixed
+
+- Recover interrupted multi-partition commits from durable originals through explicit `build`, collection or backup. Serialize source runs and state updates, preserve directory entries before journal writes, and bound partitions before writing.
+- Preserve newer upstream revisions during backfills, repair duplicates and corrupt caches, and retry concurrent cache replacement.
+- Report skipped files and unavailable bases in search; reject incomplete retrieval-case answers. Fail stale-cache health checks and skipped-file updates, reject malformed partition paths, confine link validation, and distinguish unreadable record sources from missing records.
+- Correct recent and identity ordering, per-item passage selection, local-date and DST handling, and malformed-note isolation. Expose identity ambiguity and OKF provenance links.
+- Validate Drive snapshot response identity before accepting empty catalogs, bound provider output while subprocesses run, and cancel collector descendants on SIGTERM.
+
+### Changed
+
+- Rewrite onboarding around a runnable first decision and a small team pilot. Clarify offline and security limits, scheduler cadence and example isolation.
+- Expand failure tests, French retrieval cases and the benchmark's changed and unchanged record paths. No runtime dependencies or services added.
+
 ## [v8.1.0](https://github.com/fmind/fkf/releases/tag/v8.1.0) - 2026-09-23
 
 ### Added

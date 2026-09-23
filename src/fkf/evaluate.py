@@ -20,6 +20,9 @@ class Case(Model):
     source: str = ""
     type: str = ""
     status: Status = ""
+    recent: bool = False
+    changed_since: str = ""
+    current: bool = False
     limit: Annotated[int, Field(ge=1, le=50)] = 10
     # A note path without #fragment matches any of its sections.
     expect: list[str] = Field(default_factory=list)
@@ -55,17 +58,26 @@ def evaluate(store: Store, path: str = "queries.yaml") -> dict[str, object]:
             type=case.type,
             status=case.status,
             limit=case.limit,
+            recent=case.recent,
+            changed_since=moment(case.changed_since) if case.changed_since else "",
+            current=case.current,
         )
-        items = cast("list[dict[str, object]]", search([store], query, counted=False)["items"])
+        reply = search([store], query, counted=False)
+        items = cast("list[dict[str, object]]", reply["items"])
         refs = [str(item["ref"]) for item in items]
         delivered = "\n".join(f"{item.get('title', '')}\n{item.get('excerpt', '')}" for item in items)
         missing = [ref for ref in case.expect if not _matches(ref, refs)]
         forbidden = [ref for ref in case.forbid if _matches(ref, refs)]
         absent = [text for text in case.text if text.casefold() not in delivered.casefold()]
-        passed = not (missing or forbidden or absent) and (not case.empty or not items)
+        passed = not (missing or forbidden or absent or reply.get("problems") or reply.get("stale")) and (
+            not case.empty or not items
+        )
         result: dict[str, object] = {"name": case.name, "passed": passed}
         if not passed:
             result.update(missing=missing, forbidden=forbidden, absent=absent, returned=refs)
+            for field in ("problems", "stale"):
+                if field in reply:
+                    result[field] = reply[field]
         results.append(result)
     passed = sum(bool(r["passed"]) for r in results)
     return {"passed": passed == len(results), "score": f"{passed}/{len(results)}", "cases": results}

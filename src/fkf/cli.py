@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import signal
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import FrameType
 from typing import Annotated, cast
 
 import typer
+import yaml
 from pydantic import ValidationError
 from typer.completion import completion_init
 
@@ -15,6 +18,7 @@ from fkf import __version__, index, usage
 from fkf.collect import collect, log_path, state
 from fkf.config import load, may_collect, one, register, select
 from fkf.evaluate import evaluate
+from fkf.health import source_health
 from fkf.models import Config, Error, Query, Status, encode, explain, moment
 from fkf.retrieve import read, search
 from fkf.storage import Store, writer
@@ -70,7 +74,8 @@ def initialize(path: Path, name: str = "knowledge") -> None:
     store = Store(path)
     with writer(store):
         store.write(
-            "fkf.yaml", f"# https://fmind.github.io/fkf/\nversion: 2\nname: {config.name}\nsources: {{}}\n".encode()
+            "fkf.yaml",
+            ("# https://fmind.github.io/fkf/\n" + yaml.safe_dump(config.model_dump(), sort_keys=False)).encode(),
         )
         store.write("wiki/index.md", b'---\nokf_version: "0.2"\n---\n\n# Wiki\n\n- [Welcome](welcome.md)\n')
         store.write(
@@ -81,7 +86,7 @@ def initialize(path: Path, name: str = "knowledge") -> None:
         for directory in ("projects", "tasks", "records", "sources", "scripts", "configs", "skills", "tests"):
             store.write(directory + "/.gitkeep", b"")
         store.write("AGENTS.md", AGENTS.encode())
-        store.write(".gitignore", b".fkf/\nlogs/\n")
+        store.write(".gitignore", b".fkf/\nlogs/\nrecords/\noriginals/\ninputs/\n")
     emit({"created": str(store.root), **register(store, collect=True)})
 
 
@@ -135,6 +140,10 @@ def find(
     status: Status = "",
     limit: int = 10,
     recent: Annotated[bool, typer.Option(help="Order by time instead of relevance.")] = False,
+    changed_since: Annotated[str, typer.Option(help="Upstream changes since this time; event time is unchanged.")] = "",
+    current: Annotated[
+        bool, typer.Option(help="Only notes and enabled sources; excludes historical/disabled sources.")
+    ] = False,
 ) -> None:
     """Search notes and records; results carry refs for fkf read."""
     emit(
@@ -149,6 +158,8 @@ def find(
                 status=status,
                 limit=limit,
                 recent=recent,
+                changed_since=moment(changed_since) if changed_since else "",
+                current=current,
             ),
         )
     )
@@ -170,24 +181,31 @@ def report(
     for store in select(base):
         config, history, summary = load(store), state(store), index.status(store)
         counts = cast("dict[str, dict[str, object]]", summary.pop("sources"))
+        coverage = source_health(store, counts, now=now)
         sources: dict[str, dict[str, object]] = {}
         for name in sorted({*config.sources, *counts}):
             settings = config.sources.get(name)
-            entry: dict[str, object] = {**counts.get(name, {"records": 0}), **history.get(name, {})}
+            run = history.get(name, {})
+            counters = {key: run[key] for key in ("records", "added", "updated", "unchanged", "removed") if key in run}
+            entry: dict[str, object] = {
+                **{key: value for key, value in run.items() if key not in counters},
+                **counts.get(name, {"records": 0}),
+                **coverage[name],
+            }
+            if counters:
+                entry["last_run"] = counters
             if settings is None:
                 entry["configured"] = False
             else:
                 entry["enabled"] = settings.enabled
-                success = str(entry.get("success", ""))
                 if settings.enabled and settings.refresh and may_collect(store):
-                    limit = now - timedelta(seconds=2 * settings.refresh)
-                    entry["stale"] = not success or datetime.fromisoformat(success) < limit
+                    entry["stale"] = coverage[name]["freshness"] in {"never", "stale"}
                     healthy &= not entry["stale"]
                 if entry.get("error"):
                     entry["log"] = str(log_path(store, name))
-                    healthy = False
+                    healthy &= not settings.enabled
             sources[name] = {key: value for key, value in entry.items() if value != ""}
-        healthy &= not summary["problems"]
+        healthy &= not summary["problems"] and summary["index"] == "ready"
         bases.append(
             {
                 "base": config.name,
@@ -195,6 +213,17 @@ def report(
                 "collect": may_collect(store),
                 **summary,
                 "sources": sources,
+                "coverage": {
+                    kind: {
+                        "sources": sum(value["state"] == kind for value in coverage.values()),
+                        "records": sum(
+                            int(cast("int", counts.get(name, {}).get("records", 0)))
+                            for name, value in coverage.items()
+                            if value["state"] == kind
+                        ),
+                    }
+                    for kind in ("active", "disabled", "historical")
+                },
                 "usage": usage.summary(store),
             }
         )
@@ -214,7 +243,7 @@ def check(base: BaseOption = "") -> None:
 
 @app.command("build")
 def rebuild(base: BaseOption = "") -> None:
-    """Rebuild the disposable search cache from scratch; search refreshes it incrementally anyway."""
+    """Recover interrupted record writes and rebuild the disposable search cache from scratch."""
     emit(index.refresh(one(base), full=True))
 
 
@@ -241,7 +270,12 @@ def schema() -> None:
     emit(Config.model_json_schema())
 
 
+def _cancel(_signum: int, _frame: FrameType | None) -> None:
+    raise KeyboardInterrupt
+
+
 def main() -> None:
+    previous = signal.signal(signal.SIGTERM, _cancel)
     try:
         app()
     except BrokenPipeError:
@@ -256,3 +290,5 @@ def main() -> None:
         message = str(error) if isinstance(error, Error) else "inaccessible file or directory; check the base and path"
         typer.echo("fkf: " + message, err=True)
         sys.exit(1)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
