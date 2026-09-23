@@ -2,6 +2,38 @@
 
 All notable changes to `fkf` are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v8.0.0](https://github.com/fmind/fkf/releases/tag/v8.0.0) - 2026-09-22
+
+FKF 8 focuses on the loop that makes a knowledge base useful: collect on a schedule, search from anywhere, read the exact source, keep notes current. It removes machinery that made bases hard to run and notes hard to read.
+
+### Breaking changes
+
+- Store records as monthly JSON Lines, `records/<source>/<YYYY-MM>.jsonl`, with one line per source item upserted by id; snapshot sources keep one `snapshot.jsonl`. Immutable per-run capture files, capture hashes, latest/historical snapshots and `--history` are removed; Git or backups keep history. This also removes the 20,000-file ceiling that hourly collection reached within two months.
+- Replace `find` and `context` with one `search [QUERY] [--since] [--until] [--source] [--type] [--status] [--limit] [--recent]`. An empty query lists a time window newest first. Byte budgets are removed; `--limit` bounds results.
+- Use readable refs everywhere: `path`, `path#section` and `source:id`. Base ids, `fkf://` qualified references and `record:<hash>` URIs are removed.
+- `fkf.yaml` is `version: 2` with a `name` and no `id`; `fkf.local.yaml` is removed. Bases are registered per user in `~/.config/fkf/config.yaml`, which also grants collection trust per machine.
+- `collect SOURCE [--since] [--until] [--dry-run]` replaces positional windows and `--preview`. `build` always rebuilds from scratch; `--check` and `--if-stale` are removed.
+- Remove containers, `parents`, `--within` and `indexes/structures.json`; link folders and labels with ordinary `links`. Remove note supersession, the special `## History` heading, trust-signal computation, `reviewed` and `effective`; note status is one of draft, active, paused, blocked, done, stable, deprecated or archived, and `updated` dates a note.
+- MCP exposes `search` and `read`.
+- Convert a v7 base with a one-off script in that base; see the upgrade notes in the documentation.
+
+### Added
+
+- Search every registered base from any directory, or only the enclosing base; results name their base.
+- `fkf register PATH [--collect]` adds a cloned team base; a base never runs collectors on a machine that has not trusted it.
+- The search cache refreshes itself incrementally before each query, skips and reports unparsable files, and keeps answering, marked `stale`, while another writer holds the base.
+- Relative times: `now`, `today`, `yesterday`, `12h`, `7d`, `2w` and local `YYYY-MM-DD` dates.
+- `fkf status [--check]` reports each source's last run, success, error and private stderr log, and fails when a trusted scheduled source is stale.
+- `fkf update` covers every trusted base, resumes each window source from its last success with overlap, catches up at most 30 days, and keeps run state outside the base.
+- `fkf validate` reports every problem at once, including broken links, missing headings, cited records that do not exist and misplaced or duplicate records.
+
+### Changed
+
+- Rank exact identities first, then items matching all words, then any word; notes above records; deprecated and archived notes last; one result per note through its best section.
+- Collectors run from the base root with the user's environment minus loader-injection variables, and write stderr to a bounded private log.
+- Retrieval cases use `version: 2` with `expect`, `forbid`, `text`, `empty` and time filters.
+- Mark the package as beta while the format settles.
+
 ## [v7.0.1](https://github.com/fmind/fkf/releases/tag/v7.0.1) - 2026-09-21
 
 First published v7 release. The v7.0.0 candidate stopped at the macOS package gate before publication; its tag remains unchanged.

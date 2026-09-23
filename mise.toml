@@ -81,12 +81,12 @@ site = Path("site")
 expected_pages = {
     "docs/base/index.html",
     "docs/commands/index.html",
-    "docs/context/index.html",
     "docs/getting-started/index.html",
     "docs/index.html",
     "docs/mcp/index.html",
     "docs/privacy/index.html",
     "docs/schema/index.html",
+    "docs/search/index.html",
     "docs/sources/index.html",
     "index.html",
     "third-party-notices/index.html",
@@ -277,7 +277,7 @@ set -euo pipefail
 fkf_test_home=$(mktemp -d)
 fkf_test_home=$(cd "$fkf_test_home" && pwd -P)
 trap 'rm -rf "$fkf_test_home"' EXIT
-env -u FKF_BASE HOME="$fkf_test_home" XDG_STATE_HOME="$fkf_test_home/state" \
+env -u FKF_BASE HOME="$fkf_test_home" XDG_STATE_HOME="$fkf_test_home/state" XDG_CONFIG_HOME="$fkf_test_home/config" \
   uv run pytest --basetemp="$fkf_test_home/pytest" \
     --cov=fkf --cov-branch --cov-report=term-missing --cov-fail-under=85
 '''
@@ -322,10 +322,12 @@ for distribution in wheel sdist; do
     unset FKF_BASE
     export HOME="$fkf_package_home" XDG_STATE_HOME="$fkf_package_home/state"
     fkf_package_bin="$tmp/$distribution-venv/bin/fkf"
+    export XDG_CONFIG_HOME="$fkf_package_home/config"
     "$fkf_package_bin" init "$tmp/$distribution-base"
-    "$fkf_package_bin" build --base "$tmp/$distribution-base"
-    "$fkf_package_bin" build --base "$tmp/$distribution-base" --check
-    "$fkf_package_bin" context "project decisions" --base "$tmp/$distribution-base" --budget 850
+    "$fkf_package_bin" validate --base "$tmp/$distribution-base"
+    "$fkf_package_bin" search welcome
+    "$fkf_package_bin" read wiki/welcome.md
+    "$fkf_package_bin" status --check
   )
 done
 '''

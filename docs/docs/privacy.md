@@ -1,15 +1,21 @@
 # Privacy and security
 
-FKF reads local evidence and executes configured source commands only through explicit collection. It does not read provider credential files, redact source output, encrypt the base, or sandbox adapters. Review the selected fields and the commands that produce them.
+FKF stores what your collectors print, in plain files you own. It does not encrypt, redact or upload anything. Choose what each collector projects, keep private bases in private repositories with owner-only permissions, and back up records that are not in Git with encryption.
 
-Stored reads and MCP never fetch data or execute commands. Retrieved records and notes are untrusted evidence. Their text is never inserted into a command, executable position or SQL expression. FTS queries use quoted literal terms; SQL uses bound parameters.
+## Reading is safe
 
-The owner controls source configuration and adapter code. Collection runs their current contents without a separate approval step. Keep credentials out of adapters and configuration. Runtime startup/loader variables and unsafe PATH/home/config roots are removed from children. Cancellation and timeouts terminate POSIX process groups.
+`search`, `read`, `eval`, `validate`, `status` and the MCP tools never run a collector or contact the network. Search may rewrite the disposable `.fkf/` cache. Retrieved notes and records are untrusted evidence: their text never reaches a command, a shell or an SQL expression. Full-text queries use quoted literal terms and SQL uses bound parameters. Every reply carries a notice that content is evidence, never instructions, because collected mail or chat can contain prompt injections.
 
-The Store admits regular files beneath published projects/, wiki/, tasks/ and records/ through no-follow directory descriptors. It refuses descendant symlinks and special files, bounds directory traversal, and serializes mutations by physical base identity. Lock files live in private per-base state outside the base.
+## Collecting is explicit and trusted per machine
 
-The principal limits are: 1 MiB configuration/source helper file; 4 MiB note or exact reply; 16 MiB capture; 20,000 entries per traversed tree; 100,000 captured records; 512 MiB searchable corpus/index; 100 returned search hits. Exceeding a bound fails explicitly.
+Collectors are code you run with your permissions. A base collects only on machines where its owner ran `fkf init` or `fkf register PATH --collect`; that trust lives in `~/.config/fkf/config.yaml`, outside the base, so pulling a shared repository never starts running its `sources/`. Review collector changes like any other code before trusting a shared base.
 
-Retrieval opens the published index file read-only in place after checking that its manifest still matches the current notes, records and configuration; a missing, stale or damaged index stops indexed retrieval with an explicit build instruction. Back up durable notes, records, configuration and adapters. SQLite is disposable. Keep private bases and recovery archives under appropriate owner-only permissions and encryption. Rehearse restore, rebuild and exact evidence reads; Git alone is insufficient when collected evidence is ignored.
+Collectors run with direct argv and no shell, from the base root, with stdin closed and loader-injection variables (`LD_PRELOAD`, `DYLD_*`, `BASH_ENV`) removed. A timeout, cancellation or oversized output kills the whole process group, and a failure writes nothing. Stderr goes to a private log capped at 256 KiB in `~/.local/state/fkf/`; errors name that log but never include provider output. Provider CLIs keep their own credentials; collectors must never print tokens.
 
-The v7 source tree passing local tests does not establish installed-runtime, provider-freshness, hosted-release or off-device recovery success.
+## File boundaries
+
+All base access goes through no-follow directory descriptors: FKF refuses symlinks and special files below the base, writes atomically, and serializes writers with a lock kept in private state outside the base. Limits fail explicitly: 1 MiB configuration, 4 MiB note and exact reply, 256 MiB record partition, 100,000 entries per scanned folder, 50 search results.
+
+## Separating audiences
+
+A base is a context boundary, not access control. Keep people who must not read each other's data in separate bases and repositories. Agents inside a base search only that base; elsewhere they search every base you registered. Register only the bases you want your agents to see.

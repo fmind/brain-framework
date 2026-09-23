@@ -1,106 +1,71 @@
-"""Owner-authored acceptance cases over delivered context and exact evidence."""
+"""Owner-written retrieval cases: the questions a base must keep answering."""
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from pydantic import Field, ValidationError
 
-from fkf.config import load, yaml_object
-from fkf.index import database
-from fkf.models import Error, Model, NoteStatus, NoteType, Query, local_reference
-from fkf.retrieve import context, read
+from fkf.config import yaml_object
+from fkf.models import Error, Model, Query, Status, explain, moment
+from fkf.retrieve import search
 from fkf.storage import Store
 
 
 class Case(Model):
     name: str
-    query: str
-    expect: list[str] = Field(default_factory=list)
-    forbidden: list[str] = Field(default_factory=list)
-    excerpts: dict[str, list[str]] = Field(default_factory=dict)
-    reads: dict[str, list[str]] = Field(default_factory=dict)
-    empty: bool = False
+    query: str = ""
+    since: str = ""
+    until: str = ""
     source: str = ""
-    order: Literal["relevance", "recent"] = "relevance"
-    history: bool = False
-    after: str = ""
-    before: str = ""
-    type: NoteType = ""
-    status: NoteStatus = ""
-    within: str = ""
-    limit: Annotated[int, Field(ge=1, le=100)] = 10
-    budget: Annotated[int, Field(ge=128, le=16384)] = 850
+    type: str = ""
+    status: Status = ""
+    limit: Annotated[int, Field(ge=1, le=50)] = 10
+    # A note path without #fragment matches any of its sections.
+    expect: list[str] = Field(default_factory=list)
+    forbid: list[str] = Field(default_factory=list)
+    # Each text must appear in a returned title or excerpt: the answer is delivered, not only its location.
+    text: list[str] = Field(default_factory=list)
+    empty: bool = False
 
 
 class Suite(Model):
-    version: Literal[1] = 1
-    cases: Annotated[list[Case], Field(min_length=1, max_length=100)]
+    version: Literal[2] = 2
+    cases: Annotated[list[Case], Field(min_length=1, max_length=200)]
+
+
+def _matches(expected: str, refs: list[str]) -> bool:
+    return any(ref == expected or ("#" not in expected and ref.partition("#")[0] == expected) for ref in refs)
 
 
 def evaluate(store: Store, path: str = "queries.yaml") -> dict[str, object]:
-    config = load(store)
     try:
         suite = Suite.model_validate(yaml_object(store.read(path, 1 << 20)))
     except ValidationError as error:
-        raise Error("invalid evaluation suite") from error
+        raise Error(f"invalid {path}: " + explain(error)) from error
     results = []
-    with database(store) as (connection, _state):
-        aliases = {
-            row["alias"]: row["uri"]
-            for row in connection.execute(
-                "SELECT a.alias,a.uri FROM aliases a JOIN entries e ON e.uri=a.uri ORDER BY e.captured,e.uri DESC",
-                (),
-            )
-        }
     for case in suite.cases:
-        if (not case.empty and not case.expect) or (case.empty and case.expect):
-            raise Error("each evaluation case needs expected URIs or empty: true")
-        pack = context(
-            store,
-            Query(
-                text=case.query,
-                limit=case.limit,
-                source=case.source,
-                order=case.order,
-                history=case.history,
-                after=case.after,
-                before=case.before,
-                type=case.type,
-                status=case.status,
-                within=case.within,
-            ),
-            case.budget,
+        if case.empty == bool(case.expect or case.text):
+            raise Error(f"case {case.name}: use expect/text, or empty: true")
+        query = Query(
+            text=case.query,
+            since=moment(case.since) if case.since else "",
+            until=moment(case.until) if case.until else "",
+            source=case.source,
+            type=case.type,
+            status=case.status,
+            limit=case.limit,
         )
-        items = pack["items"]
-        if not isinstance(items, list):
-            raise Error("invalid context result")
-        delivered = {item["uri"]: item for item in items}
-        delivered.update({local_reference(config.id, item["ref"]): item for item in items})
-
-        def resolve(uri):
-            uri = local_reference(config.id, uri)
-            return aliases.get(uri, uri)
-
-        missing = [uri for uri in case.expect if resolve(uri) not in delivered]
-        forbidden = [uri for uri in case.forbidden if resolve(uri) in delivered]
-        evidence = []
-        for uri, fragments in case.excerpts.items():
-            item = delivered.get(resolve(uri), {})
-            if not fragments or any(part not in item.get("excerpt", "") for part in fragments):
-                evidence.append(uri)
-        for uri, fragments in case.reads.items():
-            try:
-                value = read(store, uri)
-            except Error, OSError, UnicodeError:
-                evidence.append(uri)
-                continue
-            record = value.get("record", {})
-            body = str(value.get("text", "") or (record.get("text", "") if isinstance(record, dict) else ""))
-            if not fragments or any(part not in body for part in fragments):
-                evidence.append(uri)
-        passed = not (missing or forbidden or evidence) and (not case.empty or not delivered)
-        results.append(
-            {"name": case.name, "passed": passed, "missing": missing, "forbidden": forbidden, "missing_text": evidence}
-        )
-    return {"passed": all(r["passed"] for r in results), "cases": results}
+        items = cast("list[dict[str, object]]", search([store], query)["items"])
+        refs = [str(item["ref"]) for item in items]
+        delivered = "\n".join(f"{item.get('title', '')}\n{item.get('excerpt', '')}" for item in items)
+        missing = [ref for ref in case.expect if not _matches(ref, refs)]
+        forbidden = [ref for ref in case.forbid if _matches(ref, refs)]
+        absent = [text for text in case.text if text.casefold() not in delivered.casefold()]
+        passed = not (missing or forbidden or absent) and (not case.empty or not items)
+        result: dict[str, object] = {"name": case.name, "passed": passed}
+        if not passed:
+            result.update(missing=missing, forbidden=forbidden, absent=absent, returned=refs)
+        results.append(result)
+    passed = sum(bool(r["passed"]) for r in results)
+    return {"passed": passed == len(results), "score": f"{passed}/{len(results)}", "cases": results}

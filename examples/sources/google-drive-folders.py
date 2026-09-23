@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture the current Drive folder catalog and explicit parent IDs through gws."""
+"""Capture the current Drive folder catalog, linking each folder to its parents, through gws."""
 
 import json
 import subprocess
@@ -66,13 +66,12 @@ def collect() -> list[dict[str, object]]:
             records.append(
                 {
                     "id": identifier,
-                    "kind": "container",
                     "title": " ".join(name.split()),
                     "text": "Drive folder: " + name,
                     "time": folder.get("modifiedTime", ""),
                     "url": folder.get("webViewLink", ""),
                     "aliases": ["drive:" + quote(identifier, safe="")],
-                    "parents": ["drive:" + quote(parent, safe="") for parent in parents],
+                    "links": ["drive:" + quote(parent, safe="") for parent in parents],
                     "attributes": folder,
                 }
             )

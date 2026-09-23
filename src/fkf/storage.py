@@ -5,11 +5,17 @@ from __future__ import annotations
 import fcntl
 import os
 import stat
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath
 
 from fkf.models import MAX_FILE, MAX_FILES, Error, digest
+
+
+class BusyError(Error):
+    """Another process holds the base writer lock."""
+
 
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -60,7 +66,8 @@ class Store:
             raise Error(f"{name}: file exceeds {limit} bytes")
         return data
 
-    def write(self, name: str, data: bytes, *, immutable: bool = False) -> None:
+    def write(self, name: str, data: bytes) -> None:
+        """Replace a regular file atomically; readers see the old or the new bytes, never a mix."""
         with self.parent(name, create=True) as (parent, leaf):
             temporary = ".write-" + os.urandom(16).hex()
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
@@ -69,25 +76,25 @@ class Store:
                     stream.write(data)
                     stream.flush()
                     os.fsync(stream.fileno())
-                if immutable:
-                    try:
-                        os.link(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
-                    except FileExistsError:
-                        if self.read(name) != data:
-                            raise Error(f"{name}: immutable evidence already exists with different bytes") from None
+                try:
+                    info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
                 else:
-                    try:
-                        info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        if not stat.S_ISREG(info.st_mode):
-                            raise Error(f"{name}: refusing to replace a non-regular file")
-                    os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+                    if not stat.S_ISREG(info.st_mode):
+                        raise Error(f"{name}: refusing to replace a non-regular file")
+                os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
                 os.fsync(parent)
             finally:
                 with suppress(FileNotFoundError):
                     os.unlink(temporary, dir_fd=parent)
+
+    def delete(self, name: str) -> None:
+        with self.parent(name) as (parent, leaf):
+            if not stat.S_ISREG(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode):
+                raise Error(f"{name}: refusing to delete a non-regular file")
+            os.unlink(leaf, dir_fd=parent)
+            os.fsync(parent)
 
     def files(self, directory: str) -> list[str]:
         """Bound the entire traversal, including directories and ignored extensions."""
@@ -103,7 +110,7 @@ class Store:
                 for entry in entries:
                     visited += 1
                     if visited > MAX_FILES:
-                        raise Error("directory exceeds the 20,000-entry scan limit")
+                        raise Error(f"{directory} exceeds the {MAX_FILES:,}-entry scan limit")
                     path = f"{prefix}/{entry.name}"
                     info = entry.stat(follow_symlinks=False)
                     if stat.S_ISDIR(info.st_mode):
@@ -128,12 +135,13 @@ class Store:
             os.close(fd)
         return sorted(result)
 
-    def fingerprint(self, name: str) -> tuple[int, int, int, int, int]:
+    def fingerprint(self, name: str) -> tuple[int, int, int, int]:
+        """Size, mtime, ctime and inode: ctime catches an edit whose mtime was preserved."""
         with self.parent(name) as (parent, leaf):
             info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
             if not stat.S_ISREG(info.st_mode):
                 raise Error(f"{name}: expected a regular file")
-            return info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_dev, info.st_ino
+            return info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino
 
 
 def state_store(root: Path) -> Store:
@@ -153,27 +161,23 @@ def state_store(root: Path) -> Store:
 
 
 @contextmanager
-def writer(store: Store) -> Iterator[None]:
+def writer(store: Store, wait: float = 0) -> Iterator[None]:
+    """Serialize writers of one physical base; wait up to `wait` seconds for another writer."""
     state = state_store(store.root)
     with state.parent("write.lock") as (parent, leaf):
         fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Error("invalid writer lock")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise Error("another writer is active for this base; retry after it finishes") from error
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if time.monotonic() >= deadline:
+                    raise BusyError("another writer is active for this base; retry after it finishes") from error
+                time.sleep(0.05)
         yield
     finally:
         os.close(fd)
-
-
-def discover(value: str = "") -> Store:
-    selected = value or os.environ.get("FKF_BASE", "")
-    if selected:
-        return Store(Path(selected).expanduser())
-    for candidate in (Path.cwd(), *Path.cwd().parents):
-        if (candidate / "fkf.yaml").is_file():
-            return Store(candidate)
-    raise Error("no base selected; pass --base or set FKF_BASE")

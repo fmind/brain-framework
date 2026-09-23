@@ -1,6 +1,6 @@
 # Contributing
 
-Read [AGENTS.md](AGENTS.md) for the core contracts and the local [fkf-contribute skill](.agents/skills/fkf-contribute/SKILL.md) for the contribution workflow. Keep the implementation small and preserve evidence, offline retrieval, explicit collection, and recovery. Discuss changes that enlarge the product surface before implementing them.
+Read [AGENTS.md](AGENTS.md) for the core contracts and the local [fkf-contribute skill](.agents/skills/fkf-contribute/SKILL.md) for the contribution workflow. Keep the implementation small and preserve file-based knowledge, offline search, explicit trusted collection and readable refs. Discuss changes that enlarge the product surface before implementing them.
 
 ```bash
 mise run install

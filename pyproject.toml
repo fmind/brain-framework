@@ -1,8 +1,8 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "fkf"
-version = "7.0.1"
-description = "Local, offline evidence retrieval for coding agents"
+version = "8.0.0"
+description = "Owned knowledge for people and their agents: Markdown notes, collected records, offline search"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
@@ -10,7 +10,7 @@ license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Médéric Hurier" }]
 keywords = ["agents", "knowledge", "mcp", "retrieval"]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",

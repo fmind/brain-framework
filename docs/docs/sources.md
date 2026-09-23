@@ -1,64 +1,94 @@
-# Sources are commands
+# Collectors
 
-The core expects one JSON array of normalized records on stdout. Adapters own provider access, finite pagination, field projection and completeness. They should fail before printing partial results. Credentials belong to the provider CLI and must never enter base configuration or evidence.
+A collector is any executable that prints one JSON array of [records](base.md#records) on stdout. It owns provider access, pagination and projection; the provider's CLI owns credentials. FKF runs it, validates the whole array, and upserts the records. A failure, a timeout, invalid output or excessive output writes nothing.
 
 ```json
 [{
   "id": "decision-42",
   "title": "Keep historical evidence",
-  "text": "The team selected durable local files.",
+  "text": "The team selected durable local files because providers delete content.",
   "time": "2026-09-01T12:00:00Z",
-  "links": ["repo:example/project"]
+  "url": "https://mail.example.com/decision-42",
+  "links": ["repo:github.com/team/archive", "person:email/owner@example.com"]
 }]
 ```
 
-The repository's `examples/sources/` provides three reviewed patterns: local Git history, windowed Calendar events and complete Drive folder snapshots; copy the ones you need into `sources/`. Declare a bare external executable or a helper path beginning with sources/. Arguments are direct argv, never shell-reparsed. Exact placeholders are `{{base}}`, `{{home}}`, `{{start}}`, and `{{end}}`. The executable itself is literal. Use a helper with an explicit shebang for pipelines or provider-specific logic.
-
-```bash
-# Review fkf.yaml and the selected adapter before running it.
-fkf collect activity 2026-09-01T00:00:00Z 2026-09-02T00:00:00Z \
-  --base ~/knowledge --preview
-```
-
-Preview executes the currently configured command. Successful collection validates the whole array, requires unique ids and meaningful titles, and writes one immutable content-addressed capture. It does not automatically rebuild the index; invoke `fkf build` after a collection batch.
-
-The default timeout is 120 seconds; configured limits are 1–3600 seconds and 1–16 MiB of output per stream. Commands execute from `/` with startup/loader variables removed and PATH/home/config roots sanitized. Timeout, cancellation, nonzero exit or excessive output leaves no partial capture and terminates descendants.
-
-Configuration and adapter edits take effect on the next collection. There is no separate approval step or change-detection registry, and adapters run with your user permissions. Scheduling and source health probes belong to the base's maintenance commands.
-
-## Useful record projections
-
-Adapters should emit a descriptive title and factual text that lets a reader understand the record without opening the provider. Put the relevant subject, outcome or status, and source-provided rationale in searchable text. Preserve provider timestamps without substituting collection time for an unknown event time. Avoid generic titles that contain only a run or event id when the provider supplies a useful subject.
-
-`attributes` retains selected structured details for exact reads; it is not indexed. Deliberately project facts needed for retrieval into `title` and `text`. Do not dump arbitrary attributes, credentials, or unnecessary personal data into text. Preserve supplied URLs and explicit repository, document or event identities in `links` and `aliases`; never infer relationships from names or similar prose.
-
-Use a stable `id` within each source across edits and cancellations. Captures of that source/id are observations of the same record, so ordinary retrieval uses the latest known capture and `--history` exposes older ones. Append a new capture after an authorized collection; never rewrite existing records to improve their projection. Historical evidence remains exact and independently readable.
-
-Test projections with synthetic provider data: a useful subject and body, missing optional fields, cancellation or changed status, event time versus modification time, explicit links, and bounded pagination failures. Assert that important facts reach text, not just attributes.
-
-## Incremental refresh
-
-`fkf update --base PATH --dry-run` plans without running commands or writing an index. `fkf update --base PATH` runs only enabled sources with a positive `refresh` interval whose latest successful automatic capture is due, then builds if stale. Sources default to `refresh: 0` (manual only). The interval, `lookback` (first window, default 86400) and `overlap` (default 300) are seconds, validated in `fkf.yaml`; source-only local overrides have the same precedence as command settings.
+Declare collectors in `fkf.yaml`. The executable is a bare command on PATH or a `sources/` path; arguments are passed directly, never through a shell. The placeholders `{{base}}`, `{{home}}`, `{{start}}` and `{{end}}` are replaced once.
 
 ```yaml
 # https://fmind.github.io/fkf/
-version: 1
-id: aabbccddeeff00112233445566778899
-name: knowledge
+version: 2
+name: brain
 sources:
-  activity:
-    command: [sources/activity.py, "{{start}}", "{{end}}"]
+  git-commits:
+    command: [sources/git-history.py, "{{home}}", "{{start}}", "{{end}}"]
     refresh: 3600
-    lookback: 86400
-    overlap: 300
+  drive-folders:
+    command: [sources/google-drive-folders.py]
+    mode: snapshot
+    refresh: 86400
 ```
 
-A windowed source resumes at its last successful automatic window end minus overlap; a snapshot source requests its configured lookback each time and must return the complete catalog. Failed collections do not advance checkpoints. Other due sources may succeed, and the command exits 1 if any collection failed. No transaction spans a whole batch. Concurrent writers fail rather than corrupting evidence; configure the scheduler to avoid overlapping runs. Captures produced by `update` carry `automatic: true`; manual `collect` captures default to false and never advance or delay automatic progress. Durable automatic captures supply checkpoints, so deleting `.fkf/` loses no progress. Existing unmarked captures remain unchanged and do not seed automatic progress: the first automatic run uses the configured lookback. A collection records an observation even when its records are unchanged. A run with no due sources and a current index writes nothing.
+| Setting     | Default  | Meaning                                                                                      |
+| ----------- | -------- | -------------------------------------------------------------------------------------------- |
+| `command`   | required | Direct argv.                                                                                 |
+| `enabled`   | `true`   | Disabled sources never run; their records stay searchable.                                   |
+| `mode`      | `window` | `window` upserts what the collector returns; `snapshot` replaces the source's whole catalog. |
+| `refresh`   | `0`      | Seconds between automatic runs; `0` keeps the source manual.                                 |
+| `lookback`  | `86400`  | Seconds covered by a first run, or by every snapshot run.                                    |
+| `overlap`   | `300`    | Seconds re-read before the last window's end, for late arrivals.                             |
+| `timeout`   | `300`    | Seconds before the process group is killed.                                                  |
+| `max_bytes` | 64 MiB   | Maximum stdout size.                                                                         |
 
-Overlap catches only late arrivals inside the requested window. Provider adapters that query event time cannot promise complete edit/deletion detection; use an explicit wider `collect` window for reconciliation. A long outage can exceed provider limits: reduce the source scope or adjust the adapter to handle the outstanding window before resuming. Manual backfills retain evidence but do not declare an automatic gap covered. Configure a suitable lookback for the first run and review the dry-run before enabling automation.
+Collectors run from the base root with your environment minus loader-injection variables, stdin closed, and stderr captured to a private per-source log of at most 256 KiB under `~/.local/state/fkf/`. Errors name the log, never its content. The [example collectors](https://github.com/fmind/fkf/tree/main/examples/sources) show local Git history, a windowed Google Calendar and a complete Drive folder snapshot; copy them into `sources/` and adapt them with tests.
 
-A base-owned cron, systemd timer, launchd job or team scheduler invokes `fkf update --base /absolute/base`. FKF installs no schedule and upgrades no software. For example, an hourly cron job can call a reviewed `scripts/update.sh` containing `exec /absolute/path/to/fkf update --base /absolute/base`. Give the job the provider CLI environment it needs. Use the scheduler's logs or redirect compact receipts into rotated, private `logs/`; do not record provider output. Prefer one scheduler invocation at a time.
+## Collect and update
 
-## Shared identities
+```bash
+fkf collect git-commits --since 30d --dry-run   # run and show three samples, write nothing
+fkf collect git-commits --since 30d             # backfill a month
+fkf update --dry-run                            # which sources are due, and their windows
+fkf update                                      # run them all, then refresh search
+```
 
-Use the same literal identity across adapters: `person:email/<lowercase-address>` (UTF-8 percent-encoded, preserving `/ : @ +`, with `~` encoded), `repo:github.com/<lowercase-owner>/<lowercase-repo>`, and provider item ids. Mail, contacts, calendar participants, Git authors, chat senders and document owners can therefore share an email edge. Only source-provided fields establish relationships; no name matching or guessed email-to-GitHub-account mapping occurs. Query an identity directly with `fkf find 'person:email/person@example.invalid'`. The SQLite `edges`, `aliases` and `memberships` tables are derived views of this evidence, not a separate authoritative graph.
+`update` runs every enabled source whose `refresh` elapsed since its last success, in every base trusted on this machine. A window source resumes from its last collected window minus `overlap`, catching up at most 30 days after a long pause; upserts make repeated items harmless. A failed source stays due and never blocks the others; the command exits 1 when any failed. Run state lives in `~/.local/state/fkf/`, so losing it only means the next run uses `lookback`.
+
+## Schedule it
+
+Run `fkf update` from a native timer. On Linux, a systemd user timer:
+
+```ini
+# ~/.config/systemd/user/fkf-update.service
+[Unit]
+Description=Collect due FKF sources
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/fkf update
+TimeoutStartSec=45min
+```
+
+```ini
+# ~/.config/systemd/user/fkf-update.timer
+[Unit]
+Description=Collect due FKF sources hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it with `systemctl --user enable --now fkf-update.timer` and read runs with `journalctl --user -u fkf-update`. On macOS, a launchd agent with `StartInterval` 3600 runs the same command. Give the job the PATH its collectors need (`gh`, `gws`, `git`). `fkf status --check` exits 1 when a scheduled source has not succeeded within twice its `refresh`, which suits a monitoring check.
+
+## Good records
+
+- Put the facts someone will ask about in `title` and `text`: subject, outcome, people, rationale. `attributes` are for exact reads, not search.
+- Keep `id` stable across edits so a changed item replaces its line.
+- Use event time, never collection time, for `time`.
+- Link explicit identities only: `person:email/<lowercase address>`, `repo:github.com/<owner>/<name>`, provider URLs. Never infer relationships from similar names.
+- Skip noise at the source: trash, promotions, bots, test runs. A smaller, relevant corpus answers better.
+- Fail before printing anything when pagination is incomplete or the provider errors, and test the collector with a fake provider.

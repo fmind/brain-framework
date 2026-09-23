@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter
 
-from fkf.models import Collection, Record, encode
+from fkf.config import register
+from fkf.models import Record, encode
 from fkf.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,36 +97,69 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_STATE_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     monkeypatch.delenv("FKF_BASE", raising=False)
+    monkeypatch.chdir(tmp_path)
     for key in tuple(os.environ):
         if key.startswith("GIT_"):
             monkeypatch.delenv(key)
 
 
+PROJECT = b"""---
+type: project
+status: active
+updated: 2026-09-01
+tags: [retention]
+aliases: ["repo:example/project"]
+---
+
+# Offline retrieval
+
+Keep stored reads offline. Decided in [the meeting](meetings:decision-1).
+
+## Decision
+
+Provider retention cannot guarantee historical evidence, so the team keeps durable records.
+
+## Next actions
+
+- Publish the retention guide.
+"""
+
+
+def records_file(store: Store, source: str, month: str, records: list[Record]) -> None:
+    store.write(
+        f"records/{source}/{month}.jsonl", b"".join(encode(r.model_dump(exclude_defaults=True)) for r in records)
+    )
+
+
 @pytest.fixture
 def base(tmp_path: Path) -> Store:
+    """A registered, collect-trusted base with one project note, one wiki concept and two records."""
     root = tmp_path / "base"
     root.mkdir()
     store = Store(root)
-    store.write("fkf.yaml", b"version: 1\nid: aabbccddeeff00112233445566778899\nname: fixture\nsources: {}\n")
+    store.write("fkf.yaml", b"version: 2\nname: fixture\nsources: {}\n")
+    store.write("projects/offline.md", PROJECT)
     store.write(
-        "wiki/project.md",
-        b'---\ntype: wiki\ntitle: Offline retrieval decision\naliases: ["repo:example/project"]\n---\n# Retrieval\n\nKeep stored reads offline.\n\n## Reason\n\nProvider retention cannot guarantee historical evidence.\n',
+        "wiki/evidence.md",
+        b"---\ntype: concept\nstatus: stable\n---\n\n# Durable evidence\n\nOriginals outlive providers.\n",
     )
-    capture = Collection(
-        source="meetings",
-        captured="2026-09-01T00:00:00Z",
-        records=[
+    records_file(
+        store,
+        "meetings",
+        "2026-08",
+        [
             Record(
                 id="decision-1",
                 title="Preserve durable evidence",
                 text="The team chose offline retrieval.",
                 time="2026-08-31T12:00:00Z",
-                links=["wiki/project.md"],
+                links=["repo:example/project"],
                 aliases=["meeting:decision-1"],
             ),
-            Record(id="noise", title="Lunch plans", text="Meet for lunch on Tuesday."),
+            Record(id="lunch", title="Lunch plans", text="Meet for lunch on Tuesday.", time="2026-08-30T12:00:00Z"),
         ],
     )
-    store.write("records/meetings/fixture.json", encode(capture.model_dump()))
+    register(store, collect=True)
     return store

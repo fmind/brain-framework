@@ -2,7 +2,7 @@
 [project]
 site_name = "fkf"
 site_url = "https://fmind.github.io/fkf/"
-site_description = "Owned, offline evidence retrieval for coding agents."
+site_description = "Owned knowledge for people and their agents."
 site_author = "Médéric Hurier"
 copyright = "Copyright &copy; 2026 Médéric Hurier (Fmind)."
 docs_dir = "docs"
@@ -14,9 +14,9 @@ nav = [
   { "Overview" = "docs/index.md" },
   { "Getting started" = "docs/getting-started.md" },
   { "Understand FKF" = [
-    { "Notes, records and configuration" = "docs/base.md" },
-    { "Sources are commands" = "docs/sources.md" },
-    { "Bounded context" = "docs/context.md" },
+    { "Base layout and knowledge" = "docs/base.md" },
+    { "Collectors" = "docs/sources.md" },
+    { "Search and read" = "docs/search.md" },
   ] },
   { "Reference" = [
     { "Command reference" = "docs/commands.md" },

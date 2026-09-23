@@ -1,6 +1,7 @@
 ---
 type: project
 status: active
+updated: 2026-09-19
 aliases: ["repo:example/project"]
 ---
 
@@ -8,10 +9,14 @@ aliases: ["repo:example/project"]
 
 Demonstrate collecting fictional evidence and retrieving a grounded answer locally.
 
-## TODO
+## Now
+
+The source is a local deterministic script with no credentials or network access. See the [retention concept](../wiki/retention.md).
+
+## Decisions
+
+- 2026-09-19: keep original evidence ([record](demo:retention)).
+
+## Next actions
 
 - [ ] Run the [retention task](../tasks/2026-09-19_retention/TASK.md).
-
-## Context
-
-See the [retention concept](../wiki/retention.md). The source is a local deterministic script with no credentials or network access.

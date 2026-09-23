@@ -16,7 +16,6 @@ sys.stdout.write(
                 "title": "Retention decision",
                 "text": "Keep original evidence because upstream content can disappear.",
                 "time": start.isoformat(),
-                "aliases": ["demo:retention"],
                 "links": ["repo:example/project"],
             }
         ]

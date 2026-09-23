@@ -1,4 +1,4 @@
-"""The complete snapshot example preserves explicit membership and fails closed."""
+"""The complete snapshot example links folders to their parents and fails closed."""
 
 import json
 
@@ -27,8 +27,8 @@ def test_drive_folders_page_completely_and_keep_parent_identity(provider: Provid
     )
     records = provider.records("google-drive-folders.py", START, END)
     assert [r.id for r in records] == ["root", "child"]
-    assert records[1].parents == ["drive:root"]
-    assert records[1].kind == "container"
+    assert records[1].links == ["drive:root"]
+    assert records[0].aliases == ["drive:root"]
     params = json.loads(provider.calls("gws")[0][-1])
     assert "incompleteSearch" in params["fields"]
     assert params["corpora"] == "user"

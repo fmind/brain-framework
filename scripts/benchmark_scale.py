@@ -1,4 +1,4 @@
-"""Measure repeated retrieval over mixed notes and captures; never contact providers."""
+"""Measure cache builds, incremental refreshes and searches over notes and records; never contact providers."""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ import tempfile
 import time
 from pathlib import Path
 
-from fkf.index import build
-from fkf.models import Collection, Query, Record, encode
-from fkf.retrieve import context, read
+from fkf import records
+from fkf.index import refresh
+from fkf.models import Query, Record
+from fkf.retrieve import read, search
 from fkf.storage import Store
 
 
@@ -36,31 +37,35 @@ def main() -> None:
         (root / "base").mkdir()
         os.environ["XDG_STATE_HOME"] = str(root / "state")
         store = Store(root / "base")
-        store.write("fkf.yaml", b"version: 1\nid: aabbccddeeff00112233445566778899\nname: benchmark\n")
+        store.write("fkf.yaml", b"version: 2\nname: benchmark\n")
         background = ("Routine project background. " * args.body_chars)[: args.body_chars]
-        for batch in range(0, args.records, 1000):
-            capture = Collection(
-                source="benchmark",
-                captured="2026-09-01T00:00:00Z",
-                records=[
-                    Record(
-                        id=str(n),
-                        title=f"Decision {n}",
-                        text=background + "\nRetain evidence. " + ("Zirconium decision." if n == 0 else ""),
-                        aliases=[f"decision:{n}"],
-                    )
-                    for n in range(batch, min(batch + 1000, args.records))
-                ],
+        items = [
+            Record(
+                id=str(n),
+                title=f"Decision {n}",
+                text=background + "\nRetain evidence. " + ("Zirconium decision." if n == 0 else ""),
+                time=f"2026-{n % 12 + 1:02d}-01T00:00:00Z",
+                aliases=[f"decision:{n}"],
             )
-            store.write(f"records/{batch}.json", encode(capture.model_dump()))
+            for n in range(args.records)
+        ]
+        records.upsert(store, "benchmark", items, snapshot=False)
         for n in range(args.notes):
             store.write(f"wiki/{n}.md", f"# Project {n}\n\n{background}\n\nKeep durable evidence.\n".encode())
         measurements = {}
         for name, operation in [
-            ("build", lambda: build(store)),
-            ("cached_selective", lambda: context(store, Query(text="zirconium"))),
-            ("cached_common", lambda: context(store, Query(text="evidence"))),
-            ("exact_read", lambda: read(store, "decision:0")),
+            ("build", lambda: refresh(store, full=True)),
+            (
+                "note_edit",
+                lambda: (
+                    store.write("wiki/0.md", b"# Edited\n\nZirconium note.\n"),
+                    search([store], Query(text="edited")),
+                ),
+            ),
+            ("selective", lambda: search([store], Query(text="zirconium"))),
+            ("common", lambda: search([store], Query(text="evidence"))),
+            ("timeline", lambda: search([store], Query(since="2026-06-01T00:00:00.000000Z", limit=50))),
+            ("exact_read", lambda: read([store], "decision:0")),
         ]:
             timings = []
             for _ in range(args.repeats):

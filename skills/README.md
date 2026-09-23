@@ -1,22 +1,13 @@
 # FKF skills
 
-These reusable Markdown packages help agents use an installed FKF base. They are distributed from this repository separately from the Python wheel and source distribution.
+Markdown packages that teach agents to use FKF. They are distributed from this repository, separately from the Python package.
 
-| Skill                                 | Use                                                                        |
-| ------------------------------------- | -------------------------------------------------------------------------- |
-| [fkf-use](fkf-use/SKILL.md)           | Retrieve bounded context and resolve exact evidence references.            |
-| [fkf-maintain](fkf-maintain/SKILL.md) | Refresh and maintain an authorized base without deleting durable evidence. |
-| [fkf-learn](fkf-learn/SKILL.md)       | Maintain concise, sourced knowledge through authorized Markdown edits.     |
+| Skill                                 | Use                                                                         |
+| ------------------------------------- | --------------------------------------------------------------------------- |
+| [fkf-use](fkf-use/SKILL.md)           | Search and read notes and records from any repository.                      |
+| [fkf-learn](fkf-learn/SKILL.md)       | Keep project notes, wiki concepts and tasks current after work.             |
+| [fkf-maintain](fkf-maintain/SKILL.md) | Fix failing collectors, schedule updates, backfill and add retrieval cases. |
 
-Copy required packages into the target base’s canonical `skills/` directory, then expose reviewed packages through project-local `.agents/skills/` using supported links or copies. Installing into a host-wide skill catalog is a separate choice. Keep the base’s executable selection in its own instructions. Existing skills with the same name should be reviewed before replacement. FKF does not install skills or change host registrations.
-
-For a host that discovers project-local `.agents/skills/`, run this from the base after copying and reviewing `skills/fkf-use/` (and confirm the destination does not already exist):
-
-```bash
-mkdir -p .agents/skills
-ln -s ../../skills/fkf-use .agents/skills/fkf-use
-```
-
-Use a copy if the host does not support links. Repeat only for the workflows you need; preserve each skill folder, its `SKILL.md`, and any referenced templates. Review updates before replacing an installed package. See each skill’s `name` and `description` for its routing scope.
+Install `fkf-use` where every agent host finds it, usually the user-wide `~/.agents/skills/fkf-use/`, so agents can reach your registered bases from any repository. Install `fkf-learn` and `fkf-maintain` the same way, or copy them into a base's `skills/` when only that base should use them. Review updates before replacing an installed copy.
 
 For development of FKF itself, use the repository-local [fkf-contribute](../.agents/skills/fkf-contribute/SKILL.md) skill.

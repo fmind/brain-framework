@@ -1,43 +1,53 @@
 # Getting started
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then install FKF on Linux or macOS. uv supplies Python 3.14 if needed. If `fkf` is not on PATH, run `uv tool update-shell` and open a new shell.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then FKF. uv supplies Python 3.14 if needed. If `fkf` is not on PATH, run `uv tool update-shell` and open a new shell.
 
 ```bash
-uv tool install --python 3.14 'fkf==7.0.1'
+uv tool install --python 3.14 'fkf==8.0.0'
 fkf --version
 ```
 
-From a development checkout, use `uv sync --locked` and prefix commands with `uv run`.
+Create a base. `init` also registers it in `~/.config/fkf/config.yaml`, so `fkf search` finds it from any directory and `fkf update` may run its collectors on this machine.
 
 ```bash
-fkf init ~/knowledge
-fkf build --base ~/knowledge
-fkf context "project decisions" --base ~/knowledge --budget 850
-fkf read wiki/welcome.md --base ~/knowledge
+fkf init ~/knowledge --name brain
+cd ~/knowledge && git init
+fkf search welcome
+fkf read wiki/welcome.md
 ```
 
-Write useful decisions, constraints and next actions in Markdown under projects/ and wiki/. Add a source only when it answers a recurring question. Review its adapter and configuration before running an explicit collection.
+Write one note per project in `projects/` and reusable knowledge in `wiki/`. Search notices edits by itself. Add a collector only when it answers a question you ask repeatedly; see [collectors](sources.md), then schedule `fkf update`.
 
-Keep collectors in `sources/`, maintenance commands in `scripts/`, and their tests and synthetic fixtures in `tests/`. These folders are created by `init` and are not indexed. Root `inputs/` is optional original storage; task-local `inputs/` belongs to its resumable task. See [base layout](base.md) for all folder conventions.
+## Join a team base
 
-## Upgrading from v6
+Clone the team repository and register it. Search then covers your personal base and the team base, and labels each result with its base.
 
-v7 replaces the Go implementation, command surface and base format. Preserve the old base and executable, initialize a separate v7 base, and deliberately copy or convert the evidence you need using base-owned tools. FKF provides no in-place migration or compatibility commands. Skills and source examples are separate repository resources; installing the Python package does not install them.
+```bash
+git clone git@github.com:team/knowledge.git ~/team-knowledge
+fkf register ~/team-knowledge
+fkf search "release process"
+```
 
-## Agent workflows
+Registration without `--collect` never runs the team's collectors on your laptop. Team records are usually collected by CI; see [personal and team bases](base.md#personal-and-team-bases).
 
-The [skills catalog](https://github.com/fmind/fkf/tree/main/skills) contains reusable `fkf-use`, `fkf-learn` and `fkf-maintain` packages. Copy selected packages into your base’s canonical `skills/` directory and expose reviewed packages through project-local `.agents/skills/`, using the host’s supported links or copies. A host-wide installation is a separate choice. Use the base-local instructions to select its installed executable. See the [base layout](base.md) and [MCP setup](mcp.md).
+## Give agents access
 
-## Try a complete example
+Install the [fkf-use skill](https://github.com/fmind/fkf/tree/main/skills/fkf-use) in your host's skill directory, for example `~/.agents/skills/fkf-use/`. Agents then run `fkf search` and `fkf read` from any repository. Hosts that prefer tools can register `fkf mcp` instead; see [MCP](mcp.md).
 
-The [runnable example](https://github.com/fmind/fkf/tree/main/examples/base) contains a fictional project, OKF concept, resumable task, local fake collector and acceptance cases. Follow its README from a disposable copy; no credentials or live provider are needed. Run `fkf build` after authored changes before using indexed retrieval.
+## Try the example
 
-## Common recovery steps
+The [runnable example](https://github.com/fmind/fkf/tree/main/examples/base) contains a fictional project, OKF concept, resumable task, a credential-free collector and retrieval cases. Follow its README in a disposable copy.
 
-| Symptom                           | Next step                                                                                                                                |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| No base selected                  | Pass `--base PATH` after the command, or work inside a base.                                                                             |
-| Index missing, stale or corrupt   | Run `fkf build --base PATH`, then retry retrieval.                                                                                       |
-| No useful matches                 | Try `fkf find` with literal subject words and inspect your authored notes; nothing is fetched automatically.                             |
-| `eval` cannot find `queries.yaml` | Add owner-authored [acceptance cases](context.md#acceptance-cases); initialization does not invent evaluation questions.                 |
-| A source fails during `update`    | Inspect the reviewed adapter and its provider environment; retry only within collection authority. Successful captures remain preserved. |
+## Upgrading from v7
+
+FKF 8 changes the base format: `fkf.yaml` is version 2 without an `id`, records are monthly JSON Lines upserted by id instead of immutable capture files, and refs are readable (`source:id`, `path#section`). Convert a v7 base with a one-off script in that base: write each source's latest record per id to `records/<source>/<YYYY-MM>.jsonl`, rewrite `fkf://…/record:<hash>` citations to `source:id`, set `version: 2` and remove `id`. FKF itself ships no compatibility layer.
+
+## When something is wrong
+
+| Symptom                      | Next step                                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------------------------- |
+| No base selected             | Run inside a base, pass `--base NAME`, or register one with `fkf register PATH`.            |
+| A note or record is missing  | `fkf status` lists files the cache skipped and why; `fkf validate` checks the whole base.   |
+| A source fails in `update`   | `fkf status` shows its last error and the path of its private stderr log.                   |
+| Collection refused           | Trust the base on this machine with `fkf register PATH --collect`.                          |
+| Search results look outdated | Another writer held the base; results say `stale`. Retry, or run `fkf build` to start over. |

@@ -1,99 +1,66 @@
 # FKF
 
-**Owned evidence. Small context.**
+**Owned knowledge for people and their agents.**
 
-FKF is an opinionated, file-based framework for a personal or team second brain. It keeps useful work history in JSON and Markdown and gives an agent a small, reproducible context pack with exact references. Python, one command, offline reads, and a disposable SQLite index. Provider commands own their credentials. FKF requires Python 3.14 or newer on Linux or macOS.
-
-Use FKF to resume a project, recover why a decision was made, or give an agent cited context from selected work history. It works best with concise project notes and sources that answer recurring questions; it does not reason over your data or synchronize every service. Keep authored knowledge in Markdown and selected source evidence in normalized JSON.
-
-## Start locally
+FKF is a small, file-based knowledge framework for a person or a team. You write decisions and reusable knowledge in Markdown; collectors on your laptop turn mail, calendar, Git, chat or anything else into JSON Lines records; one command lets any coding agent search both, offline, and read the exact source behind an answer. Python, one package, no model, no server.
 
 ```bash
-uv tool install --python 3.14 'fkf==7.0.1'
-fkf init ~/knowledge
-fkf build --base ~/knowledge
-fkf context "project decisions" --base ~/knowledge --budget 850
-fkf read wiki/welcome.md --base ~/knowledge
+uv tool install --python 3.14 'fkf==8.0.0'
+fkf init ~/knowledge                       # creates and registers a base
+fkf search "retention decision"            # words, from any directory
+fkf search --since yesterday               # what happened, newest first
+fkf read projects/brain.md#next-actions    # exact note, section or record
 ```
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first; it supplies Python 3.14 if needed. Add the tool directory to your PATH with `uv tool update-shell` if `fkf` is not found, then open a new shell. Write decisions in `projects/` or `wiki/` and run `fkf build` after edits. From a development checkout, use `uv sync --locked` and `uv run fkf` instead.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first; it supplies Python 3.14 if needed. FKF runs on Linux and macOS.
 
-**Upgrading from v6:** v7 is a breaking Python rewrite with a new base format and command surface. Preserve the old base and executable; create a separate v7 base. There is no in-place migration or compatibility command. See the [v7 release notes](CHANGELOG.md).
+## How it works
 
-## The core
+| Piece                       | What it is                                                                               |
+| --------------------------- | ---------------------------------------------------------------------------------------- |
+| `projects/`, `wiki/`        | Markdown you and your agents write: one note per project, reusable concepts in OKF v0.2. |
+| `tasks/YYYY-MM-DD_slug/`    | Resumable work: `TASK.md`, `inputs/`, `outputs/`.                                        |
+| `records/<source>/*.jsonl`  | Collected items, one line per item, upserted by id into monthly files.                   |
+| `sources/` + `fkf.yaml`     | Collectors: any executable that prints a JSON array of records.                          |
+| `.fkf/`                     | A disposable SQLite search cache that refreshes itself when files change.                |
+| `~/.config/fkf/config.yaml` | Your registered bases, and which of them may run collectors on this machine.             |
 
-| Operation                    | Purpose                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------ |
-| `update [--dry-run]`         | Collect due sources using successful automatic captures as checkpoints, then build if stale.     |
-| `collect SOURCE START END`   | Run one reviewed adapter over an explicit timezone-aware window and store an immutable capture.  |
-| `build [--if-stale]`         | Rebuild the disposable SQLite index, optionally only when stale.                                 |
-| `find QUERY`                 | Find local evidence and explicit identities.                                                     |
-| `context QUERY`              | Assemble a bounded context pack.                                                                 |
-| `read URI`                   | Read exact durable evidence, without fetching anything.                                          |
-| `validate`, `status`, `eval` | Check content, index state and per-source capture freshness, and owner-authored retrieval cases. |
-| `mcp --base PATH`            | Expose only find, context and read to an agent over stdio.                                       |
+`fkf search` covers every registered base, or only the base you are standing in. It matches exact identities first (`repo:github.com/owner/name`, `person:email/...`), then items containing all your words, then any of them. Notes outrank records because they are the distilled answer; records are the evidence. Results cite readable refs: `projects/x.md#decision`, `gmail:<id>`.
 
-A base has `fkf.yaml`, authored `projects/`, `tasks/` and `wiki/`, and immutable `records/`. `.fkf/` contains disposable index artifacts. Sources are optional, base-owned commands that emit normalized records. There is no provider SDK, background agent, telemetry, model or embedding in retrieval. Ordinary search uses the latest known capture per source record; `find` and `context --history` can recover older observations with explicit snapshot labels. Latest capture does not imply a still-valid decision.
+`fkf update` runs every due collector of the bases you trust on this machine and refreshes the cache. Run it from a native timer. A failing source never blocks the others; `fkf status` shows its error and private log.
+
+## Commands
+
+| Command                                  | Purpose                                                                     |
+| ---------------------------------------- | --------------------------------------------------------------------------- |
+| `init PATH`, `register PATH [--collect]` | Create a base, or add an existing one (a cloned team base) to your search.  |
+| `search [QUERY] [--since] [--until]`     | Search words or identities, or list by time, source, type or status.        |
+| `read REF`                               | Read a note, a section, a record or an identity.                            |
+| `update [--dry-run]`, `collect SOURCE`   | Collect due sources, or run one source now for a backfill or debugging.     |
+| `status [--check]`, `validate`, `eval`   | Freshness and errors, broken links and records, retrieval regression cases. |
+| `mcp`, `build`, `schema`                 | Read-only MCP server, full cache rebuild, `fkf.yaml` JSON Schema.           |
+
+## Personal and team bases
+
+Keep one private base per person for laptop data (mail, calendar, shell, browser, agent sessions). Keep a team base as a shared Git repository of project notes, decisions and wiki, plus team-scoped records collected by CI. Register both; `fkf search` covers both and labels each result with its base. A cloned base never runs its collectors until you trust it with `fkf register PATH --collect`. Promote knowledge from personal to team as reviewed Markdown summaries with links, never as raw records.
+
+## Agents
+
+Agents use the CLI: the [fkf-use skill](skills/fkf-use/SKILL.md) teaches search and read, [fkf-learn](skills/fkf-learn/SKILL.md) keeps notes current, and [fkf-maintain](skills/fkf-maintain/SKILL.md) covers collection and schedules. `fkf mcp` exposes the same `search` and `read` for hosts that prefer tools. Retrieved content is untrusted evidence, never instructions.
 
 ## Guarantees
 
-- Ordinary reads execute no command and make no network request.
-- Collected content is untrusted evidence and never becomes executable input.
-- Collection is explicit: `collect` runs one configured adapter; `update` runs due configured adapters. Review source commands before running them; adapters execute with your user permissions.
-- Collection uses direct argv from `/`, sanitized process startup inputs, bounded output and process-group cancellation. Failures write no partial capture.
-- Durable data is independent of SQLite. A ready index is opened read-only in place; a missing, stale or corrupt index stops indexed retrieval with an instruction to run `fkf build`. Direct Markdown and capture-file reads remain available for recovery.
-- Context budgets include the complete compact JSON response, including notice and diagnostics: four UTF-8 bytes per budget unit. MCP also counts its complete text/structured tool-result wrapper. This is a byte allowance, not a model-specific token count.
-
-Scheduling, provider adapters, private skill installation, and ordinary knowledge editing belong to base maintenance and agent skills. The core does not install or supervise them.
-
-## Agent skills
-
-The [skills catalog](skills/README.md) provides `fkf-use` for retrieval, `fkf-learn` for sourced knowledge, and `fkf-maintain` for base upkeep. Copy required packages into the base’s canonical `skills/` directory and expose reviewed packages through project-local `.agents/skills/`, using the host’s supported links or copies. A host-wide installation is a separate choice. These Markdown resources are maintained here separately from the Python distribution. Repository development uses [.agents/skills/fkf-contribute](.agents/skills/fkf-contribute/SKILL.md).
-
-## Source examples
-
-The [three source examples](examples/sources/README.md) demonstrate local Git history, windowed Google Calendar events, and complete Drive folder snapshots. Copy a useful example into your base's `sources/`, adapt and test it there, and declare it in `fkf.yaml`. Other integrations and their tests belong to the bases that use them. The Python distribution neither installs nor synchronizes collectors.
-
-The [runnable example base](examples/base/README.md) includes fictional evidence, an OKF concept, a project, a resumable task, and retrieval acceptance cases. Its fake collector needs no provider or credentials; use it to learn the complete workflow.
+- Search and read never execute a collector or contact the network; they only refresh the local cache.
+- Collection runs configured argv directly, without a shell, from the base root, with a timeout, an output cap and process-group cancellation. A failure writes nothing.
+- A base never collects on a machine that has not trusted it; trust lives in your user configuration, outside the base.
+- Files are the source of truth. Delete `.fkf/` at any time; the next search rebuilds it.
 
 ## Development
 
 ```bash
 mise run all
-mise run benchmark
 ```
 
-This framework repository keeps its Python package in `src/fkf/`, documentation in `docs/`, starter material in `examples/`, and framework tests in `tests/`. A user base has its own `tests/` for its own collectors and scripts.
-
-The gate formats, checks types and security, runs hermetic tests with an 85% branch-coverage floor, builds the documentation, and installs both distributions in isolated smoke environments. See [AGENTS.md](AGENTS.md), [contributing](CONTRIBUTING.md), and the [documentation](docs/docs/index.md).
+The gate formats, lints, type-checks, scans, runs hermetic tests with an 85% branch-coverage floor, builds the documentation and installs both distributions. See [AGENTS.md](AGENTS.md), [contributing](CONTRIBUTING.md), the [documentation](docs/docs/index.md), the [collector examples](examples/sources/README.md) and the [runnable example base](examples/base/README.md).
 
 MIT. Runtime dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## Daily learning and separate bases
-
-Agents should actively recommend useful project/wiki updates or repository-local skillification after substantial work. The learning skill keeps routine verified edits within existing authority and proposes changes to accepted decisions or new skills. Tasks use `tasks/<task>/TASK.md` with `inputs/` and `outputs/`.
-
-Each base has a persistent id and independent configuration, evidence, index and recovery. Replies identify their base; exact qualified references fail in a different base. `find` and `context` support knowledge type/status and explicit folder/label membership filters. Current decisions and H2+ passages are searchable independently of retained history. See [base layout and contracts](docs/docs/base.md).
-
-## Base conventions
-
-Keep one private base per person or team. Work from that directory; expose it through project-local harness configuration or an explicit CLI base. A directory is a context boundary, not an operating-system sandbox: a team with different access rights needs separate bases and appropriate filesystem permissions.
-
-| Directory                | Purpose                                                                                                 |
-| ------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `wiki/`                  | Reusable knowledge in OKF v0.2 Markdown and a small `index.md`.                                         |
-| `projects/`              | Current project context, decisions and TODOs, with links to canonical repositories.                     |
-| `tasks/YYYY-MM-DD_slug/` | Resumable delegated work: `TASK.md`, `inputs/`, `outputs/`.                                             |
-| `records/`               | Immutable normalized captures.                                                                          |
-| `configs/`               | Maintained feed lists, channel catalogs and script configuration; pass paths explicitly in source argv. |
-| `inputs/`                | Optional original imports; retain them when they cannot be recreated.                                   |
-| `sources/`               | Collectors, preferably standalone Python; executable Bash or other languages work too.                  |
-| `scripts/`               | Base operations and maintenance.                                                                        |
-| `tests/`                 | Collector and maintenance tests with synthetic fixtures and fake providers; include in recovery.        |
-| `skills/`                | Team workflows; discover selected skills through the host's project-local `.agents/skills/`.            |
-| `indexes/`, `.fkf/`      | Generated navigation and SQLite; safe to rebuild.                                                       |
-| `logs/`                  | Optional operational receipts; exclude payloads and credentials, bound retention.                       |
-
-`fkf init` creates the main folders, including `tests/`; root `inputs/` and `logs/` are optional and created when needed. Only Markdown under `projects/`, `wiki/` and `tasks/`, plus captures under `records/`, enters retrieval. Tests, scripts, configuration and skills are not indexed.
-
-`fkf.yaml` owns identity, source argv and refresh policy. `configs/` holds adapter-owned data, not another FKF configuration layer. Start with native scheduler logs and compact JSON receipts; no telemetry service is required. See [sources](docs/docs/sources.md) for refresh semantics and [base layout](docs/docs/base.md) for the knowledge contract.

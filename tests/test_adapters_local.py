@@ -6,11 +6,11 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import cast
 
-from conftest import Provider
-from fkf.index import build
-from fkf.models import Collection, Query, encode
-from fkf.retrieve import find
+from conftest import Provider, records_file
+from fkf.models import Query
+from fkf.retrieve import search
 from fkf.storage import Store
 
 PAGE_ONE = {
@@ -153,10 +153,7 @@ def test_people_and_repository_identities_join_across_providers(
     )
     events = provider.records("google-calendar.py", "primary", "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     for source, records in [("git", commits), ("calendar", events)]:
-        base.write(
-            f"records/{source}/one.json",
-            encode(Collection(source=source, captured="2026-09-02T00:00:00Z", records=records).model_dump()),
-        )
-    build(base)
-    result = json.loads(encode(find(base, Query(text="person:email/owner@example.invalid"))))
-    assert {item["source"] for item in result["items"]} == {"git", "calendar"}
+        records_file(base, source, "undated", records)
+    result = search([base], Query(text="person:email/owner@example.invalid"))
+    items = cast("list[dict[str, object]]", result["items"])
+    assert {item["source"] for item in items} == {"git", "calendar"}

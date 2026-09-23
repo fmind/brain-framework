@@ -1,5 +1,5 @@
 ---
-type: Concept
+type: concept
 title: Concept title
 description: A concise description of the knowledge this page preserves.
 status: draft
@@ -7,8 +7,8 @@ status: draft
 
 # Concept title
 
-State the useful knowledge and its limits. Add `sources` mappings with `resource` and stable `id` fields for supporting evidence; cite claims with matching Markdown footnote labels. Do not invent provenance or verification to fill a template.
+State the useful knowledge and its limits. Add `sources` mappings with a `resource` (a URL or a record ref such as `meetings:decision-1`) for supporting evidence. Do not invent provenance or verification to fill a template.
 
 ## Related knowledge
 
-Use ordinary relative or bundle-root Markdown links to related concepts.
+Link related concepts with ordinary relative Markdown links.

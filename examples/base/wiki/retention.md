@@ -1,10 +1,10 @@
 ---
-type: Concept
+type: concept
 status: stable
 sources:
-  - resource: "source:demo:retention"
+  - resource: "demo:retention"
 ---
 
 # Retention
 
-Keep original evidence because upstream content can disappear. SQLite and navigation indexes are derived and can be rebuilt. This is fictional demonstration knowledge; no review or verification is asserted.
+Keep original evidence because upstream content can disappear. The search cache is derived and can be rebuilt at any time. This is fictional demonstration knowledge; no review or verification is asserted.

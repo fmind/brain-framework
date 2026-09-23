@@ -1,4 +1,4 @@
-"""Explicit direct argv, bounded process groups and immutable collection."""
+"""Run configured collectors with direct argv, bounded output and process-group cancellation."""
 
 from __future__ import annotations
 
@@ -11,98 +11,52 @@ import subprocess
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
-from fkf.config import load
-from fkf.models import Collection, Error, Record, Source, decode, digest, encode, timestamp
-from fkf.storage import Store, relative, writer
+from fkf import records
+from fkf.config import load, may_collect
+from fkf.models import Error, Record, Source, decode, encode, explain, timestamp
+from fkf.storage import Store, relative, state_store, writer
 
-_STARTUP = frozenset(
-    [
-        "BASH_ENV",
-        "ENV",
-        "ZDOTDIR",
-        "fish_function_path",
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "PYTHONSTARTUP",
-        "PYTHONINSPECT",
-        "PYTHONWARNINGS",
-        "PYTHONUSERBASE",
-        "PYTHONPLATLIBDIR",
-        "NODE_OPTIONS",
-        "NODE_PATH",
-        "PERL5OPT",
-        "PERL5LIB",
-        "PERLLIB",
-        "RUBYOPT",
-        "RUBYLIB",
-        "RUBYGEMS_GEMDEPS",
-        "GEM_PATH",
-        "JAVA_TOOL_OPTIONS",
-        "JDK_JAVA_OPTIONS",
-        "_JAVA_OPTIONS",
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "LD_AUDIT",
-        "GCONV_PATH",
-        "R_ENVIRON",
-        "R_ENVIRON_USER",
-        "R_PROFILE",
-        "R_PROFILE_USER",
-    ]
+_LOG = 256 << 10
+_STARTUP = (
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "BASH_ENV",
+    "ENV",
 )
-_ROOTS = ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
 
 
 class Runner(Protocol):
-    def __call__(self, argv: list[str], source: Source, store: Store, /) -> bytes: ...
+    def __call__(self, argv: list[str], source: Source, store: Store, log: Path, /) -> bytes: ...
 
 
-def environment(root: Path) -> dict[str, str]:
-    values = dict(os.environ)
-
-    def outside(value: str) -> bool:
-        candidate = Path(value)
-        try:
-            return candidate.is_absolute() and not candidate.resolve().is_relative_to(root)
-        except OSError, RuntimeError:
-            return False
-
-    for key in tuple(values):
-        if key in _STARTUP or key.startswith(("DYLD_", "LUA_INIT", "BASH_FUNC_")):
-            del values[key]
-    for key in _ROOTS:
-        if key in values and not outside(values[key]):
-            del values[key]
-    values["PATH"] = os.pathsep.join(dict.fromkeys(p for p in values.get("PATH", "").split(os.pathsep) if outside(p)))
-    values["PYTHONNOUSERSITE"] = "1"
-    return values
-
-
-def run(argv: list[str], source: Source, store: Store) -> bytes:
-    env = environment(store.root)
+def run(argv: list[str], source: Source, store: Store, log: Path) -> bytes:
+    """Execute one collector from the base root; stderr goes to a bounded private log, never to errors."""
     executable = argv[0]
     if executable.startswith("sources/"):
         relative(executable)
         store.read(executable, 1 << 20)
         executable = str(store.root / executable)
     elif "/" in executable:
-        raise Error("executable must be a bare external command or sources/ helper")
+        raise Error("executable must be a bare command name or a sources/ path")
+    elif (found := shutil.which(executable)) is None:
+        raise Error(f"{executable} is not on PATH")
     else:
-        found = shutil.which(executable, path=env["PATH"])
-        if found is None:
-            raise Error("required executable is unavailable on the sanitized PATH")
         executable = found
+    env = {key: value for key, value in os.environ.items() if key not in _STARTUP}
     try:
         child = subprocess.Popen(  # noqa: S603  # nosemgrep: dangerous-subprocess-use-audit
-            # Only a literal executable and direct configured argv reach this boundary.
+            # Direct argv from the owner's fkf.yaml; no shell interprets it.
             [executable, *argv[1:]],
-            cwd="/",
+            cwd=store.root,
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -110,20 +64,19 @@ def run(argv: list[str], source: Source, store: Store) -> bytes:
             start_new_session=True,
         )
     except OSError as error:
-        raise Error("could not start the source command; check its executable and interpreter") from error
-    output = bytearray()
-    sizes = {"out": 0, "err": 0}
+        raise Error("could not start the collector; check its executable bit and interpreter") from error
+    output, errors = bytearray(), bytearray()
     deadline = time.monotonic() + source.timeout
     try:
         with selectors.DefaultSelector() as selector:
-            for pipe, name in ((child.stdout, "out"), (child.stderr, "err")):
+            for pipe, buffer in ((child.stdout, output), (child.stderr, errors)):
                 if pipe is None:
-                    raise Error("source pipes were not created")
+                    raise Error("collector pipes were not created")
                 os.set_blocking(pipe.fileno(), False)
-                selector.register(pipe, selectors.EVENT_READ, name)
+                selector.register(pipe, selectors.EVENT_READ, buffer)
             while selector.get_map() or child.poll() is None:
                 if time.monotonic() >= deadline:
-                    raise Error("source command timed out; no evidence written")
+                    raise Error(f"collector timed out after {source.timeout}s; nothing was written")
                 if not selector.get_map():
                     with suppress(subprocess.TimeoutExpired):
                         child.wait(timeout=0.05)
@@ -132,23 +85,43 @@ def run(argv: list[str], source: Source, store: Store) -> bytes:
                     if not chunk:
                         selector.unregister(key.fileobj)
                         continue
-                    sizes[key.data] += len(chunk)
-                    if sizes[key.data] > source.max_bytes:
-                        raise Error("source output exceeded its byte limit; no evidence written")
-                    if key.data == "out":
-                        output.extend(chunk)
+                    key.data.extend(chunk)
+                    if len(output) > source.max_bytes:
+                        raise Error("collector output exceeded max_bytes; nothing was written")
+                    del errors[:-_LOG]
         code = child.wait()
         if code:
-            raise Error(f"source command exited with status {code}; provider output remains private")
+            raise Error(f"collector exited with status {code}; nothing was written")
         return bytes(output)
     finally:
-        # Descendants can retain pipes after their leader exits; kill the whole session.
+        # Descendants can keep pipes open after their leader exits; end the whole session.
         with suppress(ProcessLookupError):
             os.killpg(child.pid, signal.SIGKILL)
         child.wait()
         for pipe in (child.stdout, child.stderr):
             if pipe is not None:
                 pipe.close()
+        log.write_bytes(bytes(errors[-_LOG:]))
+        log.chmod(0o600)
+
+
+def state(store: Store) -> dict[str, dict[str, object]]:
+    """Per-source run history, kept on this machine outside the base."""
+    try:
+        value = decode(state_store(store.root).read("sources.json"))
+    except FileNotFoundError:
+        return {}
+    return value if isinstance(value, dict) else {}  # type: ignore[return-value]
+
+
+def _remember(store: Store, name: str, **values: object) -> None:
+    current = state(store)
+    current[name] = {**current.get(name, {}), **values}
+    state_store(store.root).write("sources.json", encode(current))
+
+
+def log_path(store: Store, name: str) -> Path:
+    return state_store(store.root).root / f"{name}.log"
 
 
 def collect(
@@ -157,50 +130,66 @@ def collect(
     *,
     start: str,
     end: str,
-    preview: bool = False,
-    automatic: bool = False,
+    dry_run: bool = False,
     runner: Runner = run,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
+    """Run one source over [start, end) and upsert its records; failures write nothing."""
     try:
         start, end = timestamp(start), timestamp(end)
     except ValueError as error:
         raise Error("collection start/end require timezone-aware timestamps") from error
-    if datetime.fromisoformat(start) >= datetime.fromisoformat(end):
+    if start >= end:
         raise Error("collection start must be earlier than end")
-
-    def execute() -> dict[str, object]:
-        source = load(store).sources.get(name)
-        if source is None or not source.enabled:
-            raise Error("source is unknown or disabled")
-        values = {"base": str(store.root), "home": str(Path.home()), "start": start, "end": end}
-        argv = [re.sub(r"\{\{(base|home|start|end)\}\}", lambda match: values[match[1]], arg) for arg in source.command]
-        raw = runner(argv, source, store)
-        if len(raw) > source.max_bytes:
-            raise Error("source output exceeded its byte limit")
+    source = load(store).sources.get(name)
+    if source is None or not source.enabled:
+        raise Error(f"source {name} is unknown or disabled")
+    if not may_collect(store):
+        raise Error("this base may not run collectors here; trust it with fkf register --collect")
+    values = {"base": str(store.root), "home": str(Path.home()), "start": start, "end": end}
+    argv = [re.sub(r"\{\{(base|home|start|end)\}\}", lambda match: values[match[1]], arg) for arg in source.command]
+    log = log_path(store, name)
+    started = clock()
+    try:
+        raw = runner(argv, source, store, log)
         try:
-            records = TypeAdapter(list[Record]).validate_python(decode(raw))
-            document = Collection(
-                source=name,
-                captured=clock().isoformat(),
-                start=start,
-                end=end,
-                records=records,
-                mode=source.mode,
-                automatic=automatic,
-            )
+            incoming = TypeAdapter(list[Record]).validate_python(decode(raw))
         except ValidationError as error:
-            raise Error("source must emit an array of valid records with unique ids and meaningful titles") from error
-        if preview:
-            return {"source": name, "count": len(records), "samples": [r.model_dump() for r in records[:3]]}
-        data = encode(document.model_dump())
-        if len(data) > source.max_bytes:
-            raise Error("normalized collection exceeds its byte limit")
-        path = f"records/{name}/{digest(data)}.json"
-        store.write(path, data, immutable=True)
-        return {"source": name, "count": len(records), "path": path}
+            raise Error("collector must print one JSON array of records: " + explain(error)) from error
+        if len({r.id for r in incoming}) != len(incoming):
+            raise Error("collector returned duplicate record ids")
+        result: dict[str, object] = {"source": name, "records": len(incoming)}
+        if dry_run:
+            return {**result, "samples": [r.model_dump(exclude_defaults=True) for r in incoming[:3]]}
+        with writer(store, wait=120):
+            result.update(records.upsert(store, name, incoming, snapshot=source.mode == "snapshot"))
+    except Error as error:
+        if not dry_run:
+            _remember(store, name, run=started.isoformat(), error=str(error))
+        raise Error(f"{name}: {error}; see {log}") from error
+    previous = str(state(store).get(name, {}).get("end", ""))
+    _remember(store, name, run=started.isoformat(), success=started.isoformat(), end=max(previous, end), error="")
+    return result
 
-    if preview:
-        return execute()
-    with writer(store):
-        return execute()
+
+def due(store: Store, now: datetime) -> list[tuple[str, str, str]]:
+    """Enabled sources whose refresh interval elapsed, with the window each should collect."""
+    config, history = load(store), state(store)
+    windows = []
+    for name, source in sorted(config.sources.items()):
+        if not source.enabled or not source.refresh:
+            continue
+        last = history.get(name, {})
+        if last.get("success") and now < datetime.fromisoformat(str(last["success"])) + timedelta(
+            seconds=source.refresh
+        ):
+            continue
+        start = now - timedelta(seconds=source.lookback)
+        if last.get("end") and source.mode == "window":
+            # Resume after the last window with overlap for late arrivals (upserts make it harmless),
+            # catching up at most 30 days after a long pause.
+            resumed = datetime.fromisoformat(str(last["end"])) - timedelta(seconds=source.overlap)
+            if resumed < now:
+                start = max(resumed, now - timedelta(days=30))
+        windows.append((name, timestamp(start.isoformat()), timestamp(now.isoformat())))
+    return windows

@@ -1,7 +1,5 @@
 # FKF
 
-FKF preserves useful evidence and delivers small context packs to agents. JSON and Markdown remain authoritative; SQLite is a disposable local index. Stored reads execute no commands and make no network requests.
+FKF keeps a person's or a team's knowledge in plain files and makes it searchable by agents. Markdown notes hold decisions and reusable knowledge; JSON Lines records hold what collectors gathered from mail, calendars, Git or any other source; a disposable SQLite cache answers searches offline.
 
-Begin with [getting started](getting-started.md), then read about the [base](base.md), [source commands](sources.md), and [retrieval](context.md). The [command reference](commands.md), [MCP interface](mcp.md), and [security boundaries](privacy.md) describe the complete core.
-
-Scheduling, provider adapters and harness installation belong to base maintenance. The runtime keeps one current configuration and evidence format.
+Begin with [getting started](getting-started.md), then read about the [base layout](base.md), [collectors](sources.md) and [search](search.md). The [command reference](commands.md), [MCP server](mcp.md) and [security model](privacy.md) describe the complete core.

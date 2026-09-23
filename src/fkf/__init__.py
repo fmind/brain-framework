@@ -1,6 +1,6 @@
-"""Owned evidence, small context."""
+"""Owned knowledge for people and their agents."""
 
-__version__ = "7.0.1"
+__version__ = "8.0.0"
 
 
 def main() -> None:
