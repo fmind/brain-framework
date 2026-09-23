@@ -277,7 +277,8 @@ set -euo pipefail
 fkf_test_home=$(mktemp -d)
 fkf_test_home=$(cd "$fkf_test_home" && pwd -P)
 trap 'rm -rf "$fkf_test_home"' EXIT
-env -u FKF_BASE HOME="$fkf_test_home" XDG_STATE_HOME="$fkf_test_home/state" XDG_CONFIG_HOME="$fkf_test_home/config" \
+# Set TZ before Python starts: some macOS builds do not expose time.tzset().
+env -u FKF_BASE TZ=UTC HOME="$fkf_test_home" XDG_STATE_HOME="$fkf_test_home/state" XDG_CONFIG_HOME="$fkf_test_home/config" \
   uv run pytest --basetemp="$fkf_test_home/pytest" \
     --cov=fkf --cov-branch --cov-report=term-missing --cov-fail-under=85
 '''

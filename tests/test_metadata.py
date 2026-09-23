@@ -2,30 +2,46 @@
 
 from __future__ import annotations
 
-import time
-from datetime import UTC, datetime
+import os
+import subprocess
+import sys
+from textwrap import dedent
 
 import pytest
 from pydantic import ValidationError
 
-from fkf.models import Query, Record, moment, timestamp
+from fkf.models import Query, Record, timestamp
 from fkf.storage import Store
 
 
-def test_local_dates_use_the_offset_at_that_midnight(monkeypatch: pytest.MonkeyPatch) -> None:
-    with monkeypatch.context() as context:
-        context.setenv("TZ", "Europe/Paris")
-        time.tzset()
-        try:
-            september = datetime(2026, 9, 23, 12, tzinfo=UTC)
-            transition = datetime(2026, 3, 29, 12, tzinfo=UTC)
-            assert moment("2026-01-01", september) == "2025-12-31T23:00:00.000000Z"
-            assert moment("today", transition) == "2026-03-28T23:00:00.000000Z"
-            assert moment("yesterday", transition) == "2026-03-27T23:00:00.000000Z"
-            assert moment("1d", transition) == "2026-03-28T12:00:00.000000Z"
-        finally:
-            context.undo()
-            time.tzset()
+def python_in_timezone(zone: str, program: str, *arguments: str) -> None:
+    # Choose TZ at process startup; Intel macOS Python can omit time.tzset().
+    result = subprocess.run(  # noqa: S603 - synthetic timezone behavior in the tested interpreter
+        [sys.executable, "-c", dedent(program), *arguments],
+        env={**os.environ, "TZ": zone},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_local_dates_use_the_offset_at_that_midnight() -> None:
+    python_in_timezone(
+        "Europe/Paris",
+        """
+        from datetime import UTC, datetime
+        from fkf.models import moment
+
+        september = datetime(2026, 9, 23, 12, tzinfo=UTC)
+        transition = datetime(2026, 3, 29, 12, tzinfo=UTC)
+        assert moment("2026-01-01", september) == "2025-12-31T23:00:00.000000Z"
+        assert moment("today", transition) == "2026-03-28T23:00:00.000000Z"
+        assert moment("yesterday", transition) == "2026-03-27T23:00:00.000000Z"
+        assert moment("1d", transition) == "2026-03-28T12:00:00.000000Z"
+        """,
+    )
 
 
 def test_timestamp_overflow_is_a_validation_failure() -> None:
@@ -49,11 +65,8 @@ def test_revision_times_and_source_filters_are_strict() -> None:
         Record(id="document", title="Decision", attributes={"updated": "2026-09-23"})
 
 
-def test_note_dates_follow_local_days_without_rebuilding_the_cache(
-    base: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_note_dates_follow_local_days_without_rebuilding_the_cache(base: Store) -> None:
     from fkf import index
-    from fkf.retrieve import search
 
     for day in ("2026-09-22", "2026-09-23", "2026-09-24", "2026-03-29"):
         base.write(f"projects/{day}.md", f"---\nupdated: {day}\n---\n# Localday {day}\n".encode())
@@ -64,20 +77,28 @@ def test_note_dates_follow_local_days_without_rebuilding_the_cache(
         ("Europe/Paris", "2026-09-23", "2026-09-24", "2026-09-22T22:00:00.000000Z"),
         ("Europe/Paris", "2026-03-29", "2026-03-30", "2026-03-28T23:00:00.000000Z"),
     ]:
-        with monkeypatch.context() as context:
-            context.setenv("TZ", zone)
-            time.tzset()
-            try:
-                for options in ({"since": moment(day)}, {"changed_since": moment(day)}):
-                    reply = search(
-                        [base],
-                        Query.model_validate({"text": "localday", "until": moment(end), **options}),
-                        counted=False,
-                    )
-                    assert isinstance(reply["items"], list)
-                    assert [item["ref"] for item in reply["items"]] == [f"projects/{day}.md"]
-                    assert reply["items"][0]["time"] == expected
-            finally:
-                context.undo()
-                time.tzset()
+        python_in_timezone(
+            zone,
+            """
+            import sys
+            from pathlib import Path
+            from fkf.models import Query, moment
+            from fkf.retrieve import search
+            from fkf.storage import Store
+
+            root, day, end, expected = sys.argv[1:]
+            for options in ({"since": moment(day)}, {"changed_since": moment(day)}):
+                reply = search(
+                    [Store(Path(root))],
+                    Query.model_validate({"text": "localday", "until": moment(end), **options}),
+                    counted=False,
+                )
+                assert [item["ref"] for item in reply["items"]] == [f"projects/{day}.md"]
+                assert reply["items"][0]["time"] == expected
+            """,
+            str(base.root),
+            day,
+            end,
+            expected,
+        )
     assert (base.root / index.CACHE).stat().st_ino == cache_inode

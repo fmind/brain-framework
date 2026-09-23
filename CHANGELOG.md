@@ -2,7 +2,9 @@
 
 All notable changes to `fkf` are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
-## [v8.2.0](https://github.com/fmind/fkf/releases/tag/v8.2.0) - 2026-09-23
+## [v8.2.1](https://github.com/fmind/fkf/releases/tag/v8.2.1) - 2026-09-23
+
+First published 8.2 release. The v8.2.0 candidate stopped at the Intel macOS test gate before publication; its tag remains unchanged.
 
 FKF 8.2 makes incomplete results visible, preserves evidence through interrupted writes, and helps distinguish recently edited knowledge from historical records. Existing version 2 bases need no conversion; disposable search caches rebuild automatically.
 
@@ -14,6 +16,7 @@ FKF 8.2 makes incomplete results visible, preserves evidence through interrupted
 
 ### Fixed
 
+- Select test timezones before Python starts, preserving all DST and shared-cache checks on builds without `time.tzset()`, including Intel macOS.
 - Recover interrupted multi-partition commits from durable originals through explicit `build`, collection or backup. Serialize source runs and state updates, preserve directory entries before journal writes, and bound partitions before writing.
 - Preserve newer upstream revisions during backfills, repair duplicates and corrupt caches, and retry concurrent cache replacement.
 - Report skipped files and unavailable bases in search; reject incomplete retrieval-case answers. Fail stale-cache health checks and skipped-file updates, reject malformed partition paths, confine link validation, and distinguish unreadable record sources from missing records.

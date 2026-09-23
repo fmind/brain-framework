@@ -9,7 +9,7 @@ Use it to answer "Why did we choose this?", resume a project after a break, or g
 ## Try it
 
 ```bash
-uv tool install --python 3.14 'fkf==8.2.0'
+uv tool install --python 3.14 'fkf==8.2.1'
 fkf init ~/knowledge                       # creates and registers a base
 fkf search welcome                        # find the note created by init
 fkf read wiki/welcome.md                   # read its exact contents
