@@ -14,7 +14,7 @@ from fkf.markdown import authored, note
 from fkf.models import AUTHORED, DEMOTED, Error, Query, Record
 from fkf.storage import BusyError, Store, writer
 
-SCHEMA = 8
+SCHEMA = 9
 CACHE = ".fkf/index.sqlite"
 _DDL = """
 CREATE TABLE files(path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, ctime INTEGER, inode INTEGER,
@@ -26,7 +26,7 @@ CREATE INDEX items_path ON items(path);
 CREATE INDEX items_time ON items(time);
 CREATE TABLE passages(id INTEGER PRIMARY KEY, item INTEGER NOT NULL, fragment TEXT NOT NULL, title TEXT NOT NULL);
 CREATE INDEX passages_item ON passages(item);
-CREATE VIRTUAL TABLE search USING fts5(title, text, names, tokenize='unicode61 remove_diacritics 2');
+CREATE VIRTUAL TABLE search USING fts5(title, text, names, tokenize='porter unicode61 remove_diacritics 2');
 CREATE TABLE names(name TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY(name, item)) WITHOUT ROWID;
 CREATE INDEX names_item ON names(item);
 CREATE TABLE links(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;

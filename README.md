@@ -5,7 +5,7 @@
 FKF is a small, file-based knowledge framework for a person or a team. You write decisions and reusable knowledge in Markdown; collectors on your laptop turn mail, calendar, Git, chat or anything else into JSON Lines records; one command lets any coding agent search both, offline, and read the exact source behind an answer. Python, one package, no model, no server.
 
 ```bash
-uv tool install --python 3.14 'fkf==8.0.0'
+uv tool install --python 3.14 'fkf==8.0.1'
 fkf init ~/knowledge                       # creates and registers a base
 fkf search "retention decision"            # words, from any directory
 fkf search --since yesterday               # what happened, newest first

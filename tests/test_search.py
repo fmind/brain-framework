@@ -32,6 +32,8 @@ def test_all_terms_rank_before_any_term_and_notes_before_records(base: Store) ->
     # Function words are dropped, but a query made only of them still searches literally.
     assert refs(base, "what is the retention decision")[0] == "projects/offline.md#decision"
     assert refs(base, "the")
+    # English stemming: plural and verb forms match their stem.
+    assert refs(base, "decisions keeping")[0] == "projects/offline.md#decision"
 
 
 def test_results_are_compact_and_cite_readable_refs(base: Store) -> None:

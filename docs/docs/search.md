@@ -17,7 +17,7 @@ Search runs on a SQLite FTS5 cache in `.fkf/`. Before answering, it compares the
 2. **All words**: items containing every word, ranked by BM25 with headings weighted above body text.
 3. **Any word**: when fewer than `--limit` items matched every word, items containing some of them follow.
 
-Within each group notes rank above records, because a note is the distilled answer and records are its evidence; deprecated and archived notes rank last. Each note appears once, through its best section. Function words such as "what" or "the" are dropped unless the query has nothing else. Case and diacritics never matter: `reunion` finds `réunion`. There is no model or embedding: the agent reformulates when a query misses, which is fast and explainable.
+Within each group notes rank above records, because a note is the distilled answer and records are its evidence; deprecated and archived notes rank last. Each note appears once, through its best section. Function words such as "what" or "the" are dropped unless the query has nothing else. Case and diacritics never matter (`reunion` finds `réunion`), and English stemming matches word forms (`meetings` finds `meeting`, `decided` finds `decide`). There is no model or embedding: the agent reformulates when a query misses, which is fast and explainable.
 
 ## Filters and time
 

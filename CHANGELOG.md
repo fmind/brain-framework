@@ -2,6 +2,12 @@
 
 All notable changes to `fkf` are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v8.0.1](https://github.com/fmind/fkf/releases/tag/v8.0.1) - 2026-09-23
+
+### Changed
+
+- Match English word forms with the FTS5 Porter stemmer, so `meetings` finds `meeting` and `decided` finds `decide`. Existing caches rebuild on the next search.
+
 ## [v8.0.0](https://github.com/fmind/fkf/releases/tag/v8.0.0) - 2026-09-22
 
 FKF 8 focuses on the loop that makes a knowledge base useful: collect on a schedule, search from anywhere, read the exact source, keep notes current. It removes machinery that made bases hard to run and notes hard to read.
