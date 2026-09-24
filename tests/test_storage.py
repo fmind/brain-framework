@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import os
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from threading import Barrier
 
@@ -71,6 +76,111 @@ def test_writer_lock_is_exclusive_and_waits(brain: Store) -> None:
         pass
     with writer(brain):
         pass
+
+
+@pytest.mark.parametrize(
+    ("lock", "name"),
+    [(writer, "write.lock"), (reader, "write.lock"), (partial(collecting, sensor="source"), "collect-source.lock")],
+    ids=["writer", "reader", "collector"],
+)
+def test_lock_creation_race_keeps_the_contenders_inode(
+    brain: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    lock: Callable[..., AbstractContextManager[None]],
+    name: str,
+) -> None:
+    original = os.open
+    contender: list[int] = []
+    opened: list[int] = []
+    calls: list[tuple[int, int | None]] = []
+
+    def raced_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if path == name:
+            calls.append((flags, dir_fd))
+            if len(calls) == 1:
+                # Reproduce the observed macOS first-create failure after a contender creates the leaf.
+                fd = original(path, flags, mode, dir_fd=dir_fd)
+                contender.append(fd)
+                os.write(fd, b"contender")
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                raise FileNotFoundError(errno.ENOENT, "concurrent first creation", path)
+        fd = original(path, flags, mode, dir_fd=dir_fd)
+        if path == name:
+            opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", raced_open)
+    try:
+        with pytest.raises(BusyError), lock(brain, wait=0):
+            pass
+        assert len(calls) == 2
+        assert calls[0][1] == calls[1][1]
+        assert calls[1][0] == calls[0][0] & ~os.O_CREAT
+        assert len(opened) == 1
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(opened[0])
+        inode = os.fstat(contender[0]).st_ino
+        path = state_store(brain.root).root / name
+        assert path.stat().st_ino == inode
+        assert path.read_bytes() == b"contender"
+    finally:
+        for fd in contender:
+            os.close(fd)
+    with lock(brain, wait=0):
+        assert path.stat().st_ino == inode
+        assert path.read_bytes() == b"contender"
+
+
+@pytest.mark.parametrize("failure", [errno.ENOENT, errno.EACCES, errno.ELOOP])
+def test_lock_creation_errors_do_not_create_a_replacement(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, failure: int
+) -> None:
+    original = os.open
+    calls: list[int] = []
+
+    def failed_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if path == "write.lock":
+            calls.append(flags)
+            if len(calls) == 1:
+                raise OSError(failure, "creation failed", path)
+        return original(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", failed_open)
+    with pytest.raises(OSError, match=r"write\.lock") as caught, writer(brain):
+        pass
+    assert caught.value.errno == failure
+    assert len(calls) == (2 if failure == errno.ENOENT else 1)
+    assert not (state_store(brain.root).root / "write.lock").exists()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "directory"])
+def test_lock_creation_fallback_rejects_unsafe_leaves(brain: Store, monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    original = os.open
+    path = state_store(brain.root).root / "write.lock"
+    target = brain.root.parent / "lock-target"
+    target.write_bytes(b"untouched")
+    calls = 0
+
+    def raced_open(leaf: str | os.PathLike[str], flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        nonlocal calls
+        if leaf == "write.lock":
+            calls += 1
+            if calls == 1:
+                if kind == "symlink":
+                    path.symlink_to(target)
+                elif kind == "fifo":
+                    os.mkfifo(path, 0o600)
+                else:
+                    path.mkdir()
+                raise FileNotFoundError(errno.ENOENT, "concurrent first creation", leaf)
+        return original(leaf, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", raced_open)
+    match = {"symlink": "symbolic links", "fifo": "invalid writer lock", "directory": "Is a directory"}[kind]
+    with pytest.raises((Error, OSError), match=match), writer(brain):
+        pass
+    assert calls == 2
+    assert target.read_bytes() == b"untouched"
 
 
 def test_shared_read_locks_and_independent_collector_lock(brain: Store) -> None:

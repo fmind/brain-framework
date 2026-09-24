@@ -177,7 +177,13 @@ def state_store(root: Path) -> Store:
 def _lock(store: Store, name: str, wait: float, *, shared: bool = False) -> Iterator[None]:
     state = state_store(store.root)
     with state.parent(name) as (parent, leaf):
-        fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent)
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+        try:
+            fd = os.open(leaf, flags | os.O_CREAT, 0o600, dir_fd=parent)
+        except FileNotFoundError:
+            # Concurrent first creation can report ENOENT on macOS. Reopen only an existing lock;
+            # keep the pinned parent and safety flags, and never replace a missing lock on recovery.
+            fd = os.open(leaf, flags, dir_fd=parent)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Error("invalid writer lock")

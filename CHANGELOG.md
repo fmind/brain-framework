@@ -2,7 +2,14 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
-## [v9.0.0](https://github.com/fmind/brain-framework/releases/tag/v9.0.0) - 2026-09-24
+## [v9.0.1](https://github.com/fmind/brain-framework/releases/tag/v9.0.1) - 2026-09-24
+
+First published Brain Framework release. The v9.0.0 candidate stopped at the macOS ARM64 concurrent-registration check before publication; its tag remains unchanged. This release includes the complete identity and format transition described below.
+
+### Fixed
+
+- Recover when a competing process creates the shared lock during its initial open, while retaining the same confined parent and no-follow checks. A missing or unsafe lock still fails explicitly.
+- Cover initial lock creation races, persistent missing locks and unsafe contenders without relaxing writer serialization.
 
 ### Breaking changes
 
@@ -16,6 +23,10 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 - Offline search and exact reads, two read-only MCP tools, plain-file evidence, bounded trusted collection, atomic recovery and external scheduling.
 - Stable record IDs, provider provenance, explicit concept types, and searchable Markdown in action inputs and outputs.
+
+## [v9.0.0](https://github.com/fmind/brain-framework/releases/tag/v9.0.0) - 2026-09-24
+
+Unpublished transition candidate. Publication stopped at the macOS ARM64 concurrent-registration gate; the tag remains unchanged. The corrected transition is released in v9.0.1.
 
 ## [v8.2.2](https://github.com/fmind/fkf/releases/tag/v8.2.2) - 2026-09-24
 

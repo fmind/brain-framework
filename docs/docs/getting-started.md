@@ -5,7 +5,7 @@ By the end of this walkthrough, you will have a saved decision, a search that fi
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then Brain Framework. uv supplies Python 3.14 if needed. If `bf` is not on PATH, run `uv tool update-shell` and open a new shell.
 
 ```bash
-uv tool install --python 3.14 'brain-framework==9.0.0'
+uv tool install --python 3.14 'brain-framework==9.0.1'
 bf --version
 ```
 
@@ -111,7 +111,7 @@ The [runnable example](https://github.com/fmind/brain-framework/tree/main/exampl
 Read the [release notes](https://github.com/fmind/brain-framework/releases), then update the tool and check your brain:
 
 ```bash
-uv tool install --upgrade --python 3.14 'brain-framework==9.0.0'
+uv tool install --upgrade --python 3.14 'brain-framework==9.0.1'
 bf --version
 bf validate --brain brain
 bf eval --brain brain
@@ -123,7 +123,7 @@ Run `eval` once your brain has `queries.yaml`. Review and update separately inst
 
 Brain Framework 9 uses one current format (version 3). FKF 8 brains need a one-time transition before this package can read them: preserve the original files and machine state, pause collection, rename the brain layout and configuration, update authored links and integrations, carry over collection trust and successful-run windows, then rebuild and validate. Record payloads, IDs and provenance stay unchanged; pending transaction originals remain with `memories/`. There is no compatibility command or automatic migration.
 
-The [v9 release notes](https://github.com/fmind/brain-framework/releases/tag/v9.0.0) list the interface changes. Earlier release notes retain the names and formats used at the time.
+The [v9 release notes](https://github.com/fmind/brain-framework/releases/tag/v9.0.1) list the interface changes. Earlier release notes retain the names and formats used at the time.
 
 ## When something is wrong
 
