@@ -17,6 +17,7 @@ nav = [
     { "Brain layout and knowledge" = "docs/brain.md" },
     { "Sensors" = "docs/sensors.md" },
     { "Search and read" = "docs/search.md" },
+    { "Team brains" = "docs/team.md" },
   ] },
   { "Reference" = [
     { "Command reference" = "docs/commands.md" },

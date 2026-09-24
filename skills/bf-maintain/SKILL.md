@@ -1,6 +1,6 @@
 ---
 name: bf-maintain
-description: Maintain Brain Framework brains - sensor health, scheduled updates, backfills, validation and retrieval cases. Use when bf status reports stale or failing sources, when adding a sensor, or when setting up a schedule.
+description: Maintain Brain Framework brains - sensor health, scheduled updates, backfills, validation and retrieval cases. Use when bf status reports stale or failing sensors, when adding a sensor, or when setting up a schedule.
 license: MIT
 ---
 
@@ -10,14 +10,14 @@ Select the intended brain before maintenance; use `--brain NAME` so the working 
 
 ```bash
 bf status --brain NAME             # cache, sources, last success, errors, log paths
-bf update --dry-run --brain NAME   # due sources and their windows, runs nothing
-bf update --brain NAME             # when authorized: collect due sources, refresh cache
+bf update --dry-run --brain NAME   # due sensors and their windows, runs nothing
+bf update --brain NAME             # when authorized: collect due sensors, refresh cache
 bf validate --brain NAME && bf eval --brain NAME
 ```
 
-1. **Failing source**: read the log path from `bf status`, reproduce with `bf collect SENSOR --since 1d --dry-run --brain NAME`, fix the sensor under `sensors/` with a fake-provider test under `tests/`, then rerun. Provider authentication belongs to the provider CLI (`gh auth`, `gws auth`).
-1. **Stale source**: check the scheduler (`systemctl --user list-timers bf-update.timer`, `journalctl --user -u bf-update`) before blaming the sensor. A paused laptop catches up at most 30 days automatically; backfill older gaps with `bf collect SENSOR --since YYYY-MM-DD`.
-1. **New sensor**: add it only for a question the user asks repeatedly. Copy an example from the Brain Framework repository's `examples/sensors/`, keep projection focused (title and text carry the searchable facts, skip noise such as trash or bots), test it with a fake provider, declare a disabled source with explicit account/folder/channel scope, modification time, partial-content and deletion behavior, try `bf collect NAME --dry-run` when enabled and authorized, then declare `refresh` in `bf.yaml`.
+1. **Failing sensor**: read the log path from `bf status`, reproduce with `bf collect SENSOR --since 1d --dry-run --brain NAME`, fix the sensor under `sensors/` with a fake-provider test under `tests/`, then rerun. Provider authentication belongs to the provider CLI (`gh auth`, `gws auth`).
+1. **Stale sensor**: check the scheduler (`systemctl --user list-timers bf-update.timer`, `journalctl --user -u bf-update`) before blaming the sensor. A paused laptop catches up at most 30 days automatically; backfill older gaps with `bf collect SENSOR --since YYYY-MM-DD`.
+1. **New sensor**: add it only for a question the user asks repeatedly. Copy an example from the Brain Framework repository's `examples/sensors/`, keep projection focused (title and text carry the searchable facts, skip noise such as trash or bots), test it with a fake provider, declare it disabled with explicit account/folder/channel scope, modification time, partial-content and deletion behavior, try `bf collect NAME --dry-run` when enabled and authorized, then declare `refresh` in `bf.yaml`.
 1. **Usage**: once a month, read `usage` in `bf status`. Near-zero searches mean agents are not reaching the brain: check that `bf-use` is installed where they run before improving anything else. A high share of `empty` searches means notes or sensors miss what people ask.
 1. **Stale notes**: `review` in `bf status` lists active or blocked projects whose note is older than 14 days; refresh them from recent records or set their verified current status.
 1. **Incomplete retrieval**: inspect `problems` and `stale`, repair the named file or brain, then repeat the query; `eval` rejects incomplete answers.

@@ -137,6 +137,35 @@ def test_initialization_obeys_the_physical_writer_lock(tmp_path: Path) -> None:
     assert not list(target.iterdir())
 
 
+def test_initialization_names_team_brains_and_keeps_action_inputs_versioned(tmp_path: Path) -> None:
+    clone = tmp_path / "Team_Knowledge"
+    (clone / ".git").mkdir(parents=True)
+    created = invoke("init", str(clone), "--no-collect")
+    assert (created["brain"], created["collect"]) == ("team-knowledge", False)
+    assert user_config().brains["team-knowledge"].collect is False
+    patterns = [line for line in (clone / ".gitignore").read_text().splitlines() if not line.startswith("#")]
+    # Unanchored patterns would also hide actions/*/inputs/ from every clone.
+    assert patterns == ["/.bf/", "/logs/", "/memories/", "/originals/", "/inputs/"]
+    (clone / "actions/2026-09-24_pilot/inputs").mkdir(parents=True)
+    (clone / "actions/2026-09-24_pilot/inputs/request.md").write_text("# Request\n")
+    (clone / "actions/2026-09-24_pilot/ACTION.md").write_text("# Pilot\n\n[Request](inputs/request.md)\n")
+    assert invoke("validate", "--brain", "team-knowledge")["valid"]
+    assert invoke("init", str(tmp_path / "Team_Knowledge_2"))["brain"] == "team-knowledge-2"
+    for target, message in ((tmp_path / "2026", "choose a brain name"), (clone, "freshly cloned")):
+        result = CliRunner().invoke(app, ["init", str(target)])
+        assert result.exit_code == 1
+        assert message in str(result.exception)
+    assert not (tmp_path / "2026").exists()
+
+
+def test_unsupported_platforms_fail_before_loading_posix_primitives(monkeypatch: pytest.MonkeyPatch) -> None:
+    import bf
+
+    monkeypatch.setattr(os, "name", "nt")
+    with pytest.raises(SystemExit, match="requires Linux or macOS"):
+        bf.main()
+
+
 def text(result: object) -> str:
     assert isinstance(result, CallToolResult)
     assert isinstance(result.content[0], TextContent)

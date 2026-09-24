@@ -32,28 +32,28 @@ sensors:
 | Setting     | Default  | Meaning                                                                                   |
 | ----------- | -------- | ----------------------------------------------------------------------------------------- |
 | `command`   | required | Direct argv.                                                                              |
-| `enabled`   | `true`   | Disabled sources never run; their records stay searchable.                                |
+| `enabled`   | `true`   | Disabled sensors never run; their records stay searchable.                                |
 | `mode`      | `window` | `window` upserts what the sensor returns; `snapshot` replaces the source's whole catalog. |
-| `refresh`   | `0`      | Seconds between automatic runs; `0` keeps the source manual.                              |
+| `refresh`   | `0`      | Seconds between automatic runs; `0` keeps the sensor manual.                              |
 | `lookback`  | `86400`  | Seconds covered by a first run, or by every snapshot run.                                 |
 | `overlap`   | `300`    | Seconds re-read before the last window's end, for late arrivals.                          |
 | `timeout`   | `300`    | Seconds before the process group is killed.                                               |
 | `max_bytes` | 64 MiB   | Maximum stdout size.                                                                      |
 
-Sensors run from the brain root with your environment minus loader-injection variables, stdin closed, and stderr captured to a private per-source log of at most 256 KiB under `~/.local/state/bf/`. Errors name the log, never its content. The [example sensors](https://github.com/fmind/brain-framework/tree/main/examples/sensors) show local Git history, Google Calendar, a complete Drive folder snapshot and scoped local documents; copy them into `sensors/` and adapt them with tests.
+Sensors run from the brain root with your environment minus loader-injection variables, stdin closed, and stderr captured to a private per-sensor log of at most 256 KiB under `~/.local/state/bf/`. Errors name the log, never its content. The [example sensors](https://github.com/fmind/brain-framework/tree/main/examples/sensors) show local Git history, Google Calendar, a complete Drive folder snapshot and scoped local documents; copy them into `sensors/` and adapt them with tests.
 
 ## Collect and update
 
 ```bash
 bf collect git-commits --since 30d --dry-run   # run and show three samples, write nothing
 bf collect git-commits --since 30d             # backfill a month
-bf update --dry-run                            # which sources are due, and their windows
+bf update --dry-run                            # which sensors are due, and their windows
 bf update                                      # run them all, then refresh search
 ```
 
-`update` follows the [brain selection rules](commands.md): it runs due sources in the selected brains that are trusted on this machine. A source is due when it is enabled, its `refresh` is nonzero, and that interval has elapsed since its last success. A window source resumes from its last collected window minus `overlap`, catching up at most 30 days after a long pause; upserts make repeated items harmless. A failed source stays due and never blocks the others; the command exits 1 when any failed. Run state lives in `~/.local/state/bf/`, so losing it means the next run uses `lookback` and previously recorded coverage is no longer available.
+`update` follows the [brain selection rules](commands.md): it runs due sensors in the selected brains that are trusted on this machine. A sensor is due when it is enabled, its `refresh` is nonzero, and that interval has elapsed since its last success. A window sensor resumes from its last collected window minus `overlap`, catching up at most 30 days after a long pause; upserts make repeated items harmless. A failed sensor stays due and never blocks the others; the command exits 1 when any failed. Run state lives in `~/.local/state/bf/`, so losing it means the next run uses `lookback` and previously recorded coverage is no longer available. A CI job keeps it between runs or uses a longer `lookback`; see [team brains](team.md#collect-in-ci).
 
-Runs of the same source are serialized. Other sources can collect concurrently; record commits and run-state updates serialize briefly. `status` separates indexed totals from `last_run` counts (added, updated, unchanged and removed), and reports disabled and historical evidence separately from enabled sources. A manual backfill does not claim coverage across an uncollected gap.
+Runs of the same sensor are serialized. Other sensors can collect concurrently; record commits and run-state updates serialize briefly. `status` separates indexed totals from `last_run` counts (added, updated, unchanged and removed), and reports disabled and historical evidence separately from enabled sources. A manual backfill does not claim coverage across an uncollected gap.
 
 ## Define the scope before adding a sensor
 
@@ -71,7 +71,7 @@ Run `bf update` from a native timer. On Linux, create these two files; this exam
 # https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html
 # ~/.config/systemd/user/bf-update.service
 [Unit]
-Description=Collect due Brain Framework sources
+Description=Collect due Brain Framework sensors
 
 [Service]
 Type=oneshot
@@ -83,7 +83,7 @@ TimeoutStartSec=45min
 # https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
 # ~/.config/systemd/user/bf-update.timer
 [Unit]
-Description=Check for due Brain Framework sources every 15 minutes
+Description=Check for due Brain Framework sensors every 15 minutes
 
 [Timer]
 OnCalendar=*:0/15
@@ -94,11 +94,11 @@ RandomizedDelaySec=1min
 WantedBy=timers.target
 ```
 
-Run `systemctl --user daemon-reload`, enable it with `systemctl --user enable --now bf-update.timer`, and read runs with `journalctl --user -u bf-update`. On macOS, a launchd agent with `StartInterval` 900 checks for due sources every 15 minutes. Give the job the PATH its sensors need (`gh`, `gws`, `git`). `bf status --check` exits 1 when a scheduled source has not succeeded within twice its `refresh`, which suits a monitoring check.
+Run `systemctl --user daemon-reload`, enable it with `systemctl --user enable --now bf-update.timer`, and read runs with `journalctl --user -u bf-update`. On macOS, a launchd agent with `StartInterval` 900 checks for due sensors every 15 minutes. Give the job the PATH its sensors need (`gh`, `gws`, `git`). `bf status --check` exits 1 when a scheduled sensor has not succeeded within twice its `refresh`, which suits a monitoring check.
 
 Check `systemctl --user list-timers bf-update.timer` for the next trigger and `systemctl --user show bf-update.service -p Result -p ExecMainStatus` after a run, then `bf status --check --brain brain` for source health. Enabling a timer alone does not prove collection succeeded. Disable future runs with `systemctl --user disable --now bf-update.timer`; stop an active collection separately with `systemctl --user stop bf-update.service`.
 
-Choose a timer interval comfortably shorter than the smallest nonzero `refresh`. An hourly timer with random delay can run just before an hourly source is due and skip it until the following hour. A 15-minute check avoids that extra hour of delay; it still collects only due sources. `Persistent=true` coalesces missed calendar triggers when the user manager returns; it does not keep a sleeping laptop running. Cache and provider failures make `update` exit 1.
+Choose a timer interval comfortably shorter than the smallest nonzero `refresh`. An hourly timer with random delay can run just before an hourly sensor is due and skip it until the following hour. A 15-minute check avoids that extra hour of delay; it still collects only due sensors. `Persistent=true` coalesces missed calendar triggers when the user manager returns; it does not keep a sleeping laptop running. Cache and provider failures make `update` exit 1.
 
 ## Good records
 

@@ -106,6 +106,7 @@ expected_pages = {
     "docs/schema/index.html",
     "docs/search/index.html",
     "docs/sensors/index.html",
+    "docs/team/index.html",
     "index.html",
     "third-party-notices/index.html",
 }

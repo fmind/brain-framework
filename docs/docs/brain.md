@@ -1,18 +1,18 @@
 # Brain layout and knowledge
 
-A brain is an ordinary directory, normally a Git repository. `bf init PATH --name NAME` creates it and registers it for this user.
+A brain is an ordinary directory, normally a Git repository. `bf init PATH` creates it in a new, empty or freshly cloned directory and registers it for this user under the directory's name; `--name NAME` chooses another name, and `--no-collect` withholds collection trust.
 
 ```text
-bf.yaml                         # name and sensors
-AGENTS.md                        # instructions for agents working in the brain
-projects/<project>.md            # one note per project
-concepts/index.md, concepts/<concept>.md # reusable OKF v0.2 knowledge
-actions/YYYY-MM-DD_slug/ACTION.md    # resumable work, with inputs/ and outputs/
-memories/<source>/<YYYY-MM>.jsonl # collected items
-sensors/                         # sensors
-routines/, settings/, tests/       # maintenance code, its settings and its tests
-skills/                          # workflow packages for agents
-.bf/                            # disposable search cache
+bf.yaml                                   # name and sensors
+AGENTS.md                                 # instructions for agents working in the brain
+projects/<project>.md                     # one note per project
+concepts/index.md, concepts/<concept>.md  # reusable OKF v0.2 knowledge
+actions/YYYY-MM-DD_slug/ACTION.md         # resumable work, with inputs/ and outputs/
+memories/<source>/<YYYY-MM>.jsonl         # collected items
+sensors/                                  # executable collectors declared in bf.yaml
+routines/, settings/, tests/              # maintenance code, its settings and its tests
+skills/                                   # workflow packages for agents
+.bf/                                      # disposable search cache
 ```
 
 Only Markdown under `projects/`, `concepts/` and `actions/` and JSON Lines under `memories/` are searchable. This includes Markdown in action inputs and outputs: keep them within the brain's intended audience. Everything else is ordinary brain code and configuration. `.bf/` is safe to delete while Brain Framework is idle.
@@ -89,7 +89,7 @@ Record writes use a recoverable transaction under `memories/.pending/`. It holds
 Separate brains by who may read them. A directory is a context boundary, not an access-control system: use separate repositories and filesystem permissions for different audiences.
 
 - **Personal brain**: private repository, laptop sensors (mail, calendar, Git, shell, browser, agent sessions), registered with `--collect`. Keep bulky or sensitive `memories/` out of the Git remote and back them up encrypted instead.
-- **Team brain**: shared repository of projects, decisions, concepts and actions, plus records of team-scoped sources (organization issues and pull requests, shared meeting notes). Collect them in CI, for example a nightly job running `bf register . --collect && bf update` and committing `memories/`, so no laptop runs shared sensor code. New brains ignore `memories/` by default: explicitly opt reviewed team-source paths into version control before relying on CI publication.
+- **Team brain**: shared repository of projects, decisions, concepts and actions, plus records of team-scoped sources (organization issues and pull requests, shared meeting notes), created with a distinctive name and `--no-collect`. One CI job collects and commits reviewed sources, so no laptop runs shared sensor code. [Team brains](team.md) covers creation, joining, CI collection and review.
 
 Registered brains live in `~/.config/bf/config.yaml`:
 
@@ -106,9 +106,9 @@ brains:
 
 Commands select `--brain NAME|PATH`, then `BF_BRAIN`, then the brain containing the working directory, then every registered brain. Within a brain, agents therefore stay in that brain; elsewhere they search everything you registered. Promote personal knowledge to the team by writing a summary in the team brain and linking to what others can read.
 
-`XDG_CONFIG_HOME` overrides `~/.config` for the registry; `XDG_STATE_HOME` overrides `~/.local/state` for private run history, locks and usage. Registration serializes updates and writes the registry atomically with owner-only file permissions. Keep names unique. Automatic selection skips registered directories absent from this machine; selecting an absent brain explicitly fails. Use `--brain NAME` when a particular brain must be present for your answer.
+`XDG_CONFIG_HOME` overrides `~/.config` for the registry; `XDG_STATE_HOME` overrides `~/.local/state` for private run history, locks and usage. Registration serializes updates and writes the registry atomically with owner-only file permissions. Names are unique per machine: registering a second brain under a taken name fails, so rename your own brain rather than a shared one. Automatic selection skips registered directories absent from this machine; selecting an absent brain explicitly fails. Use `--brain NAME` when a particular brain must be present for your answer.
 
-Running `bf register PATH` again without `--collect` revokes collection trust while keeping the brain searchable. To stop selecting it automatically, remove its entry from the registry; the files remain in place. Set `enabled: false` to stop a single source while keeping its existing records searchable.
+Running `bf register PATH` again without `--collect` revokes collection trust while keeping the brain searchable. To stop selecting it automatically, remove its entry from the registry; the files remain in place. Set `enabled: false` to stop a single sensor while keeping its existing records searchable.
 
 ## Actions
 

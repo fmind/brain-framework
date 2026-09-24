@@ -4,7 +4,7 @@ Brain Framework is one typed Python package and one console command. Its purpose
 
 ## Scope
 
-- Keep only the current configuration and brain format. Do not add legacy code, migration tooling, provider SDKs or compatibility command surfaces.
+- Keep only the current configuration and brain format. Do not add legacy code, migration tooling, provider SDKs or compatibility command surfaces. Change the brain, `bf.yaml` or `queries.yaml` format only in a major release, with manual upgrade steps in its changelog entry; teams pin one release.
 - `projects/`, `actions/` and `concepts/` contain authored Markdown; concepts follow OKF v0.2. Actions use `actions/YYYY-MM-DD_slug/ACTION.md` plus `inputs/` and `outputs/`. `memories/<source>/<YYYY-MM>.jsonl` holds one line per source item, upserted by id (`undated.jsonl`, `snapshot.jsonl` for snapshot sources). `.bf/` is a disposable SQLite cache. `sensors/` holds sensors, `routines/`, `settings/` and `tests/` brain maintenance, `skills/` workflow packages. One `bf.yaml` (version 3) defines the brain; `~/.config/bf/config.yaml` registers brains per user and grants collection trust per machine.
 - Records have `id`, `title`, optional `text`, `time`, `url`, `links`, `aliases` and `attributes`. Provider-specific projection belongs in brain-owned sensors. Reserved attributes `updated`, `observed` and `partial` describe revision provenance. No provider SDK, model, embedding, scheduler, harness installer or plugin framework belongs in the core.
 - CLI and MCP call the same services. MCP exposes exactly `search` and `read`, with no execution or write operation.
@@ -30,7 +30,7 @@ Brain Framework is one typed Python package and one console command. Its purpose
 | index.py       | Incremental SQLite cache, ranking and time-window queries.                   |
 | retrieve.py    | Multi-brain search and exact reads.                                          |
 | collect.py     | Process boundary, collection, run state and due windows.                     |
-| update.py      | Collect due sources of trusted brains, then refresh caches.                  |
+| update.py      | Collect due sensors of trusted brains, then refresh caches.                  |
 | validate.py    | Whole-brain offline checks.                                                  |
 | evaluate.py    | Owner-written retrieval cases.                                               |
 | health.py      | Source coverage and freshness from configuration and private run state.      |

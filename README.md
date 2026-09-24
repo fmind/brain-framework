@@ -11,12 +11,12 @@ Brain Framework is one Python package and one command; it needs no model, hosted
 ## Try it
 
 ```bash
-uv tool install --python 3.14 'brain-framework==9.0.1'
-bf init ~/knowledge                       # creates and registers a brain
-cd ~/knowledge                            # keep this walkthrough in that brain
-bf search welcome                        # find the note created by init
-bf read concepts/welcome.md                   # read its exact contents
-bf validate                              # check notes, links and records
+uv tool install --python 3.14 'brain-framework==9.1.0'
+bf init ~/knowledge          # creates and registers a brain named knowledge
+cd ~/knowledge               # keep this walkthrough in that brain
+bf search welcome            # find the note created by init
+bf read concepts/welcome.md  # read its exact contents
+bf validate                  # check notes, links and records
 ```
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first; it supplies Python 3.14 if needed. Brain Framework runs on Linux and macOS.
@@ -56,7 +56,7 @@ Sensors gather observations, memories preserve their evidence, concepts distill 
 
 `bf search` selects `--brain NAME|PATH`, then `BF_BRAIN`, then the enclosing brain, then every registered brain. Search by words, an explicit identity such as `repo:github.com/owner/name`, or a time window such as `--since yesterday`. Use `--changed-since 7d --current` to find recently edited evidence from enabled sources. Notes receive a ranking boost because they distill the answer; records supply the evidence. Read returned refs such as `projects/x.md#decision` or `gmail:<id>` to inspect the source. Search reports incomplete results under `problems` or `stale`; an incomplete empty answer never proves absence.
 
-`bf update` runs every due sensor in the selected brains you trust on this machine and refreshes the cache. Run it from a native timer. A failing source never blocks the others; `bf status` distinguishes active collection from disabled or historical evidence, with freshness, change counts and private error logs.
+`bf update` runs every due sensor in the selected brains you trust on this machine and refreshes the cache. Run it from a native timer. A failing sensor never blocks the others; `bf status` distinguishes active collection from disabled or historical evidence, with freshness, change counts and private error logs.
 
 Each part has one job. Your editor writes Markdown, provider CLIs handle authentication, sensors print JSON, Brain Framework searches files, and your agent interprets results. JSON output composes with shell tools; Git reviews changes and systemd or launchd schedules collection. You can replace a part without replacing your knowledge.
 
@@ -67,7 +67,7 @@ Each part has one job. Your editor writes Markdown, provider CLIs handle authent
 | `init PATH`, `register PATH [--collect]` | Create a brain, or add an existing one (a cloned team brain) to your search.      |
 | `search [QUERY] [--since] [--until]`     | Search words or identities, or list by time, source, type or status.              |
 | `read REF`                               | Read a note, a section, a record or an identity.                                  |
-| `update [--dry-run]`, `collect SENSOR`   | Collect due sources, or run one source now for a backfill or debugging.           |
+| `update [--dry-run]`, `collect SENSOR`   | Collect due sensors, or run one sensor now for a backfill or debugging.           |
 | `status [--check]`, `validate`, `eval`   | Freshness, errors, notes due for review and usage; broken links; retrieval cases. |
 | `mcp`, `build`, `schema`                 | Read-only MCP server, full cache rebuild, `bf.yaml` JSON Schema.                  |
 
@@ -77,7 +77,7 @@ Start a team pilot with a private Git repository, one real project note and a fe
 
 For the first pilot, pick a decision someone currently has to ask a colleague to explain. Write the decision, its reason and the next action, then have a teammate find the answer from a fresh clone. Success means they can read the evidence and act on it. The [team walkthrough](docs/docs/getting-started.md#check-the-answers-your-team-needs) includes runnable retrieval cases; no sensor or model setup is needed.
 
-Keep personal mail and laptop history in a separate private brain. Outside either brain, `bf search` covers both and labels each result; inside one, it searches only that brain. Use `--brain NAME` to select explicitly. A cloned brain never runs its sensors until you trust it with `bf register PATH --collect`. Promote personal knowledge as reviewed summaries with links teammates can access. Add team-scoped CI collection when the notes need it; see [personal and team brains](docs/docs/brain.md#personal-and-team-brains).
+Keep personal mail and laptop history in a separate private brain. Outside either brain, `bf search` covers both and labels each result; inside one, it searches only that brain. Use `--brain NAME` to select explicitly. A cloned brain never runs its sensors until you trust it with `bf register PATH --collect`. Promote personal knowledge as reviewed summaries with links teammates can access. Add team-scoped CI collection when the notes need it; the [team brains guide](docs/docs/team.md) covers naming, collection trust, CI collection and review.
 
 ## Agents
 

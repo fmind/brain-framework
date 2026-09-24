@@ -2,6 +2,26 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v9.1.0](https://github.com/fmind/brain-framework/releases/tag/v9.1.0) - 2026-09-24
+
+Brain Framework 9.1 prepares team deployments. The brain format is unchanged: existing version 3 brains need no conversion.
+
+### Added
+
+- `bf init --no-collect` registers a shared brain for search without collection trust, and `init` accepts a fresh clone of an empty repository.
+- A [team brains](https://fmind.github.io/brain-framework/docs/team/) guide: distinctive names, joining, CI collection with preserved run state, allowlisted `memories/` publication, required review of sensor code, and data retention.
+- A documented compatibility policy: the brain, `bf.yaml` and `queries.yaml` formats change only in a major release, with manual upgrade steps.
+
+### Fixed
+
+- `bf init` anchors `.gitignore` patterns to the brain root, so `actions/*/inputs/` stay versioned and a teammate's clone validates like the author's copy. Existing brains that copied the old patterns should prefix `inputs/`, `logs/`, `memories/`, `originals/` and `.bf/` with `/`.
+- `bf init` names a brain after its directory instead of `knowledge`, avoiding registry name collisions between personal and team brains, and explains how to resolve a taken name.
+- Unsupported platforms fail with a clear message instead of an import traceback.
+
+### Changed
+
+- Call executable collectors sensors in command help, documentation and the `bf-maintain` skill; record refs, `--source`, health `sources` and OKF `sources` keep their provenance names. `search --source` now has help text.
+
 ## [v9.0.1](https://github.com/fmind/brain-framework/releases/tag/v9.0.1) - 2026-09-24
 
 First published Brain Framework release. The v9.0.0 candidate stopped at the macOS ARM64 concurrent-registration check before publication; its tag remains unchanged. This release includes the complete identity and format transition described below.
@@ -14,7 +34,7 @@ First published Brain Framework release. The v9.0.0 candidate stopped at the mac
 ### Breaking changes
 
 - Rename FKF to Brain Framework: install `brain-framework`, import `bf`, and run `bf`. The repository and documentation move to `fmind/brain-framework`.
-- Use format 3 with `bf.yaml`, `sensors:`, `{{brain}}`, `--brain`, `BF_BRAIN`, and a `brains:` registry under `~/.config/bf/`. Private runtime state lives under `~/.local/state/bf/`.
+- Use format 3 for `bf.yaml` and `queries.yaml`, with `sensors:`, `{{brain}}`, `--brain`, `BF_BRAIN`, and a `brains:` registry under `~/.config/bf/`. Private runtime state lives under `~/.local/state/bf/`.
 - Organize authored knowledge in `projects/`, `concepts/`, and `actions/` with `ACTION.md`; collected records in `memories/`; collection code in `sensors/`; maintenance in `routines/` and `settings/`; disposable search in `.bf/`.
 - Rename workflows to `bf-use`, `bf-learn`, `bf-maintain`, and `bf-contribute`. CLI and MCP results identify their brain; collection reports identify sensors while record provenance retains `source:id` and OKF `sources`.
 - Keep one current format without legacy aliases. Preserve original evidence and per-machine collection trust during any one-time transition, and rebuild caches from the migrated files.
