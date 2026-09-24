@@ -58,6 +58,8 @@ A record's time is its event time. A note's `updated` date is interpreted as mid
 
 Excerpts are short passages around the match. Read the ref for the complete note, section or record; `read` rejects a reply above 4 MiB rather than truncating it. When several bases hold the same ref, pass `--base`. Refs are stable as long as the file path, heading or record id is, and Git history records how a note changed.
 
+Quote refs containing spaces or shell metacharacters: `fkf read 'projects/C# guide.md#decision'` reads a section of `C# guide.md`. In Markdown links, URL-encode literal filename characters (`C%23%20guide.md#decision`); the final unescaped `#` introduces the heading. Record IDs are opaque: a `#` inside `source:id` remains part of the ID.
+
 Records expose available `updated`, `observed` and `partial` metadata. A response's `sources` describes relevant collection coverage: active, disabled or historical; freshness; last successful collection, source mode and completed request window (window sources only). Exact record reads include this under `collection`. A successful collector run proves that its declared window completed, not that every older object was rechecked. Trusted scheduled sources with no successful run are `never`; untrusted scheduled sources have `unknown` freshness, and unscheduled sources are `manual`. Missing or corrupt SQLite caches are rebuilt; exact record reads can still resolve directly from the files.
 
 ## Retrieval cases
@@ -82,6 +84,8 @@ cases:
 ```
 
 A case fails when retrieval reports `problems` or `stale`, including a case expecting no results.
+
+A whole note path in `expect` or `forbid` matches any section of that note; section refs and record IDs match exactly, including any `#` inside a record ID. Automatic selection omits registered directories absent from this machine; use `--base NAME` to require a particular base.
 
 Malformed record paths and unreadable files are reported as problems instead of producing refs that cannot be read. Exact reads still recover a known record from a healthy partition; if other partitions are unreadable and the requested record cannot be found, the read fails with a validation diagnostic rather than claiming absence.
 

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from pydantic import ValidationError
 
+from fkf import config
 from fkf.config import load, may_collect, one, register, select, user_config, user_path, yaml_object
-from fkf.models import Config, Error, Knowledge, Query, Record, Source, decode, moment, timestamp
+from fkf.models import Config, Error, Knowledge, Query, Record, Source, UserConfig, decode, moment, timestamp
 from fkf.storage import BusyError, Store, collecting, reader, relative, state_store, writer
 
 
@@ -220,3 +224,31 @@ def test_nothing_selected_is_actionable(tmp_path: Path) -> None:
     os.chdir(tmp_path)
     with pytest.raises(Error, match="fkf register"):
         select()
+
+
+def test_concurrent_registrations_keep_every_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stores = []
+    for number in range(4):
+        root = tmp_path / f"base-{number}"
+        root.mkdir()
+        store = Store(root)
+        store.write("fkf.yaml", f"version: 2\nname: base-{number}\n".encode())
+        stores.append(store)
+    original = config.user_config
+    start = Barrier(len(stores))
+
+    def slow_read() -> UserConfig:
+        registry = original()
+        # Widen the read/modify/write race without changing the result of a registry read.
+        time.sleep(0.05)
+        return registry
+
+    def enroll(store: Store) -> None:
+        start.wait(timeout=10)
+        register(store, collect=False)
+
+    monkeypatch.setattr(config, "user_config", slow_read)
+    with ThreadPoolExecutor(max_workers=len(stores)) as executor:
+        list(executor.map(enroll, stores))
+    assert set(user_config().bases) == {f"base-{number}" for number in range(4)}
+    assert user_path().stat().st_mode & 0o077 == 0

@@ -7,6 +7,7 @@ from typing import Annotated, Literal, cast
 from pydantic import Field, ValidationError
 
 from fkf.config import yaml_object
+from fkf.markdown import authored, split_ref
 from fkf.models import Error, Model, Query, Status, explain, moment
 from fkf.retrieve import search
 from fkf.storage import Store
@@ -38,7 +39,7 @@ class Suite(Model):
 
 
 def _matches(expected: str, refs: list[str]) -> bool:
-    return any(ref == expected or ("#" not in expected and ref.partition("#")[0] == expected) for ref in refs)
+    return any(ref == expected or (authored(expected) and split_ref(ref)[0] == expected) for ref in refs)
 
 
 def evaluate(store: Store, path: str = "queries.yaml") -> dict[str, object]:

@@ -11,7 +11,7 @@ import yaml.resolver
 from pydantic import ValidationError
 
 from fkf.models import Config, Error, Registration, UserConfig, explain
-from fkf.storage import Store
+from fkf.storage import Store, writer
 
 
 class _Loader(yaml.SafeLoader):
@@ -77,7 +77,8 @@ def user_config() -> UserConfig:
     """The optional user registry; a missing file means no registered bases."""
     path = user_path()
     try:
-        data = path.read_bytes()
+        with path.open("rb") as stream:
+            data = stream.read((1 << 20) + 1)
     except FileNotFoundError:
         return UserConfig()
     try:
@@ -89,20 +90,23 @@ def user_config() -> UserConfig:
 def register(store: Store, *, collect: bool) -> dict[str, object]:
     """Add or update this base in the user registry, keyed by its configured name."""
     name = load(store).name
-    registry = user_config()
-    for other, entry in registry.bases.items():
-        if other != name and Path(entry.path).expanduser().resolve() == store.root:
-            raise Error(f"this directory is already registered as {other}")
-    existing = registry.bases.get(name)
-    if existing and Path(existing.path).expanduser().resolve() != store.root:
-        raise Error(f"another base is already registered as {name}; rename one of them in fkf.yaml")
-    registry.bases[name] = Registration(path=str(store.root), collect=collect)
     path = user_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    document = {"bases": {key: value.model_dump() for key, value in sorted(registry.bases.items())}}
-    temporary = path.with_name(f".{path.name}.{os.getpid()}")
-    temporary.write_text("# https://fmind.github.io/fkf/\n" + yaml.safe_dump(document, sort_keys=True))
-    temporary.replace(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    registry_store = Store(path.parent)
+    # Registration is one shared read/modify/write transaction, independent of each base's lock.
+    with writer(registry_store, wait=30):
+        registry = user_config()
+        for other, entry in registry.bases.items():
+            if other != name and Path(entry.path).expanduser().resolve() == store.root:
+                raise Error(f"this directory is already registered as {other}")
+        existing = registry.bases.get(name)
+        if existing and Path(existing.path).expanduser().resolve() != store.root:
+            raise Error(f"another base is already registered as {name}; rename one of them in fkf.yaml")
+        registry.bases[name] = Registration(path=str(store.root), collect=collect)
+        document = {"bases": {key: value.model_dump() for key, value in sorted(registry.bases.items())}}
+        registry_store.write(
+            path.name, ("# https://fmind.github.io/fkf/\n" + yaml.safe_dump(document, sort_keys=True)).encode()
+        )
     return {"base": name, "path": str(store.root), "collect": collect, "config": str(path)}
 
 

@@ -203,9 +203,16 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
     if not incoming and not snapshot:
         return {"added": 0, "updated": 0, "unchanged": 0, "removed": 0}
     existing: dict[str, dict[str, Record]] = {}
+    located: dict[str, str] = {}
     for name in partitions(store, source):
-        existing[name.rsplit("/", 1)[1].removesuffix(".jsonl")] = {r.id: r for r in load(store, name)}
-    located = {record_id: key for key, records in existing.items() for record_id in records}
+        key = name.rsplit("/", 1)[1].removesuffix(".jsonl")
+        partition_records: dict[str, Record] = {}
+        for record in load(store, name):
+            if record.id in located:
+                raise Error(f"source {source} contains duplicate record ids; run fkf validate and reconcile them")
+            located[record.id] = key
+            partition_records[record.id] = record
+        existing[key] = partition_records
     before = {key: dict(records) for key, records in existing.items()}
     counts = {"added": 0, "updated": 0, "unchanged": 0, "removed": 0}
     if snapshot:

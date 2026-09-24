@@ -2,6 +2,20 @@
 
 All notable changes to `fkf` are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v8.2.2](https://github.com/fmind/fkf/releases/tag/v8.2.2) - 2026-09-24
+
+### Fixed
+
+- Refuse collection into a source with duplicate stored IDs before changing evidence, including snapshot replacement.
+- Serialize concurrent base registrations and write the registry durably with owner-only permissions.
+- Preserve `#` and percent escapes in note filenames and local links; require exact record IDs in retrieval cases.
+
+### Changed
+
+- Explain the value of shared, file-based knowledge through concrete questions and the search, read, work and update loop.
+- Add runnable team-pilot retrieval cases, routine upgrade instructions and host connection checks.
+- Align documentation and skills on base selection, skill discovery, collection trust, recovery and native scheduling.
+
 ## [v8.2.1](https://github.com/fmind/fkf/releases/tag/v8.2.1) - 2026-09-23
 
 First published 8.2 release. The v8.2.0 candidate stopped at the Intel macOS test gate before publication; its tag remains unchanged.

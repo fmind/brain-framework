@@ -1,3 +1,4 @@
+# https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-issue-forms
 name: Bug report
 description: Report a reproducible problem without sharing anything a base collected.
 title: "bug: "
@@ -12,7 +13,7 @@ body:
     attributes:
       label: Command
       description: The command that misbehaved.
-      placeholder: fkf sync github-pull-requests --date 2026-05-04
+      placeholder: fkf search "retention decision" --base example
     validations:
       required: true
   - type: textarea
@@ -27,7 +28,7 @@ body:
     attributes:
       label: Reproduction
       description: >-
-        The smallest safe sequence of commands. If collection broke, include the substituted command from `fkf sync --dry-run` — it holds dates and paths, never a value.
+        The smallest safe sequence using a synthetic base. For collection failures, include the redacted source configuration and error. `fkf collect --dry-run` executes the collector and prints record samples; never paste private samples or logs.
     validations:
       required: true
   - type: textarea

@@ -15,7 +15,7 @@ from fkf.markdown import authored, note
 from fkf.models import AUTHORED, Error, Query, Record, moment
 from fkf.storage import BusyError, Store, reader, writer
 
-SCHEMA = 11
+SCHEMA = 12
 # Active projects whose note is older than this are listed for review; a reminder, never a failure.
 REVIEW_DAYS = 14
 CACHE = ".fkf/index.sqlite"

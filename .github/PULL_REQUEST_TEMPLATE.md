@@ -1,6 +1,6 @@
 ## What
 
-<!-- Describe the change, and name the CLI and version any preset was verified against. -->
+<!-- Describe the problem and resulting behavior. For collector changes, name the provider CLI and version verified. -->
 
 ## Why
 
@@ -10,4 +10,4 @@
 
 - [ ] `mise run all` is green
 - [ ] No real base, workspace data, or personal identifier appears in the diff
-- [ ] Any break to a flag, configuration key, stored format, URI form, or MCP tool name is stated above — there is no compatibility layer
+- [ ] Any break to a flag, configuration key, stored format, reference format, or MCP tool name is stated above — there is no compatibility layer

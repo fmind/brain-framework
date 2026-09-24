@@ -267,3 +267,20 @@ def test_older_upstream_revision_cannot_replace_or_move_newer_evidence(base: Sto
     assert found[1] == current
     assert found[0] == "records/revisions/" + ("snapshot" if snapshot else "2026-09") + ".jsonl"
     assert (records.find(base, "revisions", "other") is None) == snapshot
+
+
+@pytest.mark.parametrize("separate_partitions", [False, True])
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_collection_preserves_conflicting_existing_records(
+    base: Store, *, separate_partitions: bool, snapshot: bool
+) -> None:
+    first = records.line(Record(id="same", title="First evidence", time="2026-08-01T00:00:00Z"))
+    second = records.line(Record(id="same", title="Conflicting evidence", time="2026-09-01T00:00:00Z"))
+    base.write("records/conflicts/2026-08.jsonl", first if separate_partitions else first + second)
+    if separate_partitions:
+        base.write("records/conflicts/2026-09.jsonl", second)
+    before = {name: base.read(name) for name in records.partitions(base)}
+    with pytest.raises(Error, match=r"duplicate.*fkf validate"):
+        records.upsert(base, "conflicts", [Record(id="new", title="New evidence")], snapshot=snapshot)
+    assert {name: base.read(name) for name in records.partitions(base)} == before
+    assert not (base.root / "records/.pending").exists()

@@ -1,7 +1,7 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "fkf"
-version = "8.2.1"
+version = "8.2.2"
 description = "Owned knowledge for people and their agents: Markdown notes, collected records, offline search"
 readme = "README.md"
 requires-python = ">=3.14"

@@ -7,7 +7,7 @@ import stat
 
 from fkf import records
 from fkf.config import load
-from fkf.markdown import Note, authored, broken, note, scheme, validate_wiki
+from fkf.markdown import Note, authored, broken, note, scheme, split_ref, validate_wiki
 from fkf.models import AUTHORED, Error
 from fkf.storage import Store, relative
 
@@ -66,7 +66,7 @@ def _validate(store: Store) -> dict[str, object]:
     for item in notes:
         for alias in item.knowledge.aliases:
             aliases.setdefault(alias, set()).add(item.path)
-        problems.extend(broken(item, {t.partition("#")[0] for t in item.links if exists(t.partition("#")[0])}, slugs))
+        problems.extend(broken(item, {split_ref(t)[0] for t in item.links if exists(split_ref(t)[0])}, slugs))
         for target in item.targets:
             source = scheme(item.path, target)
             if (source in ids or source in config.sources) and target.partition(":")[2] not in ids.get(source, set()):

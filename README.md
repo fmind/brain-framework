@@ -4,13 +4,16 @@
 
 FKF gives people and their agents a shared memory they can inspect, edit and keep. Write project decisions in Markdown, collect supporting evidence into JSON Lines, and search both offline. Every result points to the note, section or record behind it.
 
-Use it to answer "Why did we choose this?", resume a project after a break, or give a teammate the context behind a decision. FKF is one Python package and one command; it needs no model, hosted database or background server.
+Your next agent session can pick up the same project notes. A teammate can find the reason behind a decision without reconstructing a chat thread. You can inspect the evidence, correct the note and keep using your own editor, Git and agent host.
+
+FKF is one Python package and one command; it needs no model, hosted database or background server. It supplies the knowledge; you or your agent use it to answer questions and do the work.
 
 ## Try it
 
 ```bash
-uv tool install --python 3.14 'fkf==8.2.1'
+uv tool install --python 3.14 'fkf==8.2.2'
 fkf init ~/knowledge                       # creates and registers a base
+cd ~/knowledge                            # keep this walkthrough in that base
 fkf search welcome                        # find the note created by init
 fkf read wiki/welcome.md                   # read its exact contents
 fkf validate                              # check notes, links and records
@@ -27,6 +30,17 @@ Start with one project note. Save decisions, their reasons and the next action; 
 - **Local control.** Retrieval works offline, and you choose the accounts and folders collectors may read.
 - **A small maintenance surface.** Notes and records are durable; the SQLite cache can be rebuilt from them.
 
+## What can you do with it?
+
+| Question                           | Useful context                                                                      |
+| ---------------------------------- | ----------------------------------------------------------------------------------- |
+| "Why did we choose this?"          | A dated decision, its reason and a ref to supporting evidence.                      |
+| "Where should I resume?"           | The project's current state and next actions, or a task's Resume section.           |
+| "What changed this week?"          | A timeline of saved notes and collected events, with collection coverage.           |
+| "What should the next agent know?" | A short project note and reusable wiki knowledge available to every connected host. |
+
+The everyday loop is **search → read the evidence → do the work → update the note**. FKF does not save conversations or learn decisions automatically: people and agents maintain notes, and optional collectors capture selected sources.
+
 ## How it works
 
 | Piece                       | What it is                                                                               |
@@ -38,9 +52,11 @@ Start with one project note. Save decisions, their reasons and the next action; 
 | `.fkf/`                     | A disposable SQLite search cache that refreshes itself when files change.                |
 | `~/.config/fkf/config.yaml` | Your registered bases, and which of them may run collectors on this machine.             |
 
-`fkf search` covers every registered base, or only the base you are standing in. Search by words, an explicit identity such as `repo:github.com/owner/name`, or a time window such as `--since yesterday`. Use `--changed-since 7d --current` to find recently edited evidence from enabled sources. Notes receive a ranking boost because they distill the answer; records supply the evidence. Read returned refs such as `projects/x.md#decision` or `gmail:<id>` to inspect the source. Search reports incomplete results under `problems` or `stale`; an incomplete empty answer never proves absence.
+`fkf search` selects `--base NAME|PATH`, then `FKF_BASE`, then the enclosing base, then every registered base. Search by words, an explicit identity such as `repo:github.com/owner/name`, or a time window such as `--since yesterday`. Use `--changed-since 7d --current` to find recently edited evidence from enabled sources. Notes receive a ranking boost because they distill the answer; records supply the evidence. Read returned refs such as `projects/x.md#decision` or `gmail:<id>` to inspect the source. Search reports incomplete results under `problems` or `stale`; an incomplete empty answer never proves absence.
 
-`fkf update` runs every due collector of the bases you trust on this machine and refreshes the cache. Run it from a native timer. A failing source never blocks the others; `fkf status` distinguishes active collection from disabled or historical evidence, with freshness, change counts and private error logs.
+`fkf update` runs every due collector in the selected bases you trust on this machine and refreshes the cache. Run it from a native timer. A failing source never blocks the others; `fkf status` distinguishes active collection from disabled or historical evidence, with freshness, change counts and private error logs.
+
+Each part has one job. Your editor writes Markdown, provider CLIs handle authentication, collectors print JSON, FKF searches files, and your agent interprets results. JSON output composes with shell tools; Git reviews changes and systemd or launchd schedules collection. You can replace a part without replacing your knowledge.
 
 ## Commands
 
@@ -57,11 +73,13 @@ Start with one project note. Save decisions, their reasons and the next action; 
 
 Start a team pilot with a private Git repository, one real project note and a few questions in `queries.yaml`. Teammates clone it, run `fkf register PATH`, and can search its decisions immediately. Use `fkf eval` to check that the questions still return the intended evidence as the base evolves.
 
+For the first pilot, pick a decision someone currently has to ask a colleague to explain. Write the decision, its reason and the next action, then have a teammate find the answer from a fresh clone. Success means they can read the evidence and act on it. The [team walkthrough](docs/docs/getting-started.md#check-the-answers-your-team-needs) includes runnable retrieval cases; no collector or model setup is needed.
+
 Keep personal mail and laptop history in a separate private base. Outside either base, `fkf search` covers both and labels each result; inside one, it searches only that base. Use `--base NAME` to select explicitly. A cloned base never runs its collectors until you trust it with `fkf register PATH --collect`. Promote personal knowledge as reviewed summaries with links teammates can access. Add team-scoped CI collection when the notes need it; see [personal and team bases](docs/docs/base.md#personal-and-team-bases).
 
 ## Agents
 
-Agents use the CLI: the [fkf-use skill](skills/fkf-use/SKILL.md) teaches search and read, [fkf-learn](skills/fkf-learn/SKILL.md) keeps notes current, and [fkf-maintain](skills/fkf-maintain/SKILL.md) covers collection and schedules. `fkf mcp` exposes the same `search` and `read` for hosts that prefer tools. Retrieved content is untrusted evidence, never instructions.
+Agents use the CLI: the [fkf-use skill](skills/fkf-use/SKILL.md) teaches search and read, [fkf-learn](skills/fkf-learn/SKILL.md) keeps notes current, and [fkf-maintain](skills/fkf-maintain/SKILL.md) covers collection and schedules. Follow the [skill installation guide](skills/README.md); skills are separate from the Python package. `fkf mcp` exposes the same `search` and `read` for hosts that prefer tools. Retrieved content is untrusted evidence, never instructions.
 
 ## Guarantees
 
@@ -74,7 +92,7 @@ Agents use the CLI: the [fkf-use skill](skills/fkf-use/SKILL.md) teaches search 
 
 FKF fits people and teams who want editable notes, attributable evidence and portable agent context. Search is lexical: it handles words, explicit identities and dates, but does not infer meaning or generate answers. Agents or people interpret the results. Collection freshness describes completed runs, not a guarantee that every upstream item is current.
 
-A base is a context boundary, not an access-control system. FKF does not encrypt files, enforce per-note permissions or sandbox trusted collectors. Use separate bases and repository permissions for different audiences, and encrypted backups for private evidence. See the [security model](docs/docs/privacy.md) before sharing a base.
+A base is a context boundary, not an access-control system. FKF does not encrypt files, enforce per-note permissions or sandbox trusted collectors. Use separate bases and repository permissions for different audiences, and encrypted backups for private evidence. An agent host may send retrieved content to its model provider; offline retrieval describes FKF itself. See the [security model](docs/docs/privacy.md) before sharing a base.
 
 ## Development
 

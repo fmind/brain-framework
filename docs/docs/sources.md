@@ -51,7 +51,7 @@ fkf update --dry-run                            # which sources are due, and the
 fkf update                                      # run them all, then refresh search
 ```
 
-`update` runs every enabled source whose `refresh` elapsed since its last success, in every base trusted on this machine. A window source resumes from its last collected window minus `overlap`, catching up at most 30 days after a long pause; upserts make repeated items harmless. A failed source stays due and never blocks the others; the command exits 1 when any failed. Run state lives in `~/.local/state/fkf/`, so losing it only means the next run uses `lookback`.
+`update` follows the [base selection rules](commands.md): it runs due sources in the selected bases that are trusted on this machine. A source is due when it is enabled, its `refresh` is nonzero, and that interval has elapsed since its last success. A window source resumes from its last collected window minus `overlap`, catching up at most 30 days after a long pause; upserts make repeated items harmless. A failed source stays due and never blocks the others; the command exits 1 when any failed. Run state lives in `~/.local/state/fkf/`, so losing it means the next run uses `lookback` and previously recorded coverage is no longer available.
 
 Runs of the same source are serialized. Other sources can collect concurrently; record commits and run-state updates serialize briefly. `status` separates indexed totals from `last_run` counts (added, updated, unchanged and removed), and reports disabled and historical evidence separately from enabled sources. A manual backfill does not claim coverage across an uncollected gap.
 
@@ -65,20 +65,22 @@ Start with records that answer recurring questions. Add richer mail bodies, comm
 
 ## Schedule it
 
-Run `fkf update` from a native timer. On Linux, a systemd user timer:
+Run `fkf update` from a native timer. On Linux, create these two files; this example explicitly targets a registered base named `brain`. Replace that name and the executable path if needed (`command -v fkf` shows your installation):
 
 ```ini
+# https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html
 # ~/.config/systemd/user/fkf-update.service
 [Unit]
 Description=Collect due FKF sources
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/fkf update
+ExecStart=%h/.local/bin/fkf update --base brain
 TimeoutStartSec=45min
 ```
 
 ```ini
+# https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
 # ~/.config/systemd/user/fkf-update.timer
 [Unit]
 Description=Check for due FKF sources every 15 minutes
@@ -93,6 +95,8 @@ WantedBy=timers.target
 ```
 
 Run `systemctl --user daemon-reload`, enable it with `systemctl --user enable --now fkf-update.timer`, and read runs with `journalctl --user -u fkf-update`. On macOS, a launchd agent with `StartInterval` 900 checks for due sources every 15 minutes. Give the job the PATH its collectors need (`gh`, `gws`, `git`). `fkf status --check` exits 1 when a scheduled source has not succeeded within twice its `refresh`, which suits a monitoring check.
+
+Check `systemctl --user list-timers fkf-update.timer` for the next trigger and `systemctl --user show fkf-update.service -p Result -p ExecMainStatus` after a run, then `fkf status --check --base brain` for source health. Enabling a timer alone does not prove collection succeeded. Disable future runs with `systemctl --user disable --now fkf-update.timer`; stop an active collection separately with `systemctl --user stop fkf-update.service`.
 
 Choose a timer interval comfortably shorter than the smallest nonzero `refresh`. An hourly timer with random delay can run just before an hourly source is due and skip it until the following hour. A 15-minute check avoids that extra hour of delay; it still collects only due sources. `Persistent=true` coalesces missed calendar triggers when the user manager returns; it does not keep a sleeping laptop running. Cache and provider failures make `update` exit 1.
 

@@ -614,3 +614,25 @@ def test_evaluation_rejects_incomplete_empty_answers(base: Store) -> None:
     assert not reply["passed"]
     assert isinstance(reply["cases"], list)
     assert reply["cases"][0]["problems"]
+
+
+def test_search_refs_keep_hash_characters_in_note_filenames(base: Store) -> None:
+    path = "projects/C# guide.md"
+    base.write(path, b"# Sharpneedle\n\n## Decision\n\nUniquesection keeps the full path.\n")
+    whole = refs(base, "sharpneedle")[0]
+    assert whole == path
+    assert str(read([base], whole)["text"]).startswith("# Sharpneedle")
+    part = refs(base, "uniquesection")[0]
+    assert part == path + "#decision"
+    assert str(read([base], part)["text"]).startswith("## Decision")
+
+
+def test_retrieval_cases_distinguish_record_ids_from_note_sections(base: Store) -> None:
+    from fkf.evaluate import evaluate
+
+    records_file(base, "issues", "undated", [Record(id="item#comment", title="Hashneedle")])
+    base.write(
+        "queries.yaml",
+        b"version: 2\ncases:\n  - name: exact-record\n    query: hashneedle\n    expect: [issues:item]\n",
+    )
+    assert not evaluate(base)["passed"]

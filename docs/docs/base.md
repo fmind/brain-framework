@@ -15,7 +15,7 @@ skills/                          # workflow packages for agents
 .fkf/                            # disposable search cache
 ```
 
-Only Markdown under `projects/`, `wiki/` and `tasks/` and JSON Lines under `records/` are searchable. Everything else is ordinary, versioned base code and configuration. `.fkf/` is safe to delete.
+Only Markdown under `projects/`, `wiki/` and `tasks/` and JSON Lines under `records/` are searchable. This includes Markdown in task inputs and outputs: keep them within the base's intended audience. Everything else is ordinary base code and configuration. `.fkf/` is safe to delete while FKF is idle.
 
 ## Notes
 
@@ -78,6 +78,8 @@ A record is one source item. Collectors print them; FKF stores one JSON object p
 
 Collecting the same id again replaces its line, moving it if its month changed; each id appears once per source. If both revisions declare `attributes.updated`, an older revision cannot overwrite a newer one. History lives in Git or in your backups, not in duplicate records.
 
+If files already contain duplicate IDs, collection stops before changing that source. Run `fkf validate`, preserve the conflicting revisions and reconcile them deliberately; collection never chooses which conflicting evidence to discard.
+
 Three reserved attributes describe evidence quality: `updated` is the upstream modification timestamp, `observed` is when FKF first collected this revision, and `partial: true` marks intentionally incomplete content. Timestamps require a timezone. `time` keeps its event meaning; `--changed-since` uses `updated`, falling back to event time when unavailable. Collection preserves `observed` when content has not changed. Other attributes remain provider-specific.
 
 Record writes use a recoverable transaction under `records/.pending/`. It holds originals only while a write is incomplete; explicit `fkf build`, collection or backup recovers it after an interruption; ordinary reads report the pending transaction without changing evidence. Keep this directory with the records when backing up a stopped base, and never delete it as cache. A live backup must hold the same base writer lock while copying files.
@@ -103,6 +105,10 @@ bases:
 ```
 
 Commands select `--base NAME|PATH`, then `FKF_BASE`, then the base containing the working directory, then every registered base. Within a base, agents therefore stay in that base; elsewhere they search everything you registered. Promote personal knowledge to the team by writing a summary in the team base and linking to what others can read.
+
+`XDG_CONFIG_HOME` overrides `~/.config` for the registry; `XDG_STATE_HOME` overrides `~/.local/state` for private run history, locks and usage. Registration serializes updates and writes the registry atomically with owner-only file permissions. Keep names unique. Automatic selection skips registered directories absent from this machine; selecting an absent base explicitly fails. Use `--base NAME` when a particular base must be present for your answer.
+
+Running `fkf register PATH` again without `--collect` revokes collection trust while keeping the base searchable. To stop selecting it automatically, remove its entry from the registry; the files remain in place. Set `enabled: false` to stop a single source while keeping its existing records searchable.
 
 ## Tasks
 

@@ -8,7 +8,7 @@ from contextlib import suppress
 from fkf import index, records, usage
 from fkf.config import load
 from fkf.health import source_health
-from fkf.markdown import authored, section
+from fkf.markdown import authored, section, split_ref
 from fkf.models import MAX_REPLY, NOTICE, Error, Query, encode
 from fkf.storage import Store, relative
 
@@ -122,7 +122,7 @@ def read(stores: list[Store], ref: str, base: str = "") -> dict[str, object]:
 
 def _read(store: Store, ref: str) -> dict[str, object] | None:
     name = load(store).name
-    path, _, fragment = ref.partition("#")
+    path, fragment = split_ref(ref)
     if authored(path):
         relative(path)
         try:

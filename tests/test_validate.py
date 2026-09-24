@@ -102,3 +102,16 @@ def test_okf_sources_are_checked_explicit_relations(base: Store) -> None:
 def test_duplicate_aliases_are_reported(base: Store) -> None:
     base.write("projects/duplicate.md", b'---\naliases: ["repo:example/project"]\n---\n# Duplicate owner\n')
     assert "ambiguous identity repo:example/project" in str(validate(base)["problems"])
+
+
+def test_local_links_decode_filename_escapes_once_after_splitting_fragments(base: Store) -> None:
+    base.write("projects/C# guide.md", b"# Guide\n\n## Decision\n\nKeep the reference readable.\n")
+    base.write("projects/literal%20name.md", b"# Literal percent\n")
+    data = b"# Links\n\n[guide](C%23%20guide.md#decision) [whole](C%23%20guide.md) [literal](literal%2520name.md)\n"
+    base.write("projects/links.md", data)
+    assert note("projects/links.md", data).links == [
+        "projects/C# guide.md",
+        "projects/C# guide.md#decision",
+        "projects/literal%20name.md",
+    ]
+    assert validate(base)["valid"]

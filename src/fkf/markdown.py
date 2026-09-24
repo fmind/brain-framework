@@ -105,8 +105,11 @@ def parse(path: str, data: bytes) -> Markdown:
                 slug = f"{stem}-{suffix}"
             used.add(slug)
             headings.append(Heading(slug, title, int(token.tag[1:]), token.map[0] + offset))
-        # markdown-it percent-encodes hrefs; keep the literal target so identities match exactly.
-        links.extend(unquote(str(child.attrGet("href"))) for child in token.children or [] if child.type == "link_open")
+        for child in token.children or []:
+            if child.type == "link_open":
+                target = str(child.attrGet("href"))
+                # Split local URL fragments before decoding: %23 is part of a filename.
+                links.append(unquote(target) if scheme(path, target) else target)
     return Markdown(text, body, attributes, headings, links)
 
 
@@ -122,11 +125,20 @@ def section(path: str, data: bytes, fragment: str) -> str:
     return "".join(source_lines[heading.line : end])
 
 
+def split_ref(ref: str) -> tuple[str, str]:
+    """Split a readable ref, preserving hashes in Markdown filenames and directory names."""
+    if authored(ref) or "#" not in ref:
+        return ref, ""
+    path, _, fragment = ref.rpartition("#")
+    return path, fragment
+
+
 def reference(path: str, target: str) -> str:
     """Resolve a relative note link to a base-relative path; identities and URLs stay unchanged."""
     if scheme(path, target):
         return target
-    name, _, fragment = unquote(target).partition("#")
+    name, _, fragment = target.partition("#")
+    name, fragment = unquote(name), unquote(fragment)
     if name.startswith("/") and path.startswith("wiki/"):
         joined = posixpath.normpath("wiki/" + name.lstrip("/"))
     else:
@@ -218,7 +230,7 @@ def broken(note: Note, exists: set[str], slugs: dict[str, set[str]]) -> list[str
     for target in note.targets:
         if scheme(note.path, target) or target == "#":
             continue
-        name, _, fragment = reference(note.path, target).partition("#")
+        name, fragment = split_ref(reference(note.path, target))
         if name == ".." or name.startswith("../"):
             problems.append(f"{note.path}: link leaves the base: {target}")
         elif name not in exists:

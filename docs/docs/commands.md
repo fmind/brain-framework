@@ -1,6 +1,6 @@
 # Command reference
 
-Data goes to stdout as compact JSON; diagnostics go to stderr. Exit 0 means success, 1 a failure or failed check, 2 invalid input and 130 cancellation. `fkf COMMAND --help` lists every option.
+Command results go to stdout as compact JSON; help and version output are plain text. Diagnostics go to stderr. Exit 0 means success, 1 a failure or failed check, 2 invalid command-line input and 130 cancellation. `fkf COMMAND --help` lists every option.
 
 | Command                                                                                                                | Contract                                                                                                                                                                                                                                   |
 | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -20,3 +20,14 @@ Data goes to stdout as compact JSON; diagnostics go to stderr. Exit 0 means succ
 Existing-base commands accept `--base NAME|PATH`; `init` and `register` take a path argument instead. Without `--base`, commands use `FKF_BASE`, then the base containing the working directory, then every registered base. Commands that act on a single base (`collect`, `validate`, `eval`, `build`) ask for `--base` when several are registered.
 
 `status --check` also fails when the cache is stale because another writer is active. `update` exits 1 when collection or cache refresh fails, including skipped evidence files. Inspect the JSON diagnostics before treating an empty result as proof that nothing happened. `collect --dry-run` runs the provider and updates its private stderr log; it does not write records or success history. `update --dry-run` runs no providers.
+
+Use `--base NAME` for scripts and scheduled jobs that must target one base. `update` follows the same selection rules as search: inside a base it updates that base; outside, it considers all registered bases. It skips those without collection trust.
+
+With [jq](https://jqlang.org/) installed, JSON results can feed an ordinary shell pipeline:
+
+```bash
+fkf search --type project --status active --base brain |
+  jq -r '.items[] | [.ref, .title] | @tsv'
+```
+
+Inspect `problems` and `stale` before using a filtered report as a complete inventory. In shell automation, use `set -o pipefail` so a failed FKF command is not hidden by a successful output formatter.
