@@ -79,7 +79,7 @@ from pathlib import Path
 
 site = Path("site")
 expected_pages = {
-    "docs/base/index.html",
+    "docs/brain/index.html",
     "docs/commands/index.html",
     "docs/getting-started/index.html",
     "docs/index.html",
@@ -87,12 +87,12 @@ expected_pages = {
     "docs/privacy/index.html",
     "docs/schema/index.html",
     "docs/search/index.html",
-    "docs/sources/index.html",
+    "docs/sensors/index.html",
     "index.html",
     "third-party-notices/index.html",
 }
 required_assets = {
-    "fkf.schema.json",
+    "bf.schema.json",
     "fmind-logo.webp",
     "third-party/lucide-LICENSE.txt",
     "third-party/zensical-0.0.59-LICENSE.txt",
@@ -112,10 +112,10 @@ PY
 ''',
   '''
 set -euo pipefail
-fkf_site_root=$(mktemp -d)
-trap 'rm -rf "$fkf_site_root"' EXIT
-ln -s "$PWD/site" "$fkf_site_root/fkf"
-lychee --offline --root-dir "$fkf_site_root" --no-progress 'site/**/*.html'
+bf_site_root=$(mktemp -d)
+trap 'rm -rf "$bf_site_root"' EXIT
+ln -s "$PWD/site" "$bf_site_root/brain-framework"
+lychee --offline --root-dir "$bf_site_root" --no-progress 'site/**/*.html'
 ''',
 ]
 
@@ -188,8 +188,8 @@ run = '''
 set -euo pipefail
 schema=$(mktemp)
 trap 'rm -f "$schema"' EXIT
-uv run fkf schema | jq -S . > "$schema"
-jq -S . docs/fkf.schema.json | diff -u - "$schema"
+uv run bf schema | jq -S . > "$schema"
+jq -S . docs/bf.schema.json | diff -u - "$schema"
 '''
 
 [tasks."check:shell"]
@@ -252,11 +252,11 @@ description = "Rewrite the JSON Schema from the Python configuration loader atom
 shell = "bash -c"
 run = '''
 set -euo pipefail
-schema=$(mktemp docs/fkf.schema.json.XXXXXX)
+schema=$(mktemp docs/bf.schema.json.XXXXXX)
 trap 'rm -f "$schema"' EXIT
-uv run fkf schema > "$schema"
-mv "$schema" docs/fkf.schema.json
-dprint fmt docs/fkf.schema.json
+uv run bf schema > "$schema"
+mv "$schema" docs/bf.schema.json
+dprint fmt docs/bf.schema.json
 '''
 
 [tasks.install]
@@ -274,13 +274,13 @@ description = "Run the hermetic test suite with branch coverage"
 shell = "bash -c"
 run = '''
 set -euo pipefail
-fkf_test_home=$(mktemp -d)
-fkf_test_home=$(cd "$fkf_test_home" && pwd -P)
-trap 'rm -rf "$fkf_test_home"' EXIT
+bf_test_home=$(mktemp -d)
+bf_test_home=$(cd "$bf_test_home" && pwd -P)
+trap 'rm -rf "$bf_test_home"' EXIT
 # Set TZ before Python starts: some macOS builds do not expose time.tzset().
-env -u FKF_BASE TZ=UTC HOME="$fkf_test_home" XDG_STATE_HOME="$fkf_test_home/state" XDG_CONFIG_HOME="$fkf_test_home/config" \
-  uv run pytest --basetemp="$fkf_test_home/pytest" \
-    --cov=fkf --cov-branch --cov-report=term-missing --cov-fail-under=85
+env -u BF_BRAIN TZ=UTC HOME="$bf_test_home" XDG_STATE_HOME="$bf_test_home/state" XDG_CONFIG_HOME="$bf_test_home/config" \
+  uv run pytest --basetemp="$bf_test_home/pytest" \
+    --cov=bf --cov-branch --cov-report=term-missing --cov-fail-under=85
 '''
 
 [tasks."test:package"]
@@ -288,15 +288,15 @@ description = "Install and invoke the wheel and source distribution outside the 
 shell = "bash -c"
 run = '''
 set -euo pipefail
-wheel_count=$(find dist -maxdepth 1 -type f -name 'fkf-*.whl' | wc -l)
-sdist_count=$(find dist -maxdepth 1 -type f -name 'fkf-*.tar.gz' | wc -l)
+wheel_count=$(find dist -maxdepth 1 -type f -name 'brain_framework-*.whl' | wc -l)
+sdist_count=$(find dist -maxdepth 1 -type f -name 'brain_framework-*.tar.gz' | wc -l)
 [ "$wheel_count" -eq 1 ] && [ "$sdist_count" -eq 1 ] || {
-  echo "expected exactly one fkf wheel and one source distribution" >&2
+  echo "expected exactly one brain-framework wheel and one source distribution" >&2
   exit 1
 }
 project_root=$PWD
-wheel="$project_root/$(find dist -maxdepth 1 -type f -name 'fkf-*.whl')"
-sdist="$project_root/$(find dist -maxdepth 1 -type f -name 'fkf-*.tar.gz')"
+wheel="$project_root/$(find dist -maxdepth 1 -type f -name 'brain_framework-*.whl')"
+sdist="$project_root/$(find dist -maxdepth 1 -type f -name 'brain_framework-*.tar.gz')"
 tmp=$(mktemp -d)
 # macOS /var and user-supplied TMPDIR may be symlinks; private state needs the physical path.
 tmp=$(cd "$tmp" && pwd -P)
@@ -310,25 +310,45 @@ for distribution in wheel sdist; do
 done
 cd "$tmp"
 uv pip install --offline --no-deps --link-mode copy --python "$tmp/wheel-venv/bin/python" "$wheel"
-"$tmp/wheel-venv/bin/fkf" --version
+"$tmp/wheel-venv/bin/bf" --version
 uv pip check --python "$tmp/wheel-venv/bin/python"
 uv pip install --offline --no-deps --link-mode copy --python "$tmp/sdist-venv/bin/python" "$sdist"
-"$tmp/sdist-venv/bin/fkf" --version
+"$tmp/sdist-venv/bin/bf" --version
 uv pip check --python "$tmp/sdist-venv/bin/python"
-# Exercise the installed CLI and derived reads in both artifacts, with no user base or state.
+# Exercise the installed CLI and derived reads in both artifacts, with no user brain or state.
 for distribution in wheel sdist; do
-  fkf_package_home="$tmp/$distribution-home"
-  mkdir "$fkf_package_home"
+  "$tmp/$distribution-venv/bin/python" - <<'PYTHON'
+from importlib.metadata import distribution
+from pathlib import Path
+import bf
+
+installed = distribution("brain-framework")
+assert installed.metadata["Name"] == "brain-framework"
+assert installed.version == bf.__version__
+assert [(entry.name, entry.value) for entry in installed.entry_points] == [("bf", "bf:main")]
+assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
+PYTHON
+  bf_package_home="$tmp/$distribution-home"
+  mkdir "$bf_package_home"
   (
-    unset FKF_BASE
-    export HOME="$fkf_package_home" XDG_STATE_HOME="$fkf_package_home/state"
-    fkf_package_bin="$tmp/$distribution-venv/bin/fkf"
-    export XDG_CONFIG_HOME="$fkf_package_home/config"
-    "$fkf_package_bin" init "$tmp/$distribution-base"
-    "$fkf_package_bin" validate --base "$tmp/$distribution-base"
-    "$fkf_package_bin" search welcome
-    "$fkf_package_bin" read wiki/welcome.md
-    "$fkf_package_bin" status --check
+    unset BF_BRAIN
+    export HOME="$bf_package_home" XDG_STATE_HOME="$bf_package_home/state"
+    bf_package_bin="$tmp/$distribution-venv/bin/bf"
+    export XDG_CONFIG_HOME="$bf_package_home/config"
+    "$bf_package_bin" init "$tmp/$distribution-brain"
+    "$bf_package_bin" validate --brain "$tmp/$distribution-brain"
+    "$bf_package_bin" search welcome
+    "$bf_package_bin" read concepts/welcome.md
+    "$bf_package_bin" status --check
+    cat > "$tmp/$distribution-brain/queries.yaml" <<'YAML'
+version: 3
+cases:
+  - name: installed-welcome
+    query: welcome
+    expect: [concepts/welcome.md]
+YAML
+    "$bf_package_bin" eval
+
   )
 done
 '''
@@ -344,5 +364,5 @@ description = "Upgrade dependencies to latest compatible versions"
 run = "uv sync --upgrade"
 
 [tasks.watch]
-description = "Run the FKF CLI from the working tree"
-run = "uv run fkf"
+description = "Run the Brain Framework CLI from the working tree"
+run = "uv run bf"

@@ -11,11 +11,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from fkf import records
-from fkf.index import refresh
-from fkf.models import Query, Record
-from fkf.retrieve import read, search
-from fkf.storage import Store, writer
+from bf import records
+from bf.index import refresh
+from bf.models import Query, Record
+from bf.retrieve import read, search
+from bf.storage import Store, writer
 
 
 def main() -> None:
@@ -34,10 +34,10 @@ def main() -> None:
         parser.error("limits: records 1-100000, body-chars 64-4096, notes 0-1000, repeats 1-20")
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        (root / "base").mkdir()
+        (root / "brain").mkdir()
         os.environ["XDG_STATE_HOME"] = str(root / "state")
-        store = Store(root / "base")
-        store.write("fkf.yaml", b"version: 2\nname: benchmark\n")
+        store = Store(root / "brain")
+        store.write("bf.yaml", b"version: 3\nname: benchmark\n")
         background = ("Routine project background. " * args.body_chars)[: args.body_chars]
         items = [
             Record(
@@ -51,7 +51,7 @@ def main() -> None:
         ]
         records.upsert(store, "benchmark", items, snapshot=False)
         for n in range(args.notes):
-            store.write(f"wiki/{n}.md", f"# Project {n}\n\n{background}\n\nKeep durable evidence.\n".encode())
+            store.write(f"concepts/{n}.md", f"# Project {n}\n\n{background}\n\nKeep durable evidence.\n".encode())
         measurements = {}
         revision = 0
 
@@ -79,7 +79,7 @@ def main() -> None:
             (
                 "note_edit",
                 lambda: (
-                    store.write("wiki/0.md", b"# Edited\n\nZirconium note.\n"),
+                    store.write("concepts/0.md", b"# Edited\n\nZirconium note.\n"),
                     search([store], Query(text="edited")),
                 ),
             ),

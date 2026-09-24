@@ -1,6 +1,21 @@
 # Changelog
 
-All notable changes to `fkf` are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
+All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
+
+## [v9.0.0](https://github.com/fmind/brain-framework/releases/tag/v9.0.0) - 2026-09-24
+
+### Breaking changes
+
+- Rename FKF to Brain Framework: install `brain-framework`, import `bf`, and run `bf`. The repository and documentation move to `fmind/brain-framework`.
+- Use format 3 with `bf.yaml`, `sensors:`, `{{brain}}`, `--brain`, `BF_BRAIN`, and a `brains:` registry under `~/.config/bf/`. Private runtime state lives under `~/.local/state/bf/`.
+- Organize authored knowledge in `projects/`, `concepts/`, and `actions/` with `ACTION.md`; collected records in `memories/`; collection code in `sensors/`; maintenance in `routines/` and `settings/`; disposable search in `.bf/`.
+- Rename workflows to `bf-use`, `bf-learn`, `bf-maintain`, and `bf-contribute`. CLI and MCP results identify their brain; collection reports identify sensors while record provenance retains `source:id` and OKF `sources`.
+- Keep one current format without legacy aliases. Preserve original evidence and per-machine collection trust during any one-time transition, and rebuild caches from the migrated files.
+
+### Preserved
+
+- Offline search and exact reads, two read-only MCP tools, plain-file evidence, bounded trusted collection, atomic recovery and external scheduling.
+- Stable record IDs, provider provenance, explicit concept types, and searchable Markdown in action inputs and outputs.
 
 ## [v8.2.2](https://github.com/fmind/fkf/releases/tag/v8.2.2) - 2026-09-24
 

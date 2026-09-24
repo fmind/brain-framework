@@ -9,5 +9,5 @@
 ## Test plan
 
 - [ ] `mise run all` is green
-- [ ] No real base, workspace data, or personal identifier appears in the diff
+- [ ] No real brain, workspace data, or personal identifier appears in the diff
 - [ ] Any break to a flag, configuration key, stored format, reference format, or MCP tool name is stated above — there is no compatibility layer

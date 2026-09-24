@@ -1,13 +1,13 @@
 ---
 title: Third-party notices
-description: Licenses for the third-party code distributed by the fkf documentation site.
+description: Licenses for the third-party code distributed by the bf documentation site.
 hide:
   - toc
 ---
 
 # Third-party notices
 
-The documentation site distributes these pinned third-party artifacts. Python distributions include a separate checked-in [`THIRD_PARTY_NOTICES.md`](https://github.com/fmind/fkf/blob/main/THIRD_PARTY_NOTICES.md) covering FKF's runtime dependency closure.
+The documentation site distributes these pinned third-party artifacts. Python distributions include a separate checked-in [`THIRD_PARTY_NOTICES.md`](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md) covering Brain Framework's runtime dependency closure.
 
 | Component               | Version | Distributed use                           | License                                                           |
 | ----------------------- | ------- | ----------------------------------------- | ----------------------------------------------------------------- |

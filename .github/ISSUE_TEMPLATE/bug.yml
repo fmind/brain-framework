@@ -1,19 +1,19 @@
 # https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-issue-forms
 name: Bug report
-description: Report a reproducible problem without sharing anything a base collected.
+description: Report a reproducible problem without sharing anything a brain collected.
 title: "bug: "
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        A base holds real activity. Review and redact every line before pasting: no credentials, personal data, customer names, record content, private repository names, or home paths. `fkf status` does not print whole records or command stdout, but diagnostics can include source names, paths, record identifiers, and timestamps.
+        A brain holds real activity. Review and redact every line before pasting: no credentials, personal data, customer names, record content, private repository names, or home paths. `bf status` does not print whole records or command stdout, but diagnostics can include source names, paths, record identifiers, and timestamps.
   - type: input
     id: command
     attributes:
       label: Command
       description: The command that misbehaved.
-      placeholder: fkf search "retention decision" --base example
+      placeholder: bf search "retention decision" --brain example
     validations:
       required: true
   - type: textarea
@@ -28,20 +28,20 @@ body:
     attributes:
       label: Reproduction
       description: >-
-        The smallest safe sequence using a synthetic base. For collection failures, include the redacted source configuration and error. `fkf collect --dry-run` executes the collector and prints record samples; never paste private samples or logs.
+        The smallest safe sequence using a synthetic brain. For collection failures, include the redacted source configuration and error. `bf collect --dry-run` executes the collector and prints record samples; never paste private samples or logs.
     validations:
       required: true
   - type: textarea
     id: status
     attributes:
       label: Status output
-      description: Redacted output of `fkf status`.
+      description: Redacted output of `bf status`.
       render: text
   - type: input
     id: version
     attributes:
-      label: fkf version
-      placeholder: fkf --version
+      label: bf version
+      placeholder: bf --version
     validations:
       required: true
   - type: dropdown

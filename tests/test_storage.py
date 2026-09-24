@@ -12,14 +12,14 @@ from threading import Barrier
 import pytest
 from pydantic import ValidationError
 
-from fkf import config
-from fkf.config import load, may_collect, one, register, select, user_config, user_path, yaml_object
-from fkf.models import Config, Error, Knowledge, Query, Record, Source, UserConfig, decode, moment, timestamp
-from fkf.storage import BusyError, Store, collecting, reader, relative, state_store, writer
+from bf import config
+from bf.config import load, may_collect, one, register, select, user_config, user_path, yaml_object
+from bf.models import Config, Error, Knowledge, Query, Record, Sensor, UserConfig, decode, moment, timestamp
+from bf.storage import BusyError, Store, collecting, reader, relative, state_store, writer
 
 
 def test_path_grammar() -> None:
-    assert relative("wiki/a.md") == ("wiki", "a.md")
+    assert relative("concepts/a.md") == ("concepts", "a.md")
     for bad in ["/etc/passwd", "../x", "a//b", "a/./b", "a\\b", "a\x00b", ""]:
         with pytest.raises(Error):
             relative(bad)
@@ -30,35 +30,35 @@ def test_no_follow_reads_writes_and_traversal(tmp_path: Path) -> None:
     root.mkdir()
     store = Store(root)
     (tmp_path / "outside").write_text("secret")
-    (root / "wiki").mkdir()
-    (root / "wiki/link.md").symlink_to(tmp_path / "outside")
+    (root / "concepts").mkdir()
+    (root / "concepts/link.md").symlink_to(tmp_path / "outside")
     with pytest.raises(OSError, match="symbolic links"):
-        store.read("wiki/link.md")
+        store.read("concepts/link.md")
     with pytest.raises(Error, match="symlinks"):
-        store.files("wiki")
-    (root / "wiki/link.md").unlink()
+        store.files("concepts")
+    (root / "concepts/link.md").unlink()
     (root / "linked").symlink_to(tmp_path)
     with pytest.raises(OSError, match=r"Not a directory|symbolic links"):
         store.write("linked/escape.md", b"x")
     assert not (tmp_path / "escape.md").exists()
-    store.write("wiki/a.md", b"one")
-    store.write("wiki/a.md", b"two")
-    assert store.read("wiki/a.md") == b"two"
+    store.write("concepts/a.md", b"one")
+    store.write("concepts/a.md", b"two")
+    assert store.read("concepts/a.md") == b"two"
     with pytest.raises(Error, match="exceeds"):
-        store.read("wiki/a.md", 2)
-    (root / "wiki/dir.md").mkdir()
+        store.read("concepts/a.md", 2)
+    (root / "concepts/dir.md").mkdir()
     with pytest.raises(Error, match="non-regular"):
-        store.write("wiki/dir.md", b"x")
+        store.write("concepts/dir.md", b"x")
     with pytest.raises(Error):
-        store.delete("wiki/dir.md")
-    store.delete("wiki/a.md")
-    assert store.files("wiki") == []
+        store.delete("concepts/dir.md")
+    store.delete("concepts/a.md")
+    assert store.files("concepts") == []
     assert store.files("missing") == []
     with pytest.raises(Error, match="expected a regular file"):
-        store.fingerprint("wiki/dir.md")
+        store.fingerprint("concepts/dir.md")
 
 
-def test_missing_base_is_named(tmp_path: Path) -> None:
+def test_missing_brain_is_named(tmp_path: Path) -> None:
     with pytest.raises(Error, match="does not exist"):
         Store(tmp_path / "absent")
     (tmp_path / "file").write_text("")
@@ -66,53 +66,53 @@ def test_missing_base_is_named(tmp_path: Path) -> None:
         Store(tmp_path / "file")
 
 
-def test_writer_lock_is_exclusive_and_waits(base: Store) -> None:
-    with writer(base), pytest.raises(BusyError), writer(base, wait=0.1):
+def test_writer_lock_is_exclusive_and_waits(brain: Store) -> None:
+    with writer(brain), pytest.raises(BusyError), writer(brain, wait=0.1):
         pass
-    with writer(base):
+    with writer(brain):
         pass
 
 
-def test_shared_read_locks_and_independent_collector_lock(base: Store) -> None:
-    with reader(base), reader(base), pytest.raises(BusyError), writer(base):
+def test_shared_read_locks_and_independent_collector_lock(brain: Store) -> None:
+    with reader(brain), reader(brain), pytest.raises(BusyError), writer(brain):
         pass
-    with writer(base), pytest.raises(BusyError), reader(base, wait=0):
+    with writer(brain), pytest.raises(BusyError), reader(brain, wait=0):
         pass
     with (
-        collecting(base, "source"),
-        writer(base),
-        collecting(base, "other"),
+        collecting(brain, "source"),
+        writer(brain),
+        collecting(brain, "other"),
         pytest.raises(BusyError),
-        collecting(base, "source"),
+        collecting(brain, "source"),
     ):
         pass
 
 
-def test_rmdir_refuses_files_and_symlinks(base: Store) -> None:
-    base.write("empty/item", b"data")
+def test_rmdir_refuses_files_and_symlinks(brain: Store) -> None:
+    brain.write("empty/item", b"data")
     with pytest.raises(Error, match="directory"):
-        base.rmdir("empty/item")
-    (base.root / "redirect").symlink_to(base.root / "empty", target_is_directory=True)
+        brain.rmdir("empty/item")
+    (brain.root / "redirect").symlink_to(brain.root / "empty", target_is_directory=True)
     with pytest.raises(Error, match="directory"):
-        base.rmdir("redirect")
-    base.delete("empty/item")
-    base.rmdir("empty")
-    assert not (base.root / "empty").exists()
+        brain.rmdir("redirect")
+    brain.delete("empty/item")
+    brain.rmdir("empty")
+    assert not (brain.root / "empty").exists()
 
 
-def test_state_stays_outside_the_base_and_private(base: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    state = state_store(base.root)
-    assert not state.root.is_relative_to(base.root)
+def test_state_stays_outside_the_brain_and_private(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = state_store(brain.root)
+    assert not state.root.is_relative_to(brain.root)
     assert state.root.stat().st_mode & 0o077 == 0
-    monkeypatch.setenv("XDG_STATE_HOME", str(base.root / "state"))
-    with pytest.raises(Error, match="outside the base"):
-        state_store(base.root)
-    target = base.root.parent / "elsewhere"
+    monkeypatch.setenv("XDG_STATE_HOME", str(brain.root / "state"))
+    with pytest.raises(Error, match="outside the brain"):
+        state_store(brain.root)
+    target = brain.root.parent / "elsewhere"
     target.mkdir()
-    (base.root.parent / "redirect").symlink_to(target)
-    monkeypatch.setenv("XDG_STATE_HOME", str(base.root.parent / "redirect"))
+    (brain.root.parent / "redirect").symlink_to(target)
+    monkeypatch.setenv("XDG_STATE_HOME", str(brain.root.parent / "redirect"))
     with pytest.raises(Error, match="symlinks"):
-        state_store(base.root)
+        state_store(brain.root)
 
 
 def test_json_and_yaml_reject_ambiguity() -> None:
@@ -146,9 +146,9 @@ def test_models_are_strict_and_canonical() -> None:
         Knowledge.model_validate({"status": "current"})
     for command in [["{{start}}"], ["x", "{{secret}}"], ["x", "a\x00"]]:
         with pytest.raises(ValidationError):
-            Source(command=command)
+            Sensor(command=command)
     with pytest.raises(ValidationError):
-        Config.model_validate({"version": 2, "name": "Bad Name"})
+        Config.model_validate({"version": 3, "name": "Bad Name"})
     with pytest.raises(ValidationError, match="time window"):
         Query(text="  ")
     assert Query(status="active").text == ""
@@ -171,68 +171,71 @@ def test_relative_moments_resolve_deterministically() -> None:
             moment(bad, now)
 
 
-def test_configuration_is_strict_and_version_2(base: Store) -> None:
-    assert load(base).name == "fixture"
-    base.write("fkf.yaml", b"version: 1\nid: x\nname: old\n")
-    with pytest.raises(Error, match="FKF 7"):
-        load(base)
-    base.write("fkf.yaml", b"version: 2\nname: fixture\nunknown: 1\n")
+def test_configuration_is_strict_and_version_3(brain: Store) -> None:
+    assert load(brain).name == "fixture"
+    brain.write("bf.yaml", b"version: 1\nid: x\nname: old\n")
+    with pytest.raises(Error, match="version"):
+        load(brain)
+    brain.write("bf.yaml", b"version: 3\nname: fixture\nunknown: 1\n")
     with pytest.raises(Error, match="unknown"):
-        load(base)
+        load(brain)
 
 
-def test_registry_selection_and_collection_trust(base: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    assert may_collect(base)
-    assert user_config().bases["fixture"].collect
-    assert user_path().read_text().startswith("# https://fmind.github.io/fkf/")
+def test_registry_selection_and_collection_trust(brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert may_collect(brain)
+    assert user_config().brains["fixture"].collect
+    assert user_path().read_text().startswith("# https://fmind.github.io/brain-framework/")
     other = tmp_path / "team"
     other.mkdir()
     team = Store(other)
-    team.write("fkf.yaml", b"version: 2\nname: team\n")
+    team.write("bf.yaml", b"version: 3\nname: team\n")
     assert not may_collect(team)
     register(team, collect=False)
     assert not may_collect(team)
-    assert [s.root for s in select()] == [base.root, team.root]
+    assert [s.root for s in select()] == [brain.root, team.root]
     assert one("team").root == team.root
     assert one(str(other)).root == team.root
-    with pytest.raises(Error, match="several bases"):
+    with pytest.raises(Error, match="several brains"):
         one()
-    monkeypatch.setenv("FKF_BASE", "fixture")
-    assert [s.root for s in select()] == [base.root]
-    monkeypatch.delenv("FKF_BASE")
-    monkeypatch.chdir(base.root / "projects")
-    assert [s.root for s in select()] == [base.root]
+    monkeypatch.setenv("BF_BRAIN", "fixture")
+    assert [s.root for s in select()] == [brain.root]
+    assert one("team").root == team.root
+    monkeypatch.chdir(team.root)
+    assert [s.root for s in select()] == [brain.root]
+    monkeypatch.delenv("BF_BRAIN")
+    monkeypatch.chdir(brain.root / "projects")
+    assert [s.root for s in select()] == [brain.root]
     clone = tmp_path / "clone"
     clone.mkdir()
-    Store(clone).write("fkf.yaml", b"version: 2\nname: team\n")
+    Store(clone).write("bf.yaml", b"version: 3\nname: team\n")
     with pytest.raises(Error, match="already registered as team"):
         register(Store(clone), collect=False)
-    base.write("fkf.yaml", b"version: 2\nname: renamed\n")
+    brain.write("bf.yaml", b"version: 3\nname: renamed\n")
     with pytest.raises(Error, match="already registered as fixture"):
-        register(base, collect=True)
+        register(brain, collect=True)
     monkeypatch.chdir(tmp_path)
-    user_path().write_text(f"bases:\n  fixture:\n    path: {base.root}\n  gone:\n    path: {tmp_path / 'gone'}\n")
-    assert [s.root for s in select()] == [base.root]
+    user_path().write_text(f"brains:\n  fixture:\n    path: {brain.root}\n  gone:\n    path: {tmp_path / 'gone'}\n")
+    assert [s.root for s in select()] == [brain.root]
     with pytest.raises(Error, match="does not exist"):
         select("gone")
-    user_path().write_text("bases:\n  bad:\n    path: 1\n")
+    user_path().write_text("brains:\n  bad:\n    path: 1\n")
     with pytest.raises(Error, match="invalid"):
         user_config()
 
 
 def test_nothing_selected_is_actionable(tmp_path: Path) -> None:
     os.chdir(tmp_path)
-    with pytest.raises(Error, match="fkf register"):
+    with pytest.raises(Error, match="bf register"):
         select()
 
 
-def test_concurrent_registrations_keep_every_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_concurrent_registrations_keep_every_brain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     stores = []
     for number in range(4):
-        root = tmp_path / f"base-{number}"
+        root = tmp_path / f"brain-{number}"
         root.mkdir()
         store = Store(root)
-        store.write("fkf.yaml", f"version: 2\nname: base-{number}\n".encode())
+        store.write("bf.yaml", f"version: 3\nname: brain-{number}\n".encode())
         stores.append(store)
     original = config.user_config
     start = Barrier(len(stores))
@@ -250,5 +253,5 @@ def test_concurrent_registrations_keep_every_base(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(config, "user_config", slow_read)
     with ThreadPoolExecutor(max_workers=len(stores)) as executor:
         list(executor.map(enroll, stores))
-    assert set(user_config().bases) == {f"base-{number}" for number in range(4)}
+    assert set(user_config().brains) == {f"brain-{number}" for number in range(4)}
     assert user_path().stat().st_mode & 0o077 == 0

@@ -1,0 +1,18 @@
+# https://fmind.github.io/brain-framework/docs/search/
+version: 3
+cases:
+  - name: retention-concept
+    query: why keep original evidence
+    type: concept
+    expect: [concepts/retention.md]
+    text: [upstream content can disappear]
+  - name: retention-record
+    query: retention decision
+    source: demo
+    expect: ["demo:retention"]
+  - name: project-by-identity
+    query: "repo:example/project"
+    expect: [projects/example.md, "demo:retention"]
+  - name: absent-evidence
+    query: nonexistent-quasar
+    empty: true

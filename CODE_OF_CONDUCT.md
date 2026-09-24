@@ -33,7 +33,7 @@ The following conduct, including threats or promotion of it, is not acceptable:
 
 ## Reporting an issue
 
-Not every disagreement is a Code of Conduct violation. If an incident may be one, use this repository's [private advisory form](https://github.com/fmind/fkf/security/advisories/new); conduct reports are explicitly accepted there even when no software vulnerability is involved. Do not open a public issue containing personal or sensitive details.
+Not every disagreement is a Code of Conduct violation. If an incident may be one, use this repository's [private advisory form](https://github.com/fmind/brain-framework/security/advisories/new); conduct reports are explicitly accepted there even when no software vulnerability is involved. Do not open a public issue containing personal or sensitive details.
 
 Reports will be reviewed as promptly and fairly as practical. Relevant messages, logs, or witness accounts may be requested. Safety and confidentiality take priority; investigation and enforcement happen privately unless the affected people agree that a broader communication is useful. The maintainer must recuse themself from a report involving their own conduct when another suitable reviewer is available.
 

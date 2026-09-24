@@ -9,57 +9,57 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from fkf import index, records
-from fkf.cli import app
-from fkf.models import Error
-from fkf.storage import Store, writer
-from fkf.update import update
-from fkf.validate import validate
+from bf import index, records
+from bf.cli import app
+from bf.models import Error
+from bf.storage import Store, writer
+from bf.update import update
+from bf.validate import validate
 
 
-def test_health_check_rejects_a_stale_cache(base: Store) -> None:
-    index.refresh(base)
-    with writer(base):
-        result = CliRunner().invoke(app, ["status", "--check", "--base", str(base.root)])
+def test_health_check_rejects_a_stale_cache(brain: Store) -> None:
+    index.refresh(brain)
+    with writer(brain):
+        result = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
     assert result.exit_code == 1
     reply = json.loads(result.stdout)
-    assert reply["bases"][0]["index"] == "stale"
+    assert reply["brains"][0]["index"] == "stale"
     assert not reply["healthy"]
 
 
-def test_update_reports_skipped_evidence_as_failure(base: Store) -> None:
-    base.write("projects/broken.md", b"---\nstatus: invalid\n---\n# Broken\n")
-    report = update([base])
-    assert isinstance(report["bases"], list)
-    assert report["bases"][0]["index"]["problems"] == 1
+def test_update_reports_skipped_evidence_as_failure(brain: Store) -> None:
+    brain.write("projects/broken.md", b"---\nstatus: invalid\n---\n# Broken\n")
+    report = update([brain])
+    assert isinstance(report["brains"], list)
+    assert report["brains"][0]["index"]["problems"] == 1
     assert not report["ok"]
 
 
-def test_missing_record_in_corrupt_source_is_not_proven_absent(base: Store) -> None:
-    base.write("records/meetings/2026-09.jsonl", b"broken partition\n")
-    assert records.find(base, "meetings", "decision-1") is not None
+def test_missing_record_in_corrupt_source_is_not_proven_absent(brain: Store) -> None:
+    brain.write("memories/meetings/2026-09.jsonl", b"broken partition\n")
+    assert records.find(brain, "meetings", "decision-1") is not None
     with pytest.raises(Error, match="unreadable partitions"):
-        records.find(base, "meetings", "possibly-in-broken-file")
-    assert records.find(base, "other", "absent") is None
+        records.find(brain, "meetings", "possibly-in-broken-file")
+    assert records.find(brain, "other", "absent") is None
 
 
-@pytest.mark.parametrize("path", ["records/orphan.jsonl", "records/Bad/2026-09.jsonl", "records/mail/2026-99.jsonl"])
-def test_invalid_record_paths_never_produce_unreadable_refs(base: Store, path: str) -> None:
-    from fkf.models import Query
-    from fkf.retrieve import search
+@pytest.mark.parametrize("path", ["memories/orphan.jsonl", "memories/Bad/2026-09.jsonl", "memories/mail/2026-99.jsonl"])
+def test_invalid_record_paths_never_produce_unreadable_refs(brain: Store, path: str) -> None:
+    from bf.models import Query
+    from bf.retrieve import search
 
-    base.write(path, b'{"id":"item","title":"Misplacedneedle"}\n')
-    reply = search([base], Query(text="misplacedneedle"), counted=False)
+    brain.write(path, b'{"id":"item","title":"Misplacedneedle"}\n')
+    reply = search([brain], Query(text="misplacedneedle"), counted=False)
     assert reply["items"] == []
     assert reply["problems"]
-    assert not validate(base)["valid"]
+    assert not validate(brain)["valid"]
 
 
-def test_unreadable_note_is_skipped_without_hiding_healthy_files(base: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    from fkf.models import Query
-    from fkf.retrieve import search
+def test_unreadable_note_is_skipped_without_hiding_healthy_files(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bf.models import Query
+    from bf.retrieve import search
 
-    base.write("projects/denied.md", b"# Restricted\n")
+    brain.write("projects/denied.md", b"# Restricted\n")
     original = Store.read
 
     def denied(self: Store, name: str, limit: int = 16 << 20) -> bytes:
@@ -68,31 +68,31 @@ def test_unreadable_note_is_skipped_without_hiding_healthy_files(base: Store, mo
         return original(self, name, limit)
 
     monkeypatch.setattr(Store, "read", denied)
-    reply = search([base], Query(text="offline"), counted=False)
+    reply = search([brain], Query(text="offline"), counted=False)
     assert reply["items"]
     assert "inaccessible file" in str(reply["problems"])
     assert "private operating-system detail" not in str(reply)
-    assert not validate(base)["valid"]
+    assert not validate(brain)["valid"]
 
 
-def test_validation_refuses_links_through_unindexed_symlinks(base: Store, tmp_path: Path) -> None:
+def test_validation_refuses_links_through_unindexed_symlinks(brain: Store, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.txt").write_text("private evidence")
-    (base.root / "inputs").mkdir()
-    (base.root / "inputs/direct.txt").symlink_to(outside / "secret.txt")
-    (base.root / "inputs/redirect").symlink_to(outside, target_is_directory=True)
-    base.write(
+    (brain.root / "inputs").mkdir()
+    (brain.root / "inputs/direct.txt").symlink_to(outside / "secret.txt")
+    (brain.root / "inputs/redirect").symlink_to(outside, target_is_directory=True)
+    brain.write(
         "projects/links.md",
         b"# Links\n\n[direct](../inputs/direct.txt) [parent](../inputs/redirect/secret.txt)\n",
     )
-    report = validate(base)
+    report = validate(brain)
     assert not report["valid"]
     assert isinstance(report["problems"], list)
     assert len([p for p in report["problems"] if "broken link" in p]) == 2
 
 
-def test_new_directories_are_durable_before_their_files(base: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_new_directories_are_durable_before_their_files(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     synced: list[tuple[int, int]] = []
     fsync = os.fsync
 
@@ -102,9 +102,9 @@ def test_new_directories_are_durable_before_their_files(base: Store, monkeypatch
         fsync(fd)
 
     monkeypatch.setattr(os, "fsync", record_sync)
-    base.write("new-parent/journal/original", b"durable original")
+    brain.write("new-parent/journal/original", b"durable original")
     expected = []
-    for directory in (base.root, base.root / "new-parent", base.root / "new-parent/journal"):
+    for directory in (brain.root, brain.root / "new-parent", brain.root / "new-parent/journal"):
         info = directory.stat()
         expected.append((info.st_dev, info.st_ino))
     assert all(identity in synced for identity in expected)

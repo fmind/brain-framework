@@ -97,9 +97,9 @@ def test_document_root_cannot_be_redirected_through_an_ancestor(provider: Provid
 
 @pytest.fixture
 def documents() -> ModuleType:
-    path = ROOT / "examples/sources/local-documents.py"
+    path = ROOT / "examples/sensors/local-documents.py"
     if not path.exists():
-        path = ROOT / "sources/local-documents.py"
+        path = ROOT / "sensors/local-documents.py"
     spec = importlib.util.spec_from_file_location("local_documents", path)
     assert spec is not None
     assert spec.loader is not None

@@ -14,7 +14,7 @@ body:
     id: proposal
     attributes:
       label: Proposed solution
-      description: The smallest useful change, and what it would let a base reach that it cannot today.
+      description: The smallest useful change, and what it would let a brain reach that it cannot today.
     validations:
       required: true
   - type: checkboxes
@@ -24,5 +24,5 @@ body:
       options:
         - label: The proposal works on the supported Linux and macOS release targets.
           required: true
-        - label: The proposal keeps a base's contents private and reads no credential.
+        - label: The proposal keeps a brain's contents private and reads no credential.
           required: true

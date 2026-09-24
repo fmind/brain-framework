@@ -75,10 +75,10 @@ def _runtime_distributions(platform: str) -> dict[str, str]:
         assert name not in packages, f"uv.lock contains multiple entries for {name}"
         packages[name] = package
 
-    requested_extras: dict[str, set[str]] = {"fkf": set()}
+    requested_extras: dict[str, set[str]] = {"brain-framework": set()}
     processed_extras: dict[str, set[str]] = {}
     selected: set[str] = set()
-    pending = ["fkf"]
+    pending = ["brain-framework"]
     while pending:
         name = pending.pop()
         assert name in packages, f"uv.lock has no package entry for runtime dependency {name}"
@@ -112,8 +112,8 @@ def _runtime_distributions(platform: str) -> dict[str, str]:
         package = packages[name]
         source = _mapping(package.get("source"), f"{name}.source")
         if "registry" not in source:
-            assert name == "fkf", f"unexpected non-registry runtime package: {name}"
-            assert source == {"editable": "."}, "fkf must remain the editable lock root"
+            assert name == "brain-framework", f"unexpected non-registry runtime package: {name}"
+            assert source == {"editable": "."}, "brain-framework must remain the editable lock root"
             continue
         version = package.get("version")
         assert isinstance(version, str), f"{name}.version must be a string"
@@ -154,5 +154,5 @@ def test_distribution_packages_both_project_and_third_party_licenses() -> None:
 
     assert project["license"] == "MIT"
     assert project["license-files"] == ["LICENSE", "THIRD_PARTY_NOTICES.md"]
-    assert notices.startswith("# Third-party notices\n\nFKF depends on ")
-    assert re.search(r"\bFKF v?\d+\.\d+\.\d+\b", notices) is None
+    assert notices.startswith("# Third-party notices\n\nBrain Framework depends on ")
+    assert re.search(r"\bBrain Framework v?\d+\.\d+\.\d+\b", notices) is None

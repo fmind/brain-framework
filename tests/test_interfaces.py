@@ -14,10 +14,10 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 from typer.testing import CliRunner
 
-from fkf.cli import app
-from fkf.config import user_config
-from fkf.mcp import server
-from fkf.storage import Store, writer
+from bf.cli import app
+from bf.config import user_config
+from bf.mcp import server
+from bf.storage import Store, writer
 
 
 def invoke(*args: str, code: int = 0) -> dict:
@@ -26,74 +26,74 @@ def invoke(*args: str, code: int = 0) -> dict:
     return json.loads(result.stdout) if result.stdout else {}
 
 
-def test_cli_lifecycle(tmp_path: Path, base: Store) -> None:
+def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
     assert CliRunner().invoke(app, ["--help"]).exit_code == 0
     target = tmp_path / "new"
     created = invoke("init", str(target), "--name", "fresh")
     assert created["collect"] is True
-    assert user_config().bases["fresh"].path == str(target)
+    assert user_config().brains["fresh"].path == str(target)
     assert CliRunner().invoke(app, ["init", str(target)]).exit_code != 0
-    assert invoke("validate", "--base", "fresh")["valid"]
-    assert (target / "AGENTS.md").read_text().startswith("# Knowledge base")
-    found = invoke("search", "offline", "--base", "fixture")
+    assert invoke("validate", "--brain", "fresh")["valid"]
+    assert (target / "AGENTS.md").read_text().startswith("# Brain")
+    found = invoke("search", "offline", "--brain", "fixture")
     assert found["items"][0]["ref"] == "projects/offline.md"
     everywhere = invoke("search", "welcome")
-    assert {i["base"] for i in everywhere["items"]} == {"fresh"}
-    window = invoke("search", "--since", "2026-08-31", "--until", "2026-09-02", "--base", "fixture")
+    assert {i["brain"] for i in everywhere["items"]} == {"fresh"}
+    window = invoke("search", "--since", "2026-08-31", "--until", "2026-09-02", "--brain", "fixture")
     assert [i["ref"] for i in window["items"]] == ["projects/offline.md", "meetings:decision-1"]
     exact = invoke("read", "meetings:decision-1")
     assert exact["record"]["title"] == "Preserve durable evidence"
-    assert invoke("build", "--base", "fixture")["changed"] == 3
-    status = invoke("status", "--base", "fixture", "--check")
+    assert invoke("build", "--brain", "fixture")["changed"] == 3
+    status = invoke("status", "--brain", "fixture", "--check")
     assert status["healthy"]
-    assert status["bases"][0]["sources"]["meetings"] == {
+    assert status["brains"][0]["sources"]["meetings"] == {
         "records": 2,
         "latest": "2026-08-31T12:00:00.000000Z",
         "configured": False,
         "state": "historical",
         "freshness": "unknown",
     }
-    base.write(
+    brain.write(
         "queries.yaml",
-        b"version: 2\ncases:\n  - name: decision\n    query: retention decision\n    expect: [projects/offline.md]\n",
+        b"version: 3\ncases:\n  - name: decision\n    query: retention decision\n    expect: [projects/offline.md]\n",
     )
-    assert invoke("eval", "--base", "fixture")["passed"]
-    base.write("queries.yaml", b"version: 2\ncases:\n  - name: missing\n    query: lunch\n    empty: true\n")
-    failed = invoke("eval", "--base", "fixture", code=1)
+    assert invoke("eval", "--brain", "fixture")["passed"]
+    brain.write("queries.yaml", b"version: 3\ncases:\n  - name: missing\n    query: lunch\n    empty: true\n")
+    failed = invoke("eval", "--brain", "fixture", code=1)
     assert failed["cases"][0]["returned"] == ["meetings:lunch"]
     other = tmp_path / "clone"
     other.mkdir()
-    (other / "fkf.yaml").write_text("version: 2\nname: clone\n")
+    (other / "bf.yaml").write_text("version: 3\nname: clone\n")
     assert invoke("register", str(other))["collect"] is False
-    assert invoke("update", "--base", "clone", "--dry-run")["bases"][0]["skipped"]
-    base.write("projects/bad.md", b"# Bad [x](missing.md)\n")
-    assert not invoke("validate", "--base", "fixture", code=1)["valid"]
+    assert invoke("update", "--brain", "clone", "--dry-run")["brains"][0]["skipped"]
+    brain.write("projects/bad.md", b"# Bad [x](missing.md)\n")
+    assert not invoke("validate", "--brain", "fixture", code=1)["valid"]
     assert invoke("schema")["title"] == "Config"
 
 
-def test_status_check_fails_on_stale_trusted_sources(base: Store) -> None:
-    base.write("fkf.yaml", b"version: 2\nname: fixture\nsources:\n  mail:\n    command: [echo]\n    refresh: 3600\n")
-    report = invoke("status", "--base", "fixture", "--check", code=1)
-    assert report["bases"][0]["sources"]["mail"]["stale"] is True
-    base.write("fkf.yaml", b"version: 2\nname: fixture\nsources:\n  mail:\n    command: [sh, -c, exit 3]\n")
-    assert invoke("collect", "mail", "--base", "fixture", "--since", "2d", code=1) == {}
-    entry = invoke("status", "--base", "fixture", code=0)["bases"][0]["sources"]["mail"]
+def test_status_check_fails_on_stale_trusted_sources(brain: Store) -> None:
+    brain.write("bf.yaml", b"version: 3\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n")
+    report = invoke("status", "--brain", "fixture", "--check", code=1)
+    assert report["brains"][0]["sources"]["mail"]["stale"] is True
+    brain.write("bf.yaml", b"version: 3\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n")
+    assert invoke("collect", "mail", "--brain", "fixture", "--since", "2d", code=1) == {}
+    entry = invoke("status", "--brain", "fixture", code=0)["brains"][0]["sources"]["mail"]
     assert "status 3" in entry["error"]
     assert entry["log"].endswith("mail.log")
 
 
 @pytest.mark.parametrize(
     ("instruction", "expected"),
-    [("source_fish", "complete --command fkf"), ("complete_fish", "search")],
+    [("source_fish", "complete --command bf"), ("complete_fish", "search")],
 )
 def test_fish_completion_in_fresh_process(instruction: str, expected: str, tmp_path: Path) -> None:
     result = subprocess.run(
-        [sys.executable, "-c", "from fkf.cli import app; app(prog_name='fkf')"],
+        [sys.executable, "-c", "from bf.cli import app; app(prog_name='bf')"],
         cwd=tmp_path,
         env={
             **os.environ,
-            "_FKF_COMPLETE": instruction,
-            "_TYPER_COMPLETE_ARGS": "fkf sea",
+            "_BF_COMPLETE": instruction,
+            "_TYPER_COMPLETE_ARGS": "bf sea",
             "_TYPER_COMPLETE_FISH_ACTION": "get-args",
         },
         capture_output=True,
@@ -106,26 +106,26 @@ def test_fish_completion_in_fresh_process(instruction: str, expected: str, tmp_p
     assert not result.stderr
 
 
-def test_console_errors_are_private_and_on_stderr(base: Store) -> None:
-    def fkf(*args: str) -> subprocess.CompletedProcess[str]:
+def test_console_errors_are_private_and_on_stderr(brain: Store) -> None:
+    def bf(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(  # noqa: S603 - synthetic CLI boundary
-            [sys.executable, "-m", "fkf", *args], capture_output=True, text=True, check=False
+            [sys.executable, "-m", "bf", *args], capture_output=True, text=True, check=False
         )
 
     for args in [
-        ["read", "fkf.yaml", "--base", "fixture"],
+        ["read", "bf.yaml", "--brain", "fixture"],
         ["search", "x", "--limit", "0"],
         ["search", "--since", "soon"],
     ]:
-        result = fkf(*args)
+        result = bf(*args)
         assert result.returncode
         assert not result.stdout
-        assert result.stderr.startswith("fkf:")
-        assert str(base.root) not in result.stderr
-    assert "limit" in fkf("search", "x", "--limit", "0").stderr
-    assert "a filter" in fkf("search").stderr
-    version = fkf("--version")
-    assert version.stdout.strip() == distribution_version("fkf")
+        assert result.stderr.startswith("bf:")
+        assert str(brain.root) not in result.stderr
+    assert "limit" in bf("search", "x", "--limit", "0").stderr
+    assert "a filter" in bf("search").stderr
+    version = bf("--version")
+    assert version.stdout.strip() == distribution_version("brain-framework")
 
 
 def test_initialization_obeys_the_physical_writer_lock(tmp_path: Path) -> None:
@@ -143,8 +143,8 @@ def text(result: object) -> str:
     return result.content[0].text
 
 
-def test_mcp_exposes_two_read_only_tools_with_cli_payloads(base: Store) -> None:
-    mcp = server([base])
+def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None:
+    mcp = server([brain])
 
     async def check() -> None:
         tools = await mcp.list_tools()
@@ -159,10 +159,11 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(base: Store) -> None:
         assert json.loads(text(found))["items"][0]["ref"] == "projects/offline.md"
         window = await mcp.call_tool("search", {"since": "2026-08-31", "until": "2026-09-01"})
         assert json.loads(text(window))["items"][0]["ref"] == "meetings:decision-1"
-        exact = await mcp.call_tool("read", {"ref": "projects/offline.md#decision"})
+        exact = await mcp.call_tool("read", {"ref": "projects/offline.md#decision", "brain": "fixture"})
+        assert json.loads(text(exact))["brain"] == "fixture"
         assert "Provider retention" in json.loads(text(exact))["text"]
         for name, arguments, message in [
-            ("read", {"ref": "fkf.yaml"}, "not found"),
+            ("read", {"ref": "bf.yaml"}, "not found"),
             ("search", {"query": "x", "limit": 0}, "invalid"),
             ("search", {"since": "soon"}, "times accept"),
         ]:
@@ -170,12 +171,12 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(base: Store) -> None:
             assert isinstance(failed, CallToolResult)
             assert failed.is_error
             assert message in text(failed)
-            assert str(base.root) not in text(failed)
+            assert str(brain.root) not in text(failed)
 
     asyncio.run(check())
 
 
-@pytest.mark.usefixtures("base")
+@pytest.mark.usefixtures("brain")
 def test_mcp_stdio_handshake(tmp_path: Path) -> None:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
@@ -183,7 +184,7 @@ def test_mcp_stdio_handshake(tmp_path: Path) -> None:
     async def check() -> None:
         parameters = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "fkf", "mcp"],
+            args=["-m", "bf", "mcp"],
             env={
                 "HOME": os.environ["HOME"],
                 "XDG_STATE_HOME": os.environ["XDG_STATE_HOME"],
@@ -196,7 +197,8 @@ def test_mcp_stdio_handshake(tmp_path: Path) -> None:
             ClientSession(incoming, outgoing, read_timeout_seconds=10) as session,
         ):
             initialized = await session.initialize()
-            assert initialized.server_info.version == distribution_version("fkf")
+            assert initialized.server_info.name == "bf"
+            assert initialized.server_info.version == distribution_version("brain-framework")
             listing = await session.list_tools()
             assert {tool.name for tool in listing.tools} == {"search", "read"}
             found = await session.call_tool("search", {"query": "offline"})

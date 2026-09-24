@@ -17,21 +17,21 @@ from typing import Any, cast
 
 import pytest
 
-from fkf import records
-from fkf.collect import collect, due, log_path, run, state
-from fkf.config import register
-from fkf.models import Error, Source
-from fkf.storage import BusyError, Store, writer
-from fkf.update import update
+from bf import records
+from bf.collect import collect, due, log_path, run, state
+from bf.config import register
+from bf.models import Error, Sensor
+from bf.storage import BusyError, Store, writer
+from bf.update import update
 
 START = "2026-09-01T00:00:00.000000Z"
 END = "2026-09-02T00:00:00.000000Z"
 NOW = datetime(2026, 9, 2, tzinfo=UTC)
-CONFIG = b"""version: 2
+CONFIG = b"""version: 3
 name: fixture
-sources:
+sensors:
   sample:
-    command: [echo, "{{start}}", "{{end}}", "{{base}}", "{{home}}"]
+    command: [echo, "{{start}}", "{{end}}", "{{brain}}", "{{home}}"]
     refresh: 3600
   folders:
     command: [echo]
@@ -51,13 +51,13 @@ def emit(*items: dict[str, object]) -> bytes:
 
 
 @pytest.fixture
-def configured(base: Store) -> Store:
-    base.write("fkf.yaml", CONFIG)
-    return base
+def configured(brain: Store) -> Store:
+    brain.write("bf.yaml", CONFIG)
+    return brain
 
 
 def test_collect_dry_run_then_upsert(configured: Store) -> None:
-    def fake(argv: list[str], source: Source, store: Store, log: Path) -> bytes:
+    def fake(argv: list[str], source: Sensor, store: Store, log: Path) -> bytes:
         assert argv[1:] == [START, END, str(configured.root), str(Path.home())]
         assert source.refresh == 3600
         assert store.root == configured.root
@@ -66,20 +66,20 @@ def test_collect_dry_run_then_upsert(configured: Store) -> None:
 
     preview = collect(configured, "sample", start=START, end=END, runner=fake, dry_run=True)
     samples = cast("list[dict[str, object]]", preview["samples"])
-    assert preview == {"records": 1, "samples": samples, "source": "sample"}
+    assert preview == {"records": 1, "samples": samples, "sensor": "sample"}
     assert samples[0]["id"] == "x"
     assert records.partitions(configured, "sample") == []
     assert state(configured) == {}
     result = collect(configured, "sample", start=START, end=END, runner=fake, clock=lambda: NOW)
-    assert result == {"source": "sample", "records": 1, "added": 1, "updated": 0, "unchanged": 0, "removed": 0}
-    assert records.partitions(configured, "sample") == ["records/sample/2026-09.jsonl"]
+    assert result == {"sensor": "sample", "records": 1, "added": 1, "updated": 0, "unchanged": 0, "removed": 0}
+    assert records.partitions(configured, "sample") == ["memories/sample/2026-09.jsonl"]
     assert state(configured)["sample"] == {
         "run": NOW.isoformat(),
         "success": NOW.isoformat(),
         "start": START,
         "end": END,
         "error": "",
-        **{key: value for key, value in result.items() if key != "source"},
+        **{key: value for key, value in result.items() if key != "sensor"},
     }
 
 
@@ -110,11 +110,11 @@ def test_collection_requires_a_known_enabled_trusted_source_and_a_window(configu
     clone = tmp_path / "clone"
     clone.mkdir()
     shared = Store(clone)
-    shared.write("fkf.yaml", CONFIG.replace(b"name: fixture", b"name: shared"))
+    shared.write("bf.yaml", CONFIG.replace(b"name: fixture", b"name: shared"))
     with pytest.raises(Error, match="register --collect"):
         collect(shared, "sample", start=START, end=END, runner=lambda *_: b"[]")
     register(shared, collect=False)
-    assert update([shared])["bases"] == [{"base": "shared", "skipped": "not trusted to collect on this machine"}]
+    assert update([shared])["brains"] == [{"brain": "shared", "skipped": "not trusted to collect on this machine"}]
 
 
 def test_due_windows_resume_with_overlap_and_catch_up_at_most_30_days(configured: Store) -> None:
@@ -133,20 +133,20 @@ def test_due_windows_resume_with_overlap_and_catch_up_at_most_30_days(configured
 
 
 def test_update_isolates_failures_and_refreshes_the_cache(configured: Store) -> None:
-    def fake(_argv: list[str], source: Source, *_: object) -> bytes:
+    def fake(_argv: list[str], source: Sensor, *_: object) -> bytes:
         if source.mode == "snapshot":
             raise Error("provider unavailable")
         return emit({"id": "x", "title": "Collected zirconium", "time": "2026-09-01T10:00:00Z"})
 
     planned = cast("Any", update([configured], dry_run=True, now=NOW))
-    assert [s["status"] for s in planned["bases"][0]["sources"]] == ["due", "due"]
-    assert "index" not in planned["bases"][0]
+    assert [s["status"] for s in planned["brains"][0]["sensors"]] == ["due", "due"]
+    assert "index" not in planned["brains"][0]
     report = cast("Any", update([configured], now=NOW, runner=fake))
     assert not report["ok"]
-    sources = report["bases"][0]["sources"]
+    sources = report["brains"][0]["sensors"]
     assert [s["status"] for s in sources] == ["failed", "collected"]
     assert "provider unavailable" in sources[0]["error"]
-    assert report["bases"][0]["index"]["changed"] >= 1
+    assert report["brains"][0]["index"]["changed"] >= 1
     # The failed snapshot stays due; the collected window waits for its refresh interval.
     assert [name for name, *_ in due(configured, NOW + timedelta(minutes=1))] == ["folders"]
 
@@ -155,7 +155,7 @@ def test_real_process_boundary(configured: Store, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setenv("LD_PRELOAD", "/bad.so")
     log = log_path(configured, "sample")
-    source = Source(command=["sh"], timeout=1, max_bytes=128)
+    source = Sensor(command=["sh"], timeout=1, max_bytes=128)
     assert run(["sh", "-c", 'printf "[]"; printf "$LD_PRELOAD note" >&2'], source, configured, log) == b"[]"
     assert log.read_text() == " note"
     assert log.stat().st_mode & 0o077 == 0
@@ -171,33 +171,33 @@ def test_real_process_boundary(configured: Store, monkeypatch: pytest.MonkeyPatc
     run(["sh", "-c", "head -c 400000 /dev/zero >&2; printf '[]'"], source, configured, log)
     assert log.stat().st_size == 256 << 10
     with pytest.raises(Error, match="not on PATH"):
-        run(["no-such-fkf-command"], source, configured, log)
+        run(["no-such-bf-command"], source, configured, log)
     with pytest.raises(Error, match="bare command"):
         run(["/bin/sh"], source, configured, log)
 
 
-def test_base_collectors_run_from_the_base_root(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_brain_collectors_run_from_the_brain_root(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     log = log_path(configured, "sample")
-    configured.write("sources/where.sh", b"#!/bin/sh\npwd\n")
-    (configured.root / "sources/where.sh").chmod(0o700)
+    configured.write("sensors/where.sh", b"#!/bin/sh\npwd\n")
+    (configured.root / "sensors/where.sh").chmod(0o700)
     assert (
-        run(["sources/where.sh"], Source(command=["sources/where.sh"]), configured, log)
+        run(["sensors/where.sh"], Sensor(command=["sensors/where.sh"]), configured, log)
         == f"{configured.root}\n".encode()
     )
-    configured.write("sources/bad.sh", b"#!/nonexistent/interpreter\n")
-    (configured.root / "sources/bad.sh").chmod(0o700)
+    configured.write("sensors/bad.sh", b"#!/nonexistent/interpreter\n")
+    (configured.root / "sensors/bad.sh").chmod(0o700)
     with pytest.raises(Error, match="interpreter"):
-        run(["sources/bad.sh"], Source(command=["sources/bad.sh"]), configured, log)
+        run(["sensors/bad.sh"], Sensor(command=["sensors/bad.sh"]), configured, log)
     with pytest.raises(Error):
-        run(["sources/../fkf.yaml"], Source(command=["x"]), configured, log)
+        run(["sensors/../bf.yaml"], Sensor(command=["x"]), configured, log)
 
 
 def test_placeholders_are_expanded_once(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     home = configured.root.parent / "literal-{{start}}"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    configured.write("fkf.yaml", CONFIG.replace(b'"{{start}}", "{{end}}", "{{base}}", ', b""))
+    configured.write("bf.yaml", CONFIG.replace(b'"{{start}}", "{{end}}", "{{brain}}", ', b""))
 
     def fake(argv: list[str], *_: object) -> bytes:
         assert argv == ["echo", str(home)]
@@ -208,14 +208,14 @@ def test_placeholders_are_expanded_once(configured: Store, monkeypatch: pytest.M
 
 def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
     configured.write(
-        "fkf.yaml",
-        b"version: 2\nname: fixture\nsources:\n"
-        b"  a-missing:\n    command: [sources/missing.py]\n    refresh: 3600\n"
+        "bf.yaml",
+        b"version: 3\nname: fixture\nsensors:\n"
+        b"  a-missing:\n    command: [sensors/missing.py]\n    refresh: 3600\n"
         b'  b-good:\n    command: [echo, "[]"]\n    refresh: 3600\n',
     )
     report = cast("Any", update([configured], now=NOW))
     assert not report["ok"]
-    assert [item["status"] for item in report["bases"][0]["sources"]] == ["failed", "collected"]
+    assert [item["status"] for item in report["brains"][0]["sensors"]] == ["failed", "collected"]
     assert state(configured)["a-missing"]["error"]
     assert state(configured)["b-good"]["success"]
 
@@ -225,7 +225,7 @@ def test_success_and_failure_history_are_serialized(configured: Store, monkeypat
     writes = []
 
     def checked(self: Store, name: str, data: bytes) -> None:
-        if name == "sources.json":
+        if name == "sensors.json":
             with pytest.raises(BusyError), writer(configured):
                 pass
             writes.append(name)
@@ -235,7 +235,7 @@ def test_success_and_failure_history_are_serialized(configured: Store, monkeypat
     collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]")
     with pytest.raises(Error, match="JSON"):
         collect(configured, "folders", start=START, end=END, runner=lambda *_: b"broken")
-    assert writes == ["sources.json", "sources.json"]
+    assert writes == ["sensors.json", "sensors.json"]
     assert set(state(configured)) == {"sample", "folders"}
 
 
@@ -263,7 +263,7 @@ def test_interpreter_startup_injection_is_removed(configured: Store, monkeypatch
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     for key in ("PYTHONPATH", "PYTHONHOME", "NODE_OPTIONS", "RUBYOPT", "PERL5OPT", "DYLD_FALLBACK_LIBRARY_PATH"):
         monkeypatch.setenv(key, "startup-injection")
-    source = Source(command=["sh"])
+    source = Sensor(command=["sh"])
     output = run(
         ["sh", "-c", 'printf "%s" "$PYTHONPATH$PYTHONHOME$NODE_OPTIONS$RUBYOPT$PERL5OPT$DYLD_FALLBACK_LIBRARY_PATH"'],
         source,
@@ -275,15 +275,15 @@ def test_interpreter_startup_injection_is_removed(configured: Store, monkeypatch
 
 def test_sigterm_cancels_collector_and_descendants(configured: Store, tmp_path: Path) -> None:
     marker = tmp_path / "children"
-    configured.write("sources/wait.sh", b'#!/bin/sh\nsleep 60 &\nprintf "%s %s\\n" "$$" "$!" > "$1"\nwait\n')
-    (configured.root / "sources/wait.sh").chmod(0o700)
+    configured.write("sensors/wait.sh", b'#!/bin/sh\nsleep 60 &\nprintf "%s %s\\n" "$$" "$!" > "$1"\nwait\n')
+    (configured.root / "sensors/wait.sh").chmod(0o700)
     configured.write(
-        "fkf.yaml",
+        "bf.yaml",
         json.dumps(
             {
-                "version": 2,
+                "version": 3,
                 "name": "fixture",
-                "sources": {"sample": {"command": ["sources/wait.sh", str(marker)]}},
+                "sensors": {"sample": {"command": ["sensors/wait.sh", str(marker)]}},
             }
         ).encode(),
     )
@@ -291,10 +291,10 @@ def test_sigterm_cancels_collector_and_descendants(configured: Store, tmp_path: 
         [
             sys.executable,
             "-m",
-            "fkf",
+            "bf",
             "collect",
             "sample",
-            "--base",
+            "--brain",
             str(configured.root),
             "--since",
             START,
@@ -335,23 +335,23 @@ def test_sigterm_cancels_collector_and_descendants(configured: Store, tmp_path: 
             child.communicate(timeout=5)
 
 
-def test_invalid_history_and_other_base_errors_do_not_stop_update(configured: Store, tmp_path: Path) -> None:
-    from fkf.storage import state_store
+def test_invalid_history_and_other_brain_errors_do_not_stop_update(configured: Store, tmp_path: Path) -> None:
+    from bf.storage import state_store
 
-    state_store(configured.root).write("sources.json", b'{"sample":{"success":"not-a-date"},"folders":[]}')
+    state_store(configured.root).write("sensors.json", b'{"sample":{"success":"not-a-date"},"folders":[]}')
     assert state(configured) == {}
-    state_store(configured.root).write("sources.json", b"broken")
+    state_store(configured.root).write("sensors.json", b"broken")
     assert state(configured) == {}
-    other = tmp_path / "broken-base"
+    other = tmp_path / "broken-brain"
     other.mkdir()
     broken = Store(other)
-    broken.write("fkf.yaml", b"invalid: true\n")
-    configured.write(".fkf", b"not a directory")
+    broken.write("bf.yaml", b"invalid: true\n")
+    configured.write(".bf", b"not a directory")
     report = cast("Any", update([broken, configured], now=NOW, runner=lambda *_: b"[]"))
     assert not report["ok"]
-    assert report["bases"][0]["error"]
-    assert report["bases"][1]["index"]["error"]
-    assert [item["status"] for item in report["bases"][1]["sources"]] == ["collected", "collected"]
+    assert report["brains"][0]["error"]
+    assert report["brains"][1]["index"]["error"]
+    assert [item["status"] for item in report["brains"][1]["sensors"]] == ["collected", "collected"]
 
 
 def test_observation_and_coverage_describe_collected_evidence(configured: Store) -> None:
@@ -375,7 +375,7 @@ def test_failed_run_history_reports_that_records_were_committed(
     original = Store.write
 
     def fail_history(self: Store, name: str, data: bytes) -> None:
-        if name == "sources.json":
+        if name == "sensors.json":
             raise PermissionError("synthetic state failure")
         original(self, name, data)
 

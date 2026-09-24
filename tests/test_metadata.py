@@ -10,8 +10,8 @@ from textwrap import dedent
 import pytest
 from pydantic import ValidationError
 
-from fkf.models import Query, Record, timestamp
-from fkf.storage import Store
+from bf.models import Query, Record, timestamp
+from bf.storage import Store
 
 
 def python_in_timezone(zone: str, program: str, *arguments: str) -> None:
@@ -32,7 +32,7 @@ def test_local_dates_use_the_offset_at_that_midnight() -> None:
         "Europe/Paris",
         """
         from datetime import UTC, datetime
-        from fkf.models import moment
+        from bf.models import moment
 
         september = datetime(2026, 9, 23, 12, tzinfo=UTC)
         transition = datetime(2026, 3, 29, 12, tzinfo=UTC)
@@ -65,13 +65,13 @@ def test_revision_times_and_source_filters_are_strict() -> None:
         Record(id="document", title="Decision", attributes={"updated": "2026-09-23"})
 
 
-def test_note_dates_follow_local_days_without_rebuilding_the_cache(base: Store) -> None:
-    from fkf import index
+def test_note_dates_follow_local_days_without_rebuilding_the_cache(brain: Store) -> None:
+    from bf import index
 
     for day in ("2026-09-22", "2026-09-23", "2026-09-24", "2026-03-29"):
-        base.write(f"projects/{day}.md", f"---\nupdated: {day}\n---\n# Localday {day}\n".encode())
-    index.refresh(base)
-    cache_inode = (base.root / index.CACHE).stat().st_ino
+        brain.write(f"projects/{day}.md", f"---\nupdated: {day}\n---\n# Localday {day}\n".encode())
+    index.refresh(brain)
+    cache_inode = (brain.root / index.CACHE).stat().st_ino
     for zone, day, end, expected in [
         ("America/New_York", "2026-09-23", "2026-09-24", "2026-09-23T04:00:00.000000Z"),
         ("Europe/Paris", "2026-09-23", "2026-09-24", "2026-09-22T22:00:00.000000Z"),
@@ -82,9 +82,9 @@ def test_note_dates_follow_local_days_without_rebuilding_the_cache(base: Store) 
             """
             import sys
             from pathlib import Path
-            from fkf.models import Query, moment
-            from fkf.retrieve import search
-            from fkf.storage import Store
+            from bf.models import Query, moment
+            from bf.retrieve import search
+            from bf.storage import Store
 
             root, day, end, expected = sys.argv[1:]
             for options in ({"since": moment(day)}, {"changed_since": moment(day)}):
@@ -96,9 +96,9 @@ def test_note_dates_follow_local_days_without_rebuilding_the_cache(base: Store) 
                 assert [item["ref"] for item in reply["items"]] == [f"projects/{day}.md"]
                 assert reply["items"][0]["time"] == expected
             """,
-            str(base.root),
+            str(brain.root),
             day,
             end,
             expected,
         )
-    assert (base.root / index.CACHE).stat().st_ino == cache_inode
+    assert (brain.root / index.CACHE).stat().st_ino == cache_inode

@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter
 
-from fkf.config import register
-from fkf.models import Record, encode
-from fkf.storage import Store
+from bf.config import register
+from bf.models import Record, encode
+from bf.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
 _FAKE = '''#!{python}
@@ -69,7 +69,7 @@ class Provider:
             "LANG": "C.UTF-8",
         }
         return subprocess.run(  # noqa: S603 - the subject is the adapter's own process boundary
-            [sys.executable, str(ROOT / "examples" / "sources" / adapter), *arguments],
+            [sys.executable, str(ROOT / "examples" / "sensors" / adapter), *arguments],
             env=env,
             capture_output=True,
             text=True,
@@ -98,7 +98,7 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_STATE_HOME", str(home / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
-    monkeypatch.delenv("FKF_BASE", raising=False)
+    monkeypatch.delenv("BF_BRAIN", raising=False)
     monkeypatch.chdir(tmp_path)
     for key in tuple(os.environ):
         if key.startswith("GIT_"):
@@ -129,20 +129,20 @@ Provider retention cannot guarantee historical evidence, so the team keeps durab
 
 def records_file(store: Store, source: str, month: str, records: list[Record]) -> None:
     store.write(
-        f"records/{source}/{month}.jsonl", b"".join(encode(r.model_dump(exclude_defaults=True)) for r in records)
+        f"memories/{source}/{month}.jsonl", b"".join(encode(r.model_dump(exclude_defaults=True)) for r in records)
     )
 
 
 @pytest.fixture
-def base(tmp_path: Path) -> Store:
-    """A registered, collect-trusted base with one project note, one wiki concept and two records."""
-    root = tmp_path / "base"
+def brain(tmp_path: Path) -> Store:
+    """A registered, collect-trusted brain with one project note, one concept and two records."""
+    root = tmp_path / "brain"
     root.mkdir()
     store = Store(root)
-    store.write("fkf.yaml", b"version: 2\nname: fixture\nsources: {}\n")
+    store.write("bf.yaml", b"version: 3\nname: fixture\nsensors: {}\n")
     store.write("projects/offline.md", PROJECT)
     store.write(
-        "wiki/evidence.md",
+        "concepts/evidence.md",
         b"---\ntype: concept\nstatus: stable\n---\n\n# Durable evidence\n\nOriginals outlive providers.\n",
     )
     records_file(

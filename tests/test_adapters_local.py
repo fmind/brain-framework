@@ -8,10 +8,10 @@ import subprocess
 from pathlib import Path
 from typing import cast
 
+from bf.models import Query
+from bf.retrieve import search
+from bf.storage import Store
 from conftest import Provider, records_file
-from fkf.models import Query
-from fkf.retrieve import search
-from fkf.storage import Store
 
 PAGE_ONE = {
     "kind": "calendar#events",
@@ -126,7 +126,7 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
 
 
 def test_people_and_repository_identities_join_across_providers(
-    provider: Provider, tmp_path: Path, base: Store
+    provider: Provider, tmp_path: Path, brain: Store
 ) -> None:
     root = tmp_path / "code"
     (root / "project/.git").mkdir(parents=True)
@@ -163,7 +163,7 @@ def test_people_and_repository_identities_join_across_providers(
     )
     events = provider.records("google-calendar.py", "primary", "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     for source, records in [("git", commits), ("calendar", events)]:
-        records_file(base, source, "undated", records)
-    result = search([base], Query(text="person:email/owner@fmind.dev"))
+        records_file(brain, source, "undated", records)
+    result = search([brain], Query(text="person:email/owner@fmind.dev"))
     items = cast("list[dict[str, object]]", result["items"])
     assert {item["source"] for item in items} == {"git", "calendar"}

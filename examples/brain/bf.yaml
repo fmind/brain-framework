@@ -1,0 +1,7 @@
+# https://fmind.github.io/brain-framework/
+version: 3
+name: example
+sensors:
+  demo:
+    command: [sensors/demo.py, "{{start}}", "{{end}}"]
+    refresh: 3600

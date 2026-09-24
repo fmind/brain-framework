@@ -15,7 +15,7 @@ from conftest import ROOT
 @pytest.mark.parametrize("adapter", ["google-calendar.py", "google-drive-folders.py", "git-history.py"])
 @pytest.mark.parametrize("mode", ["overflow", "timeout"])
 def test_provider_output_is_bounded_and_child_is_reaped(adapter: str, mode: str, tmp_path: Path) -> None:
-    run = runpy.run_path(str(ROOT / "examples/sources" / adapter))["run"]
+    run = runpy.run_path(str(ROOT / "examples/sensors" / adapter))["run"]
     pid = tmp_path / "pid"
     producer = tmp_path / "producer.py"
     producer.write_text(

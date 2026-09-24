@@ -1,8 +1,8 @@
 # https://zensical.org/docs/setup/basics/
 [project]
-site_name = "fkf"
-site_url = "https://fmind.github.io/fkf/"
-site_description = "Owned knowledge for people and their agents."
+site_name = "Brain Framework"
+site_url = "https://fmind.github.io/brain-framework/"
+site_description = "Plain-file brains for people and their agents."
 site_author = "Médéric Hurier"
 copyright = "Copyright &copy; 2026 Médéric Hurier (Fmind)."
 docs_dir = "docs"
@@ -13,9 +13,9 @@ extra_javascript = ["javascripts/accessibility.js"]
 nav = [
   { "Overview" = "docs/index.md" },
   { "Getting started" = "docs/getting-started.md" },
-  { "Understand FKF" = [
-    { "Base layout and knowledge" = "docs/base.md" },
-    { "Collectors" = "docs/sources.md" },
+  { "Understand Brain Framework" = [
+    { "Brain layout and knowledge" = "docs/brain.md" },
+    { "Sensors" = "docs/sensors.md" },
     { "Search and read" = "docs/search.md" },
   ] },
   { "Reference" = [
@@ -49,8 +49,8 @@ features = [
 
 [[project.extra.social]]
 icon = "lucide/git-branch"
-link = "https://github.com/fmind/fkf"
-name = "FKF on GitHub"
+link = "https://github.com/fmind/brain-framework"
+name = "Brain Framework on GitHub"
 
 [project.markdown_extensions]
 attr_list = {}

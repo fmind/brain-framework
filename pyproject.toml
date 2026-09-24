@@ -1,8 +1,8 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
-name = "fkf"
-version = "8.2.2"
-description = "Owned knowledge for people and their agents: Markdown notes, collected records, offline search"
+name = "brain-framework"
+version = "9.0.0"
+description = "Plain-file brains for people and their agents"
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
@@ -27,16 +27,19 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://fmind.github.io/fkf/"
-Issues = "https://github.com/fmind/fkf/issues"
-Repository = "https://github.com/fmind/fkf"
+Documentation = "https://fmind.github.io/brain-framework/"
+Issues = "https://github.com/fmind/brain-framework/issues"
+Repository = "https://github.com/fmind/brain-framework"
 
 [project.scripts]
-fkf = "fkf:main"
+bf = "bf:main"
 
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "bf"
 
 [dependency-groups]
 dev = [
@@ -93,14 +96,14 @@ select = [
   "W",
 ]
 ignore = [
-  "ASYNC240", # FKF performs bounded local filesystem work from async MCP handlers.
+  "ASYNC240", # Brain Framework performs bounded local filesystem work from async MCP handlers.
   "E501", # Long CLI help and schema descriptions are clearer as one string.
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"examples/sources/**" = [
+"examples/sensors/**" = [
   "S603", # Adapters invoke provider CLIs with literal argv lists; no shell is involved.
-  "S607", # Provider CLIs are resolved by bare name on the PATH FKF sanitizes.
+  "S607", # Provider CLIs are resolved by bare name on the PATH Brain Framework sanitizes.
   "T201", # Adapters print exactly one JSON array to stdout.
 ]
 "tests/**" = [
@@ -119,7 +122,7 @@ xfail_strict = true
 
 [tool.coverage.run]
 branch = true
-source = ["fkf"]
+source = ["bf"]
 
 [tool.coverage.report]
 show_missing = true
