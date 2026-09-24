@@ -75,10 +75,28 @@ run = [
   "uv run zensical build --clean --strict",
   '''
 uv run python - <<'PY'
+from html.parser import HTMLParser
 from pathlib import Path
+
+class SkipLinks(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids = set()
+        self.targets = []
+        self.focusable = set()
+
+    def handle_starttag(self, tag, attributes):
+        attributes = dict(attributes)
+        if attributes.get("id"):
+            self.ids.add(attributes["id"])
+            if attributes.get("tabindex") == "-1":
+                self.focusable.add(attributes["id"])
+        if tag == "a" and "md-skip" in attributes.get("class", "").split():
+            self.targets.append(attributes.get("href", "").removeprefix("#"))
 
 site = Path("site")
 expected_pages = {
+    "404.html",
     "docs/brain/index.html",
     "docs/commands/index.html",
     "docs/getting-started/index.html",
@@ -98,7 +116,7 @@ required_assets = {
     "third-party/zensical-0.0.59-LICENSE.txt",
     "third-party/zensical-javascript-LICENSE.txt",
 }
-actual_pages = {path.relative_to(site).as_posix() for path in site.rglob("index.html")}
+actual_pages = {path.relative_to(site).as_posix() for path in site.rglob("*.html")}
 missing_assets = sorted(relative for relative in required_assets if not (site / relative).is_file())
 if actual_pages != expected_pages or missing_assets:
     missing_pages = sorted(expected_pages - actual_pages)
@@ -108,6 +126,15 @@ if actual_pages != expected_pages or missing_assets:
         f"missing_pages={missing_pages}, unexpected_pages={unexpected_pages}, "
         f"missing_assets={missing_assets}"
     )
+missing_skip_targets = []
+for relative in sorted(expected_pages):
+    page = SkipLinks()
+    page.feed((site / relative).read_text())
+    missing_skip_targets.extend(f"{relative}#{target}" for target in page.targets if target not in page.ids)
+    if relative == "404.html" and (page.targets != ["__skip"] or "__skip" not in page.focusable):
+        raise SystemExit("404 page must provide a focusable skip-navigation target")
+if missing_skip_targets:
+    raise SystemExit(f"documentation skip targets missing: {missing_skip_targets}")
 PY
 ''',
   '''

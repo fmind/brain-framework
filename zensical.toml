@@ -32,6 +32,7 @@ nav = [
 ]
 
 [project.theme]
+custom_dir = "overrides"
 language = "en"
 logo = "fmind-logo.webp"
 favicon = "fmind-logo.webp"
