@@ -16,6 +16,24 @@ def test_a_clean_brain_is_valid(brain: Store) -> None:
     assert validate(brain) == {"valid": True, "notes": 2, "records": 2, "problems": []}
 
 
+def test_action_folders_are_dated_and_resumable(brain: Store) -> None:
+    brain.write("actions/README.md", b"# Actions\n")
+    brain.write("actions/2026-09-24_pilot-review/ACTION.md", b"# Pilot\n")
+    brain.write("actions/2026-09-24_pilot-review/outputs/answer.md", b"# Answer\n")
+    assert validate(brain)["valid"]
+    for folder in ("2026-09-24-hyphen", "undated", "2026-02-30_bad-date", "2026-09-24_Upper"):
+        brain.write(f"actions/{folder}/ACTION.md", b"# Misnamed\n")
+    brain.write("actions/2026-09-24_no-action/inputs/request.md", b"# Request\n")
+    problems = cast("list[str]", validate(brain)["problems"])
+    assert problems == [
+        "actions/2026-02-30_bad-date: name action folders YYYY-MM-DD_slug (lowercase slug, hyphens)",
+        "actions/2026-09-24-hyphen: name action folders YYYY-MM-DD_slug (lowercase slug, hyphens)",
+        "actions/2026-09-24_Upper: name action folders YYYY-MM-DD_slug (lowercase slug, hyphens)",
+        "actions/2026-09-24_no-action: missing ACTION.md",
+        "actions/undated: name action folders YYYY-MM-DD_slug (lowercase slug, hyphens)",
+    ]
+
+
 def test_problems_are_collected_not_fail_fast(brain: Store) -> None:
     brain.write(
         "projects/links.md",

@@ -33,7 +33,7 @@ Brain Framework is one typed Python package and one console command. Its purpose
 | update.py      | Collect due sensors of trusted brains, then refresh caches.                  |
 | validate.py    | Whole-brain offline checks.                                                  |
 | evaluate.py    | Owner-written retrieval cases.                                               |
-| health.py      | Source coverage and freshness from configuration and private run state.      |
+| health.py      | Source coverage, freshness and the status report from private run state.     |
 | usage.py       | Local usage counts in private state: operation and result count, no query.   |
 | cli.py, mcp.py | Thin public adapters.                                                        |
 

@@ -11,7 +11,7 @@ Brain Framework is one Python package and one command; it needs no model, hosted
 ## Try it
 
 ```bash
-uv tool install --python 3.14 'brain-framework==9.1.0'
+uv tool install --python 3.14 'brain-framework==9.2.0'
 bf init ~/knowledge          # creates and registers a brain named knowledge
 cd ~/knowledge               # keep this walkthrough in that brain
 bf search welcome            # find the note created by init
@@ -21,7 +21,7 @@ bf validate                  # check notes, links and records
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first; it supplies Python 3.14 if needed. Brain Framework runs on Linux and macOS.
 
-Start with one project note. Save decisions, their reasons and the next action; search notices edits automatically. Add a sensor when you need recurring evidence from Git, mail, a calendar or another source. The [getting-started guide](docs/docs/getting-started.md) walks through a searchable decision, and the [example brain](examples/brain/README.md) demonstrates collection without credentials.
+Start with one project note. Save decisions, their reasons and the next action; search notices edits automatically. Add a sensor when you need recurring evidence from Git, mail, a calendar or another source. The [getting-started guide](https://fmind.github.io/brain-framework/docs/getting-started/) walks through a searchable decision, and the [example brain](https://github.com/fmind/brain-framework/tree/main/examples/brain) demonstrates collection without credentials.
 
 ## Why plain files?
 
@@ -75,13 +75,13 @@ Each part has one job. Your editor writes Markdown, provider CLIs handle authent
 
 Start a team pilot with a private Git repository, one real project note and a few questions in `queries.yaml`. Teammates clone it, run `bf register PATH`, and can search its decisions immediately. Use `bf eval` to check that the questions still return the intended evidence as the brain evolves.
 
-For the first pilot, pick a decision someone currently has to ask a colleague to explain. Write the decision, its reason and the next action, then have a teammate find the answer from a fresh clone. Success means they can read the evidence and act on it. The [team walkthrough](docs/docs/getting-started.md#check-the-answers-your-team-needs) includes runnable retrieval cases; no sensor or model setup is needed.
+For the first pilot, pick a decision someone currently has to ask a colleague to explain. Write the decision, its reason and the next action, then have a teammate find the answer from a fresh clone. Success means they can read the evidence and act on it. The [team walkthrough](https://fmind.github.io/brain-framework/docs/getting-started/#check-the-answers-your-team-needs) includes runnable retrieval cases; no sensor or model setup is needed.
 
-Keep personal mail and laptop history in a separate private brain. Outside either brain, `bf search` covers both and labels each result; inside one, it searches only that brain. Use `--brain NAME` to select explicitly. A cloned brain never runs its sensors until you trust it with `bf register PATH --collect`. Promote personal knowledge as reviewed summaries with links teammates can access. Add team-scoped CI collection when the notes need it; the [team brains guide](docs/docs/team.md) covers naming, collection trust, CI collection and review.
+Keep personal mail and laptop history in a separate private brain. Outside either brain, `bf search` covers both and labels each result; inside one, it searches only that brain. Use `--brain NAME` to select explicitly. A cloned brain never runs its sensors until you trust it with `bf register PATH --collect`. Promote personal knowledge as reviewed summaries with links teammates can access. Add team-scoped CI collection when the notes need it; the [team brains guide](https://fmind.github.io/brain-framework/docs/team/) covers naming, collection trust, CI collection and review.
 
 ## Agents
 
-Agents use the CLI: the [bf-use skill](skills/bf-use/SKILL.md) teaches search and read, [bf-learn](skills/bf-learn/SKILL.md) keeps notes current, and [bf-maintain](skills/bf-maintain/SKILL.md) covers collection and schedules. Follow the [skill installation guide](skills/README.md); skills are separate from the Python package. `bf mcp` exposes the same `search` and `read` for hosts that prefer tools. Retrieved content is untrusted evidence, never instructions.
+Agents use the CLI: the [bf-use skill](https://github.com/fmind/brain-framework/blob/main/skills/bf-use/SKILL.md) teaches search and read, [bf-learn](https://github.com/fmind/brain-framework/blob/main/skills/bf-learn/SKILL.md) keeps notes current, and [bf-maintain](https://github.com/fmind/brain-framework/blob/main/skills/bf-maintain/SKILL.md) covers collection and schedules. Follow the [skill installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md); skills are separate from the Python package. `bf mcp` exposes the same `search` and `read` for hosts that prefer tools. Retrieved content is untrusted evidence, never instructions.
 
 ## Guarantees
 
@@ -94,7 +94,7 @@ Agents use the CLI: the [bf-use skill](skills/bf-use/SKILL.md) teaches search an
 
 Brain Framework fits people and teams who want editable notes, attributable evidence and portable agent context. Search is lexical: it handles words, explicit identities and dates, but does not infer meaning or generate answers. Agents or people interpret the results. Collection freshness describes completed runs, not a guarantee that every upstream item is current.
 
-A brain is a context boundary, not an access-control system. Brain Framework does not encrypt files, enforce per-note permissions or sandbox trusted sensors. Use separate brains and repository permissions for different audiences, and encrypted backups for private evidence. An agent host may send retrieved content to its model provider; offline retrieval describes Brain Framework itself. See the [security model](docs/docs/privacy.md) before sharing a brain.
+A brain is a context boundary, not an access-control system. Brain Framework does not encrypt files, enforce per-note permissions or sandbox trusted sensors. Use separate brains and repository permissions for different audiences, and encrypted backups for private evidence. An agent host may send retrieved content to its model provider; offline retrieval describes Brain Framework itself. See the [security model](https://fmind.github.io/brain-framework/docs/privacy/) before sharing a brain.
 
 ## Development
 
@@ -104,6 +104,6 @@ Use `uv run bf` from the checkout to exercise changes. Run the complete gate bef
 mise run all
 ```
 
-The gate formats, lints, type-checks, scans, runs hermetic tests with an 85% branch-coverage floor, builds the documentation and installs both distributions. See [AGENTS.md](AGENTS.md), [contributing](CONTRIBUTING.md), the [documentation](docs/docs/index.md), the [sensor examples](examples/sensors/README.md) and the [runnable example brain](examples/brain/README.md).
+The gate formats, lints, type-checks, scans, runs hermetic tests with an 85% branch-coverage floor, builds the documentation and installs both distributions. See [AGENTS.md](https://github.com/fmind/brain-framework/blob/main/AGENTS.md), [contributing](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md), the [documentation](https://fmind.github.io/brain-framework/docs/), the [sensor examples](https://github.com/fmind/brain-framework/tree/main/examples/sensors) and the [runnable example brain](https://github.com/fmind/brain-framework/tree/main/examples/brain).
 
-MIT. Runtime dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+MIT. Runtime dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md).

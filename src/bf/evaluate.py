@@ -8,9 +8,12 @@ from pydantic import Field, ValidationError
 
 from bf.config import yaml_object
 from bf.markdown import authored, split_ref
-from bf.models import Error, Model, Query, Status, explain, moment
+from bf.models import Error, Model, Query, Status, explain
 from bf.retrieve import search
 from bf.storage import Store
+
+# Case fields passed unchanged to Query; `query` becomes its text.
+_SEARCH = {"since", "until", "source", "type", "status", "recent", "changed_since", "current", "limit"}
 
 
 class Case(Model):
@@ -45,24 +48,18 @@ def _matches(expected: str, refs: list[str]) -> bool:
 def evaluate(store: Store, path: str = "queries.yaml") -> dict[str, object]:
     try:
         suite = Suite.model_validate(yaml_object(store.read(path, 1 << 20)))
+    except FileNotFoundError:
+        raise Error(f"{path} does not exist; add retrieval cases before running bf eval") from None
     except ValidationError as error:
         raise Error(f"invalid {path}: " + explain(error)) from error
     results = []
     for case in suite.cases:
         if case.empty == bool(case.expect or case.text):
             raise Error(f"case {case.name}: use expect/text, or empty: true")
-        query = Query(
-            text=case.query,
-            since=moment(case.since) if case.since else "",
-            until=moment(case.until) if case.until else "",
-            source=case.source,
-            type=case.type,
-            status=case.status,
-            limit=case.limit,
-            recent=case.recent,
-            changed_since=moment(case.changed_since) if case.changed_since else "",
-            current=case.current,
-        )
+        try:
+            query = Query.model_validate({"text": case.query, **case.model_dump(include=_SEARCH)})
+        except ValidationError as error:
+            raise Error(f"case {case.name}: " + explain(error)) from error
         reply = search([store], query, counted=False)
         items = cast("list[dict[str, object]]", reply["items"])
         refs = [str(item["ref"]) for item in items]

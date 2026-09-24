@@ -23,17 +23,7 @@ def test_initialization_uses_only_the_final_layout_and_private_namespaces(tmp_pa
     result = CliRunner().invoke(app, ["init", str(target), "--name", "fresh"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["brain"] == "fresh"
-    assert {item.name for item in target.iterdir() if item.is_dir()} == {
-        "projects",
-        "actions",
-        "concepts",
-        "memories",
-        "sensors",
-        "routines",
-        "settings",
-        "skills",
-        "tests",
-    }
+    assert {item.name for item in target.iterdir() if item.is_dir()} == {"projects", "actions", "concepts"}
     store = Store(target)
     assert load(store).model_dump() == {"version": 3, "name": "fresh", "sensors": {}}
     assert user_path().parts[-2:] == ("bf", "config.yaml")
@@ -42,6 +32,21 @@ def test_initialization_uses_only_the_final_layout_and_private_namespaces(tmp_pa
     assert result.exit_code == 0, result.output
     assert (target / ".bf/index.sqlite").is_file()
     assert ".fkf/" not in store.read(".gitignore").decode()
+    full = tmp_path / "full-brain"
+    result = CliRunner().invoke(app, ["init", str(full), "--name", "full", "--full"])
+    assert result.exit_code == 0, result.output
+    assert {item.name for item in full.iterdir() if item.is_dir()} == {
+        "projects",
+        "actions",
+        "concepts",
+        "memories",
+        "assets",
+        "sensors",
+        "routines",
+        "settings",
+        "skills",
+        "tests",
+    }
 
 
 def test_prior_schema_registry_and_placeholder_are_rejected() -> None:

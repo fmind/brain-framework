@@ -333,6 +333,16 @@ def test_registry_selection_and_collection_trust(brain: Store, tmp_path: Path, m
         user_config()
 
 
+def test_registration_keeps_the_owner_header(brain: Store) -> None:
+    header = "# Machine-local registry; use bf register.\n# Second line\n"
+    user_path().write_text(header + user_path().read_text().split("\n", 1)[1] + "# trailing note\n")
+    register(brain, collect=False)
+    written = user_path().read_text()
+    assert written.startswith(header + "brains:\n")
+    assert "trailing note" not in written
+    assert not user_config().brains["fixture"].collect
+
+
 def test_nothing_selected_is_actionable(tmp_path: Path) -> None:
     os.chdir(tmp_path)
     with pytest.raises(Error, match="bf register"):

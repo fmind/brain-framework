@@ -9,7 +9,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import ValidationError
 
 from bf import __version__
-from bf.models import Error, Query, Status, encode, explain, moment
+from bf.models import Error, Query, Status, encode, explain
 from bf.retrieve import read, search
 from bf.storage import Store
 
@@ -57,14 +57,14 @@ def server(stores: list[Store]) -> MCPServer:
                 stores,
                 Query(
                     text=query,
-                    since=moment(since) if since else "",
-                    until=moment(until) if until else "",
+                    since=since,
+                    until=until,
                     source=source,
                     type=type,
                     status=status,
                     limit=limit,
                     recent=recent,
-                    changed_since=moment(changed_since) if changed_since else "",
+                    changed_since=changed_since,
                     current=current,
                 ),
             )

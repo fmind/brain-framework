@@ -3,13 +3,33 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
+from datetime import date
 
 from bf import records
 from bf.config import load
 from bf.markdown import Note, authored, broken, note, scheme, split_ref, validate_concept
 from bf.models import AUTHORED, Error
 from bf.storage import Store, relative
+
+_ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def _actions(files: list[str]) -> list[str]:
+    """Each folder below actions/ is one dated action with its ACTION.md; loose files are allowed."""
+    problems = []
+    for folder in sorted({name.split("/")[1] for name in files if name.count("/") >= 2}):
+        try:
+            if not _ACTION.fullmatch(folder):
+                raise ValueError
+            date.fromisoformat(folder[:10])
+        except ValueError:
+            problems.append(f"actions/{folder}: name action folders YYYY-MM-DD_slug (lowercase slug, hyphens)")
+            continue
+        if f"actions/{folder}/ACTION.md" not in files:
+            problems.append(f"actions/{folder}: missing ACTION.md")
+    return problems
 
 
 def validate(store: Store) -> dict[str, object]:
@@ -41,8 +61,10 @@ def _validate(store: Store) -> dict[str, object]:
             problems.append(str(error))
         except OSError:
             problems.append(f"{name}: inaccessible file; check permissions")
+    listed = {directory: store.files(directory) for directory in AUTHORED}
+    problems.extend(_actions(listed["actions"]))
     notes: list[Note] = []
-    for name in (n for directory in AUTHORED for n in store.files(directory) if authored(n)):
+    for name in (n for directory in AUTHORED for n in listed[directory] if authored(n)):
         try:
             data = store.read(name, 4 << 20)
             notes.append(note(name, data))

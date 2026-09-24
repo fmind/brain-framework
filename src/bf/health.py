@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
-from bf.collect import state
+from bf import index, usage
+from bf.collect import log_path, state
 from bf.config import load, may_collect
 from bf.storage import Store
 
@@ -46,3 +48,59 @@ def source_health(
                 )
         result[name] = item
     return result
+
+
+def report(stores: list[Store], now: datetime | None = None) -> dict[str, object]:
+    """Per brain: cache, notes, records, source freshness, errors, logs, notes due for review and usage."""
+    now = now or datetime.now(UTC)
+    brains, healthy = [], True
+    for store in stores:
+        config, history, summary, trusted = load(store), state(store), index.status(store), may_collect(store)
+        counts = cast("dict[str, dict[str, object]]", summary.pop("sources"))
+        coverage = source_health(store, counts, now=now)
+        sources: dict[str, dict[str, object]] = {}
+        for name in sorted({*config.sensors, *counts}):
+            settings = config.sensors.get(name)
+            run = history.get(name, {})
+            counters = {key: run[key] for key in ("records", "added", "updated", "unchanged", "removed") if key in run}
+            entry: dict[str, object] = {
+                **{key: value for key, value in run.items() if key not in counters},
+                **counts.get(name, {"records": 0}),
+                **coverage[name],
+            }
+            if counters:
+                entry["last_run"] = counters
+            if settings is None:
+                entry["configured"] = False
+            else:
+                entry["enabled"] = settings.enabled
+                if settings.enabled and settings.refresh and trusted:
+                    entry["stale"] = coverage[name]["freshness"] in {"never", "stale"}
+                    healthy &= not entry["stale"]
+                if entry.get("error"):
+                    entry["log"] = str(log_path(store, name))
+                    healthy &= not settings.enabled
+            sources[name] = {key: value for key, value in entry.items() if value != ""}
+        healthy &= not summary["problems"] and summary["index"] == "ready"
+        brains.append(
+            {
+                "brain": config.name,
+                "path": str(store.root),
+                "collect": trusted,
+                **summary,
+                "sources": sources,
+                "coverage": {
+                    kind: {
+                        "sources": sum(value["state"] == kind for value in coverage.values()),
+                        "records": sum(
+                            int(cast("int", counts.get(name, {}).get("records", 0)))
+                            for name, value in coverage.items()
+                            if value["state"] == kind
+                        ),
+                    }
+                    for kind in ("active", "disabled", "historical")
+                },
+                "usage": usage.summary(store),
+            }
+        )
+    return {"healthy": healthy, "brains": brains}

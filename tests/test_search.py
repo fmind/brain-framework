@@ -611,6 +611,16 @@ def test_search_waits_if_a_rebuild_replaces_the_checked_generation(
     assert "problems" not in reply
 
 
+def test_evaluation_names_missing_retrieval_cases(brain: Store) -> None:
+    from bf.evaluate import evaluate
+
+    with pytest.raises(Error, match=r"queries\.yaml does not exist"):
+        evaluate(brain)
+    brain.write("queries.yaml", b"version: 3\ncases:\n  - name: later\n    since: soon\n    empty: true\n")
+    with pytest.raises(Error, match="case later: since"):
+        evaluate(brain)
+
+
 def test_evaluation_rejects_incomplete_empty_answers(brain: Store) -> None:
     from bf.evaluate import evaluate
 

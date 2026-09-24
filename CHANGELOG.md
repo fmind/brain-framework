@@ -2,6 +2,30 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v9.2.0](https://github.com/fmind/brain-framework/releases/tag/v9.2.0) - 2026-09-24
+
+Brain Framework 9.2 starts new brains smaller, checks action folders and repairs the PyPI project page. The brain format is unchanged: existing version 3 brains need no conversion.
+
+### Added
+
+- `bf init --full` also creates the optional versioned folders: `memories/`, `assets/`, `sensors/`, `routines/`, `settings/`, `skills/` and `tests/`.
+- `bf validate` reports action folders that are not named `YYYY-MM-DD_slug` or lack `ACTION.md`. Rename such folders with `git mv`; validation then reports any links to update.
+- Document the optional brain folders: versioned `assets/` for media that notes link to, and the unversioned `inputs/`, `originals/` and `logs/` that new brains already ignore.
+
+### Changed
+
+- `bf init` creates only `projects/`, `concepts/` and `actions/`; other folders appear when first needed.
+- `bf register` keeps the registry's leading comment lines when it rewrites the file.
+- Search, MCP and retrieval cases resolve relative times in one place. An invalid search time exits 2 as invalid input, and an invalid retrieval case names the case.
+- `bf status` builds its report in the health service; the CLI stays a thin adapter.
+- PyPI publication accepts deployments only from `v*` tags.
+
+### Fixed
+
+- README links are absolute, so the PyPI project page reaches the documentation, skills and examples; a test keeps every link resolvable offline.
+- `bf eval` names a missing `queries.yaml` instead of reporting an inaccessible file.
+- Claude Code discovers the repository's `bf-contribute` skill through `.claude/skills`.
+
 ## [v9.1.0](https://github.com/fmind/brain-framework/releases/tag/v9.1.0) - 2026-09-24
 
 Brain Framework 9.1 prepares team deployments. The brain format is unchanged: existing version 3 brains need no conversion.

@@ -266,7 +266,11 @@ class Query(Model):
     @field_validator("since", "until", "changed_since")
     @classmethod
     def instant(cls, value: str) -> str:
-        return timestamp(value) if value else ""
+        """Every adapter passes user times through; relative ones resolve when the query is built."""
+        try:
+            return moment(value) if value else ""
+        except Error as error:
+            raise ValueError(str(error)) from None
 
     @model_validator(mode="after")
     def bounded(self) -> Query:

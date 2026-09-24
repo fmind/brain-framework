@@ -61,6 +61,10 @@ def test_revision_times_and_source_filters_are_strict() -> None:
     assert record.observed == "2026-09-23T12:05:00.000000Z"
     assert Query(current=True).current
     assert Query(changed_since="2026-09-22T00:00:00Z").changed_since == "2026-09-22T00:00:00.000000Z"
+    # Adapters pass user times through; the query resolves relative ones.
+    assert Query(since="7d").since < Query(since="now").since
+    with pytest.raises(ValidationError, match="times accept"):
+        Query(since="soon")
     with pytest.raises(ValidationError):
         Record(id="document", title="Decision", attributes={"updated": "2026-09-23"})
 

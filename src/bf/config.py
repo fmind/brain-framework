@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from itertools import takewhile
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +13,8 @@ from pydantic import ValidationError
 
 from bf.models import Config, Error, Registration, UserConfig, explain
 from bf.storage import Store, writer
+
+_HEADER = "# https://fmind.github.io/brain-framework/\n"
 
 
 class _Loader(yaml.SafeLoader):
@@ -71,18 +74,25 @@ def user_path() -> Path:
     return Path(root).expanduser() / "bf" / "config.yaml"
 
 
-def user_config() -> UserConfig:
-    """The optional user registry; a missing file means no registered brains."""
+def _registry() -> tuple[UserConfig, str]:
+    """The optional user registry and its leading comment block; a missing file registers no brain."""
     path = user_path()
     try:
         with path.open("rb") as stream:
             data = stream.read((1 << 20) + 1)
     except FileNotFoundError:
-        return UserConfig()
+        return UserConfig(), ""
     try:
-        return UserConfig.model_validate(yaml_object(data))
+        registry = UserConfig.model_validate(yaml_object(data))
     except ValidationError as error:
         raise Error(f"invalid {path}: " + explain(error)) from error
+    # yaml_object has already rejected invalid UTF-8.
+    header = "".join(takewhile(lambda line: line.startswith("#"), data.decode().splitlines(keepends=True)))
+    return registry, header if not header or header.endswith("\n") else header + "\n"
+
+
+def user_config() -> UserConfig:
+    return _registry()[0]
 
 
 def register(store: Store, *, collect: bool) -> dict[str, object]:
@@ -93,7 +103,7 @@ def register(store: Store, *, collect: bool) -> dict[str, object]:
     registry_store = Store(path.parent)
     # Registration is one shared read/modify/write transaction, independent of each brain's lock.
     with writer(registry_store, wait=30):
-        registry = user_config()
+        registry, header = _registry()
         for other, entry in registry.brains.items():
             if other != name and Path(entry.path).expanduser().resolve() == store.root:
                 raise Error(f"this directory is already registered as {other}")
@@ -104,7 +114,8 @@ def register(store: Store, *, collect: bool) -> dict[str, object]:
         document = {"brains": {key: value.model_dump() for key, value in sorted(registry.brains.items())}}
         registry_store.write(
             path.name,
-            ("# https://fmind.github.io/brain-framework/\n" + yaml.safe_dump(document, sort_keys=True)).encode(),
+            # Keep the owner's leading comments; inline comments do not survive the rewrite.
+            ((header or _HEADER) + yaml.safe_dump(document, sort_keys=True)).encode(),
         )
     return {"brain": name, "path": str(store.root), "collect": collect, "config": str(path)}
 
