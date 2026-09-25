@@ -11,4 +11,4 @@ State the useful knowledge and its limits. Add `sources` mappings with a `resour
 
 ## Related knowledge
 
-Link related concepts with ordinary relative Markdown links.
+Use ordinary relative links for navigation, or a declared typed BF link for a relationship: `[Related](bf://BRAIN/concepts/ID?rel=related-to)`. Replace placeholders with verified identities, declare the role in `bf.yaml`, and use `entity` only when this note explicitly owns that identity.

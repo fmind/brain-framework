@@ -29,7 +29,7 @@ def invoke(*args: str, code: int = 0) -> dict:
 def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
     assert CliRunner().invoke(app, ["--help"]).exit_code == 0
     target = tmp_path / "new"
-    created = invoke("init", str(target), "--name", "fresh")
+    created = invoke("init", str(target), "--name", "fresh", "--collect")
     assert created["collect"] is True
     assert user_config().brains["fresh"].path == str(target)
     assert CliRunner().invoke(app, ["init", str(target)]).exit_code != 0
@@ -54,16 +54,16 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
         "freshness": "unknown",
     }
     brain.write(
-        "queries.yaml",
-        b"version: 3\ncases:\n  - name: decision\n    query: retention decision\n    expect: [projects/offline.md]\n",
+        "evals/retrieval.yaml",
+        b"version: 4\ncases:\n  - name: decision\n    query: retention decision\n    expect: [projects/offline.md]\n",
     )
     assert invoke("eval", "--brain", "fixture")["passed"]
-    brain.write("queries.yaml", b"version: 3\ncases:\n  - name: missing\n    query: lunch\n    empty: true\n")
+    brain.write("evals/retrieval.yaml", b"version: 4\ncases:\n  - name: missing\n    query: lunch\n    empty: true\n")
     failed = invoke("eval", "--brain", "fixture", code=1)
     assert failed["cases"][0]["returned"] == ["meetings:lunch"]
     other = tmp_path / "clone"
     other.mkdir()
-    (other / "bf.yaml").write_text("version: 3\nname: clone\n")
+    (other / "bf.yaml").write_text("version: 4\nname: clone\n")
     assert invoke("register", str(other))["collect"] is False
     assert invoke("update", "--brain", "clone", "--dry-run")["brains"][0]["skipped"]
     brain.write("projects/bad.md", b"# Bad [x](missing.md)\n")
@@ -72,10 +72,10 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
 
 
 def test_status_check_fails_on_stale_trusted_sources(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 3\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n")
+    brain.write("bf.yaml", b"version: 4\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n")
     report = invoke("status", "--brain", "fixture", "--check", code=1)
     assert report["brains"][0]["sources"]["mail"]["stale"] is True
-    brain.write("bf.yaml", b"version: 3\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n")
+    brain.write("bf.yaml", b"version: 4\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n")
     assert invoke("collect", "mail", "--brain", "fixture", "--since", "2d", code=1) == {}
     entry = invoke("status", "--brain", "fixture", code=0)["brains"][0]["sources"]["mail"]
     assert "status 3" in entry["error"]
@@ -142,14 +142,14 @@ def test_initialization_names_team_brains_and_keeps_action_inputs_versioned(tmp_
     (clone / ".git").mkdir(parents=True)
     created = invoke("init", str(clone), "--no-collect")
     assert (created["brain"], created["collect"]) == ("team-knowledge", False)
-    assert user_config().brains["team-knowledge"].collect is False
+    assert "team-knowledge" not in user_config().brains
     patterns = [line for line in (clone / ".gitignore").read_text().splitlines() if not line.startswith("#")]
     # Unanchored patterns would also hide actions/*/inputs/ from every clone.
     assert patterns == ["/.bf/", "/logs/", "/memories/", "/originals/", "/inputs/"]
     (clone / "actions/2026-09-24_pilot/inputs").mkdir(parents=True)
     (clone / "actions/2026-09-24_pilot/inputs/request.md").write_text("# Request\n")
     (clone / "actions/2026-09-24_pilot/ACTION.md").write_text("# Pilot\n\n[Request](inputs/request.md)\n")
-    assert invoke("validate", "--brain", "team-knowledge")["valid"]
+    assert invoke("validate", "--brain", str(clone))["valid"]
     assert invoke("init", str(tmp_path / "Team_Knowledge_2"))["brain"] == "team-knowledge-2"
     for target, message in ((tmp_path / "2026", "choose a brain name"), (clone, "freshly cloned")):
         result = CliRunner().invoke(app, ["init", str(target)])

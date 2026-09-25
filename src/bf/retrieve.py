@@ -5,8 +5,8 @@ from __future__ import annotations
 import sqlite3
 from contextlib import suppress
 
-from bf import index, records, usage
-from bf.config import load
+from bf import graph, index, links, records, usage
+from bf.config import load, related
 from bf.health import source_health
 from bf.markdown import authored, section, split_ref
 from bf.models import MAX_REPLY, NOTICE, Error, Query, encode
@@ -21,22 +21,52 @@ def bounded(value: dict[str, object], limit: int = MAX_REPLY) -> dict[str, objec
 
 def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[str, object]:
     """Merge per-brain results: relevance keeps each brain's order, a time window interleaves by time."""
+    stores, scope_problems = related(stores)
     results: list[list[dict[str, object]]] = []
     stale = []
     brains = []
-    problems: list[dict[str, object]] = []
+    problems: list[dict[str, object]] = list(scope_problems)
     last_error: Exception | None = None
     owners: set[tuple[str, str]] = set()
     identity = index.identity(query.text)
+    identities, identity_problems = graph.expand(stores, query.text.strip()) if identity else (set(), [])
+    targets, target_problems = graph.expand(stores, query.target)
+    subjects, subject_problems = graph.expand(stores, query.subject)
+    problems.extend([*identity_problems, *target_problems, *subject_problems])
     for store in stores:
         name = store.root.name
         try:
             config = load(store)
             name = config.name
             with index.database(store) as (connection, state):
+                local_targets = graph.local_refs(connection, targets)
+                local_subjects = graph.local_refs(connection, subjects)
+                local_identities = graph.local_refs(connection, identities)
                 items = index.search(
-                    connection, query, active_sources={n for n, sensor in config.sensors.items() if sensor.enabled}
+                    connection,
+                    query,
+                    active_sources={n for n, sensor in config.sensors.items() if sensor.enabled},
+                    identities=local_identities,
+                    targets=local_targets,
+                    subjects=local_subjects,
                 )
+                for item in items:
+                    item["uri"] = (
+                        links.address(name, str(item["ref"]))
+                        if item["kind"] == "record"
+                        else links.address(name, *split_ref(str(item["ref"])))
+                    )
+                    claims, truncated = (
+                        graph.explanations(
+                            connection, str(item["ref"]), query, local_targets, local_subjects, local_identities
+                        )
+                        if identity or query.target or query.subject
+                        else ([], False)
+                    )
+                    if claims:
+                        item["relations"] = claims
+                    if truncated:
+                        item["relations_truncated"] = True
                 skipped = index.problems(connection)
                 if identity:
                     owners.update((name, ref) for ref in index.identity_owners(connection, query.text))
@@ -55,6 +85,8 @@ def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[s
         if counted:
             usage.note(store, "search", len(items))
         results.append([{"brain": name, **item} for item in items])
+    if not results and scope_problems:
+        raise Error("no unambiguous brain could be searched; check bf.yaml brain references")
     if not results:
         raise Error("no selected brain could be searched; run bf status with --brain for each brain") from last_error
     if identity or query.recent or not query.text.strip():
@@ -110,18 +142,48 @@ def read(stores: list[Store], ref: str, brain: str = "") -> dict[str, object]:
     """Resolve a note path, note section, `source:id` record or explicit identity in exactly one brain."""
     if not ref or len(ref) > 8192:
         raise Error("expected a reference of at most 8192 characters")
-    found = [(store, value) for store in _brain(stores, brain) if (value := _read(store, ref)) is not None]
+    stores, problems = related(stores)
+    selected = _brain(stores, brain)
+    parsed = links.parse(ref)
+    if parsed:
+        selected = _brain(selected, parsed.brain)
+        ref = parsed.identity
+    found = [(store, value) for store in selected if (value := _read(store, ref)) is not None]
     if not found:
         raise Error("reference not found; use bf search to locate it")
     if len(found) > 1:
-        raise Error("reference exists in several brains; pass --brain NAME")
-    reply = bounded({**found[0][1], "notice": NOTICE})
+        raise Error("reference exists in several brains; use a brain-qualified bf:// address")
+    reply = bounded({**found[0][1], "notice": NOTICE, **({"problems": problems} if problems else {})})
     usage.note(found[0][0], "read", 1)
     return reply
 
 
 def _read(store: Store, ref: str) -> dict[str, object] | None:
     name = load(store).name
+    if parsed := links.parse(ref):
+        if parsed.brain != name:
+            return None
+        # BF paths address authored files, source:id records, or explicitly owned entity aliases.
+        if authored(parsed.path) or ":" in parsed.path.split("/")[0]:
+            value = _read(store, parsed.path)
+        else:
+            with index.database(store) as (connection, _state):
+                owners = connection.execute(
+                    "SELECT i.ref FROM names n JOIN items i ON n.item=i.id WHERE n.name=? LIMIT 2",
+                    (links.address(name, parsed.path),),
+                ).fetchall()
+            if len(owners) > 1:
+                raise Error("ambiguous identity; read an exact file ref")
+            value = _read(store, owners[0][0]) if owners else None
+        if value and parsed.fragment:
+            if "text" not in value:
+                raise Error("fragments select Markdown sections, not record fields")
+            value = {
+                **value,
+                "text": section(str(value["ref"]), str(value["text"]).encode(), parsed.fragment),
+                "ref": str(value["ref"]) + "#" + parsed.fragment,
+            }
+        return {**value, "uri": parsed.identity} if value else None
     path, fragment = split_ref(ref)
     if authored(path):
         relative(path)

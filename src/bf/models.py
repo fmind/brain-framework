@@ -134,6 +134,7 @@ class Record(Model):
     links: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
     aliases: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
     attributes: dict[str, JsonValue] = Field(default_factory=dict)
+    fields: dict[Annotated[str, Field(pattern=NAME)], JsonValue] = Field(default_factory=dict)
 
     _clean = field_validator("id", "title")(clean)
     _identities = field_validator("links", "aliases")(identities)
@@ -181,6 +182,8 @@ class Knowledge(BaseModel):
     tags: list[str] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)
     links: list[str] = Field(default_factory=list)
+    entity: Annotated[str, Field(max_length=8192)] = ""
+    fields: dict[Annotated[str, Field(pattern=NAME)], JsonValue] = Field(default_factory=dict)
 
     _identities = field_validator("aliases", "links")(identities)
 
@@ -203,10 +206,80 @@ class Knowledge(BaseModel):
         return value
 
 
+class SchemaField(Model):
+    """A shared meaning; cardinality applies when a sensor maps this field."""
+
+    description: Annotated[str, Field(min_length=1, max_length=4096)]
+    type: Literal["string", "integer", "number", "boolean", "timestamp", "identity"]
+    cardinality: Literal["one", "optional", "many"] = "optional"
+    relation: bool = False
+    examples: Annotated[list[JsonValue], Field(max_length=20)] = Field(default_factory=list)
+
+    def scalar(self, value: JsonValue) -> JsonValue:
+        valid = {
+            "string": isinstance(value, str),
+            "integer": type(value) is int,
+            "number": type(value) in (int, float),
+            "boolean": type(value) is bool,
+            "timestamp": isinstance(value, str),
+            "identity": isinstance(value, str),
+        }[self.type]
+        if not valid:
+            raise ValueError("expected " + self.type)
+        if isinstance(value, str):
+            if len(value) > 8192:
+                raise ValueError("schema value exceeds 8192 characters")
+            clean(value)
+            if self.type == "timestamp":
+                return timestamp(value)
+            if self.type == "identity" and not re.fullmatch(r"[a-z][a-z0-9+.-]*:\S+", value):
+                raise ValueError("expected an explicit namespaced identity")
+        return value
+
+    def normalize(self, value: JsonValue) -> JsonValue:
+        if self.cardinality == "many":
+            if not isinstance(value, list) or len(value) > 1000:
+                raise ValueError("expected a list of at most 1000 scalar values")
+            result: list[JsonValue] = []
+            for item in value:
+                normalized = self.scalar(item)
+                if normalized not in result:
+                    result.append(normalized)
+            return result
+        return self.scalar(value)
+
+    @model_validator(mode="after")
+    def consistent(self) -> SchemaField:
+        if self.relation and self.type != "identity":
+            raise ValueError("relation fields require type: identity")
+        for example in self.examples:
+            self.normalize(example)
+        return self
+
+
+class Mapping(Model):
+    """One JSON Pointer into sensor output, or one literal value; never executable expressions."""
+
+    path: Annotated[str, Field(max_length=4096)] | None = None
+    value: JsonValue = None
+
+    @model_validator(mode="after")
+    def exclusive(self) -> Mapping:
+        if self.model_fields_set not in ({"path"}, {"value"}):
+            raise ValueError("use exactly one of path or value")
+        if self.path is not None:
+            if not self.path.startswith("/") or re.search(r"~(?![01])", self.path):
+                raise ValueError("path requires a JSON Pointer, such as /attributes/author")
+        elif self.value is None:
+            raise ValueError("mapping value cannot be null")
+        return self
+
+
 class Sensor(Model):
-    """Execution configuration only: adapters own provider-specific projection."""
+    """Execution and explicit mapping of sensor output into the shared schema."""
 
     command: Annotated[list[str], Field(min_length=1, max_length=128)]
+    fields: dict[Annotated[str, Field(pattern=NAME)], Mapping] = Field(default_factory=dict)
     enabled: bool = True
     # A window sensor upserts the items it returns; a snapshot sensor replaces its complete catalog.
     mode: Literal["window", "snapshot"] = "window"
@@ -231,12 +304,39 @@ class Sensor(Model):
         return values
 
 
+class BrainReference(Model):
+    """A directly related brain, located relative to the declaring brain."""
+
+    path: Annotated[str, Field(min_length=1, max_length=4096)]
+
+    @field_validator("path")
+    @classmethod
+    def valid_path(cls, value: str) -> str:
+        if not value.strip() or any(ord(char) < 32 for char in value):
+            raise ValueError("brain path must be nonempty and contain no control characters")
+        return value
+
+
 class Config(Model):
     """One brain: its name and the sensors it may run."""
 
-    version: Literal[3] = 3
+    version: Literal[4] = 4
     name: Annotated[str, Field(pattern=NAME)]
+    brains: dict[Annotated[str, Field(pattern=NAME)], BrainReference] = Field(default_factory=dict, max_length=32)
+    ontology: dict[Annotated[str, Field(pattern=NAME)], SchemaField] = Field(default_factory=dict, alias="schema")
     sensors: dict[Annotated[str, Field(pattern=NAME)], Sensor] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def mapped(self) -> Config:
+        if self.name in self.brains:
+            raise ValueError("a brain cannot reference its own name")
+        for sensor in self.sensors.values():
+            for name, mapping in sensor.fields.items():
+                if name not in self.ontology:
+                    raise ValueError("sensor mapping references an undeclared schema field")
+                if mapping.path is None:
+                    self.ontology[name].normalize(mapping.value)
+        return self
 
 
 class Registration(Model):
@@ -262,6 +362,9 @@ class Query(Model):
     recent: bool = False
     changed_since: str = ""
     current: bool = False
+    relation: Annotated[str, Field(pattern=r"^(?:[a-z][a-z0-9-]{0,63})?$")] = ""
+    target: Annotated[str, Field(max_length=8192)] = ""
+    subject: Annotated[str, Field(max_length=8192)] = ""
 
     @field_validator("since", "until", "changed_since")
     @classmethod
@@ -274,8 +377,22 @@ class Query(Model):
 
     @model_validator(mode="after")
     def bounded(self) -> Query:
+        if self.relation and not (self.target or self.subject):
+            raise ValueError("relation requires target or subject")
+        for value in (self.target, self.subject):
+            if value and not re.fullmatch(r"[a-z][a-z0-9+.-]*:\S+", value):
+                raise ValueError("target and subject require an explicit namespaced identity")
         if not self.text.strip() and not (
-            self.since or self.until or self.source or self.type or self.status or self.changed_since or self.current
+            self.since
+            or self.until
+            or self.source
+            or self.type
+            or self.status
+            or self.changed_since
+            or self.current
+            or self.relation
+            or self.target
+            or self.subject
         ):
             raise ValueError("give a query, a time window (--since/--until) or a filter (--source/--type/--status)")
         if self.since and self.until and self.since >= self.until:

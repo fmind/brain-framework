@@ -50,6 +50,7 @@ def test_results_are_compact_and_cite_readable_refs(brain: Store) -> None:
         "excerpt": "The team chose offline retrieval.",
         "kind": "record",
         "ref": "meetings:decision-1",
+        "uri": "bf://fixture/meetings:decision-1",
         "source": "meetings",
         "time": "2026-08-31T12:00:00.000000Z",
         "title": "Preserve durable evidence",
@@ -224,7 +225,7 @@ def test_several_brains_interleave_and_reads_name_their_brain(brain: Store, tmp_
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 3\nname: team\n")
+    team.write("bf.yaml", b"version: 4\nname: team\n")
     team.write("projects/offline.md", b"# Team offline\n\nThe team keeps offline retrieval too.\n")
     register(team, collect=False)
     stores = [brain, team]
@@ -439,7 +440,7 @@ def test_changed_since_uses_modification_time_without_changing_event_time(brain:
 def test_current_selects_enabled_sources_and_reports_collection_coverage(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 3\nname: fixture\nsensors:\n  meetings:\n    command: [true-command]\n    refresh: 3600\n  disabled:\n    command: [true-command]\n    enabled: false\n",
+        b"version: 4\nname: fixture\nsensors:\n  meetings:\n    command: [true-command]\n    refresh: 3600\n  disabled:\n    command: [true-command]\n    enabled: false\n",
     )
     for source in ("disabled", "historical"):
         records_file(brain, source, "undated", [Record(id="x", title="Offline retrieval")])
@@ -459,7 +460,8 @@ def test_current_selects_enabled_sources_and_reports_collection_coverage(brain: 
     ]
     collection = read([brain], "meetings:decision-1")["collection"]
     assert isinstance(collection, dict)
-    assert collection["freshness"] == "never"
+    # Retrieval does not consult machine collection trust; no local run means unknown coverage.
+    assert collection["freshness"] == "unknown"
 
 
 def test_okf_provenance_resources_are_searchable_identity_links(brain: Store) -> None:
@@ -520,7 +522,7 @@ def test_recent_identity_keeps_owners_ahead_of_newer_relations_across_brains(bra
     folder = tmp_path / "shared"
     folder.mkdir()
     team = Store(folder)
-    team.write("bf.yaml", b"version: 3\nname: team\n")
+    team.write("bf.yaml", b"version: 4\nname: team\n")
     team.write("projects/owner.md", b'---\nupdated: 2026-08-01\naliases: ["repo:example/project"]\n---\n# Owner\n')
     result = search([team, brain], Query(text="repo:example/project", recent=True))["items"]
     assert isinstance(result, list)
@@ -544,7 +546,7 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
     broken = tmp_path / "broken"
     broken.mkdir()
     other = Store(broken)
-    other.write("bf.yaml", b"version: 3\nname: interrupted\n")
+    other.write("bf.yaml", b"version: 4\nname: interrupted\n")
     other.write("memories/.pending/0.before", b"preserve this original")
     reply = search([brain, other], Query(text="offline retrieval"), counted=False)
     assert isinstance(reply["items"], list)
@@ -561,9 +563,9 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
     # Exact reads cannot silently assume a broken brain contains no competing identity.
     with pytest.raises(Error):
         read([brain, other], "meetings:lunch")
-    other.write("bf.yaml", b"version: 3\nname: [invalid]\n")
+    other.write("bf.yaml", b"version: 4\nname: [invalid]\n")
     assert search([brain, other], Query(text="offline"), counted=False)["items"]
-    with pytest.raises(Error, match="no selected brain"):
+    with pytest.raises(Error, match=r"invalid bf\.yaml"):
         search([other, other], Query(text="offline"), counted=False)
 
 
@@ -614,9 +616,9 @@ def test_search_waits_if_a_rebuild_replaces_the_checked_generation(
 def test_evaluation_names_missing_retrieval_cases(brain: Store) -> None:
     from bf.evaluate import evaluate
 
-    with pytest.raises(Error, match=r"queries\.yaml does not exist"):
+    with pytest.raises(Error, match="evals has no suites"):
         evaluate(brain)
-    brain.write("queries.yaml", b"version: 3\ncases:\n  - name: later\n    since: soon\n    empty: true\n")
+    brain.write("evals/retrieval.yaml", b"version: 4\ncases:\n  - name: later\n    since: soon\n    empty: true\n")
     with pytest.raises(Error, match="case later: since"):
         evaluate(brain)
 
@@ -625,7 +627,9 @@ def test_evaluation_rejects_incomplete_empty_answers(brain: Store) -> None:
     from bf.evaluate import evaluate
 
     brain.write("projects/broken.md", b"---\nstatus: typo\n---\n# Lost answer\n")
-    brain.write("queries.yaml", b"version: 3\ncases:\n  - name: absent\n    query: lost answer\n    empty: true\n")
+    brain.write(
+        "evals/retrieval.yaml", b"version: 4\ncases:\n  - name: absent\n    query: lost answer\n    empty: true\n"
+    )
     reply = evaluate(brain)
     assert not reply["passed"]
     assert isinstance(reply["cases"], list)
@@ -648,7 +652,7 @@ def test_retrieval_cases_distinguish_record_ids_from_note_sections(brain: Store)
 
     records_file(brain, "issues", "undated", [Record(id="item#comment", title="Hashneedle")])
     brain.write(
-        "queries.yaml",
-        b"version: 3\ncases:\n  - name: exact-record\n    query: hashneedle\n    expect: [issues:item]\n",
+        "evals/retrieval.yaml",
+        b"version: 4\ncases:\n  - name: exact-record\n    query: hashneedle\n    expect: [issues:item]\n",
     )
     assert not evaluate(brain)["passed"]

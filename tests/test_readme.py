@@ -5,13 +5,20 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from markdown_it import MarkdownIt
+
 ROOT = Path(__file__).parent.parent
 DOCS = "https://fmind.github.io/brain-framework/docs/"
 REPOSITORY = re.compile(r"https://github\.com/fmind/brain-framework/(?:blob|tree)/main/(?P<path>[^#)]+)")
 
 
 def test_readme_links_are_absolute_and_resolve_to_this_checkout() -> None:
-    links = re.findall(r"\]\(([^)]+)\)", (ROOT / "README.md").read_text())
+    links = [
+        str(child.attrGet("href"))
+        for token in MarkdownIt().parse((ROOT / "README.md").read_text())
+        for child in token.children or []
+        if child.type == "link_open"
+    ]
     assert links
     for link in links:
         assert link.startswith("https://"), f"PyPI cannot resolve relative README link {link}"

@@ -16,7 +16,7 @@ from bf.storage import Store, state_store
 def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 3\nname: fixture\nsensors:\n"
+        b"version: 4\nname: fixture\nsensors:\n"
         b"  current:\n    command: [echo]\n    refresh: 3600\n"
         b"  missing:\n    command: [echo]\n    refresh: 3600\n"
         b"  paused:\n    command: [echo]\n    enabled: false\n"
@@ -34,7 +34,7 @@ def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> 
             }
         ),
     )
-    report = source_health(brain, ["archive"], now=datetime(2026, 9, 23, 13, tzinfo=UTC))
+    report = source_health(brain, ["archive"], now=datetime(2026, 9, 23, 13, tzinfo=UTC), trusted=True)
     assert report["current"]["freshness"] == "fresh"
     assert report["current"]["window"] == {"since": "2026-09-22T12:00:00Z", "until": "2026-09-23T12:00:00Z"}
     assert report["missing"]["freshness"] == "never"
@@ -49,11 +49,11 @@ def test_init_quotes_yaml_names_and_keeps_private_evidence_out_of_git(tmp_path) 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["brain"] == "on"
     assert "memories/" in (tmp_path / "brain" / ".gitignore").read_text()
-    assert CliRunner().invoke(app, ["validate", "--brain", "on"]).exit_code == 0
+    assert CliRunner().invoke(app, ["validate", "--brain", str(tmp_path / "brain")]).exit_code == 0
 
 
 def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 3\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
+    brain.write("bf.yaml", b"version: 4\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
     brain.write("memories/current/undated.jsonl", b'{"id":"a","title":"First"}\n{"id":"b","title":"Second"}\n')
     state_store(brain.root).write("sensors.json", encode({"current": {"records": 1, "unchanged": 1}}))
     result = CliRunner().invoke(app, ["status", "--brain", str(brain.root)])
@@ -67,7 +67,7 @@ def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store)
 def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failures_are_inactive(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 3\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
+        b"version: 4\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
     )
     state_store(brain.root).write(
         "sensors.json",

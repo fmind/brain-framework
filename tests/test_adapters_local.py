@@ -105,6 +105,8 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
     records = provider.records("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     assert len(records) == 1
     commit = records[0]
+    assert commit.attributes["author_refs"] == ["person:email/owner@fmind.dev"]
+    assert "repo:local/owner/project" in cast(list[str], commit.attributes["repository_refs"])
     assert commit.title == "owner/project: feat: keep durable evidence"
     assert commit.time == "2026-09-01T10:00:00.000000Z"
     assert "Because providers forget." in commit.text
@@ -167,3 +169,19 @@ def test_people_and_repository_identities_join_across_providers(
     result = search([brain], Query(text="person:email/owner@fmind.dev"))
     items = cast("list[dict[str, object]]", result["items"])
     assert {item["source"] for item in items} == {"git", "calendar"}
+
+
+def test_calendar_keeps_organizer_separate_from_invited_attendees(provider: Provider) -> None:
+    event = {
+        **cast(list[dict], PAGE_ONE["items"])[0],
+        "organizer": {"email": "OWNER@example.test"},
+        "attendees": [{"email": "guest@example.test"}],
+    }
+    provider.install("gws", [{"match": ["events", "list"], "stdout": {"kind": "calendar#events", "items": [event]}}])
+    record = provider.records("google-calendar.py", "team", "2026-09-01T00:00:00Z", "2026-09-03T00:00:00Z")[0]
+    assert record.attributes["organizer_refs"] == ["person:email/owner@example.test"]
+    assert record.attributes["attendee_refs"] == ["person:email/guest@example.test"]
+    assert set(cast(list[str], record.attributes["participant_refs"])) == {
+        "person:email/owner@example.test",
+        "person:email/guest@example.test",
+    }

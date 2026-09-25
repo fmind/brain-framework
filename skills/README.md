@@ -21,6 +21,6 @@ Run this from the Brain Framework checkout only when that destination does not e
 
 Host discovery paths differ. A brain's `skills/` can hold versioned workflow packages, but placing files there alone does not make a host load them. Use the host's configured discovery directory or a host-supported link, then start a new session and confirm `bf-use` is available.
 
-Ask the agent to search the intended brain, read one returned ref and cite it. This verifies the route from the host to your knowledge. Use `--brain NAME` for a work context; default selection otherwise depends on `BF_BRAIN`, the current directory and your registered brains. See the [agent walkthrough](../docs/docs/getting-started.md#give-agents-access) and [MCP alternative](../docs/docs/mcp.md).
+Ask the agent to search the intended brain, read one returned ref and cite it. This verifies the route from the host to your knowledge. Use `--brain PATH` for a work root; its direct `bf.yaml` brain references are also in scope; default selection otherwise depends on `BF_BRAIN`, the current directory and your registered brains. See the [agent walkthrough](../docs/docs/getting-started.md#give-agents-access) and [MCP alternative](../docs/docs/mcp.md).
 
 For development of Brain Framework itself, use the repository-local [bf-contribute](../.agents/skills/bf-contribute/SKILL.md) skill.

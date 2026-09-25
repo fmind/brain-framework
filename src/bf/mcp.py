@@ -50,6 +50,9 @@ def server(stores: list[Store]) -> MCPServer:
         recent: bool = False,
         changed_since: str = "",
         current: bool = False,
+        relation: str = "",
+        target: str = "",
+        subject: str = "",
     ) -> CallToolResult:
         """Search notes and records by words or exact identity, or list a time window (since: today, 7d, YYYY-MM-DD)."""
         return reply(
@@ -66,6 +69,9 @@ def server(stores: list[Store]) -> MCPServer:
                     recent=recent,
                     changed_since=changed_since,
                     current=current,
+                    relation=relation,
+                    target=target,
+                    subject=subject,
                 ),
             )
         )

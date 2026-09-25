@@ -32,9 +32,24 @@ Identity queries use only explicit refs, aliases and links; they never fall back
 | `--changed-since`    | Upstream modification time at or after this bound; event time when modification time is unavailable.                                                   |
 | `--current`          | Include notes and records of currently enabled sources; omit disabled or historical sources. This does not certify individual records as fresh.        |
 | `--limit N`          | 1 to 50 results, default 10.                                                                                                                           |
-| `--brain NAME`       | One registered brain; otherwise the enclosing brain or every registered brain.                                                                         |
+| `--brain NAME`       | Select a root by local name or path; search also includes its direct `bf.yaml` brain references.                                                       |
 
 A record's time is its event time. A note's `updated` date is interpreted as midnight in the reader's local timezone, including the offset on that date. Filtering, ordering and returned UTC times use that interpretation without rebuilding the cache when the timezone changes. Time windows therefore include notes dated in that local period. Without a query, a time window or filter lists items newest first: `bf search --since today` is a daily digest, `--since 7d --type project` a weekly review, and `--type project --status active` lists active projects.
+
+## Relationships
+
+Use a stable BF identity, an explicit alias, or a qualified file/record URI:
+
+```bash
+bf search --target bf://team/people/marc                    # incoming links, with any role
+bf search --relation author --target person:email/marc@example.test
+bf search --subject bf://team/projects/archive --relation depends-on
+bf read 'bf://team/projects/archive.md#decision'
+```
+
+`target` selects incoming edges; `subject` selects outgoing edges. Either can stand alone or both can constrain a relationship; `relation` requires at least one endpoint. Combine these with words, source or time filters. Exact identity searches expand explicit aliases across selected brains and include backlinks. Names never create equivalence. See [BF links](schema.md#bf-links) for declarations and namespace boundaries.
+
+Graph and identity search results include up to 50 matching `relations` per item, each with a subject, optional role, target, exact `origin`, supporting `evidence`, and optional attribution/attributes. `relations_truncated: true` reports additional claims; read the source for the complete evidence. Ordinary lexical results stay compact. Every search result includes a portable `uri` alongside its existing readable `ref`. Read `origin` to inspect the actual assertion and `evidence` for its cited support; neither is automatically verified by BF.
 
 ## Results
 
@@ -64,11 +79,11 @@ Records expose available `updated`, `observed` and `partial` metadata. A respons
 
 ## Retrieval cases
 
-`bf eval` runs the questions a brain must keep answering, from `queries.yaml`:
+`bf eval` runs the questions a brain must keep answering, from all `.yaml` and `.yml` suites recursively under `evals/`, in path order. Use `bf eval --path evals/retrieval.yaml` for one suite or `--path evals/team` for a subdirectory. Technical tests live under `tests/`; retrieval acceptance cases live under `evals/`. For example, create `evals/retrieval.yaml`:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/search/
-version: 3
+version: 4
 cases:
   - name: retention-decision
     query: why do we keep originals
@@ -85,8 +100,8 @@ cases:
 
 A case fails when retrieval reports `problems` or `stale`, including a case expecting no results.
 
-A whole note path in `expect` or `forbid` matches any section of that note; section refs and record IDs match exactly, including any `#` inside a record ID. Automatic selection omits registered directories absent from this machine; use `--brain NAME` to require a particular brain.
+For exact reads across related brains, prefer each result's qualified `uri`; a relative `ref` can exist in more than one brain. Use `bf://team/projects/example.md` in `expect` or `forbid` to distinguish brains with the same relative filenames. A whole note path or BF note address matches any section of that note; section refs and record IDs match exactly, including any `#` inside a record ID. Automatic selection omits registered directories absent from this machine; use `--brain NAME` to require a particular brain.
 
 Malformed record paths and unreadable files are reported as problems instead of producing refs that cannot be read. Exact reads still recover a known record from a healthy partition; if other partitions are unreadable and the requested record cannot be found, the read fails with a validation diagnostic rather than claiming absence.
 
-Cases also accept `until`, `source`, `status`, `limit`, `recent`, `changed_since`, `current` and `forbid`. Add a case whenever a real question fails, then improve the note or the sensor rather than the ranking. Check answer-bearing `text` as well as expected refs, and add unrelated or forbidden evidence cases so merely returning something does not count as success.
+Cases also accept `relation`, `target` and `subject` with the same endpoint rules, `until`, `source`, `status`, `limit`, `recent`, `changed_since`, `current` and `forbid`. Add a case whenever a real question fails, then improve the note or the sensor rather than the ranking. Check answer-bearing `text` as well as expected refs, and add unrelated or forbidden evidence cases so merely returning something does not count as success.

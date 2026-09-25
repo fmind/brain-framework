@@ -1,9 +1,9 @@
 # Brain layout and knowledge
 
-A brain is an ordinary directory, normally a Git repository. `bf init PATH` creates it in a new, empty or freshly cloned directory and registers it for this user under the directory's name; `--name NAME` chooses another name, and `--no-collect` withholds collection trust. It creates `projects/`, `concepts/` and `actions/`; `--full` also creates every optional versioned folder below.
+A brain is an ordinary directory, normally a Git repository. `bf init PATH` creates it in a new, empty or freshly cloned directory without global registration. Its name defaults to the directory name; `--name NAME` chooses another stable namespace. Only explicit `--collect` registers it with collection trust. It creates `projects/`, `concepts/` and `actions/`; `--full` also creates every optional versioned folder below.
 
 ```text
-bf.yaml                                   # name and sensors
+bf.yaml                                   # name, shared schema and sensor mappings
 AGENTS.md                                 # instructions for agents working in the brain
 projects/<project>.md                     # one note per project
 concepts/index.md, concepts/<concept>.md  # reusable OKF v0.2 knowledge
@@ -12,6 +12,7 @@ memories/<source>/<YYYY-MM>.jsonl         # collected items
 assets/                                   # logos, images, audio and other media that notes link to
 sensors/                                  # executable collectors declared in bf.yaml
 routines/, settings/, tests/              # maintenance code, its settings and its tests
+evals/*.yaml                              # retrieval acceptance suites
 skills/                                   # workflow packages for agents
 inputs/, originals/, logs/                # unversioned: imports to process, retained originals, routine logs
 .bf/                                      # disposable search cache
@@ -78,6 +79,7 @@ A record is one source item. Sensors print them; Brain Framework stores one JSON
 | `url`        | Where the item lives upstream.                                                           |
 | `links`      | Explicit identities it relates to: `repo:github.com/owner/name`, `person:email/address`. |
 | `aliases`    | Other exact identities of this item.                                                     |
+| `fields`     | Normalized schema values; searchable, with typed relationship edges.                     |
 | `attributes` | Structured details kept for exact reads, not searched.                                   |
 
 Collecting the same id again replaces its line, moving it if its month changed; each id appears once per source. If both revisions declare `attributes.updated`, an older revision cannot overwrite a newer one. History lives in Git or in your backups, not in duplicate records.
@@ -95,7 +97,28 @@ Separate brains by who may read them. A directory is a context boundary, not an 
 - **Personal brain**: private repository, laptop sensors (mail, calendar, Git, shell, browser, agent sessions), registered with `--collect`. Keep bulky or sensitive `memories/` out of the Git remote and back them up encrypted instead.
 - **Team brain**: shared repository of projects, decisions, concepts and actions, plus records of team-scoped sources (organization issues and pull requests, shared meeting notes), created with a distinctive name and `--no-collect`. One CI job collects and commits reviewed sources, so no laptop runs shared sensor code. [Team brains](team.md) covers creation, joining, CI collection and review.
 
-Registered brains live in `~/.config/bf/config.yaml`:
+### Related brains
+
+A brain declares its own read context in `bf.yaml`; no global configuration is required:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/schema/
+version: 4
+name: personal
+brains:
+  team:
+    path: ../team
+```
+
+The key must match the target's `bf.yaml` name. Paths resolve relative to the declaring brain root, independently of the working directory; absolute paths and `~` are also supported. Prefer relative paths and agree on repository layout across machines. Use `bf://team/projects/platform.md#decision` in notes.
+
+Search, read and retrieval evaluations include the root and its direct references only. References are bounded to 32 per brain; they never recurse, download repositories or run sensors. Missing, inaccessible, invalid and mismatched references appear under `problems`; other results remain available. Multiple directories claiming the same name are excluded and reported. Repeated physical directories are searched once. An incomplete empty answer does not prove absence.
+
+`--brain NAME` can select the enclosing brain or one of its declared names; `--brain PATH` works from anywhere. Selection chooses a new root, so its own direct references define that request's scope. Maintenance commands act on the selected root, not its references. `bf validate` still validates local evidence; foreign BF targets remain `unresolved` until explicitly read.
+
+### Optional machine registration
+
+`bf register PATH` is optional for discovery outside a brain. Collection requires explicit machine trust (`bf register PATH --collect` or `bf init PATH --collect`), stored separately from shared references. Registered brains live in `~/.config/bf/config.yaml`:
 
 ```yaml
 # https://fmind.github.io/brain-framework/
@@ -108,12 +131,14 @@ brains:
     collect: false
 ```
 
-Commands select `--brain NAME|PATH`, then `BF_BRAIN`, then the brain containing the working directory, then every registered brain. Within a brain, agents therefore stay in that brain; elsewhere they search everything you registered. Promote personal knowledge to the team by writing a summary in the team brain and linking to what others can read.
+Commands select `--brain NAME|PATH`, then `BF_BRAIN`, then the brain containing the working directory, then every registered brain. Search/read expand direct declarations of those roots; elsewhere the optional registry supplies roots. Promote personal knowledge to the team by writing a summary in the team brain and linking to what others can read.
 
-`XDG_CONFIG_HOME` overrides `~/.config` for the registry; `XDG_STATE_HOME` overrides `~/.local/state` for private run history, locks and usage, kept in `bf/<sha256 of the brain path>/`. Any command that opens a brain creates that folder, so delete the folders of brains you remove; the state is disposable. Registration serializes updates and writes the registry atomically with owner-only file permissions; it keeps the file's leading comment lines but not other comments. Names are unique per machine: registering a second brain under a taken name fails, so rename your own brain rather than a shared one. Automatic selection skips registered directories absent from this machine; selecting an absent brain explicitly fails. Use `--brain NAME` when a particular brain must be present for your answer.
+`XDG_CONFIG_HOME` overrides `~/.config` for the registry; `XDG_STATE_HOME` overrides `~/.local/state` for private run history, locks and usage, kept in `bf/<sha256 of the brain path>/`. Any command that opens a brain creates that folder, so delete the folders of brains you remove; the state is disposable. Registration serializes updates and writes the registry atomically with owner-only file permissions; it keeps the file's leading comment lines but not other comments. Names are unique per machine: registering a second brain under a taken name fails, so choose distinctive names before sharing links. If renaming is unavoidable, update affected BF addresses explicitly; do not give clones of one shared brain different names. Automatic selection skips registered directories absent from this machine; selecting an absent brain explicitly fails. Use `--brain NAME` when a particular brain must be present for your answer.
 
 Running `bf register PATH` again without `--collect` revokes collection trust while keeping the brain searchable. To stop selecting it automatically, remove its entry from the registry; the files remain in place. Set `enabled: false` to stop a single sensor while keeping its existing records searchable.
 
 ## Actions
 
 Create `actions/YYYY-MM-DD_slug/ACTION.md` before delegating substantial work: objective, TODO list, decisions, a Resume section with the exact next action, and links to `inputs/` and `outputs/`. Action Markdown is searchable. `bf validate` reports an action folder whose name is not a valid date, an underscore and a lowercase hyphenated slug, or that lacks `ACTION.md`; loose files such as `actions/README.md` are allowed. Update the owning project note when an action changes its state.
+
+Technical checks belong in `tests/`; retrieval suites belong in `evals/`. See [retrieval cases](search.md#retrieval-cases).

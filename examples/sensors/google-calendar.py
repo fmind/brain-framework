@@ -146,6 +146,20 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
                     "links": sorted(set(links + ([f"calendar:{calendar}/{identifier}"] if agenda_days else []))),
                     "aliases": [f"{'agenda' if agenda_days else 'calendar'}:{calendar}/{identifier}"],
                     "attributes": {
+                        "organizer_refs": [
+                            "person:email/" + quote(person["email"].strip().lower(), safe="/:@+").replace("~", "%7E")
+                            for person in [event.get("organizer", {})]
+                            if person.get("email")
+                        ],
+                        "attendee_refs": sorted(
+                            {
+                                "person:email/"
+                                + quote(person["email"].strip().lower(), safe="/:@+").replace("~", "%7E")
+                                for person in attendees
+                                if person.get("email")
+                            }
+                        ),
+                        "participant_refs": [link for link in links if link.startswith("person:")],
                         "start": begin,
                         "end": finish,
                         "updated": updated,

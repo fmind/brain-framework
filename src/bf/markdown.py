@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlsplit
 from markdown_it import MarkdownIt
 from pydantic import ValidationError
 
+from bf import links as bf_links
 from bf.config import yaml_object
 from bf.models import AUTHORED, Error, Knowledge, explain
 
@@ -34,6 +35,7 @@ class Markdown:
     attributes: dict[str, object]
     headings: list[Heading]
     links: list[str]
+    contexts: list[tuple[str, str]]
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,7 @@ class Note:
     passages: list[Passage]
     slugs: set[str] = field(default_factory=set)
     targets: list[str] = field(default_factory=list)
+    contexts: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def links(self) -> list[str]:
@@ -91,26 +94,39 @@ def parse(path: str, data: bytes) -> Markdown:
     tokens = MarkdownIt().parse(_FOOTNOTE.sub(r"\1:", body))
     headings: list[Heading] = []
     links: list[str] = []
+    contexts: list[tuple[str, str]] = []
     used: set[str] = set()
+    explicit: set[str] = set()
+    fragment = ""
     for i, token in enumerate(tokens):
         if token.type == "heading_open" and token.map is not None:
             inline = tokens[i + 1]
             title = "".join(
                 child.content for child in inline.children or [] if child.type in {"text", "code_inline", "image"}
             )
-            stem = slug = slugify(title)
+            anchor = re.search(r"\s+\{#([A-Za-z0-9][A-Za-z0-9_.-]*)\}$", title)
+            if anchor:
+                title = title[: anchor.start()]
+            stem = slug = anchor[1] if anchor else slugify(title)
+            if slug in used and (anchor or slug in explicit):
+                raise Error(f"{path}: duplicate explicit heading anchor")
+            if anchor:
+                explicit.add(slug)
             suffix = 0
             while slug in used:
                 suffix += 1
                 slug = f"{stem}-{suffix}"
             used.add(slug)
             headings.append(Heading(slug, title, int(token.tag[1:]), token.map[0] + offset))
+            fragment = slug
         for child in token.children or []:
             if child.type == "link_open":
                 target = str(child.attrGet("href"))
                 # Split local URL fragments before decoding: %23 is part of a filename.
-                links.append(unquote(target) if scheme(path, target) else target)
-    return Markdown(text, body, attributes, headings, links)
+                # BF parses each component before decoding; external queries keep their original meaning.
+                links.append(target)
+                contexts.append((target, fragment))
+    return Markdown(text, body, attributes, headings, links, contexts)
 
 
 def section(path: str, data: bytes, fragment: str) -> str:
@@ -136,7 +152,7 @@ def split_ref(ref: str) -> tuple[str, str]:
 def reference(path: str, target: str) -> str:
     """Resolve a relative note link to a brain-relative path; identities and URLs stay unchanged."""
     if scheme(path, target):
-        return target
+        return bf_links.target(target)
     name, _, fragment = target.partition("#")
     name, fragment = unquote(name), unquote(fragment)
     if name.startswith("/") and path.startswith("concepts/"):
@@ -213,6 +229,11 @@ def note(path: str, data: bytes) -> Note:
     )
     for target in targets:
         reference(path, target)
+    if knowledge.entity:
+        bf_links.identity(knowledge.entity)
+    for alias in knowledge.aliases:
+        if bf_links.parse(alias):
+            bf_links.identity(alias)
     return Note(
         path=path,
         title=title,
@@ -221,6 +242,7 @@ def note(path: str, data: bytes) -> Note:
         passages=passages,
         slugs={h.slug for h in markdown.headings},
         targets=targets,
+        contexts=[*markdown.contexts, *((target, "") for target in knowledge.links)],
     )
 
 

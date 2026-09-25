@@ -1,5 +1,6 @@
 ---
 type: project
+entity: bf://example/projects/example
 status: active
 updated: 2026-09-19
 aliases: ["repo:example/project"]
@@ -9,9 +10,9 @@ aliases: ["repo:example/project"]
 
 Demonstrate collecting fictional evidence and retrieving a grounded answer locally.
 
-## Now
+## Now {#now}
 
-The source is a local deterministic script with no credentials or network access. See the [retention concept](../concepts/retention.md).
+The source is a local deterministic script with no credentials or network access. See the [retention concept](bf://example/concepts/retention.md?rel=related-to).
 
 ## Decisions
 

@@ -22,9 +22,19 @@ bf validate --brain NAME && bf eval --brain NAME
 1. **Stale notes**: `review` in `bf status` lists active or blocked projects whose note is older than 14 days; refresh them from recent records or set their verified current status.
 1. **Incomplete retrieval**: inspect `problems` and `stale`, repair the named file or brain, then repeat the query; `eval` rejects incomplete answers.
 1. **Duplicate records**: collection refuses a source that already contains duplicate IDs. Run `bf validate`, preserve the conflicting revisions and reconcile their evidence before retrying; never discard a revision simply to make collection succeed.
-1. **Retrieval miss**: add the question as a case in `queries.yaml`, then improve the owning note or the sensor's projection until `bf eval` passes. Do not tune the core for one query.
+1. **Retrieval miss**: add the question as a case in `evals/retrieval.yaml`, then improve the owning note or the sensor's projection until `bf eval` passes. Do not tune the core for one query.
 1. **Schedule**: run `bf update` more often than the shortest `refresh` (for example every 15 minutes for hourly sources) from a systemd user timer or launchd agent with the provider CLIs on PATH; see the Brain Framework documentation's sensor page. Report configured, enabled and observed runs separately.
 
 Inspect active/disabled/historical coverage and `last_run` counts before interpreting freshness. Preserve `memories/.pending/` during recovery and backup; it holds durable originals for interrupted writes. Inspect the brain, then run `bf build` for explicit recovery; search and read do not apply pending journals. Keep one scheduler per machine.
 
 Never delete records, action inputs or outputs to fix a problem; `.bf/` is the only disposable folder (`bf build` recreates it). Collection runs code with the user's permissions: run live providers only within the user's authorization, and trust a shared brain with `bf register PATH --collect` only after reviewing its `sensors/`.
+
+Shared field meanings, types, cardinality and examples live under `schema` in `bf.yaml`; sensor `fields` map explicit output paths or constants into them. Use `bf search --relation ROLE --target IDENTITY` to follow a typed relationship and read its supporting record. Keep technical checks in `tests/` and retrieval suites in `evals/`; `bf eval` runs all suites, while `--path evals/NAME.yaml` selects one.
+
+## Portable links and relationships
+
+Use stable `bf://<bf.yaml name>/...` addresses across brains. An authored note may declare `entity: bf://NAME/people/ID` (or another logical namespace), with verified alternate identities in `aliases`. Declare each role in `bf.yaml` (`type: identity`, `relation: true`) before writing `[label](bf://NAME/path?rel=ROLE#section)`. The subject defaults to the note entity, otherwise its file; use `subject=IDENTITY` when stating a relationship between other entities. Keep authorship and ownership in named relationship fields, not URI userinfo. Query values must be percent-encoded, and query attributes belong before the fragment. Other URI schemes retain their original query semantics.
+
+Find incoming links with `bf search --target IDENTITY`, outgoing claims with `--subject IDENTITY`, and add `--relation ROLE` when needed. Read the returned `relations[].origin` and `evidence`; these retain the actual assertion and its cited support separately. Exact reads accept BF addresses. Use explicit heading anchors (`## Display title {#stable-id}`) when a section needs a durable ref. Keep the brain's `name` stable across clones. Selected-brain scope is a boundary: links never add another brain or contact a network. Ambiguous aliases and incomplete searches need review; `bf validate` reports foreign links under `unresolved` without opening them.
+
+Related brains belong in `bf.yaml` as `brains: {team: {path: ../team}}`. Use stable matching names and paths relative to the declaring root. Search/read include direct references only; check `problems` before claiming absence. References never grant sensor execution permission.

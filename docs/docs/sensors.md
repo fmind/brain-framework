@@ -1,6 +1,6 @@
 # Sensors
 
-A sensor is an executable collector that gathers records from a source. It can be any executable that prints one JSON array of [records](brain.md#records) on stdout. It owns provider access, pagination and projection; the provider's CLI owns credentials. Brain Framework runs it, validates the whole array, and upserts the records. A failure, a timeout, invalid output or excessive output writes nothing.
+A sensor is an executable collector that gathers records from a source. It can be any executable that prints one JSON array of [records](brain.md#records) on stdout. It owns provider access, pagination and projection; the provider's CLI owns credentials. Brain Framework runs it, validates the whole array and its [schema mappings](schema.md#shared-fields-and-sensor-mappings), and upserts the records. A failure, a timeout, invalid output or excessive output writes nothing.
 
 ```json
 [{
@@ -17,7 +17,7 @@ Declare sensors in `bf.yaml`. The executable is a bare command on PATH or a `sen
 
 ```yaml
 # https://fmind.github.io/brain-framework/
-version: 3
+version: 4
 name: brain
 sensors:
   git-commits:
@@ -32,6 +32,7 @@ sensors:
 | Setting     | Default  | Meaning                                                                                   |
 | ----------- | -------- | ----------------------------------------------------------------------------------------- |
 | `command`   | required | Direct argv.                                                                              |
+| `fields`    | `{}`     | Explicit schema-field mappings using JSON Pointer paths or literal values.                |
 | `enabled`   | `true`   | Disabled sensors never run; their records stay searchable.                                |
 | `mode`      | `window` | `window` upserts what the sensor returns; `snapshot` replaces the source's whole catalog. |
 | `refresh`   | `0`      | Seconds between automatic runs; `0` keeps the sensor manual.                              |
@@ -44,7 +45,10 @@ Sensors run from the brain root with your environment minus loader-injection var
 
 ## Collect and update
 
+Review the sensor code, then explicitly grant machine collection trust. New brains and referenced brains have no implicit execution permission.
+
 ```bash
+bf register . --collect
 bf collect git-commits --since 30d --dry-run   # run and show three samples, write nothing
 bf collect git-commits --since 30d             # backfill a month
 bf update --dry-run                            # which sensors are due, and their windows
@@ -102,7 +106,7 @@ Choose a timer interval comfortably shorter than the smallest nonzero `refresh`.
 
 ## Good records
 
-- Put the facts someone will ask about in `title` and `text`: subject, outcome, people, rationale. `attributes` are for exact reads, not search.
+- Put the facts someone will ask about in `title` and `text`: subject, outcome, people, rationale. `attributes` are for exact reads; map shared facts into searchable `fields` through the schema.
 - Keep `id` stable across edits so a changed item replaces its line.
 - Use event time, never collection time, for `time`.
 - Link explicit identities only: `person:email/<lowercase address>`, `repo:github.com/<owner>/<name>`, provider URLs. Never infer relationships from similar names.

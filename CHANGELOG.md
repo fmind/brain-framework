@@ -2,6 +2,34 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v10.0.0](https://github.com/fmind/brain-framework/releases/tag/v10.0.0) - 2026-09-25
+
+### Changed
+
+- Declare directly related brains in `bf.yaml` with stable names and relative, absolute or home-relative paths. Search, read, MCP and evaluations include direct references without recursive discovery or required global configuration. Missing references report incomplete scope; conflicting names are excluded.
+- `bf init` defaults to no global registration or collection trust; explicit `--collect` opts in. Maintenance commands do not expand references, and references never authorize sensors. Retrieval suites accept qualified BF addresses to distinguish same-named files across brains.
+- Add portable `bf://brain/path#section` addresses, explicit note `entity` identities and typed note `fields`. BF link queries encode declared relationships and attributes, with explicit subject/evidence/attribution and an immutable origin in the derived SQLite projection.
+- Add selected-brain alias federation, incoming `target` and outgoing `subject` filters, and relationship explanations through CLI, MCP and retrieval suites. Ambiguous aliases do not merge, external URL queries stay opaque, and foreign links never broaden brain selection.
+- Headings support stable `{#anchor}` identifiers. Validation checks local BF addresses and reports foreign unresolved targets. New brains include a small relationship vocabulary and agent instructions for links.
+
+- Brain format 4 restores explicit `schema` fields in `bf.yaml`: descriptions, strict types, cardinality, validated examples and typed relationships. Sensors map their record output with JSON Pointers or constants; normalized values are stored in record `fields` and included in offline search.
+- Typed relationships form a disposable, evidence-backed SQLite graph. CLI, MCP search and retrieval cases accept `relation` and `target` together, with exact identities and explicit owner aliases. Schema changes invalidate the cache; record replacement and snapshot deletion remove obsolete edges.
+- `bf eval` discovers YAML suites recursively under `evals/`; `--path` selects a suite or directory. Technical tests remain in `tests/`. `bf init --full` creates both folders.
+- Git and Calendar example sensors preserve author/repository and organizer/attendee roles for explicit mapping.
+
+### Manual upgrade from 9
+
+1. Preserve the brain files, configuration, machine state and previous runtime; pause all collection writers and finish or recover pending transactions.
+1. Install the same Brain Framework 10 build for every CLI, MCP host, project environment and scheduled writer. Restart long-running readers after the switch.
+1. Change `bf.yaml` to `version: 4`. Declare shared fields under `schema` and each sensor's `fields` mapping. Keep provider transformations in sensors; do not infer missing relationships from names or flattened links.
+1. Create `evals/`, move `queries.yaml` to `evals/retrieval.yaml`, change suite `version` to 4, and update paths in tasks, docs and skills. Multiple named suites may share the directory.
+1. Existing records without normalized fields remain readable. Preserve originals before explicitly backfilling fields from retained structured evidence; unavailable historical roles remain unknown. Mapping changes alone do not rewrite history or contact providers.
+1. Add directly related brains under `brains: {team: {path: ../team}}` in `bf.yaml`; ensure target names match. Readers now include these direct references, so review the intended audience. Use paths or local names for discovery. Existing optional registrations remain usable; newly initialized brains need explicit `--collect` before collection.
+1. Keep the brain `name` stable across clones; use it as the BF URI authority. Declare roles before adding BF link queries. Give entity notes explicit `entity` identities and reviewed aliases; do not reinterpret external URL queries or fabricate historical relationships. Refresh separately installed skills and brain agent instructions.
+1. Run `bf build`, `bf validate`, technical tests and `bf eval`; check role-specific queries and exact reads, then resume the scheduled writer. Keep originals until recovery is verified. Rollback requires the prior runtime and original configuration and records, not only a cache rebuild.
+
+No migration tooling or legacy command surface is included. Runtime dependencies are unchanged.
+
 ## [v9.2.0](https://github.com/fmind/brain-framework/releases/tag/v9.2.0) - 2026-09-24
 
 Brain Framework 9.2 starts new brains smaller, checks action folders and repairs the PyPI project page. The brain format is unchanged: existing version 3 brains need no conversion.

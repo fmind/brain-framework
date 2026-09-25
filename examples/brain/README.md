@@ -34,3 +34,13 @@ cd "$bf_checkout"
 unset -f bf
 rm -rf -- "$bf_demo"
 ```
+
+## Follow an explicit link
+
+```bash
+bf search --target bf://example/concepts/retention.md --relation related-to
+bf search --subject bf://example/projects/example --relation related-to
+bf read 'bf://example/projects/example.md#now'
+```
+
+The project note owns a logical entity and its typed link preserves the exact origin section. This example is fictional; do not copy its identities into a real brain.

@@ -120,7 +120,63 @@ def register(store: Store, *, collect: bool) -> dict[str, object]:
     return {"brain": name, "path": str(store.root), "collect": collect, "config": str(path)}
 
 
+def _reference(store: Store, name: str, path: str) -> Store:
+    try:
+        destination = Path(path).expanduser()
+    except RuntimeError as error:
+        raise Error("referenced brain home directory cannot be resolved") from error
+    target = Store(destination if destination.is_absolute() else store.root / destination)
+    if load(target).name != name:
+        raise Error(f"referenced brain {name} has a different configured name")
+    return target
+
+
+def related(roots: list[Store]) -> tuple[list[Store], list[dict[str, object]]]:
+    """Expand direct declarations once; a reference never grants execution authority."""
+    candidates = {store.root: store for store in roots}
+    names: dict[str, set[Path]] = {}
+    problems: list[dict[str, object]] = []
+    for store in roots:
+        try:
+            config = load(store)
+        except Error, OSError, UnicodeError:
+            # The owning operation reports root failures, retaining its normal failure semantics.
+            continue
+        names.setdefault(config.name, set()).add(store.root)
+        for name, reference in sorted(config.brains.items()):
+            try:
+                target = _reference(store, name, reference.path)
+            except Error, OSError, UnicodeError:
+                problems.append(
+                    {
+                        "brain": config.name,
+                        "reference": name,
+                        "error": "referenced brain is missing, inaccessible, invalid or has a different name; check bf.yaml",
+                    }
+                )
+                continue
+            names.setdefault(name, set()).add(target.root)
+            candidates[target.root] = target
+    excluded: set[Path] = set()
+    for name, paths in sorted(names.items()):
+        if len(paths) > 1:
+            excluded.update(paths)
+            problems.append({"brain": name, "error": "ambiguous brain name; multiple directories claim this identity"})
+    return [store for path, store in candidates.items() if path not in excluded], problems
+
+
 def _located(value: str) -> Store:
+    # Explicit paths and locally declared names need no global configuration.
+    if "/" in value or value in {".", "..", "~"}:
+        return Store(Path(value).expanduser())
+    if nearest := _nearest():
+        config = load(nearest)
+        if value == config.name:
+            return nearest
+        if value in config.brains:
+            return _reference(nearest, value, config.brains[value].path)
+    if Path(value).expanduser().is_dir():
+        return Store(Path(value).expanduser())
     registry = user_config()
     if value in registry.brains:
         return Store(Path(registry.brains[value].path).expanduser())

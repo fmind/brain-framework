@@ -136,7 +136,13 @@ def collect(root: Path, start: str, end: str, skip: frozenset[str] = frozenset()
                     "text": f"Repository: {relative}\nCommit: {commit}\nAuthor: {author}\nCommitted: {when}\n\n{message}",
                     "links": sorted(links),
                     "aliases": ["commit:local/" + key],
-                    "attributes": {"repository": relative, "commit": commit, "author_email": author},
+                    "attributes": {
+                        "repository": relative,
+                        "commit": commit,
+                        "author_email": author,
+                        "author_refs": [link for link in links if link.startswith("person:")],
+                        "repository_refs": [link for link in links if link.startswith("repo:")],
+                    },
                 }
             )
         if len(records) > 10000:

@@ -364,12 +364,15 @@ PYTHON
     bf_package_bin="$tmp/$distribution-venv/bin/bf"
     export XDG_CONFIG_HOME="$bf_package_home/config"
     "$bf_package_bin" init "$tmp/$distribution-brain"
+    test ! -e "$XDG_CONFIG_HOME/bf/config.yaml"
+    cd "$tmp/$distribution-brain"
     "$bf_package_bin" validate --brain "$tmp/$distribution-brain"
     "$bf_package_bin" search welcome
     "$bf_package_bin" read concepts/welcome.md
     "$bf_package_bin" status --check
-    cat > "$tmp/$distribution-brain/queries.yaml" <<'YAML'
-version: 3
+    mkdir -p "$tmp/$distribution-brain/evals"
+    cat > "$tmp/$distribution-brain/evals/retrieval.yaml" <<'YAML'
+version: 4
 cases:
   - name: installed-welcome
     query: welcome

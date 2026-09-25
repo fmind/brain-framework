@@ -25,7 +25,12 @@ def test_initialization_uses_only_the_final_layout_and_private_namespaces(tmp_pa
     assert json.loads(result.stdout)["brain"] == "fresh"
     assert {item.name for item in target.iterdir() if item.is_dir()} == {"projects", "actions", "concepts"}
     store = Store(target)
-    assert load(store).model_dump() == {"version": 3, "name": "fresh", "sensors": {}}
+    config = load(store)
+    assert config.version == 4
+    assert config.name == "fresh"
+    assert set(config.ontology) == {"author", "owner", "depends-on", "related-to"}
+    assert config.sensors == {}
+    assert "bf://fresh/" in store.read("AGENTS.md").decode()
     assert user_path().parts[-2:] == ("bf", "config.yaml")
     assert state_store(store.root).root.parent.name == "bf"
     result = CliRunner().invoke(app, ["search", "welcome", "--brain", str(target)])
@@ -46,6 +51,7 @@ def test_initialization_uses_only_the_final_layout_and_private_namespaces(tmp_pa
         "settings",
         "skills",
         "tests",
+        "evals",
     }
 
 
@@ -95,7 +101,7 @@ def test_authored_scope_and_types_follow_the_new_layout(brain: Store) -> None:
 def test_disabled_sensor_keeps_source_identity_and_memories_readable(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 3\nname: fixture\nsensors:\n  meetings:\n    command: [unavailable-provider]\n    enabled: false\n",
+        b"version: 4\nname: fixture\nsensors:\n  meetings:\n    command: [unavailable-provider]\n    enabled: false\n",
     )
     reply = read([brain], "meetings:decision-1")
     assert reply["brain"] == "fixture"

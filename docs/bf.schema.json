@@ -1,8 +1,54 @@
 {
   "$defs": {
+    "BrainReference": {
+      "additionalProperties": false,
+      "description": "A directly related brain, located relative to the declaring brain.",
+      "properties": { "path": { "maxLength": 4096, "minLength": 1, "title": "Path", "type": "string" } },
+      "required": ["path"],
+      "title": "BrainReference",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "Mapping": {
+      "additionalProperties": false,
+      "description": "One JSON Pointer into sensor output, or one literal value; never executable expressions.",
+      "properties": {
+        "path": {
+          "anyOf": [{ "maxLength": 4096, "type": "string" }, { "type": "null" }],
+          "default": null,
+          "title": "Path"
+        },
+        "value": { "$ref": "#/$defs/JsonValue", "default": null }
+      },
+      "title": "Mapping",
+      "type": "object"
+    },
+    "SchemaField": {
+      "additionalProperties": false,
+      "description": "A shared meaning; cardinality applies when a sensor maps this field.",
+      "properties": {
+        "cardinality": {
+          "default": "optional",
+          "enum": ["one", "optional", "many"],
+          "title": "Cardinality",
+          "type": "string"
+        },
+        "description": { "maxLength": 4096, "minLength": 1, "title": "Description", "type": "string" },
+        "examples": { "items": { "$ref": "#/$defs/JsonValue" }, "maxItems": 20, "title": "Examples", "type": "array" },
+        "relation": { "default": false, "title": "Relation", "type": "boolean" },
+        "type": {
+          "enum": ["string", "integer", "number", "boolean", "timestamp", "identity"],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": ["description", "type"],
+      "title": "SchemaField",
+      "type": "object"
+    },
     "Sensor": {
       "additionalProperties": false,
-      "description": "Execution configuration only: adapters own provider-specific projection.",
+      "description": "Execution and explicit mapping of sensor output into the shared schema.",
       "properties": {
         "command": {
           "items": { "type": "string" },
@@ -12,6 +58,11 @@
           "type": "array"
         },
         "enabled": { "default": true, "title": "Enabled", "type": "boolean" },
+        "fields": {
+          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Mapping" } },
+          "title": "Fields",
+          "type": "object"
+        },
         "lookback": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" },
         "max_bytes": {
           "default": 67108864,
@@ -33,13 +84,24 @@
   "additionalProperties": false,
   "description": "One brain: its name and the sensors it may run.",
   "properties": {
+    "brains": {
+      "maxProperties": 32,
+      "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/BrainReference" } },
+      "title": "Brains",
+      "type": "object"
+    },
     "name": { "pattern": "^[a-z][a-z0-9-]{0,63}$", "title": "Name", "type": "string" },
+    "schema": {
+      "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/SchemaField" } },
+      "title": "Schema",
+      "type": "object"
+    },
     "sensors": {
       "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Sensor" } },
       "title": "Sensors",
       "type": "object"
     },
-    "version": { "const": 3, "default": 3, "title": "Version", "type": "integer" }
+    "version": { "const": 4, "default": 4, "title": "Version", "type": "integer" }
   },
   "required": ["name"],
   "title": "Config",

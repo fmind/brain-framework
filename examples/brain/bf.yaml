@@ -1,7 +1,27 @@
 # https://fmind.github.io/brain-framework/
-version: 3
+version: 4
 name: example
 sensors:
   demo:
     command: [sensors/demo.py, "{{start}}", "{{end}}"]
     refresh: 3600
+    fields:
+      kind: { value: event }
+      repository: { path: /links }
+schema:
+  related-to:
+    description: An explicit association without a more specific known role.
+    type: identity
+    cardinality: many
+    relation: true
+  kind:
+    description: Common kind of source item.
+    type: string
+    cardinality: one
+    examples: [event]
+  repository:
+    description: Repository explicitly discussed in the event.
+    type: identity
+    cardinality: many
+    relation: true
+    examples: [[repo:example/project]]

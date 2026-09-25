@@ -4,7 +4,7 @@ A team brain is a private Git repository that a team reads together: project not
 
 ## Create it
 
-Create an empty private repository, clone it, and initialize the brain inside the clone. Choose a distinctive name: registry names must be unique on each machine, and many people already use `brain` or `knowledge` for a personal brain.
+Create an empty private repository, clone it, and initialize the brain inside the clone. Choose a distinctive name: brain names must be unique within a search context, and many people already use `brain` or `knowledge` for a personal brain.
 
 ```bash
 git clone git@github.com:example-org/team-knowledge.git
@@ -13,21 +13,20 @@ cd team-knowledge
 git add -A && git commit -m "feat: create the team brain" && git push
 ```
 
-`--no-collect` registers the brain for search without collection trust, so your laptop never runs the team's sensors. Start with one project note and a few [retrieval cases](getting-started.md#check-the-answers-your-team-needs) before adding any sensor.
+Initialization defaults to no registration or collection trust, so your laptop never runs the team's sensors. Start with one project note and a few [retrieval cases](getting-started.md#check-the-answers-your-team-needs) before adding any sensor.
 
 ## Join it
 
 ```bash
 git clone git@github.com:example-org/team-knowledge.git ~/team-knowledge
-bf register ~/team-knowledge
-bf search "release process" --brain team-knowledge
+bf search "release process" --brain ~/team-knowledge
 ```
 
-If registration reports that the name is already taken, rename your own brain in its `bf.yaml` and register it again; the shared name stays the same for everyone. Registration without `--collect` never runs sensors.
+Add `brains: {team-knowledge: {path: ../team-knowledge}}` to a sibling personal brain to include the team in its read context. If discovery reports a conflicting name, inspect the declarations before changing names: `bf.yaml` names are stable BF link namespaces. If you rename your own brain, update its BF addresses and incoming declarations explicitly; the shared name stays the same for everyone. Registration without `--collect` never runs sensors.
 
-Agents select every registered brain by default outside a brain. For work, select the team brain explicitly: pass `--brain team-knowledge`, set `BF_BRAIN=team-knowledge` in work repositories, and connect hosts with `bf mcp --brain team-knowledge`. Register a personal brain on a work machine only if its content may reach your work hosts and their model providers; see [separating audiences](privacy.md#separating-audiences).
+For work, select the team root explicitly: pass `--brain ~/team-knowledge`, set `BF_BRAIN` to its absolute path, and connect hosts with `bf mcp --brain ~/team-knowledge`. Its direct references are also readable. Declare a personal brain in a work context only if its content may reach your work hosts and their model providers; see [separating audiences](privacy.md#separating-audiences).
 
-Use the same Brain Framework release across the team and its collection job. Within a major version, the brain format (`bf.yaml`, `queries.yaml` and the folder layout) stays compatible; a new major version documents manual upgrade steps in its release notes. Upgrade together, then run `bf validate` and `bf eval`.
+Use the same Brain Framework release across the team and its collection job. Within a major version, the brain format (`bf.yaml`, `evals/retrieval.yaml` and the folder layout) stays compatible; a new major version documents manual upgrade steps in its release notes. Upgrade together, then run `bf validate` and `bf eval`.
 
 ## Collect in CI
 
@@ -59,7 +58,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      BRAIN_FRAMEWORK: brain-framework==9.2.0
+      BRAIN_FRAMEWORK: brain-framework==10.0.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -94,5 +93,9 @@ The collection job runs whatever sensor code is on its branch, with its provider
 
 - Records committed to Git remain in its history; removing one later means rewriting history in every clone. Check your organization's data-protection and retention rules before publishing a source.
 - Collected records are evidence, not verified knowledge. Promote what matters into project notes and concepts through normal review, with links teammates can follow.
-- Add each question the team repeatedly asks to `queries.yaml`, and run `bf validate` and `bf eval` in pull requests so broken links and lost answers fail before merge.
+- Add each question the team repeatedly asks to `evals/retrieval.yaml`, and run `bf validate` and `bf eval` in pull requests so broken links and lost answers fail before merge.
 - Check `bf status --brain team-knowledge` on a teammate's machine: run state stays with the collection job, so freshness there reads `unknown`; the latest record times still show what was collected.
+
+## Shared links
+
+Use `bf://team-knowledge/...` for portable references and retain the same `bf.yaml` name in every clone. Declare relationship meanings before authoring typed links. Promote only reviewed, shareable identities and evidence; a link into a personal brain does not make that evidence available to teammates. Validation reports foreign destinations under `unresolved`; read them explicitly within the permitted selection when needed. See [BF links](schema.md#bf-links).

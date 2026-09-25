@@ -13,11 +13,11 @@ from bf.storage import Store
 
 
 def source_health(
-    store: Store, names: Iterable[str] = (), *, now: datetime | None = None
+    store: Store, names: Iterable[str] = (), *, now: datetime | None = None, trusted: bool = False
 ) -> dict[str, dict[str, object]]:
     """Describe active, disabled and historical sources without running them or exposing logs."""
     now = now or datetime.now(UTC)
-    config, history, trusted = load(store), state(store), may_collect(store)
+    config, history = load(store), state(store)
     result: dict[str, dict[str, object]] = {}
     for name in sorted({*config.sensors, *names}):
         settings = config.sensors.get(name)
@@ -38,7 +38,7 @@ def source_health(
         if settings is not None and settings.enabled:
             if not settings.refresh:
                 item["freshness"] = "manual"
-            elif trusted:
+            elif trusted or success:
                 item["freshness"] = (
                     "never"
                     if not success
@@ -57,7 +57,7 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
     for store in stores:
         config, history, summary, trusted = load(store), state(store), index.status(store), may_collect(store)
         counts = cast("dict[str, dict[str, object]]", summary.pop("sources"))
-        coverage = source_health(store, counts, now=now)
+        coverage = source_health(store, counts, now=now, trusted=trusted)
         sources: dict[str, dict[str, object]] = {}
         for name in sorted({*config.sensors, *counts}):
             settings = config.sensors.get(name)

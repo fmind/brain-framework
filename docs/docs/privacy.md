@@ -10,7 +10,7 @@ To show whether agents actually use a brain, `search` and `read` append one line
 
 ## Collecting is explicit and trusted per machine
 
-Sensors are code you run with your permissions. A brain collects only on machines where its owner ran `bf init` without `--no-collect`, or `bf register PATH --collect`; that trust lives in `~/.config/bf/config.yaml`, outside the brain, so pulling a shared repository never starts running its `sensors/`. Review sensor changes like any other code before trusting a shared brain, and require review for `bf.yaml`, `sensors/` and CI changes in a [team brain](team.md#collect-in-ci).
+Sensors are code you run with your permissions. A brain collects only on machines where its owner ran `bf init --collect`, or `bf register PATH --collect`; that trust lives in `~/.config/bf/config.yaml`, outside the brain, so pulling a shared repository never starts running its `sensors/`. Review sensor changes like any other code before trusting a shared brain, and require review for `bf.yaml`, `sensors/` and CI changes in a [team brain](team.md#collect-in-ci).
 
 Trust applies to the brain path, not a particular commit. Later sensor edits in an already trusted brain can run on its next scheduled update. Review incoming changes before that run, or revoke trust with `bf register PATH` while you review them. Revoking trust prevents future collection attempts; it does not cancel a process already running.
 
@@ -24,7 +24,7 @@ All brain access goes through no-follow directory descriptors: Brain Framework r
 
 Offline describes Brain Framework's retrieval. An agent host may send returned content to its model provider; configure that host for your workplace's data requirements. Restrict a work integration explicitly, for example `bf mcp --brain team`, so its scope does not depend on the host's working directory.
 
-A brain is a context boundary, not access control. Keep people who must not read each other's data in separate brains and repositories. Agents inside a brain search only that brain; elsewhere they search every brain you registered. Register only the brains you want your agents to see. Records committed to Git stay in its history; publish only sources every reader may keep.
+A brain is a context boundary, not access control. Keep people who must not read each other's data in separate brains and repositories. Agents inside a brain search that root and its directly declared `brains:` references; elsewhere the optional registry supplies roots. Review reference changes before an agent uses them, especially in shared repositories: declarations expand the readable context. Reference expansion is not recursive and never grants collection trust. Records committed to Git stay in its history; publish only sources every reader may keep.
 
 ## Honest limits
 

@@ -17,7 +17,7 @@ from typing import Protocol
 
 from pydantic import Field, TypeAdapter, ValidationError, field_validator
 
-from bf import records
+from bf import ontology, records
 from bf.config import load, may_collect
 from bf.models import NAME, Error, Model, Record, Sensor, decode, encode, explain, timestamp
 from bf.storage import Store, collecting, relative, state_store, writer
@@ -187,7 +187,8 @@ def collect(
         raise Error("collection start/end require timezone-aware timestamps") from error
     if start >= end:
         raise Error("collection start must be earlier than end")
-    sensor = load(store).sensors.get(name)
+    config = load(store)
+    sensor = config.sensors.get(name)
     if sensor is None or not sensor.enabled:
         raise Error(f"sensor {name} is unknown or disabled")
     if not may_collect(store):
@@ -204,6 +205,7 @@ def collect(
                 incoming = TypeAdapter(list[Record]).validate_python(decode(raw))
             except ValidationError as error:
                 raise Error("collector must print one JSON array of records: " + explain(error)) from error
+            incoming = [ontology.project(record, sensor, config) for record in incoming]
             if len({r.id for r in incoming}) != len(incoming):
                 raise Error("collector returned duplicate record ids")
             observed = timestamp(started.isoformat())

@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/docs/search/
-version: 3
+version: 4
 cases:
   - name: retention-concept
     query: why keep original evidence
@@ -16,3 +16,15 @@ cases:
   - name: absent-evidence
     query: nonexistent-quasar
     empty: true
+  - name: explicit-repository-relationship
+    relation: repository
+    target: repo:example/project
+    expect: [demo:retention]
+  - name: explicit-concept-backlink
+    relation: related-to
+    target: bf://example/concepts/retention.md
+    expect: [projects/example.md]
+  - name: outgoing-project-claim
+    subject: bf://example/projects/example
+    relation: related-to
+    expect: [projects/example.md]

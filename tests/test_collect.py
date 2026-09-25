@@ -27,7 +27,7 @@ from bf.update import update
 START = "2026-09-01T00:00:00.000000Z"
 END = "2026-09-02T00:00:00.000000Z"
 NOW = datetime(2026, 9, 2, tzinfo=UTC)
-CONFIG = b"""version: 3
+CONFIG = b"""version: 4
 name: fixture
 sensors:
   sample:
@@ -209,7 +209,7 @@ def test_placeholders_are_expanded_once(configured: Store, monkeypatch: pytest.M
 def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 3\nname: fixture\nsensors:\n"
+        b"version: 4\nname: fixture\nsensors:\n"
         b"  a-missing:\n    command: [sensors/missing.py]\n    refresh: 3600\n"
         b'  b-good:\n    command: [echo, "[]"]\n    refresh: 3600\n',
     )
@@ -281,7 +281,7 @@ def test_sigterm_cancels_collector_and_descendants(configured: Store, tmp_path: 
         "bf.yaml",
         json.dumps(
             {
-                "version": 3,
+                "version": 4,
                 "name": "fixture",
                 "sensors": {"sample": {"command": ["sensors/wait.sh", str(marker)]}},
             }

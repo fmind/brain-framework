@@ -5,21 +5,30 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from bf import records
+from bf import links as bf_links
+from bf import ontology, records
+from bf.config import load
 from bf.markdown import authored, note
-from bf.models import AUTHORED, Error, Query, Record, moment
+from bf.models import AUTHORED, Error, Query, Record, digest, encode, moment
 from bf.storage import BusyError, Store, reader, writer
 
-SCHEMA = 12
+SCHEMA = 14
 # Active projects whose note is older than this are listed for review; a reminder, never a failure.
 REVIEW_DAYS = 14
 CACHE = ".bf/index.sqlite"
 _DDL = """
+CREATE TABLE ontology(signature TEXT NOT NULL);
+CREATE TABLE edges(item INTEGER NOT NULL, subject TEXT NOT NULL, relation TEXT NOT NULL, target TEXT NOT NULL,
+                   evidence TEXT NOT NULL, asserted_by TEXT NOT NULL, attributes TEXT NOT NULL, origin TEXT NOT NULL,
+                   PRIMARY KEY(item,subject,relation,target,evidence,asserted_by,attributes,origin)) WITHOUT ROWID;
+CREATE INDEX edges_target ON edges(relation,target);
+CREATE INDEX edges_incoming ON edges(target);
+CREATE INDEX edges_subject ON edges(subject,relation);
 CREATE TABLE files(path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, ctime INTEGER, inode INTEGER,
                    error TEXT NOT NULL DEFAULT '');
 CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT NOT NULL, kind TEXT NOT NULL,
@@ -176,6 +185,7 @@ def _open(store: Store) -> sqlite3.Connection | None:
     path = _path(store)
     if not path.exists():
         return None
+    expected_signature = _signature(store)
     connection = sqlite3.connect(path, timeout=30)
     connection.row_factory = sqlite3.Row
     try:
@@ -187,14 +197,22 @@ def _open(store: Store) -> sqlite3.Connection | None:
                 "SELECT id,item,fragment,title FROM passages LIMIT 0",
                 "SELECT name,item FROM names LIMIT 0",
                 "SELECT item,target FROM links LIMIT 0",
+                "SELECT item,subject,relation,target,evidence,asserted_by,attributes,origin FROM edges LIMIT 0",
                 "SELECT title,text,names FROM search LIMIT 0",
             ):
                 connection.execute(statement)
-            return connection
+            signature = connection.execute("SELECT signature FROM ontology").fetchone()
+            if signature and signature[0] == expected_signature:
+                return connection
     except sqlite3.DatabaseError:
         pass
     connection.close()
     return None
+
+
+def _signature(store: Store) -> str:
+    config = load(store)
+    return digest(encode({"name": config.name, "schema": {n: f.model_dump() for n, f in config.ontology.items()}}))
 
 
 def _create(store: Store) -> sqlite3.Connection:
@@ -204,6 +222,8 @@ def _create(store: Store) -> sqlite3.Connection:
     connection = sqlite3.connect(path, timeout=30)
     # Version zero withholds this generation until the ingestion transaction commits.
     connection.executescript(_DDL)
+    connection.execute("INSERT INTO ontology VALUES(?)", (_signature(store),))
+    connection.commit()
     connection.execute("PRAGMA journal_mode=WAL")
     connection.row_factory = sqlite3.Row
     return connection
@@ -220,7 +240,7 @@ def _drop(connection: sqlite3.Connection, path: str) -> None:
     items = [row[0] for row in connection.execute("SELECT id FROM items WHERE path=?", (path,))]
     for item in items:
         connection.execute("DELETE FROM search WHERE rowid IN (SELECT id FROM passages WHERE item=?)", (item,))
-        for table in ("passages", "names", "links"):
+        for table in ("passages", "names", "links", "edges"):
             connection.execute(f"DELETE FROM {table} WHERE item=?", (item,))  # noqa: S608 - fixed table names
     connection.execute("DELETE FROM items WHERE path=?", (path,))
     connection.execute("DELETE FROM files WHERE path=?", (path,))
@@ -232,6 +252,7 @@ def _insert(
     passages: list[tuple[str, str, str, str, str]],
     names: list[str],
     links: list[str],
+    edges: Sequence[bf_links.Claim] = (),
 ) -> None:
     try:
         cursor = connection.execute(
@@ -252,13 +273,31 @@ def _insert(
         )
     connection.executemany("INSERT OR IGNORE INTO names VALUES(?,?)", ((name, item) for name in names))
     connection.executemany("INSERT OR IGNORE INTO links VALUES(?,?)", ((item, link) for link in links))
+    connection.executemany(
+        "INSERT OR IGNORE INTO edges VALUES(?,?,?,?,?,?,?,?)",
+        (
+            (
+                item,
+                e.subject,
+                e.relation,
+                e.target,
+                e.evidence,
+                e.asserted_by,
+                encode(e.attributes).decode(),
+                e.origin or e.evidence,
+            )
+            for e in edges
+        ),
+    )
 
 
 def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]:
     """Insert one file; parse failures raise, while duplicate record ids are skipped and reported."""
     if authored(path):
+        config = load(store)
         projection = note(path, store.read(path, 4 << 20))
         knowledge = projection.knowledge
+        edges = ontology.note_claims(projection, config)
         metadata = " ".join([knowledge.type, *knowledge.tags, *knowledge.aliases, *projection.links])
         _insert(
             connection,
@@ -281,14 +320,25 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
                 (p.fragment, p.title, p.heading, p.text, projection.title if p.fragment else metadata)
                 for p in projection.passages
             ],
-            knowledge.aliases,
-            projection.links,
+            sorted(
+                {
+                    ontology.qualify(config, path),
+                    *(bf_links.target(v) for v in knowledge.aliases),
+                    *([bf_links.identity(knowledge.entity)] if knowledge.entity else []),
+                }
+            ),
+            sorted({*projection.links, *(e.target for e in edges)}),
+            edges,
         )
         return []
     source = records.source_of(path)
     problems = []
+    config = load(store)
     for record in records.load(store, path):
-        identity = " ".join([source, *record.aliases, *record.links, record.url])
+        edges = ontology.record_claims(record, config, f"{source}:{record.id}")
+        identity = " ".join(
+            [source, *record.aliases, *record.links, record.url, json.dumps(record.fields, ensure_ascii=False)]
+        )
         try:
             _insert(
                 connection,
@@ -308,8 +358,11 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
                     "partial": int(record.attributes.get("partial") is True),
                 },
                 [("", record.title, record.title, record.text, identity)],
-                record.aliases,
-                sorted({*record.links, *([record.url] if record.url else [])}),
+                sorted(
+                    {ontology.qualify(config, f"{source}:{record.id}"), *(bf_links.target(v) for v in record.aliases)}
+                ),
+                sorted({*(bf_links.target(v) for v in record.links), *(e.target for e in edges)}),
+                edges,
             )
         except Error as error:
             problems.append(str(error))
@@ -442,6 +495,10 @@ _FIELDS = f"i.ref,i.kind,i.source,({_TIME}) AS time,i.type,i.status,i.url,i.upda
 _FILTERS = f"""(:source='' OR i.source=:source) AND (:type='' OR i.type=:type) AND (:status='' OR i.status=:status)
   AND ((:since='' AND :until='') OR i.time!='') AND (:since='' OR ({_TIME})>=:since) AND (:until='' OR ({_TIME})<:until)
   AND (:changed_since='' OR ({_UPDATED})>=:changed_since)
+  AND ((:relation='' AND :target='' AND :subject='') OR EXISTS (
+       SELECT 1 FROM edges e WHERE e.item=i.id AND (:relation='' OR e.relation=:relation)
+       AND (:subject='' OR e.subject IN (SELECT value FROM json_each(:subjects)))
+       AND (:target='' OR e.target IN (SELECT value FROM json_each(:targets)))))
   AND (:current=0 OR i.kind='note' OR i.source IN (SELECT value FROM json_each(:active_sources)))"""  # noqa: S608 - fixed SQL fragments
 
 
@@ -467,8 +524,8 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> list
     rows = connection.execute(
         f"""WITH candidates AS (
               SELECT id AS item,2e6 AS score FROM items WHERE ref=:text
-              UNION ALL SELECT item,1e6 FROM names WHERE name=:text
-              UNION ALL SELECT item,1e3 FROM links WHERE target=:text),
+              UNION ALL SELECT item,1e6 FROM names WHERE name IN (SELECT value FROM json_each(:identities))
+              UNION ALL SELECT item,1e3 FROM links WHERE target IN (SELECT value FROM json_each(:identities))),
               owners AS (SELECT item,max(score) AS score FROM candidates GROUP BY item)
            SELECT {_FIELDS},'' AS fragment,i.title,c.score,i.lead AS excerpt FROM owners c
            JOIN items i ON i.id=c.item WHERE {_FILTERS}
@@ -479,13 +536,22 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> list
 
 
 def search(
-    connection: sqlite3.Connection, query: Query, *, active_sources: set[str] | None = None
+    connection: sqlite3.Connection,
+    query: Query,
+    *,
+    active_sources: set[str] | None = None,
+    identities: set[str] | None = None,
+    targets: set[str] | None = None,
+    subjects: set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Exact identities, lexical all-term then any-term matches, or a filtered listing."""
     connection.create_function("note_time", 1, _note_time, deterministic=True)
     params: dict[str, object] = query.model_dump()
     params["text"] = query.text.strip()
     params["active_sources"] = json.dumps(sorted(active_sources or ()))
+    params["identities"] = json.dumps(sorted(identities or {str(params["text"])}))
+    params["targets"] = json.dumps(sorted(targets or {query.target}))
+    params["subjects"] = json.dumps(sorted(subjects or {query.subject}))
     if not params["text"]:
         rows = connection.execute(
             f"""SELECT {_FIELDS},'' AS fragment,i.title,0 AS score,i.lead AS excerpt FROM items i

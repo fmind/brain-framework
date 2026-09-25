@@ -281,12 +281,12 @@ def test_relative_moments_resolve_deterministically() -> None:
             moment(bad, now)
 
 
-def test_configuration_is_strict_and_version_3(brain: Store) -> None:
+def test_configuration_is_strict_and_version_4(brain: Store) -> None:
     assert load(brain).name == "fixture"
     brain.write("bf.yaml", b"version: 1\nid: x\nname: old\n")
     with pytest.raises(Error, match="version"):
         load(brain)
-    brain.write("bf.yaml", b"version: 3\nname: fixture\nunknown: 1\n")
+    brain.write("bf.yaml", b"version: 4\nname: fixture\nunknown: 1\n")
     with pytest.raises(Error, match="unknown"):
         load(brain)
 
@@ -298,7 +298,7 @@ def test_registry_selection_and_collection_trust(brain: Store, tmp_path: Path, m
     other = tmp_path / "team"
     other.mkdir()
     team = Store(other)
-    team.write("bf.yaml", b"version: 3\nname: team\n")
+    team.write("bf.yaml", b"version: 4\nname: team\n")
     assert not may_collect(team)
     register(team, collect=False)
     assert not may_collect(team)
@@ -317,10 +317,10 @@ def test_registry_selection_and_collection_trust(brain: Store, tmp_path: Path, m
     assert [s.root for s in select()] == [brain.root]
     clone = tmp_path / "clone"
     clone.mkdir()
-    Store(clone).write("bf.yaml", b"version: 3\nname: team\n")
+    Store(clone).write("bf.yaml", b"version: 4\nname: team\n")
     with pytest.raises(Error, match="already registered as team"):
         register(Store(clone), collect=False)
-    brain.write("bf.yaml", b"version: 3\nname: renamed\n")
+    brain.write("bf.yaml", b"version: 4\nname: renamed\n")
     with pytest.raises(Error, match="already registered as fixture"):
         register(brain, collect=True)
     monkeypatch.chdir(tmp_path)
@@ -355,7 +355,7 @@ def test_concurrent_registrations_keep_every_brain(tmp_path: Path, monkeypatch: 
         root = tmp_path / f"brain-{number}"
         root.mkdir()
         store = Store(root)
-        store.write("bf.yaml", f"version: 3\nname: brain-{number}\n".encode())
+        store.write("bf.yaml", f"version: 4\nname: brain-{number}\n".encode())
         stores.append(store)
     original = config.user_config
     start = Barrier(len(stores))
