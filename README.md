@@ -41,7 +41,7 @@ Start with a single project note. Add sensors and routines when you need them.
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
 
 ```bash
-uv tool install --python 3.14 'brain-framework==12.0.1'
+uv tool install --python 3.14 'brain-framework==12.0.2'
 bf init ~/knowledge          # create your brain
 cd ~/knowledge
 bf read                      # see its home page

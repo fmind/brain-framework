@@ -117,11 +117,11 @@ run = "trivy --config trivy.yaml fs ."
 [tasks."check:schema"]
 description = "Verify the committed JSON Schema matches the Python configuration loader"
 run = [
-  "mkdir -p .cache",
-  "uv run bf schema > .cache/schema-current.json",
-  "jq -S . .cache/schema-current.json > .cache/schema-actual.json",
-  "jq -S . docs/bf.schema.json > .cache/schema-expected.json",
-  "diff -u .cache/schema-expected.json .cache/schema-actual.json",
+  "mkdir -p .schema-cache",
+  "uv run bf schema > .schema-cache/schema-current.json",
+  "jq -S . .schema-cache/schema-current.json > .schema-cache/schema-actual.json",
+  "jq -S . docs/bf.schema.json > .schema-cache/schema-expected.json",
+  "diff -u .schema-cache/schema-expected.json .schema-cache/schema-actual.json",
 ]
 
 [tasks."check:shell"]
@@ -141,7 +141,7 @@ run = "uv audit --preview-features audit-command --locked"
 [tasks.clean]
 alias = "n"
 description = "Remove generated build, test, and documentation output"
-run = "rm -rf dist site .cache .coverage htmlcov .pytest_cache .ruff_cache"
+run = "rm -rf dist site .cache .schema-cache .coverage htmlcov .pytest_cache .ruff_cache"
 
 [tasks.coverage]
 alias = "v"
@@ -178,9 +178,9 @@ run = "uv run ruff check --select=I --fix --force-exclude"
 [tasks."generate:schema"]
 description = "Generate the schema before replacing the committed copy"
 run = [
-  "mkdir -p .cache",
-  "uv run bf schema > .cache/schema-generated.json",
-  "mv .cache/schema-generated.json docs/bf.schema.json",
+  "mkdir -p .schema-cache",
+  "uv run bf schema > .schema-cache/schema-generated.json",
+  "mv .schema-cache/schema-generated.json docs/bf.schema.json",
   "dprint fmt docs/bf.schema.json",
 ]
 

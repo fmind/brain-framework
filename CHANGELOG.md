@@ -2,12 +2,15 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
-## [v12.0.1](https://github.com/fmind/brain-framework/releases/tag/v12.0.1) - 2026-09-25
+## [v12.0.2](https://github.com/fmind/brain-framework/releases/tag/v12.0.2) - 2026-09-25
+
+First published 12.0.x maintenance release. The v12.0.1 tag stopped at the CI gate before publication and remains unchanged.
 
 A maintenance release for reliable absence checks, documentation and release verification. Brain configuration and retrieval suites remain at version 5; no manual upgrade is needed.
 
 ### Fixed
 
+- Schema checks use their own scratch directory, so a concurrent clean documentation build cannot delete their intermediate files.
 - Collection bounds saved coverage by its successful run and the current observation time. A future window left in run history no longer keeps successful scheduled collection permanently stale.
 - A missing read no longer proves absence when a directly referenced brain is unavailable or identity lookup skipped invalid evidence. Retrieval evaluations expecting an empty answer fail visibly until the incomplete scope is repaired.
 - Future-dated notes appear in the home page's upcoming items without displacing recent changes.

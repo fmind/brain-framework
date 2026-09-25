@@ -1,7 +1,7 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "12.0.1"
+version = "12.0.2"
 description = "🧠 AI Brain Factory for infinite knowledge. Not for 🐙 mindflayers or 🧟 zombies."
 readme = "README.md"
 requires-python = ">=3.14"
