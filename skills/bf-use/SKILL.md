@@ -15,7 +15,7 @@ bf read today                             # a day's items (also yesterday, 2026-
 bf read memories/gmail/7d                 # one source's records in a period
 bf read repo:github.com/owner/name        # an identity: its note, backlinks by relationship, claims about it
 bf read actions/2026-09-25_slug           # an action to resume, with its files and linked projects
-bf search "retention decision"            # words: all words first, then any
+bf search "retention decision"            # words, ranked in one query; fuller matches first
 bf search "invoice" --scope memories/gmail   # within a folder, a period or an identity
 bf read projects/brain.md#next-actions    # one section of a note
 ```
