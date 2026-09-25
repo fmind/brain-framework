@@ -7,7 +7,7 @@ import sqlite3
 
 from bf import index, links
 from bf.config import load
-from bf.models import Error, Query
+from bf.models import Error
 from bf.storage import Store
 
 
@@ -25,12 +25,16 @@ def local_refs(connection: sqlite3.Connection, identities: set[str]) -> set[str]
 
 
 def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, object]]]:
-    """One explicit owner expands aliases; conflicting owners never merge their identities."""
+    """One explicit owner expands aliases; conflicting owners never merge their identities.
+
+    An alias that another item in any selected brain also claims is not expanded: it identifies
+    neither owner, even when the value itself is a unique, brain-qualified address.
+    """
     if not value:
         return set(), []
     value = links.identity(value)
     parsed = links.parse(value)
-    matches: list[set[str]] = []
+    matches: list[tuple[Store, int, set[str]]] = []
     problems: list[dict[str, object]] = []
     for store in stores:
         name = store.root.name
@@ -51,7 +55,7 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
                     }
                     if len(names) > 1001:
                         raise Error("identity expansion exceeds 1001 aliases")
-                    matches.append(names)
+                    matches.append((store, row[0], names))
         except (Error, OSError, sqlite3.DatabaseError) as error:
             problems.append(
                 {"brain": name, "error": str(error) if isinstance(error, Error) else "identity cache unavailable"}
@@ -59,13 +63,30 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
     if len(matches) > 1:
         problems.append({"error": "ambiguous identity across selected evidence; use a brain-qualified exact ref"})
         return {value}, problems
-    return ({value} | matches[0] if matches else {value}), problems
+    if not matches:
+        return {value}, problems
+    owner, item, names = matches[0]
+    shared: set[str] = set()
+    for store in stores:
+        try:
+            with index.database(store) as (connection, _state):
+                shared.update(
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT DISTINCT name FROM names WHERE name IN (SELECT value FROM json_each(?)) "
+                        "AND NOT (? AND item=?)",
+                        (json.dumps(sorted(names - {value})), store.root == owner.root, item),
+                    )
+                )
+        except Error, OSError, sqlite3.DatabaseError:
+            problems.append({"brain": store.root.name, "error": "identity cache unavailable"})
+    if shared:
+        problems.append({"error": f"{len(shared)} aliases are also claimed elsewhere and were not expanded"})
+    return {value} | (names - shared), problems
 
 
-def explanations(
-    connection: sqlite3.Connection, ref: str, query: Query, targets: set[str], subjects: set[str], identities: set[str]
-) -> tuple[list[dict[str, object]], bool]:
-    """Each claim retains its owning file, even when another file supports the same triple."""
+def explanations(connection: sqlite3.Connection, ref: str, targets: set[str]) -> tuple[list[dict[str, object]], bool]:
+    """Claims from one item to the targets; each retains its owning file, even when another file supports it."""
     # Exact ref first: record ids may contain #. Note passage refs resolve to their owning item.
     row = connection.execute("SELECT id FROM items WHERE ref=?", (ref,)).fetchone()
     if row is None:
@@ -74,22 +95,10 @@ def explanations(
         return [], False
     rows = connection.execute(
         "SELECT subject,relation,target,evidence,asserted_by,attributes,origin FROM edges WHERE item=? "
-        "AND (?='' OR relation=?) "
-        "AND (?='' OR target IN (SELECT value FROM json_each(?))) "
-        "AND (?='' OR subject IN (SELECT value FROM json_each(?))) "
-        "AND (?=0 OR target IN (SELECT value FROM json_each(?))) "
+        "AND (target IN (SELECT value FROM json_each(?)) OR EXISTS (SELECT 1 FROM json_each(?) s "
+        "WHERE target>s.value||'#' AND target<s.value||'$')) "
         "ORDER BY relation,target,evidence,subject,asserted_by,attributes,origin LIMIT 51",
-        (
-            row[0],
-            query.relation,
-            query.relation,
-            query.target,
-            json.dumps(sorted(targets)),
-            query.subject,
-            json.dumps(sorted(subjects)),
-            int(bool(identities) and not (query.target or query.subject)),
-            json.dumps(sorted(identities)),
-        ),
+        (row[0], json.dumps(sorted(targets)), json.dumps(index.sections(targets))),
     ).fetchall()
     result = []
     for row in rows[:50]:
@@ -97,3 +106,19 @@ def explanations(
         claim["attributes"] = json.loads(claim["attributes"])
         result.append({key: val for key, val in claim.items() if val not in ("", {})})
     return result, len(rows) > 50
+
+
+def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> list[dict[str, object]]:
+    """Typed claims whose explicit subject is one of these identities, wherever they were asserted."""
+    rows = connection.execute(
+        "SELECT subject,relation,target,evidence,asserted_by,attributes,origin FROM edges WHERE relation!='' "
+        "AND subject IN (SELECT value FROM json_each(?)) "
+        "ORDER BY relation,target,origin,evidence,asserted_by,attributes LIMIT 50",
+        (json.dumps(sorted(subjects)),),
+    ).fetchall()
+    result = []
+    for row in rows:
+        claim = dict(row)
+        claim["attributes"] = json.loads(claim["attributes"])
+        result.append({key: val for key, val in claim.items() if val not in ("", {})})
+    return result

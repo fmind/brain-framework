@@ -39,8 +39,14 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
     assert found["items"][0]["ref"] == "projects/offline.md"
     everywhere = invoke("search", "welcome")
     assert {i["brain"] for i in everywhere["items"]} == {"fresh"}
-    window = invoke("search", "--since", "2026-08-31", "--until", "2026-09-02", "--brain", "fixture")
-    assert [i["ref"] for i in window["items"]] == ["projects/offline.md", "meetings:decision-1"]
+    month = invoke("read", "2026-08", "--brain", "fixture")
+    assert [i["ref"] for i in month["items"]] == ["meetings:decision-1", "meetings:lunch"]
+    assert (month["previous"], month["next"]) == ("2026-07", "2026-09")
+    home = invoke("read", "--brain", "fixture")
+    assert [p["ref"] for p in home["projects"]] == ["projects/offline.md"]
+    assert invoke("search", "offline", "--scope", "memories/meetings", "--brain", "fixture")["items"][0]["ref"] == (
+        "meetings:decision-1"
+    )
     exact = invoke("read", "meetings:decision-1")
     assert exact["record"]["title"] == "Preserve durable evidence"
     assert invoke("build", "--brain", "fixture")["changed"] == 3
@@ -52,18 +58,19 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
         "configured": False,
         "state": "historical",
         "freshness": "unknown",
+        "trust": "external",
     }
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 4\ncases:\n  - name: decision\n    query: retention decision\n    expect: [projects/offline.md]\n",
+        b"version: 5\ncases:\n  - name: decision\n    query: retention decision\n    expect: [projects/offline.md]\n",
     )
     assert invoke("eval", "--brain", "fixture")["passed"]
-    brain.write("evals/retrieval.yaml", b"version: 4\ncases:\n  - name: missing\n    query: lunch\n    empty: true\n")
+    brain.write("evals/retrieval.yaml", b"version: 5\ncases:\n  - name: missing\n    query: lunch\n    empty: true\n")
     failed = invoke("eval", "--brain", "fixture", code=1)
     assert failed["cases"][0]["returned"] == ["meetings:lunch"]
     other = tmp_path / "clone"
     other.mkdir()
-    (other / "bf.yaml").write_text("version: 4\nname: clone\n")
+    (other / "bf.yaml").write_text("version: 5\nname: clone\n")
     assert invoke("register", str(other))["collect"] is False
     assert invoke("update", "--brain", "clone", "--dry-run")["brains"][0]["skipped"]
     brain.write("projects/bad.md", b"# Bad [x](missing.md)\n")
@@ -72,10 +79,10 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
 
 
 def test_status_check_fails_on_stale_trusted_sources(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 4\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n")
+    brain.write("bf.yaml", b"version: 5\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n")
     report = invoke("status", "--brain", "fixture", "--check", code=1)
     assert report["brains"][0]["sources"]["mail"]["stale"] is True
-    brain.write("bf.yaml", b"version: 4\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n")
+    brain.write("bf.yaml", b"version: 5\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n")
     assert invoke("collect", "mail", "--brain", "fixture", "--since", "2d", code=1) == {}
     entry = invoke("status", "--brain", "fixture", code=0)["brains"][0]["sources"]["mail"]
     assert "status 3" in entry["error"]
@@ -115,7 +122,8 @@ def test_console_errors_are_private_and_on_stderr(brain: Store) -> None:
     for args in [
         ["read", "bf.yaml", "--brain", "fixture"],
         ["search", "x", "--limit", "0"],
-        ["search", "--since", "soon"],
+        ["search", "x", "--scope", "soon"],
+        ["read", "memories/absent"],
     ]:
         result = bf(*args)
         assert result.returncode
@@ -123,7 +131,8 @@ def test_console_errors_are_private_and_on_stderr(brain: Store) -> None:
         assert result.stderr.startswith("bf:")
         assert str(brain.root) not in result.stderr
     assert "limit" in bf("search", "x", "--limit", "0").stderr
-    assert "a filter" in bf("search").stderr
+    assert "scope accepts" in bf("search", "x", "--scope", "soon").stderr
+    assert "Missing argument" in bf("search").stderr
     version = bf("--version")
     assert version.stdout.strip() == distribution_version("brain-framework")
 
@@ -186,15 +195,19 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
         assert isinstance(found, CallToolResult)
         assert json.loads(text(found)) == found.structured_content
         assert json.loads(text(found))["items"][0]["ref"] == "projects/offline.md"
-        window = await mcp.call_tool("search", {"since": "2026-08-31", "until": "2026-09-01"})
-        assert json.loads(text(window))["items"][0]["ref"] == "meetings:decision-1"
+        day = await mcp.call_tool("read", {"ref": "2026-08-31"})
+        assert json.loads(text(day))["items"][0]["ref"] == "meetings:decision-1"
+        home = await mcp.call_tool("read", {})
+        assert json.loads(text(home))["pages"][0] == "projects"
+        scoped = await mcp.call_tool("search", {"query": "offline", "scope": "memories/meetings"})
+        assert json.loads(text(scoped))["items"][0]["ref"] == "meetings:decision-1"
         exact = await mcp.call_tool("read", {"ref": "projects/offline.md#decision", "brain": "fixture"})
         assert json.loads(text(exact))["brain"] == "fixture"
         assert "Provider retention" in json.loads(text(exact))["text"]
         for name, arguments, message in [
             ("read", {"ref": "bf.yaml"}, "not found"),
             ("search", {"query": "x", "limit": 0}, "invalid"),
-            ("search", {"since": "soon"}, "times accept"),
+            ("search", {"query": "x", "scope": "soon"}, "scope accepts"),
         ]:
             failed = await mcp.call_tool(name, arguments)
             assert isinstance(failed, CallToolResult)

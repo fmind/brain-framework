@@ -21,7 +21,7 @@ from bf.validate import validate
 from conftest import records_file
 from test_interfaces import invoke
 
-CONFIG = b"""version: 4
+CONFIG = b"""version: 5
 name: fixture
 schema:
   friend:
@@ -108,10 +108,16 @@ def test_component_encoding_and_external_urls() -> None:
         links.identity("bf://team/people/marc?rel=friend")
 
 
+def group(reply: dict, relation: str = "") -> dict:
+    """One relationship group of a read's backlinks; the empty relation selects untyped links."""
+    return next(g for g in cast(list[dict], reply["backlinks"]) if g.get("relation", "") == relation)
+
+
 def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
     people(brain)
-    result = search([brain], Query(target="bf://fixture/people/bob", relation="friend"))
-    items = cast(list[dict], result["items"])
+    bob = read([brain], "bf://fixture/people/bob")
+    assert bob["ref"] == "projects/bob.md"
+    items = group(bob, "friend")["items"]
     assert [i["ref"] for i in items] == ["projects/alice.md"]
     claim = items[0]["relations"][0]
     assert claim == {
@@ -123,8 +129,13 @@ def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
         "origin": "bf://fixture/projects/alice.md#friends",
     }
     assert "Bob" in str(read([brain], claim["evidence"])["text"])
-    assert search([brain], Query(target="person:bob"))["items"] == items
-    assert search([brain], Query(subject="person:alice", relation="friend"))["items"] == items
+    assert read([brain], "person:bob")["backlinks"] == bob["backlinks"]
+    # A typed claim is also listed on its subject, where it was asserted.
+    alice = read([brain], "person:alice")
+    assert alice["claims"] == [{"brain": "fixture", **claim}]
+    assert alice["backlinks"] == []
+    scoped = search([brain], Query(text="bob", target="person:bob"))["items"]
+    assert [(i["ref"], i["relations"]) for i in cast(list[dict], scoped)] == [("projects/alice.md#friends", [claim])]
     assert validate(brain)["valid"]
     assert read([brain], "bf://fixture/people/bob#about")["text"] == "## About Bob {#about}\nA reviewed profile.\n"
     assert read([brain], "bf://fixture/people/bob?rel=friend#about")["ref"] == "projects/bob.md#about"
@@ -143,19 +154,20 @@ fields:
 [Bob](bf://fixture/people/bob?rel=friend&subject=person:alice&asserted-by=person:alice&since=2026-01-01T00%3A00%3A00Z)
 """,
     )
-    result = search([brain], Query(target="person:bob", relation="friend"))
-    assert len(cast(list, result["items"])) == 2
-    assert (
-        cast(list[dict], search([brain], Query(relation="author", target="person:alice"))["items"])[0]["ref"]
-        == "projects/evidence.md"
-    )
+    assert group(read([brain], "person:bob"), "friend")["total"] == 2
+    assert group(read([brain], "person:alice"), "author")["items"][0]["ref"] == "projects/evidence.md"
+    subjects = cast(list[dict], read([brain], "person:alice")["claims"])
+    assert {(c["relation"], c["origin"]) for c in subjects} == {
+        ("friend", "bf://fixture/projects/alice.md#friends"),
+        ("friend", "bf://fixture/projects/evidence.md#meeting"),
+    }
     brain.delete("projects/evidence.md")
-    assert len(cast(list, search([brain], Query(target="person:bob"))["items"])) == 1
+    assert group(read([brain], "person:bob"), "friend")["total"] == 1
     with writer(brain):
         brain.delete(index.CACHE)
-    assert len(cast(list, search([brain], Query(target="person:bob"))["items"])) == 1
+    assert group(read([brain], "person:bob"), "friend")["total"] == 1
     brain.write("projects/alice.md", b"# Alice\nNo assertion remains.\n")
-    assert search([brain], Query(target="person:bob"))["items"] == []
+    assert read([brain], "person:bob")["backlinks"] == []
 
 
 def test_federation_and_no_implicit_brain_access(brain: Store, tmp_path: Path) -> None:
@@ -165,21 +177,35 @@ def test_federation_and_no_implicit_brain_access(brain: Store, tmp_path: Path) -
     team = Store(root)
     team.write("bf.yaml", CONFIG.replace(b"name: fixture", b"name: team"))
     team.write("projects/shared.md", b"# Shared\n[Bob](bf://fixture/people/bob?rel=friend)\n")
-    assert search([team], Query(target="person:bob"))["items"] == []
-    reply = search([brain, team], Query(target="person:bob", relation="friend"))
-    assert {(i["brain"], i["ref"]) for i in cast(list[dict], reply["items"])} == {
+    with pytest.raises(Error, match="not found"):
+        read([team], "person:bob")
+    reply = read([brain, team], "person:bob")
+    assert {(i["brain"], i["ref"]) for i in group(reply, "friend")["items"]} == {
         ("fixture", "projects/alice.md"),
         ("team", "projects/shared.md"),
     }
+    # An identity without an owning note still lists what links to it across the selected brains.
+    team.write("projects/carol.md", b"# Met Carol\n[Carol](person:carol)\n")
+    records_file(brain, "mail", "undated", [Record(id="c", title="From Carol", links=["person:carol"])])
+    orphan = read([brain, team], "person:carol")
+    assert orphan["page"] == "person:carol"
+    assert {(i["brain"], i["ref"]) for i in group(orphan)["items"]} == {
+        ("fixture", "mail:c"),
+        ("team", "projects/carol.md"),
+    }
+    with pytest.raises(Error, match="not found"):
+        read([brain, team], "person:nobody")
     with pytest.raises(Error, match="unknown brain"):
         read([team], "bf://fixture/people/bob")
     assert read([brain, team], "bf://fixture/people/bob")["brain"] == "fixture"
     assert validate(team)["unresolved"] == ["bf://fixture/people/bob"]
     team.write("projects/collision.md", b"---\naliases: [person:bob]\n---\n# A different Bob\n")
-    ambiguous = search([brain, team], Query(target="person:bob"))
+    with pytest.raises(Error, match="several brains"):
+        read([brain, team], "person:bob")
+    ambiguous = search([brain, team], Query(text="bob", target="person:bob"))
     assert ambiguous.get("problems")
     assert not any(i["brain"] == "team" for i in cast(list[dict], ambiguous["items"]))
-    assert search([brain, team], Query(target="bf://fixture/people/bob"))["items"]
+    assert group(read([brain, team], "bf://fixture/people/bob"), "friend")["items"]
 
 
 def test_validation_and_skip_invalid_links(brain: Store) -> None:
@@ -234,20 +260,21 @@ def test_sensor_link_failure_is_atomic(brain: Store) -> None:
 
 def test_cli_mcp_and_evals_expose_links(brain: Store) -> None:
     people(brain)
-    cli = invoke("search", "--subject", "person:alice", "--relation", "friend")
+    cli = invoke("read", "bf://fixture/people/bob")
+    assert cli["ref"] == "projects/bob.md"
 
     async def call() -> dict:
-        result = await server([brain]).call_tool("search", {"subject": "person:alice", "relation": "friend"})
+        result = await server([brain]).call_tool("read", {"ref": "bf://fixture/people/bob"})
         assert isinstance(result, CallToolResult)
         return cast(dict, result.structured_content)
 
-    assert asyncio.run(call())["items"] == cli["items"]
+    assert asyncio.run(call())["backlinks"] == cli["backlinks"]
     brain.write(
         "evals/links.yaml",
-        b"version: 4\ncases:\n- name: friend\n  subject: person:alice\n  relation: friend\n  expect: [projects/alice.md]\n",
+        b"version: 5\ncases:\n- name: friend\n  read: person:bob\n  expect: [projects/alice.md]\n"
+        b"- name: stranger\n  read: person:nobody\n  empty: true\n",
     )
     assert evaluate(brain)["passed"]
-    assert invoke("read", "bf://fixture/people/bob")["ref"] == "projects/bob.md"
 
 
 def test_explanations_preserve_origin_and_report_truncation(brain: Store) -> None:
@@ -257,7 +284,7 @@ def test_explanations_preserve_origin_and_report_truncation(brain: Store) -> Non
         for i in range(51)
     )
     brain.write("projects/alice.md", body.encode())
-    result = cast(list[dict], search([brain], Query(target="person:bob"))["items"])[0]
+    result = group(read([brain], "person:bob"), "friend")["items"][0]
     assert result["relations_truncated"]
     assert len(result["relations"]) == 50
     claim = result["relations"][0]
@@ -269,15 +296,38 @@ def test_explanations_preserve_origin_and_report_truncation(brain: Store) -> Non
 def test_same_brain_ambiguity_does_not_expand_and_qualified_refs_still_work(brain: Store) -> None:
     people(brain)
     brain.write("projects/other.md", b"---\naliases: [person:bob]\n---\n# Another Bob\n")
-    result = search([brain], Query(target="person:bob"))
+    result = search([brain], Query(text="bob", target="person:bob"))
     assert result["problems"]
     assert result["items"] == []
-    assert search([brain], Query(target="bf://fixture/people/bob"))["items"]
+    with pytest.raises(Error, match="ambiguous"):
+        read([brain], "person:bob")
+    assert group(read([brain], "bf://fixture/people/bob"), "friend")["items"]
     assert not validate(brain)["valid"]
 
 
+def test_shared_aliases_never_merge_backlinks_and_entity_sections_link(brain: Store, tmp_path: Path) -> None:
+    people(brain)
+    brain.write("projects/about.md", b"# About\nSee [Bob's profile](bf://fixture/people/bob#about).\n")
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", CONFIG.replace(b"name: fixture", b"name: team"))
+    team.write("projects/other.md", b"---\naliases: [person:bob]\n---\n# Another Bob\n")
+    team.write("projects/talk.md", b"# Talk\n[Bob](person:bob)\n")
+    alone = {i["ref"] for g in cast(list[dict], read([brain], "projects/bob.md")["backlinks"]) for i in g["items"]}
+    assert alone == {"projects/alice.md", "projects/about.md"}
+    # person:bob also names a note in team: it identifies neither Bob, so team's link to it is not a backlink.
+    reply = read([brain, team], "bf://fixture/projects/bob.md")
+    linked = {(i["brain"], i["ref"]) for g in cast(list[dict], reply["backlinks"]) for i in g["items"]}
+    assert ("team", "projects/talk.md") not in linked
+    assert "claimed elsewhere" in str(reply["problems"])
+
+
 def test_canonical_record_backlinks_keep_evidence(brain: Store) -> None:
-    reply = search([brain], Query(target="bf://fixture/meetings:decision-1"))
-    item = cast(list[dict], reply["items"])[0]
+    reply = read([brain], "bf://fixture/meetings:decision-1")
+    assert reply["ref"] == "meetings:decision-1"
+    item = group(reply)["items"][0]
     assert item["ref"] == "projects/offline.md"
     assert item["relations"][0]["target"] == "meetings:decision-1"
+    scoped = search([brain], Query(text="decided", target="bf://fixture/meetings:decision-1"))["items"]
+    assert [i["ref"] for i in cast(list[dict], scoped)] == ["projects/offline.md"]

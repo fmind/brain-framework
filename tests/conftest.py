@@ -61,15 +61,19 @@ class Provider:
     def calls(self, name: str) -> list[list[str]]:
         return [json.loads(line) for line in (self.state / f"{name}.calls").read_text().splitlines()]
 
-    def run(self, adapter: str, *arguments: str, home: Path | None = None) -> subprocess.CompletedProcess[str]:
+    def run(
+        self, adapter: str, *arguments: str, home: Path | None = None, folder: str = "sensors"
+    ) -> subprocess.CompletedProcess[str]:
         env = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(home or self.state / "home"),
             "PYTHONDONTWRITEBYTECODE": "1",
             "LANG": "C.UTF-8",
+            # Adapters that derive local dates follow the suite's pinned timezone.
+            **({"TZ": os.environ["TZ"]} if "TZ" in os.environ else {}),
         }
         return subprocess.run(  # noqa: S603 - the subject is the adapter's own process boundary
-            [sys.executable, str(ROOT / "examples" / "sensors" / adapter), *arguments],
+            [sys.executable, str(ROOT / "examples" / folder / adapter), *arguments],
             env=env,
             capture_output=True,
             text=True,
@@ -139,7 +143,7 @@ def brain(tmp_path: Path) -> Store:
     root = tmp_path / "brain"
     root.mkdir()
     store = Store(root)
-    store.write("bf.yaml", b"version: 4\nname: fixture\nsensors: {}\n")
+    store.write("bf.yaml", b"version: 5\nname: fixture\nsensors: {}\n")
     store.write("projects/offline.md", PROJECT)
     store.write(
         "concepts/evidence.md",

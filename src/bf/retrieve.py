@@ -1,11 +1,13 @@
-"""Search across brains and read exact notes, sections and records."""
+"""Search across brains, and read pages, exact notes, sections, records and identities."""
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from contextlib import suppress
+from typing import cast
 
-from bf import graph, index, links, records, usage
+from bf import graph, index, links, pages, records, usage
 from bf.config import load, related
 from bf.health import source_health
 from bf.markdown import authored, section, split_ref
@@ -20,7 +22,7 @@ def bounded(value: dict[str, object], limit: int = MAX_REPLY) -> dict[str, objec
 
 
 def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[str, object]:
-    """Merge per-brain results: relevance keeps each brain's order, a time window interleaves by time."""
+    """Merge per-brain results: relevance keeps each brain's order, identities interleave by time."""
     stores, scope_problems = related(stores)
     results: list[list[dict[str, object]]] = []
     stale = []
@@ -31,38 +33,26 @@ def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[s
     identity = index.identity(query.text)
     identities, identity_problems = graph.expand(stores, query.text.strip()) if identity else (set(), [])
     targets, target_problems = graph.expand(stores, query.target)
-    subjects, subject_problems = graph.expand(stores, query.subject)
-    problems.extend([*identity_problems, *target_problems, *subject_problems])
+    problems.extend([*identity_problems, *target_problems])
     for store in stores:
         name = store.root.name
         try:
-            config = load(store)
-            name = config.name
+            name = load(store).name
             with index.database(store) as (connection, state):
                 local_targets = graph.local_refs(connection, targets)
-                local_subjects = graph.local_refs(connection, subjects)
                 local_identities = graph.local_refs(connection, identities)
-                items = index.search(
-                    connection,
-                    query,
-                    active_sources={n for n, sensor in config.sensors.items() if sensor.enabled},
-                    identities=local_identities,
-                    targets=local_targets,
-                    subjects=local_subjects,
-                )
-                for item in items:
-                    item["uri"] = (
-                        links.address(name, str(item["ref"]))
-                        if item["kind"] == "record"
-                        else links.address(name, *split_ref(str(item["ref"])))
-                    )
+                items = index.search(connection, query, identities=local_identities, targets=local_targets)
+                # Searches keep excerpts: the agent asked. External records stay labeled as such.
+                pages.guard(items, pages.owned(store), excerpts=True)
+                for position, item in enumerate(items):
                     claims, truncated = (
                         graph.explanations(
-                            connection, str(item["ref"]), query, local_targets, local_subjects, local_identities
+                            connection, str(item["ref"]), local_targets if query.target else local_identities
                         )
-                        if identity or query.target or query.subject
+                        if identity or query.target
                         else ([], False)
                     )
+                    item = items[position] = pages.label(name, item)
                     if claims:
                         item["relations"] = claims
                     if truncated:
@@ -84,33 +74,33 @@ def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[s
             stale.append(name)
         if counted:
             usage.note(store, "search", len(items))
-        results.append([{"brain": name, **item} for item in items])
+        results.append(items)
     if not results and scope_problems:
         raise Error("no unambiguous brain could be searched; check bf.yaml brain references")
     if not results:
         raise Error("no selected brain could be searched; run bf status with --brain for each brain") from last_error
-    if identity or query.recent or not query.text.strip():
+    if identity:
+        # Keep canonical refs, alias owners and related evidence in that order, then newest first.
         merged = sorted(
             (i for r in results for i in r), key=lambda i: (str(i.get("time", "")), str(i["ref"])), reverse=True
         )
-        if identity:
-            # Keep canonical refs, alias owners and related evidence in that order, then newest first.
-            merged.sort(
-                key=lambda item: (
-                    str(item["ref"]) != query.text.strip(),
-                    (str(item["brain"]), str(item["ref"])) not in owners,
-                )
+        merged.sort(
+            key=lambda item: (
+                str(item["ref"]) != query.text.strip(),
+                (str(item["brain"]), str(item["ref"])) not in owners,
             )
+        )
     else:
         # Interleave by rank: bm25 scores from different corpora are not comparable.
         merged = [i for rank in range(query.limit) for r in results if rank < len(r) for i in [r[rank]]]
     selected = merged[: query.limit]
     reply: dict[str, object] = {"items": selected, "notice": NOTICE}
+    scoped = query.prefix.split("/")[1] if query.prefix.startswith("memories/") else ""
     coverage = []
     for store, name in brains:
         names = {str(item["source"]) for item in selected if item["brain"] == name and "source" in item}
-        if query.source:
-            names.add(query.source)
+        if scoped:
+            names.add(scoped)
         if names:
             try:
                 coverage.extend(
@@ -138,24 +128,51 @@ def _brain(stores: list[Store], name: str) -> list[Store]:
     return chosen
 
 
-def read(stores: list[Store], ref: str, brain: str = "") -> dict[str, object]:
-    """Resolve a note path, note section, `source:id` record or explicit identity in exactly one brain."""
-    if not ref or len(ref) > 8192:
+def read(stores: list[Store], ref: str = "", brain: str = "", *, counted: bool = True) -> dict[str, object]:
+    """Resolve a page, a note, a note section, a `source:id` record or an explicit identity.
+
+    Without a ref, read returns the home page. Notes and records resolve in exactly one brain and
+    carry their backlinks across the selected brains; pages and identities combine every brain.
+    """
+    if len(ref) > 8192:
         raise Error("expected a reference of at most 8192 characters")
     stores, problems = related(stores)
-    selected = _brain(stores, brain)
-    parsed = links.parse(ref)
+    # A qualified address resolves in its brain; backlinks and identities still span the whole selection.
+    selected = everywhere = _brain(stores, brain)
+    ref = ref.strip()
+    if home := re.fullmatch(r"bf://([a-z][a-z0-9-]{0,63})/?", ref):
+        selected, ref = _brain(selected, home[1]), ""
+    parsed = links.parse(ref) if ref else None
     if parsed:
         selected = _brain(selected, parsed.brain)
-        ref = parsed.identity
+    path = parsed.path if parsed else ref
+    if not (parsed and parsed.fragment):
+        view = pages.page(selected, path, counted=counted)
+        if view is not None:
+            return bounded({**view, "notice": NOTICE, **_problems(problems, view)})
+        if re.fullmatch(r"actions/[^/#]+", path.rstrip("/")) and not authored(path):
+            # An action folder reads as its ACTION.md with the action's files and linked projects.
+            path = path.rstrip("/") + "/ACTION.md"
+            ref = links.address(parsed.brain, path) if parsed else path
     found = [(store, value) for store in selected if (value := _read(store, ref)) is not None]
     if not found:
-        raise Error("reference not found; use bf search to locate it")
+        view = pages.identity(everywhere, ref, counted=counted)
+        if view is not None:
+            return bounded({**view, "notice": NOTICE, **_problems(problems, view)})
+        raise Error("reference not found; use bf search to locate it, or bf read to browse pages")
     if len(found) > 1:
         raise Error("reference exists in several brains; use a brain-qualified bf:// address")
-    reply = bounded({**found[0][1], "notice": NOTICE, **({"problems": problems} if problems else {})})
-    usage.note(found[0][0], "read", 1)
+    store, value = found[0]
+    extra = pages.context(everywhere, store, str(value["brain"]), value)
+    reply = bounded({**value, **extra, "notice": NOTICE, **_problems(problems, extra)})
+    if counted:
+        usage.note(store, "read", 1)
     return reply
+
+
+def _problems(scope: list[dict[str, object]], reply: dict[str, object]) -> dict[str, object]:
+    combined = [*scope, *cast("list[dict[str, object]]", reply.get("problems", []))]
+    return {"problems": combined} if combined else {}
 
 
 def _read(store: Store, ref: str) -> dict[str, object] | None:
@@ -221,12 +238,14 @@ def _read(store: Store, ref: str) -> dict[str, object] | None:
                         found = hint, hinted
         found = found or records.find(store, source, record_id)
         if found:
+            collection = source_health(store, [source])[source]
             return {
                 "brain": name,
                 "ref": ref,
                 "path": found[0],
                 "record": found[1].model_dump(exclude_defaults=True),
-                "collection": source_health(store, [source])[source],
+                "collection": collection,
+                **({"external": True} if collection["trust"] == "external" else {}),
             }
     if cache_error:
         raise Error("the search cache is unavailable; run bf build to resolve identities") from cache_error

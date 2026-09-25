@@ -17,15 +17,17 @@ bf() {
 bf register . --collect
 bf update --dry-run
 bf update
+bf read
 bf search retention
 bf read demo:retention
+bf read actions/2026-09-19_retention
 bf validate
 bf eval
 ```
 
 `register --collect` trusts this copy to run `sensors/demo.py`; the wrapper keeps the demo's registry and state in its temporary directory, leaving your real registrations unchanged. A second update within the hour runs nothing. The fake sensor emits one fictional event inside each requested window, always with the same id, so repeated runs update one line in `memories/demo/`.
 
-Continue the action under `actions/2026-09-19_retention/`: write the answer with the record ref `demo:retention`, update ACTION.md, then validate and evaluate. For real data, create your own brain with `bf init PATH` and copy the patterns you need. See the [brain layout](../../docs/docs/brain.md).
+`bf read` shows the example project with its first open task, and `bf read actions/2026-09-19_retention` returns the action with its request file and the project that links to it. Continue that action: write the answer with the record ref `demo:retention` under `outputs/`, update ACTION.md, then validate and evaluate. For real data, create your own brain with `bf init PATH` and copy the patterns you need. See the [brain layout](../../docs/docs/brain.md).
 
 When finished, remove only this disposable copy and the shell wrapper:
 
@@ -38,9 +40,9 @@ rm -rf -- "$bf_demo"
 ## Follow an explicit link
 
 ```bash
-bf search --target bf://example/concepts/retention.md --relation related-to
-bf search --subject bf://example/projects/example --relation related-to
+bf read bf://example/concepts/retention.md
+bf read bf://example/projects/example
 bf read 'bf://example/projects/example.md#now'
 ```
 
-The project note owns a logical entity and its typed link preserves the exact origin section. This example is fictional; do not copy its identities into a real brain.
+The concept's `backlinks` list the project under `related-to`, and the project's `claims` list the same link: the project note owns a logical entity and its typed link preserves the exact origin section. `bf read repo:example/project` groups the collected record under its `repository` role. This example is fictional; do not copy its identities into a real brain.

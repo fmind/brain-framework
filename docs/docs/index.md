@@ -10,9 +10,9 @@ Start with one decision worth remembering. Search it, read its source, and keep 
 
 ## Small parts, ordinary tools
 
-Use your editor for notes, Git for review, provider CLIs for authentication and a native timer for collection. Brain Framework contributes one command, a rebuildable SQLite cache and two read-only MCP tools. It requires no model, hosted database or background server. Search matches words, explicit identities and dates; it does not generate answers or automatically learn from conversations.
+Use your editor for notes, Git for review, provider CLIs for authentication and a native timer for collection. Brain Framework contributes one command, a rebuildable SQLite cache, browsable pages and two read-only MCP tools. It requires no model, hosted database or background server. Search matches words, explicit identities and dates; it does not generate answers or automatically learn from conversations.
 
-These docs describe Brain Framework 10.0.0. Read the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md) for release changes. Check `bf --version` and follow the [installation guide](getting-started.md) to update an older copy.
+These docs describe Brain Framework 11.0.0. Read the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md) for release changes. Check `bf --version` and follow the [installation guide](getting-started.md) to update an older copy.
 
 ## Start with the question you need to answer
 
@@ -20,7 +20,8 @@ These docs describe Brain Framework 10.0.0. Read the [changelog](https://github.
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
 | Remember why a decision was made           | [Write and retrieve your first decision](getting-started.md#save-a-decision).                                 |
 | Give a teammate enough context to continue | [Set up a team brain](team.md) and [check its answers](getting-started.md#check-the-answers-your-team-needs). |
-| Find recent work or an exact source        | [Search by words, identity or time](search.md).                                                               |
+| See what needs attention or changed        | [Read the home page, a period or a source](search.md#pages).                                                  |
+| Find a decision or an exact source         | [Search by words or identity](search.md#search).                                                              |
 | Bring recurring evidence into the brain    | [Add a scoped sensor](sensors.md).                                                                            |
 | Let an agent use the same knowledge        | [Install a workflow skill](getting-started.md#give-agents-access) or connect the [MCP tools](mcp.md).         |
 

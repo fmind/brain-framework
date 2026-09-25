@@ -11,11 +11,12 @@ Standalone sensors for common providers. Copy the ones you need into a brain's `
 
 ```yaml
 # https://fmind.github.io/brain-framework/
-version: 4
+version: 5
 name: knowledge
 sensors:
   git-commits:
     command: [sensors/git-history.py, "{{home}}", "{{start}}", "{{end}}"]
+    trust: owner # commit messages you and your collaborators wrote in your repositories
     refresh: 3600
   google-calendar-events:
     command: [sensors/google-calendar.py, primary, "{{start}}", "{{end}}"]
@@ -23,6 +24,7 @@ sensors:
   local-documents:
     command: [sensors/local-documents.py, work, "{{home}}/Documents/knowledge"]
     mode: snapshot
+    trust: owner # only if you wrote the selected folder yourself
     enabled: false # select the intended folder before enabling
   drive-folders:
     command: [sensors/google-drive-folders.py]

@@ -20,14 +20,14 @@ import pytest
 from bf import records
 from bf.collect import collect, due, log_path, run, state
 from bf.config import register
-from bf.models import Error, Sensor
+from bf.models import Error, Program, Sensor, timestamp
 from bf.storage import BusyError, Store, writer
 from bf.update import update
 
 START = "2026-09-01T00:00:00.000000Z"
 END = "2026-09-02T00:00:00.000000Z"
 NOW = datetime(2026, 9, 2, tzinfo=UTC)
-CONFIG = b"""version: 4
+CONFIG = b"""version: 5
 name: fixture
 sensors:
   sample:
@@ -57,7 +57,7 @@ def configured(brain: Store) -> Store:
 
 
 def test_collect_dry_run_then_upsert(configured: Store) -> None:
-    def fake(argv: list[str], source: Sensor, store: Store, log: Path) -> bytes:
+    def fake(argv: list[str], source: Program, store: Store, log: Path) -> bytes:
         assert argv[1:] == [START, END, str(configured.root), str(Path.home())]
         assert source.refresh == 3600
         assert store.root == configured.root
@@ -133,8 +133,8 @@ def test_due_windows_resume_with_overlap_and_catch_up_at_most_30_days(configured
 
 
 def test_update_isolates_failures_and_refreshes_the_cache(configured: Store) -> None:
-    def fake(_argv: list[str], source: Sensor, *_: object) -> bytes:
-        if source.mode == "snapshot":
+    def fake(_argv: list[str], source: Program, *_: object) -> bytes:
+        if isinstance(source, Sensor) and source.mode == "snapshot":
             raise Error("provider unavailable")
         return emit({"id": "x", "title": "Collected zirconium", "time": "2026-09-01T10:00:00Z"})
 
@@ -209,7 +209,7 @@ def test_placeholders_are_expanded_once(configured: Store, monkeypatch: pytest.M
 def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 4\nname: fixture\nsensors:\n"
+        b"version: 5\nname: fixture\nsensors:\n"
         b"  a-missing:\n    command: [sensors/missing.py]\n    refresh: 3600\n"
         b'  b-good:\n    command: [echo, "[]"]\n    refresh: 3600\n',
     )
@@ -281,7 +281,7 @@ def test_sigterm_cancels_collector_and_descendants(configured: Store, tmp_path: 
         "bf.yaml",
         json.dumps(
             {
-                "version": 4,
+                "version": 5,
                 "name": "fixture",
                 "sensors": {"sample": {"command": ["sensors/wait.sh", str(marker)]}},
             }
@@ -361,12 +361,43 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
     assert found is not None
     assert found[1].updated == "2026-08-30T00:00:00.000000Z"
     assert found[1].observed == END
-    collect(configured, "sample", start="2026-08-31T00:00:00Z", end=START, runner=lambda *_: b"[]", clock=lambda: NOW)
-    assert state(configured)["sample"]["start"] == "2026-08-31T00:00:00.000000Z"
-    assert state(configured)["sample"]["end"] == END
+    later = NOW + timedelta(hours=1)
+    # A contiguous backfill extends coverage backwards without claiming a fresher success.
+    collect(configured, "sample", start="2026-08-31T00:00:00Z", end=START, runner=lambda *_: b"[]", clock=lambda: later)
+    entry = state(configured)["sample"]
+    assert (entry["start"], entry["end"], entry["success"], entry["run"]) == (
+        "2026-08-31T00:00:00.000000Z",
+        END,
+        NOW.isoformat(),
+        later.isoformat(),
+    )
+    # An older, disjoint backfill keeps the recorded coverage, resume point and freshness.
     collect(configured, "sample", start="2026-01-01T00:00:00Z", end="2026-01-02T00:00:00Z", runner=lambda *_: b"[]")
-    assert state(configured)["sample"]["start"] == "2026-01-01T00:00:00.000000Z"
-    assert state(configured)["sample"]["end"] == "2026-01-02T00:00:00.000000Z"
+    entry = state(configured)["sample"]
+    assert (entry["start"], entry["end"], entry["success"]) == ("2026-08-31T00:00:00.000000Z", END, NOW.isoformat())
+    assert due(configured, NOW + timedelta(days=1)) == [
+        (
+            "folders",
+            timestamp((NOW + timedelta(days=1) - timedelta(days=1)).isoformat()),
+            timestamp((NOW + timedelta(days=1)).isoformat()),
+        ),
+        ("sample", "2026-09-01T23:55:00.000000Z", timestamp((NOW + timedelta(days=1)).isoformat())),
+    ]
+    # A newer, disjoint window becomes the coverage and the latest success.
+    collect(
+        configured,
+        "sample",
+        start="2026-09-10T00:00:00Z",
+        end="2026-09-11T00:00:00Z",
+        runner=lambda *_: b"[]",
+        clock=lambda: later,
+    )
+    entry = state(configured)["sample"]
+    assert (entry["start"], entry["end"], entry["success"]) == (
+        "2026-09-10T00:00:00.000000Z",
+        "2026-09-11T00:00:00.000000Z",
+        later.isoformat(),
+    )
 
 
 def test_failed_run_history_reports_that_records_were_committed(

@@ -30,7 +30,7 @@ def test_example_collects_searches_and_resumes(tmp_path: Path) -> None:
     assert "upstream content can disappear" in evidence["record"]["text"]
     action = brain / "actions/2026-09-19_retention"
     (action / "outputs/answer.md").write_text(f"# Answer\n\nKeep originals. Evidence: [record]({evidence['ref']}).\n")
-    found = invoke("search", "keep originals", "--type", "action")
+    found = invoke("search", "keep originals", "--scope", "actions")
     assert found["items"][0]["ref"] == "actions/2026-09-19_retention/outputs/answer.md"
     assert invoke("validate")["valid"]
     partitions = sorted((brain / "memories/demo").glob("*.jsonl"))

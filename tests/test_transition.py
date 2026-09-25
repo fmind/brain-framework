@@ -26,7 +26,8 @@ def test_initialization_uses_only_the_final_layout_and_private_namespaces(tmp_pa
     assert {item.name for item in target.iterdir() if item.is_dir()} == {"projects", "actions", "concepts"}
     store = Store(target)
     config = load(store)
-    assert config.version == 4
+    assert config.version == 5
+    assert config.routines == {}
     assert config.name == "fresh"
     assert set(config.ontology) == {"author", "owner", "depends-on", "related-to"}
     assert config.sensors == {}
@@ -101,7 +102,7 @@ def test_authored_scope_and_types_follow_the_new_layout(brain: Store) -> None:
 def test_disabled_sensor_keeps_source_identity_and_memories_readable(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 4\nname: fixture\nsensors:\n  meetings:\n    command: [unavailable-provider]\n    enabled: false\n",
+        b"version: 5\nname: fixture\nsensors:\n  meetings:\n    command: [unavailable-provider]\n    enabled: false\n",
     )
     reply = read([brain], "meetings:decision-1")
     assert reply["brain"] == "fixture"
@@ -109,6 +110,7 @@ def test_disabled_sensor_keeps_source_identity_and_memories_readable(brain: Stor
     assert reply["path"] == "memories/meetings/2026-08.jsonl"
     assert cast("dict[str, object]", reply["collection"])["state"] == "disabled"
     assert cast("dict[str, object]", reply["record"])["id"] == "decision-1"
-    found = search([brain], Query(source="meetings"))
+    found = search([brain], Query(text="offline", prefix="memories/meetings"))
     assert {item["source"] for item in cast("list[dict[str, object]]", found["items"])} == {"meetings"}
-    assert search([brain], Query(source="meetings", current=True))["items"] == []
+    sources = cast("list[dict[str, object]]", read([brain], "memories")["sources"])
+    assert [(entry["source"], entry["state"]) for entry in sources] == [("meetings", "disabled")]

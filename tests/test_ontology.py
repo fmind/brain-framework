@@ -26,7 +26,7 @@ def search(stores: list[Store], query: Query) -> dict:
     return cast(dict, retrieve_search(stores, query))
 
 
-CONFIG = b"""version: 4
+CONFIG = b"""version: 5
 name: fixture
 schema:
   sender:
@@ -59,6 +59,12 @@ sensors:
 """
 
 
+def role(brain: Store, identity: str, relation: str) -> list[str]:
+    """Refs linking to an identity through one explicit role, from its read."""
+    groups = cast(list[dict], read([brain], identity)["backlinks"])
+    return [i["ref"] for g in groups if g.get("relation") == relation for i in g["items"]]
+
+
 def ingest(brain: Store, values: list[dict]) -> dict:
     return collect(
         brain, "mail", start="2026-01-01T00:00:00Z", end="2026-02-01T00:00:00Z", runner=lambda *_: encode(values)
@@ -71,11 +77,9 @@ def test_roles_replacement_aliases_and_cache_rebuild(brain: Store) -> None:
     first = {"id": "one", "title": "Planning", "attributes": {"from": "person:alice", "to": ["person:bob"]}}
     second = {"id": "two", "title": "Reply", "attributes": {"from": "person:bob", "to": ["person:alice"]}}
     assert ingest(brain, [first, second])["added"] == 2
-    query = Query(relation="sender", target="person:alice")
-    assert [i["ref"] for i in search([brain], query)["items"]] == ["mail:one"]
-    assert [i["ref"] for i in search([brain], Query(relation="sender", target="account:alice"))["items"]] == [
-        "mail:one"
-    ]
+    assert role(brain, "person:alice", "sender") == ["mail:one"]
+    assert role(brain, "account:alice", "sender") == ["mail:one"]
+    assert role(brain, "person:alice", "recipient") == ["mail:two"]
     assert search([brain], Query(text="message"))["items"]
     assert cast(dict, read([brain], "mail:one")["record"])["fields"] == {
         "sender": "person:alice",
@@ -85,14 +89,14 @@ def test_roles_replacement_aliases_and_cache_rebuild(brain: Store) -> None:
     assert validate(brain)["valid"]
     with writer(brain):
         brain.delete(index.CACHE)
-    assert search([brain], query)["items"][0]["ref"] == "mail:one"
+    assert role(brain, "person:alice", "sender") == ["mail:one"]
     first["attributes"]["from"] = "person:carol"
     ingest(brain, [first])
-    assert search([brain], query)["items"] == []
-    assert search([brain], Query(relation="recipient", target="person:alice"))["items"][0]["ref"] == "mail:two"
+    assert role(brain, "person:alice", "sender") == []
+    assert role(brain, "person:alice", "recipient") == ["mail:two"]
     with writer(brain):
         records.upsert(brain, "mail", [], snapshot=True)
-    assert search([brain], Query(relation="recipient", target="person:alice"))["items"] == []
+    assert read([brain], "person:alice")["backlinks"] == []
 
 
 def test_invalid_batch_writes_nothing_and_does_not_leak(brain: Store) -> None:
@@ -166,10 +170,10 @@ def test_config_contracts_and_pointer_escaping() -> None:
 def test_schema_change_invalidates_cache_and_bad_partition_is_reported(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     ingest(brain, [{"id": "one", "title": "Mail", "attributes": {"from": "person:alice"}}])
-    query = Query(relation="sender", target="person:alice")
-    assert search([brain], query)["items"]
+    assert role(brain, "person:alice", "sender") == ["mail:one"]
     brain.write("bf.yaml", CONFIG.replace(b"relation: true", b"relation: false"))
-    assert search([brain], query)["items"] == []
+    with pytest.raises(Error, match="not found"):
+        read([brain], "person:alice")
     record = Record(id="bad", title="Invalid", fields={"undeclared": "x"})
     brain.write("memories/bad/undated.jsonl", records.line(record))
     reply = search([brain], Query(text="offline"))
@@ -180,32 +184,34 @@ def test_schema_change_invalidates_cache_and_bad_partition_is_reported(brain: St
         ontology.validate(Record(id="bad", title="Bad", fields={"sender": 1}), load(brain))
 
 
-def test_cli_mcp_and_evaluation_share_relationship_filters(brain: Store) -> None:
+def test_cli_mcp_and_evaluation_share_relationship_pages(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     ingest(brain, [{"id": "one", "title": "Mail", "attributes": {"from": "person:alice"}}])
-    cli = invoke("search", "--relation", "sender", "--target", "person:alice")
+    cli = invoke("read", "person:alice")
+    assert cli["page"] == "person:alice"
 
     async def call() -> dict:
-        result = await server([brain]).call_tool("search", {"relation": "sender", "target": "person:alice"})
+        result = await server([brain]).call_tool("read", {"ref": "person:alice"})
         assert isinstance(result, CallToolResult)
         return cast(dict, result.structured_content)
 
-    assert asyncio.run(call())["items"] == cli["items"]
+    assert asyncio.run(call())["backlinks"] == cli["backlinks"]
+    assert invoke("search", "mail", "--scope", "person:alice")["items"][0]["ref"] == "mail:one"
     brain.write(
         "evals/roles.yaml",
-        b"version: 4\ncases:\n- name: sender\n  relation: sender\n  target: person:alice\n  expect: [mail:one]\n",
+        b"version: 5\ncases:\n- name: sender\n  read: person:alice\n  expect: [mail:one]\n  text: [sender]\n",
     )
     brain.write(
         "evals/nested/empty.yml",
-        b"version: 4\ncases:\n- name: absent\n  relation: sender\n  target: person:unknown\n  empty: true\n",
+        b"version: 5\ncases:\n- name: absent\n  read: person:unknown\n  empty: true\n",
     )
     assert evaluate(brain)["score"] == "2/2"
     assert evaluate(brain, "evals/roles.yaml")["score"] == "1/1"
-    for params in [{"relation": "sender"}, {"relation": "sender", "target": "Alice"}]:
+    for params in [{"text": "x", "relation": "sender"}, {"text": "x", "target": "Alice"}]:
         with pytest.raises(ValidationError):
             Query.model_validate(params)
     brain.write(
-        "evals/duplicate.yaml", b"version: 4\ncases:\n- name: twice\n  empty: true\n- name: twice\n  empty: true\n"
+        "evals/duplicate.yaml", b"version: 5\ncases:\n- name: twice\n  empty: true\n- name: twice\n  empty: true\n"
     )
     with pytest.raises(Error, match="duplicate"):
         evaluate(brain)

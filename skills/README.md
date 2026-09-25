@@ -2,15 +2,16 @@
 
 Markdown packages that teach agents to use Brain Framework. They are distributed from this repository, separately from the Python package.
 
-| Skill                               | Use                                                                      |
-| ----------------------------------- | ------------------------------------------------------------------------ |
-| [bf-use](bf-use/SKILL.md)           | Search and read notes and records from any repository.                   |
-| [bf-learn](bf-learn/SKILL.md)       | Keep project notes, concepts and actions current after work.             |
-| [bf-maintain](bf-maintain/SKILL.md) | Fix failing sensors, schedule updates, backfill and add retrieval cases. |
+| Skill                               | Use                                                                                   |
+| ----------------------------------- | ------------------------------------------------------------------------------------- |
+| [bf-use](bf-use/SKILL.md)           | Read pages, search and read notes and records from any repository.                    |
+| [bf-learn](bf-learn/SKILL.md)       | Keep project notes and concepts current after work.                                   |
+| [bf-action](bf-action/SKILL.md)     | Start, resume or close one action (one session of work) when the user asks for it.    |
+| [bf-maintain](bf-maintain/SKILL.md) | Fix failing sensors and routines, schedule updates, backfill and add retrieval cases. |
 
 ## Install
 
-Start with `bf-use`; add `bf-learn` to maintain notes after work and `bf-maintain` for brain operations. From a reviewed checkout of the release you use, copy each complete folder, including templates, into a skill directory your host discovers. For a host that reads `~/.agents/skills/`, a first installation is:
+Start with `bf-use`; add `bf-learn` to maintain notes after work, `bf-action` to resume work by name and `bf-maintain` for brain operations. From a reviewed checkout of the release you use, copy each complete folder, including templates, into a skill directory your host discovers. For a host that reads `~/.agents/skills/`, a first installation is:
 
 ```bash
 mkdir -p ~/.agents/skills

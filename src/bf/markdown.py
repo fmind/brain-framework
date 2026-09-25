@@ -18,6 +18,7 @@ from bf.models import AUTHORED, Error, Knowledge, explain
 
 LEAD = 320
 _FOOTNOTE = re.compile(r"^\[\^([^\]\s]+)\]:", re.MULTILINE)
+_TASK = re.compile(r"\[([ xX])\]\s+(\S.*)")
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,8 @@ class Markdown:
     headings: list[Heading]
     links: list[str]
     contexts: list[tuple[str, str]]
+    # Task list items in document order: (done, text).
+    tasks: list[tuple[bool, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,7 @@ class Note:
     slugs: set[str] = field(default_factory=set)
     targets: list[str] = field(default_factory=list)
     contexts: list[tuple[str, str]] = field(default_factory=list)
+    tasks: list[tuple[bool, str]] = field(default_factory=list)
 
     @property
     def links(self) -> list[str]:
@@ -95,6 +99,7 @@ def parse(path: str, data: bytes) -> Markdown:
     headings: list[Heading] = []
     links: list[str] = []
     contexts: list[tuple[str, str]] = []
+    tasks: list[tuple[bool, str]] = []
     used: set[str] = set()
     explicit: set[str] = set()
     fragment = ""
@@ -119,6 +124,14 @@ def parse(path: str, data: bytes) -> Markdown:
             used.add(slug)
             headings.append(Heading(slug, title, int(token.tag[1:]), token.map[0] + offset))
             fragment = slug
+        # A task is a list item whose paragraph starts with [ ] or [x]; code blocks never produce one.
+        if (
+            token.type == "inline"
+            and i >= 2
+            and (tokens[i - 1].type, tokens[i - 2].type) == ("paragraph_open", "list_item_open")
+            and (task := _TASK.match(token.content.split("\n", 1)[0]))
+        ):
+            tasks.append((task[1] != " ", _plain(task[2])[:LEAD]))
         for child in token.children or []:
             if child.type == "link_open":
                 target = str(child.attrGet("href"))
@@ -126,7 +139,7 @@ def parse(path: str, data: bytes) -> Markdown:
                 # BF parses each component before decoding; external queries keep their original meaning.
                 links.append(target)
                 contexts.append((target, fragment))
-    return Markdown(text, body, attributes, headings, links, contexts)
+    return Markdown(text, body, attributes, headings, links, contexts, tasks)
 
 
 def section(path: str, data: bytes, fragment: str) -> str:
@@ -243,6 +256,7 @@ def note(path: str, data: bytes) -> Note:
         slugs={h.slug for h in markdown.headings},
         targets=targets,
         contexts=[*markdown.contexts, *((target, "") for target in knowledge.links)],
+        tasks=markdown.tasks,
     )
 
 

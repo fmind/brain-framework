@@ -8,7 +8,7 @@ bf schema
 
 Contributors regenerate the checked-in schema from the Brain Framework checkout with `mise run generate:schema`.
 
-`bf.yaml` holds `version: 4`, the brain `name` and optional [sensors](sensors.md). Unknown keys, duplicate keys, anchors and aliases are rejected. Related brains are declared under `brains: {team: {path: ../team}}` (at most 32), resolved relative to this file; absolute and home-relative paths are accepted. Keys must match the target name and cannot repeat this brain's own name. Machine collection trust and optional registrations belong in `~/.config/bf/config.yaml`; see [personal and team brains](brain.md#personal-and-team-brains).
+`bf.yaml` holds `version: 5`, the brain `name` and optional [sensors](sensors.md) and [routines](sensors.md#routines). Sensor and routine names are distinct; routine names are action slugs (lowercase letters and digits separated by single hyphens). Unknown keys, duplicate keys, anchors and aliases are rejected. Related brains are declared under `brains: {team: {path: ../team}}` (at most 32), resolved relative to this file; absolute and home-relative paths are accepted. Keys must match the target name and cannot repeat this brain's own name. Machine collection trust and optional registrations belong in `~/.config/bf/config.yaml`; see [personal and team brains](brain.md#personal-and-team-brains).
 
 ## Shared fields and sensor mappings
 
@@ -16,7 +16,7 @@ Declare a small vocabulary under `schema`. Every field has a description and a s
 
 ```yaml
 # https://fmind.github.io/brain-framework/
-version: 4
+version: 5
 name: knowledge
 schema:
   author:
@@ -58,7 +58,7 @@ A field with `relation: true` produces directed edges from the record ref to its
 
 The graph is a disposable SQLite projection. Replacing or deleting a record removes its obsolete edges; deleting `.bf/` reconstructs the graph from files. Changing the schema invalidates the cache. Changing a sensor mapping affects subsequent collections, not historical evidence: explicitly backfill from retained structured evidence or recollect a chosen window. Never reconstruct missing roles from flattened links or similar names.
 
-Use `bf search --relation author --target person:email/alice@example.test`, then read the returned refs to inspect their fields and evidence. Notes can declare the same normalized `fields` in frontmatter. Sensor mappings remain the only way to populate collected record fields. CLI, MCP search and retrieval cases share `relation`, `target` and `subject` filters.
+Use `bf read person:email/alice@example.test`: its `backlinks` group the records and notes that link to Alice by relationship (`author`, `sender`, …), each with its claims and evidence; read the returned refs to inspect their fields. `bf search WORDS --scope person:email/alice@example.test` searches within them. Notes can declare the same normalized `fields` in frontmatter. Sensor mappings remain the only way to populate collected record fields. CLI, MCP and retrieval cases share these reads and scopes.
 
 ## BF links
 
@@ -70,7 +70,7 @@ bf://team/people/marc
 bf://team/mail:message-123
 ```
 
-The authority is the stable `name` in that brain's `bf.yaml`, shared by every clone, not a host or a machine-specific registration alias. Choose a distinctive name before sharing links. Renaming it changes its addresses: update authored links explicitly. A path addresses an existing authored Markdown file, a `source:id` record, or an explicitly declared entity. Entity paths such as `people/marc` are logical names, not new directories or automatic type inference. Other identifiers (`person:...`, `repo:...`, `mailto:...`, HTTPS URLs) remain supported; their schemes and query strings are opaque to BF.
+The authority is the stable `name` in that brain's `bf.yaml`, shared by every clone, not a host or a machine-specific registration alias. Choose a distinctive name before sharing links. Renaming it changes its addresses: update authored links explicitly. A path addresses an existing authored Markdown file, a `source:id` record, or an explicitly declared entity. Entity paths such as `people/marc` are logical names, not new directories or automatic type inference. Other identifiers (`person:...`, `repo:...`, `mailto:...`, HTTPS URLs) remain supported; their schemes and query strings are opaque to BF. For reads, `bf://team/` names that brain's home page and `bf://team/projects` or `bf://team/7d` one of its [pages](search.md#pages); an existing folder takes precedence over an entity of the same path, so name entities differently from folders.
 
 Give an entity a home in an existing authored note:
 
@@ -130,8 +130,8 @@ Each projected claim retains `subject`, `relation`, `target`, `evidence`, option
 
 ## Across brains
 
-Search expands one uniquely owned identity through its explicit aliases across the selected brains. A qualified BF address resolves only through its named brain; it never adds a registered brain to the selection or accesses a network. Search/read include selected roots and their direct `brains:` declarations, with no recursive expansion. Named references must match their destination configuration; missing or invalid references produce `problems`, and conflicting brain names are excluded. No global registry is needed for a local root and its references. Conflicting alias owners produce `problems` and disable expansion; exact matches remain visible. Cross-brain roles retain their declaring brain's schema meaning: equal role names alone do not certify semantic equivalence.
+Reads and searches expand one uniquely owned identity through its explicit aliases across the selected brains. A qualified BF address resolves only through its named brain, while its backlinks come from every selected brain; it never adds a registered brain to the selection or accesses a network. Search/read include selected roots and their direct `brains:` declarations, with no recursive expansion. Named references must match their destination configuration; missing or invalid references produce `problems`, and conflicting brain names are excluded. No global registry is needed for a local root and its references. Conflicting alias owners produce `problems` and disable expansion; exact matches remain visible. Cross-brain roles retain their declaring brain's schema meaning: equal role names alone do not certify semantic equivalence.
 
 `bf validate` checks local BF targets and sections and reports foreign targets under `unresolved` without fetching or opening those brains. Unresolved foreign targets do not make a locally valid brain invalid; read them with the target brain selected when that evidence is needed. Search and exact reads report inaccessible or ambiguous evidence rather than inventing a destination.
 
-This first implementation supplies identity resolution, backlinks, outgoing claims and explanations. It does not perform multi-hop inference, temporal truth reconstruction, or graph-based lexical ranking. Relationship dates are explicit evidence attributes, not a retained historical database. Everything remains reconstructible from files in the disposable SQLite cache.
+Reads supply identity resolution, backlinks grouped by relationship, claims about a subject and explanations. It does not perform multi-hop inference, temporal truth reconstruction, or graph-based lexical ranking. Relationship dates are explicit evidence attributes, not a retained historical database. Everything remains reconstructible from files in the disposable SQLite cache.

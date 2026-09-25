@@ -2,6 +2,42 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v11.0.0](https://github.com/fmind/brain-framework/releases/tag/v11.0.0) - 2026-09-25
+
+Brain Framework 11 turns listings into pages, gives actions a resumable page and schedules deterministic routines next to sensors. Search takes words and one scope; everything else is a page that `read` resolves. The brain format changes: `bf.yaml` and retrieval suites move to version 5.
+
+### Changed
+
+- `bf read` without a ref returns the home page: active and blocked projects, the latest actions, notes changed in 7 days, record activity per source in 24 hours, items in the coming 7 days, and scheduled sensors or routines that need `attention`. Projects are marked for `review` when their note is older than 14 days or items dated after it link to them (`new_links`), and show open `tasks` with the `next` one.
+- `read` resolves pages: folders (`projects`, `concepts`, `actions` and subfolders), periods (`today`, `yesterday`, `YYYY-MM-DD`, `YYYY-MM`, `12h`, `7d`, `2w`) with items modified in the period and each source's share, `memories`, `memories/SOURCE` with its partitions, and `memories/SOURCE/PERIOD`, `snapshot` or `undated`. Pages combine the selected brains, stay bounded (50 period or source items, 200 notes per folder, 20 per section) and report totals; `bf://NAME/` and `bf://NAME/PAGE` select one brain.
+- Whole note and record reads include `backlinks` across the selected brains, grouped by explicit relationship with claim explanations, and `claims` whose explicit subject is the item. An identity without an owning note reads as a page of what links to it. `bf read actions/FOLDER` returns ACTION.md with the action's files and the projects it links to.
+- **Breaking**: `bf search QUERY [--scope SCOPE] [--limit N]` requires words or an identity. A scope is a folder or file, a period or an identity. `--since`, `--until`, `--source`, `--type`, `--status`, `--recent`, `--changed-since`, `--current`, `--relation`, `--target` and `--subject` are removed. MCP `search` takes `query`, `scope` and `limit`; MCP `read` accepts an empty ref for the home page.
+- **Breaking**: `bf.yaml` version 5 declares `routines:`, deterministic programs that `bf update` runs after the sensors with the same trust, process boundary, timeout, output bound and private log. A routine's Markdown is validated and written as `actions/YYYY-MM-DD_NAME/ACTION.md`; an existing action is never replaced, empty output writes nothing, and a failure writes nothing and keeps it due. Routine names are action slugs distinct from sensor names. `bf status` reports routines, and `--check` fails on stale or failed ones.
+- **Breaking**: retrieval suites use version 5. A case is a search (`query`, optional `scope` and `limit`) or a read (`read`: a page, note, record or identity), checked with `expect`, `forbid`, `text` and `empty`; a read that finds nothing is empty.
+- Sensors declare `trust`: `owner` for text the brain's owner writes, `external` (the default) for mail, chat, invitations, issues, feeds and other third-party text. Pages show external records by title and ref without excerpts; searches, exact reads and backlinks label them `external`; source coverage reports each source's trust, and undeclared historical sources are external.
+- `bf status` no longer lists `review`; project review moved to pages. Process errors name the program rather than a collector, since sensors and routines share the runner. The search cache rebuilds automatically.
+
+### Added
+
+- The `bf-action` skill starts, resumes and closes one action, a single session of work, when the user asks for it; the action template moves there from `bf-learn`.
+- `examples/routines/weekly-review.py` renders a weekly review action from `bf read` pages, with a fake-`bf` test and a README contract. It names external items by ref only.
+- `examples/hooks/session-context.py` prints a short context for the current repository at agent session start (project, review signal, next task, linked evidence), and nothing when unavailable.
+
+### Fixed
+
+- A manual backfill that ends before a sensor's recorded coverage no longer replaces that coverage, moves its resume point or marks the sensor fresh; a contiguous backfill extends coverage backwards without counting as a fresh success.
+
+### Manual upgrade from 10
+
+1. Pause scheduled writers. Install the same Brain Framework 11 build for every CLI, MCP host, project environment and scheduled writer, and restart long-running MCP readers.
+1. Change `bf.yaml` to `version: 5`. Every sensor is now `external` by default: add `trust: owner` to the sensors whose text you write yourself, such as local Git history or your own documents.
+1. Change every suite under `evals/` to `version: 5`. Rewrite cases that used removed fields: a time window or filter becomes a `read` of a page (`7d`, `2026-09`, `projects`, `memories/SOURCE`) or a search `scope`; a `relation`, `target` or `subject` case becomes `read: IDENTITY` with `expect`, and `text` naming the role when it matters.
+1. Replace scripts, routines, skills and agent instructions that call removed search options: pages for listings and timelines, `bf read IDENTITY` for backlinks and claims, `--scope` for bounded searches. Update the `AGENTS.md` that earlier `bf init` generated, and reinstall `bf-use`, `bf-learn`, `bf-maintain` and the new `bf-action`.
+1. Optionally move scheduled review scripts into `routines/` and declare them under `routines:`. Review them like sensors before a trusted machine runs them.
+1. Run `bf build`, `bf validate` and `bf eval`; compare the home, `projects` and period pages with your previous listings, then resume the scheduled writer.
+
+No migration tooling or legacy command surface is included. Runtime dependencies are unchanged.
+
 ## [v10.0.0](https://github.com/fmind/brain-framework/releases/tag/v10.0.0) - 2026-09-25
 
 ### Changed

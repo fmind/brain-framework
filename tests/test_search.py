@@ -16,6 +16,7 @@ import pytest
 from bf import index, usage
 from bf.config import register
 from bf.models import Error, Query, Record, timestamp
+from bf.pages import scope
 from bf.retrieve import read, search
 from bf.storage import Store, state_store, writer
 from conftest import records_file
@@ -55,6 +56,8 @@ def test_results_are_compact_and_cite_readable_refs(brain: Store) -> None:
         "time": "2026-08-31T12:00:00.000000Z",
         "title": "Preserve durable evidence",
         "type": "record",
+        # Collected by a source that is not declared as the owner's: searches keep the excerpt, labeled.
+        "external": True,
     }
     assert "untrusted" in str(reply["notice"])
 
@@ -66,19 +69,25 @@ def test_exact_identities_and_their_linked_items(brain: Store) -> None:
     assert refs(brain, "projects/offline.md")[0] == "projects/offline.md"
 
 
-def test_time_windows_list_recent_items_and_filter_searches(brain: Store) -> None:
-    since, until = timestamp("2026-08-31T00:00:00Z"), timestamp("2026-09-02T00:00:00Z")
-    assert refs(brain, since=since, until=until) == ["projects/offline.md", "meetings:decision-1"]
-    assert refs(brain, since=since, until=timestamp("2026-09-01T00:00:00Z")) == ["meetings:decision-1"]
+def test_scopes_bound_searches_to_a_folder_a_period_or_a_source(brain: Store) -> None:
+    since = timestamp("2026-08-31T00:00:00Z")
     assert refs(brain, "lunch", until=since) == ["meetings:lunch"]
-    assert refs(brain, "offline", source="meetings") == ["meetings:decision-1"]
-    assert refs(brain, "offline", type="project")[0] == "projects/offline.md"
-    assert refs(brain, "originals", type="concept") == ["concepts/evidence.md"]
-    assert refs(brain, "offline", status="active")[0] == "projects/offline.md"
-    assert refs(brain, "offline retrieval", recent=True)[:2] == ["projects/offline.md", "meetings:decision-1"]
+    assert refs(brain, "offline", **scope("memories/meetings")) == ["meetings:decision-1"]
+    assert refs(brain, "offline", **scope("memories/meetings/")) == ["meetings:decision-1"]
+    assert refs(brain, "offline", **scope("projects"))[0] == "projects/offline.md"
+    assert refs(brain, "originals", **scope("concepts")) == ["concepts/evidence.md"]
+    assert refs(brain, "offline", **scope("concepts")) == []
+    assert refs(brain, "offline", **scope("2026-08")) == ["meetings:decision-1"]
+    assert refs(brain, "offline", **scope("2026-09-01")) == ["projects/offline.md"]
+    assert refs(brain, "lunch", **scope("memories/meetings/2026-08-30")) == ["meetings:lunch"]
+    assert refs(brain, "lunch", **scope("memories/meetings/2026-08.jsonl")) == ["meetings:lunch"]
+    assert refs(brain, "lunch", **scope("memories/meetings/undated")) == []
+    assert refs(brain, "offline", **scope("repo:example/project")) == ["meetings:decision-1"]
     assert refs(brain, "evidence", limit=1) == ["concepts/evidence.md"]
-    assert refs(brain, type="project") == ["projects/offline.md"]
-    assert refs(brain, source="meetings") == ["meetings:decision-1", "meetings:lunch"]
+    for invalid in ["bf.yaml", "sensors", "../x", "memories/../bf.yaml", "soon"]:
+        with pytest.raises(Error, match="scope accepts"):
+            scope(invalid)
+    assert scope("") == {}
 
 
 def test_demoted_notes_rank_last_but_stay_visible(brain: Store) -> None:
@@ -225,7 +234,7 @@ def test_several_brains_interleave_and_reads_name_their_brain(brain: Store, tmp_
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 4\nname: team\n")
+    team.write("bf.yaml", b"version: 5\nname: team\n")
     team.write("projects/offline.md", b"# Team offline\n\nThe team keeps offline retrieval too.\n")
     register(team, collect=False)
     stores = [brain, team]
@@ -241,9 +250,14 @@ def test_several_brains_interleave_and_reads_name_their_brain(brain: Store, tmp_
     assert read(stores, "meetings:lunch")["brain"] == "fixture"
     with pytest.raises(Error, match="unknown brain"):
         read(stores, "meetings:lunch", "absent")
-    timeline = search(stores, Query(since=timestamp("2026-01-01T00:00:00Z")))["items"]
+    team.write("projects/august.md", b"---\nupdated: 2026-08-31\n---\n# August\n")
+    timeline = read(stores, "2026-08")["items"]
     assert isinstance(timeline, list)
-    assert [i["ref"] for i in timeline] == ["projects/offline.md", "meetings:decision-1", "meetings:lunch"]
+    assert [(i["brain"], i["ref"]) for i in timeline] == [
+        ("fixture", "meetings:decision-1"),
+        ("team", "projects/august.md"),
+        ("fixture", "meetings:lunch"),
+    ]
 
 
 def test_exact_reads(brain: Store) -> None:
@@ -276,17 +290,6 @@ def test_oversized_replies_are_rejected_not_truncated(brain: Store) -> None:
         read([brain], "concepts/large.md")
 
 
-def test_status_lists_active_projects_due_for_review(brain: Store) -> None:
-    brain.write("projects/fresh.md", b"---\nstatus: active\nupdated: 2026-09-20\n---\n# Fresh\n")
-    brain.write("projects/undated.md", b"---\nstatus: blocked\n---\n# Undated\n")
-    brain.write("projects/closed.md", b"---\nstatus: done\nupdated: 2026-01-01\n---\n# Closed\n")
-    review = index.status(brain, now=datetime(2026, 9, 22, tzinfo=UTC))["review"]
-    assert review == [
-        {"ref": "projects/undated.md", "title": "Undated", "updated": ""},
-        {"ref": "projects/offline.md", "title": "Offline retrieval", "updated": "2026-09-01"},
-    ]
-
-
 def test_usage_counts_searches_empty_results_and_reads_without_queries(brain: Store) -> None:
     refs(brain, "offline")
     refs(brain, "zzabsent")
@@ -309,19 +312,6 @@ def test_usage_counts_searches_empty_results_and_reads_without_queries(brain: St
     log.mkdir()
     usage.note(brain, "search", 1)  # an unwritable log never breaks retrieval
     assert usage.summary(brain)["7d"]["search"] == 0
-
-
-def test_recent_limits_after_ordering_all_matching_records(brain: Store) -> None:
-    records_file(
-        brain,
-        "updates",
-        "2026-09",
-        [
-            Record(id="old", title="Needle needle needle", time="2026-09-01T00:00:00Z"),
-            Record(id="new", title="Latest update", text="needle " + "detail " * 100, time="2026-09-23T00:00:00Z"),
-        ],
-    )
-    assert refs(brain, "needle", recent=True, limit=1) == ["updates:new"]
 
 
 def test_identity_relations_keep_newest_first(brain: Store) -> None:
@@ -423,40 +413,38 @@ def test_changed_since_uses_modification_time_without_changing_event_time(brain:
             Record(id="recent", title="New event", time="2026-09-22T00:00:00Z"),
         ],
     )
-    assert refs(brain, source="updates", changed_since=timestamp("2026-09-21T00:00:00Z")) == [
+    page = read([brain], "2026-09")
+    assert [i["ref"] for i in cast("list[dict[str, object]]", page["items"])] == [
         "updates:recent",
-        "updates:old",
+        "projects/offline.md",
     ]
-    assert refs(brain, source="updates", since=timestamp("2026-09-21T00:00:00Z")) == ["updates:recent"]
-    items = search([brain], Query(source="updates", changed_since=timestamp("2026-09-23T00:00:00Z")))["items"]
-    assert isinstance(items, list)
-    item = items[0]
+    # Modified in the period, but dated outside it: listed separately with its event time unchanged.
+    changed = cast("list[dict[str, object]]", page["changed"])
+    assert [i["ref"] for i in changed] == ["updates:old"]
+    assert read([brain], "2026-09-23")["items"] == []
+    item = cast("list[dict[str, object]]", read([brain], "2026-09-23")["changed"])[0]
     assert item["time"] == timestamp("2026-01-01T00:00:00Z")
     assert item["updated"] == timestamp("2026-09-23T00:00:00Z")
     assert item["observed"] == timestamp("2026-09-23T01:00:00Z")
     assert item["partial"] is True
 
 
-def test_current_selects_enabled_sources_and_reports_collection_coverage(brain: Store) -> None:
+def test_searches_report_collection_coverage_of_their_sources(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 4\nname: fixture\nsensors:\n  meetings:\n    command: [true-command]\n    refresh: 3600\n  disabled:\n    command: [true-command]\n    enabled: false\n",
+        b"version: 5\nname: fixture\nsensors:\n  meetings:\n    command: [true-command]\n    refresh: 3600\n  disabled:\n    command: [true-command]\n    enabled: false\n",
     )
     for source in ("disabled", "historical"):
         records_file(brain, source, "undated", [Record(id="x", title="Offline retrieval")])
-    items = search([brain], Query(text="offline retrieval", current=True))["items"]
-    assert isinstance(items, list)
-    assert any(item["kind"] == "note" for item in items)
-    assert {item["source"] for item in items if item["kind"] == "record"} == {"meetings"}
     for source, expected in (("meetings", "active"), ("disabled", "disabled"), ("historical", "historical")):
-        result = search([brain], Query(source=source))
+        result = search([brain], Query(text="offline", **scope(f"memories/{source}")))
         sources = result["sources"]
         assert isinstance(sources, list)
         assert sources[0]["state"] == expected
-    result = search([brain], Query(source="absent", current=True))
+    result = search([brain], Query(text="offline", **scope("memories/absent")))
     assert result["items"] == []
     assert result["sources"] == [
-        {"brain": "fixture", "source": "absent", "state": "historical", "freshness": "unknown"}
+        {"brain": "fixture", "source": "absent", "state": "historical", "freshness": "unknown", "trust": "external"}
     ]
     collection = read([brain], "meetings:decision-1")["collection"]
     assert isinstance(collection, dict)
@@ -514,7 +502,7 @@ def test_recent_identity_keeps_owners_ahead_of_newer_relations_across_brains(bra
             Record(id="latest", title="Latest activity", time="2026-09-23T00:00:00Z", links=["repo:example/project"]),
         ],
     )
-    assert refs(brain, "repo:example/project", recent=True) == [
+    assert refs(brain, "repo:example/project") == [
         "projects/offline.md",
         "updates:latest",
         "meetings:decision-1",
@@ -522,9 +510,9 @@ def test_recent_identity_keeps_owners_ahead_of_newer_relations_across_brains(bra
     folder = tmp_path / "shared"
     folder.mkdir()
     team = Store(folder)
-    team.write("bf.yaml", b"version: 4\nname: team\n")
+    team.write("bf.yaml", b"version: 5\nname: team\n")
     team.write("projects/owner.md", b'---\nupdated: 2026-08-01\naliases: ["repo:example/project"]\n---\n# Owner\n')
-    result = search([team, brain], Query(text="repo:example/project", recent=True))["items"]
+    result = search([team, brain], Query(text="repo:example/project"))["items"]
     assert isinstance(result, list)
     assert [(item["brain"], item["ref"]) for item in result] == [
         ("fixture", "projects/offline.md"),
@@ -537,7 +525,7 @@ def test_recent_identity_keeps_owners_ahead_of_newer_relations_across_brains(bra
 
 def test_an_exact_record_ref_takes_precedence_over_a_colliding_alias(brain: Store) -> None:
     brain.write("projects/alias.md", b'---\nupdated: 2026-09-23\naliases: ["meetings:lunch"]\n---\n# Alias\n')
-    assert refs(brain, "meetings:lunch", recent=True)[0] == "meetings:lunch"
+    assert refs(brain, "meetings:lunch")[0] == "meetings:lunch"
     assert read([brain], "meetings:lunch")["ref"] == "meetings:lunch"
 
 
@@ -546,7 +534,7 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
     broken = tmp_path / "broken"
     broken.mkdir()
     other = Store(broken)
-    other.write("bf.yaml", b"version: 4\nname: interrupted\n")
+    other.write("bf.yaml", b"version: 5\nname: interrupted\n")
     other.write("memories/.pending/0.before", b"preserve this original")
     reply = search([brain, other], Query(text="offline retrieval"), counted=False)
     assert isinstance(reply["items"], list)
@@ -563,7 +551,7 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
     # Exact reads cannot silently assume a broken brain contains no competing identity.
     with pytest.raises(Error):
         read([brain, other], "meetings:lunch")
-    other.write("bf.yaml", b"version: 4\nname: [invalid]\n")
+    other.write("bf.yaml", b"version: 5\nname: [invalid]\n")
     assert search([brain, other], Query(text="offline"), counted=False)["items"]
     with pytest.raises(Error, match=r"invalid bf\.yaml"):
         search([other, other], Query(text="offline"), counted=False)
@@ -618,9 +606,15 @@ def test_evaluation_names_missing_retrieval_cases(brain: Store) -> None:
 
     with pytest.raises(Error, match="evals has no suites"):
         evaluate(brain)
-    brain.write("evals/retrieval.yaml", b"version: 4\ncases:\n  - name: later\n    since: soon\n    empty: true\n")
-    with pytest.raises(Error, match="case later: since"):
+    brain.write(
+        "evals/retrieval.yaml", b"version: 5\ncases:\n  - name: later\n    query: x\n    scope: soon\n    empty: true\n"
+    )
+    with pytest.raises(Error, match="case later: scope accepts"):
         evaluate(brain)
+    for case in (b"    query: x\n    read: today\n", b"    read: today\n    scope: 7d\n", b"    since: 7d\n"):
+        brain.write("evals/retrieval.yaml", b"version: 5\ncases:\n  - name: bad\n" + case + b"    empty: true\n")
+        with pytest.raises(Error, match=r"case bad|since"):
+            evaluate(brain)
 
 
 def test_evaluation_rejects_incomplete_empty_answers(brain: Store) -> None:
@@ -628,7 +622,7 @@ def test_evaluation_rejects_incomplete_empty_answers(brain: Store) -> None:
 
     brain.write("projects/broken.md", b"---\nstatus: typo\n---\n# Lost answer\n")
     brain.write(
-        "evals/retrieval.yaml", b"version: 4\ncases:\n  - name: absent\n    query: lost answer\n    empty: true\n"
+        "evals/retrieval.yaml", b"version: 5\ncases:\n  - name: absent\n    query: lost answer\n    empty: true\n"
     )
     reply = evaluate(brain)
     assert not reply["passed"]
@@ -653,6 +647,6 @@ def test_retrieval_cases_distinguish_record_ids_from_note_sections(brain: Store)
     records_file(brain, "issues", "undated", [Record(id="item#comment", title="Hashneedle")])
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 4\ncases:\n  - name: exact-record\n    query: hashneedle\n    expect: [issues:item]\n",
+        b"version: 5\ncases:\n  - name: exact-record\n    query: hashneedle\n    expect: [issues:item]\n",
     )
     assert not evaluate(brain)["passed"]

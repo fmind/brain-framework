@@ -5,7 +5,7 @@ By the end of this walkthrough, you will have a saved decision, a search that fi
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then Brain Framework. uv supplies Python 3.14 if needed. If `bf` is not on PATH, run `uv tool update-shell` and open a new shell.
 
 ```bash
-uv tool install --python 3.14 'brain-framework==10.0.0'
+uv tool install --python 3.14 'brain-framework==11.0.0'
 bf --version
 ```
 
@@ -14,6 +14,7 @@ Create a brain. No global configuration is required: work inside its directory o
 ```bash
 bf init ~/knowledge --name brain
 cd ~/knowledge && git init
+bf read                        # the home page
 bf search welcome
 bf read concepts/welcome.md
 ```
@@ -45,10 +46,11 @@ Keep original evidence because providers may delete old content.
 ```bash
 bf search "providers delete old content"
 bf read projects/archive.md#decision
+bf read projects
 bf validate
 ```
 
-The result names the file and section; `read` returns that section directly. No indexing command is needed. As the project changes, update the note in place and let Git keep its history. Add dates, evidence links and retrieval cases as the note grows; see [notes](brain.md#notes) and [retrieval cases](search.md#retrieval-cases).
+The result names the file and section; `read` returns that section directly. `bf read projects` lists the project with its open task as `next`, and the home page marks it for `review` once its note falls behind. No indexing command is needed. As the project changes, update the note in place and let Git keep its history. Add dates, evidence links and retrieval cases as the note grows; see [notes](brain.md#notes) and [retrieval cases](search.md#retrieval-cases).
 
 ## Connect your knowledge
 
@@ -61,13 +63,13 @@ In the archive note above, add `entity: bf://brain/projects/archive` to its fron
 ```
 
 ```bash
-bf search --subject bf://brain/projects/archive --relation related-to
-bf search --target bf://brain/concepts/welcome.md
+bf read bf://brain/concepts/welcome.md
+bf read bf://brain/projects/archive
 bf read 'bf://brain/projects/archive.md#decision'
 bf validate
 ```
 
-The results identify the containing decision section as the relationship's origin and evidence. Use `## Decision {#decision}` if that anchor must survive later wording changes. For people, use a logical entity identity such as `bf://brain/people/marc` on a note in an existing authored folder; no `people/` directory is needed. Add only reviewed aliases and relationships. See the [full link contract](schema.md#bf-links).
+The welcome guide's `backlinks` list the archive under `related-to`, and the archive's `claims` list the same link: both identify the containing decision section as the relationship's origin and evidence. Use `## Decision {#decision}` if that anchor must survive later wording changes. For people, use a logical entity identity such as `bf://brain/people/marc` on a note in an existing authored folder; no `people/` directory is needed. Add only reviewed aliases and relationships. See the [full link contract](schema.md#bf-links).
 
 ## Join a team brain
 
@@ -87,7 +89,7 @@ Before adding integrations, try a small pilot: one project, one owner who keeps 
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/search/
-version: 4
+version: 5
 cases:
   - name: find-the-reason
     query: providers delete old content
@@ -118,6 +120,8 @@ Follow the [skill installation guide](https://github.com/fmind/brain-framework/b
 
 From a new agent session, ask: "Search my brain for why we keep original evidence. Read the source and cite its ref." The agent should search that brain and read `projects/archive.md#decision` before answering. This checks that the host actually reaches your knowledge. Hosts that prefer tools can register `bf mcp --brain ~/brain` instead; see [MCP](mcp.md).
 
+To bring a repository's project into every session automatically, register the [session-context hook](https://github.com/fmind/brain-framework/tree/main/examples/hooks) as a session-start command in hosts that support one, such as Claude Code: it prints the project's status, review signal, next task and linked evidence for the current repository, and nothing when the brain has no matching note.
+
 For a work host, choose the team brain explicitly. An agent's model provider may receive retrieved text even though Brain Framework itself searches offline; see [separating audiences](privacy.md#separating-audiences).
 
 ## Try the example
@@ -129,7 +133,7 @@ The [runnable example](https://github.com/fmind/brain-framework/tree/main/exampl
 Read the [release notes](https://github.com/fmind/brain-framework/releases), then update the tool and check your brain:
 
 ```bash
-uv tool install --upgrade --python 3.14 'brain-framework==10.0.0'
+uv tool install --upgrade --python 3.14 'brain-framework==11.0.0'
 bf --version
 bf validate --brain brain
 bf eval --brain brain
@@ -137,6 +141,6 @@ bf eval --brain brain
 
 Run `eval` once your brain has `evals/retrieval.yaml`. Review and update separately installed skills, and restart an MCP host that still runs the old process. Within a major version, the brain format (`bf.yaml`, `evals/retrieval.yaml` and the folder layout) stays compatible. A new major version supports only its current format and documents manual upgrade steps; historical breaking changes are recorded in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md).
 
-## Transition from FKF
+## Upgrade from Brain Framework 10
 
-Brain Framework 10 uses version 4 of `bf.yaml` and retrieval suites under `evals/`. Before upgrading from 9, preserve the original files and runtime, pause collection, update every reader and writer together, change configuration and suite versions to 4, and move `queries.yaml` to `evals/retrieval.yaml`. Add the shared schema and explicit sensor mappings; existing records without `fields` remain readable but have no typed graph evidence. Rebuild, validate and evaluate before resuming collection. Follow the complete manual steps in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md). There is no compatibility command or automatic migration.
+Brain Framework 11 uses version 5 of `bf.yaml` and of retrieval suites. Search takes words and one `--scope`; listings, timelines, sources and relationships are pages read with `bf read`. Update every reader and writer together, change both versions to 5, and rewrite retrieval cases that used removed search fields: a time window or filter becomes a `read` of a page (`7d`, `2026-09`, `projects`, `memories/SOURCE`) or a `scope`, and a `relation`/`target`/`subject` case becomes a `read` of the identity. Reinstall the skills, then rebuild, validate and evaluate. Follow the complete manual steps in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md). There is no compatibility command or automatic migration.

@@ -10,7 +10,8 @@ from textwrap import dedent
 import pytest
 from pydantic import ValidationError
 
-from bf.models import Query, Record, timestamp
+from bf.models import Error, Query, Record, timestamp
+from bf.pages import period, scope
 from bf.storage import Store
 
 
@@ -59,12 +60,15 @@ def test_revision_times_and_source_filters_are_strict() -> None:
     )
     assert record.updated == "2026-09-23T12:00:00.000000Z"
     assert record.observed == "2026-09-23T12:05:00.000000Z"
-    assert Query(current=True).current
-    assert Query(changed_since="2026-09-22T00:00:00Z").changed_since == "2026-09-22T00:00:00.000000Z"
-    # Adapters pass user times through; the query resolves relative ones.
-    assert Query(since="7d").since < Query(since="now").since
-    with pytest.raises(ValidationError, match="times accept"):
-        Query(since="soon")
+    # Adapters resolve periods into canonical bounds; queries accept only canonical instants.
+    assert scope("7d")["since"] < scope("today")["until"]
+    assert Query(text="x", **scope("2026-09")).until == scope("2026-10")["since"]
+    with pytest.raises(ValidationError):
+        Query(text="x", since="7d")
+    with pytest.raises(Error, match="scope accepts"):
+        scope("soon")
+    with pytest.raises(Error, match="invalid period"):
+        period("2026-13-01")
     with pytest.raises(ValidationError):
         Record(id="document", title="Decision", attributes={"updated": "2026-09-23"})
 
@@ -76,33 +80,32 @@ def test_note_dates_follow_local_days_without_rebuilding_the_cache(brain: Store)
         brain.write(f"projects/{day}.md", f"---\nupdated: {day}\n---\n# Localday {day}\n".encode())
     index.refresh(brain)
     cache_inode = (brain.root / index.CACHE).stat().st_ino
-    for zone, day, end, expected in [
-        ("America/New_York", "2026-09-23", "2026-09-24", "2026-09-23T04:00:00.000000Z"),
-        ("Europe/Paris", "2026-09-23", "2026-09-24", "2026-09-22T22:00:00.000000Z"),
-        ("Europe/Paris", "2026-03-29", "2026-03-30", "2026-03-28T23:00:00.000000Z"),
+    for zone, day, expected in [
+        ("America/New_York", "2026-09-23", "2026-09-23T04:00:00.000000Z"),
+        ("Europe/Paris", "2026-09-23", "2026-09-22T22:00:00.000000Z"),
+        ("Europe/Paris", "2026-03-29", "2026-03-28T23:00:00.000000Z"),
     ]:
         python_in_timezone(
             zone,
             """
             import sys
             from pathlib import Path
-            from bf.models import Query, moment
-            from bf.retrieve import search
+            from bf.models import Query
+            from bf.pages import scope
+            from bf.retrieve import read, search
             from bf.storage import Store
 
-            root, day, end, expected = sys.argv[1:]
-            for options in ({"since": moment(day)}, {"changed_since": moment(day)}):
-                reply = search(
-                    [Store(Path(root))],
-                    Query.model_validate({"text": "localday", "until": moment(end), **options}),
-                    counted=False,
-                )
-                assert [item["ref"] for item in reply["items"]] == [f"projects/{day}.md"]
-                assert reply["items"][0]["time"] == expected
+            root, day, expected = sys.argv[1:]
+            store = Store(Path(root))
+            reply = search([store], Query(text="localday", **scope(day)), counted=False)
+            assert [item["ref"] for item in reply["items"]] == [f"projects/{day}.md"]
+            assert reply["items"][0]["time"] == expected
+            page = read([store], day, counted=False)
+            assert [item["ref"] for item in page["items"]] == [f"projects/{day}.md"]
+            assert page["since"] == expected
             """,
             str(brain.root),
             day,
-            end,
             expected,
         )
     assert (brain.root / index.CACHE).stat().st_ino == cache_inode

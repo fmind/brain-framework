@@ -15,6 +15,7 @@ MAX_PARTITION = 256 << 20
 MAX_REPLY = 4 << 20
 MAX_FILES = 100_000
 NAME = r"^[a-z][a-z0-9-]{0,63}$"
+SLUG = r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
 AUTHORED = ("projects", "actions", "concepts")
 Status = Literal["", "draft", "active", "paused", "blocked", "done", "stable", "deprecated", "archived"]
 # Demoted notes stay searchable and visible, but rank below current knowledge.
@@ -275,20 +276,16 @@ class Mapping(Model):
         return self
 
 
-class Sensor(Model):
-    """Execution and explicit mapping of sensor output into the shared schema."""
+class Program(Model):
+    """A trusted executable declared in bf.yaml: direct argv, bounded runtime and a due rule."""
 
     command: Annotated[list[str], Field(min_length=1, max_length=128)]
-    fields: dict[Annotated[str, Field(pattern=NAME)], Mapping] = Field(default_factory=dict)
     enabled: bool = True
-    # A window sensor upserts the items it returns; a snapshot sensor replaces its complete catalog.
-    mode: Literal["window", "snapshot"] = "window"
     timeout: Annotated[int, Field(ge=1, le=3600)] = 300
     max_bytes: Annotated[int, Field(ge=1, le=256 << 20)] = 64 << 20
-    # Zero keeps collection manual. These are due rules for `bf update`, not an installed schedule.
+    # Zero keeps the program manual. These are due rules for `bf update`, not an installed schedule.
     refresh: Annotated[int, Field(ge=0, le=31_536_000)] = 0
     lookback: Annotated[int, Field(ge=1, le=31_536_000)] = 86_400
-    overlap: Annotated[int, Field(ge=0, le=31_536_000)] = 300
 
     @field_validator("command")
     @classmethod
@@ -300,8 +297,27 @@ class Sensor(Model):
             if "{{" in stripped or "}}" in stripped:
                 raise ValueError("unknown placeholder; use brain, home, start or end")
         if not values[0] or "{{" in values[0]:
-            raise ValueError("executable must be a literal command name or sensors/ path")
+            raise ValueError("executable must be a literal command name or a sensors/ or routines/ path")
         return values
+
+
+class Sensor(Program):
+    """Execution and explicit mapping of sensor output into the shared schema."""
+
+    fields: dict[Annotated[str, Field(pattern=NAME)], Mapping] = Field(default_factory=dict)
+    # A window sensor upserts the items it returns; a snapshot sensor replaces its complete catalog.
+    mode: Literal["window", "snapshot"] = "window"
+    # Text that other people write (mail, chat, invites, feeds) is external. Only the owner's own
+    # sources are declared `owner`; pages show external items by title and ref, without excerpts.
+    trust: Literal["owner", "external"] = "external"
+    overlap: Annotated[int, Field(ge=0, le=31_536_000)] = 300
+
+
+class Routine(Program):
+    """A deterministic program whose Markdown output becomes the day's action for review."""
+
+    # An action is an authored note: keep its output within the note read limit.
+    max_bytes: Annotated[int, Field(ge=1, le=4 << 20)] = 1 << 20
 
 
 class BrainReference(Model):
@@ -318,18 +334,22 @@ class BrainReference(Model):
 
 
 class Config(Model):
-    """One brain: its name and the sensors it may run."""
+    """One brain: its name, related brains, shared schema, and the sensors and routines it may run."""
 
-    version: Literal[4] = 4
+    version: Literal[5] = 5
     name: Annotated[str, Field(pattern=NAME)]
     brains: dict[Annotated[str, Field(pattern=NAME)], BrainReference] = Field(default_factory=dict, max_length=32)
     ontology: dict[Annotated[str, Field(pattern=NAME)], SchemaField] = Field(default_factory=dict, alias="schema")
     sensors: dict[Annotated[str, Field(pattern=NAME)], Sensor] = Field(default_factory=dict)
+    # A routine name is the slug of the action folder it writes.
+    routines: dict[Annotated[str, Field(pattern=SLUG, max_length=64)], Routine] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def mapped(self) -> Config:
         if self.name in self.brains:
             raise ValueError("a brain cannot reference its own name")
+        if self.sensors.keys() & self.routines.keys():
+            raise ValueError("sensor and routine names must be distinct; they share logs and locks")
         for sensor in self.sensors.values():
             for name, mapping in sensor.fields.items():
                 if name not in self.ontology:
@@ -352,49 +372,30 @@ class UserConfig(Model):
 
 
 class Query(Model):
-    text: Annotated[str, Field(max_length=4096)] = ""
+    """Words or an exact identity, optionally bounded by one scope: a folder, a time window or an identity."""
+
+    text: Annotated[str, Field(max_length=4096)]
     limit: Annotated[int, Field(ge=1, le=50)] = 10
-    source: str = ""
-    type: str = ""
-    status: Status = ""
     since: str = ""
     until: str = ""
-    recent: bool = False
-    changed_since: str = ""
-    current: bool = False
-    relation: Annotated[str, Field(pattern=r"^(?:[a-z][a-z0-9-]{0,63})?$")] = ""
+    # A brain-relative folder or file; matches that path and everything below it.
+    prefix: Annotated[str, Field(max_length=4096)] = ""
     target: Annotated[str, Field(max_length=8192)] = ""
-    subject: Annotated[str, Field(max_length=8192)] = ""
 
-    @field_validator("since", "until", "changed_since")
+    @field_validator("since", "until")
     @classmethod
     def instant(cls, value: str) -> str:
-        """Every adapter passes user times through; relative ones resolve when the query is built."""
         try:
-            return moment(value) if value else ""
-        except Error as error:
+            return timestamp(value) if value else ""
+        except ValueError as error:
             raise ValueError(str(error)) from None
 
     @model_validator(mode="after")
     def bounded(self) -> Query:
-        if self.relation and not (self.target or self.subject):
-            raise ValueError("relation requires target or subject")
-        for value in (self.target, self.subject):
-            if value and not re.fullmatch(r"[a-z][a-z0-9+.-]*:\S+", value):
-                raise ValueError("target and subject require an explicit namespaced identity")
-        if not self.text.strip() and not (
-            self.since
-            or self.until
-            or self.source
-            or self.type
-            or self.status
-            or self.changed_since
-            or self.current
-            or self.relation
-            or self.target
-            or self.subject
-        ):
-            raise ValueError("give a query, a time window (--since/--until) or a filter (--source/--type/--status)")
+        if not self.text.strip():
+            raise ValueError("give words or an identity to search; read a page such as today to list items")
+        if self.target and not re.fullmatch(r"[a-z][a-z0-9+.-]*:\S+", self.target):
+            raise ValueError("target requires an explicit namespaced identity")
         if self.since and self.until and self.since >= self.until:
             raise ValueError("since must be earlier than until")
         return self

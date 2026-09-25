@@ -23,6 +23,27 @@
       "title": "Mapping",
       "type": "object"
     },
+    "Routine": {
+      "additionalProperties": false,
+      "description": "A deterministic program whose Markdown output becomes the day's action for review.",
+      "properties": {
+        "command": {
+          "items": { "type": "string" },
+          "maxItems": 128,
+          "minItems": 1,
+          "title": "Command",
+          "type": "array"
+        },
+        "enabled": { "default": true, "title": "Enabled", "type": "boolean" },
+        "lookback": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" },
+        "max_bytes": { "default": 1048576, "maximum": 4194304, "minimum": 1, "title": "Max Bytes", "type": "integer" },
+        "refresh": { "default": 0, "maximum": 31536000, "minimum": 0, "title": "Refresh", "type": "integer" },
+        "timeout": { "default": 300, "maximum": 3600, "minimum": 1, "title": "Timeout", "type": "integer" }
+      },
+      "required": ["command"],
+      "title": "Routine",
+      "type": "object"
+    },
     "SchemaField": {
       "additionalProperties": false,
       "description": "A shared meaning; cardinality applies when a sensor maps this field.",
@@ -74,7 +95,8 @@
         "mode": { "default": "window", "enum": ["window", "snapshot"], "title": "Mode", "type": "string" },
         "overlap": { "default": 300, "maximum": 31536000, "minimum": 0, "title": "Overlap", "type": "integer" },
         "refresh": { "default": 0, "maximum": 31536000, "minimum": 0, "title": "Refresh", "type": "integer" },
-        "timeout": { "default": 300, "maximum": 3600, "minimum": 1, "title": "Timeout", "type": "integer" }
+        "timeout": { "default": 300, "maximum": 3600, "minimum": 1, "title": "Timeout", "type": "integer" },
+        "trust": { "default": "external", "enum": ["owner", "external"], "title": "Trust", "type": "string" }
       },
       "required": ["command"],
       "title": "Sensor",
@@ -82,7 +104,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "One brain: its name and the sensors it may run.",
+  "description": "One brain: its name, related brains, shared schema, and the sensors and routines it may run.",
   "properties": {
     "brains": {
       "maxProperties": 32,
@@ -91,6 +113,12 @@
       "type": "object"
     },
     "name": { "pattern": "^[a-z][a-z0-9-]{0,63}$", "title": "Name", "type": "string" },
+    "routines": {
+      "patternProperties": { "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": { "$ref": "#/$defs/Routine" } },
+      "propertyNames": { "maxLength": 64 },
+      "title": "Routines",
+      "type": "object"
+    },
     "schema": {
       "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/SchemaField" } },
       "title": "Schema",
@@ -101,7 +129,7 @@
       "title": "Sensors",
       "type": "object"
     },
-    "version": { "const": 4, "default": 4, "title": "Version", "type": "integer" }
+    "version": { "const": 5, "default": 5, "title": "Version", "type": "integer" }
   },
   "required": ["name"],
   "title": "Config",

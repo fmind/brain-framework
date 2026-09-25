@@ -1,14 +1,14 @@
 # https://fmind.github.io/brain-framework/docs/search/
-version: 4
+version: 5
 cases:
   - name: retention-concept
     query: why keep original evidence
-    type: concept
+    scope: concepts
     expect: [concepts/retention.md]
     text: [upstream content can disappear]
   - name: retention-record
     query: retention decision
-    source: demo
+    scope: memories/demo
     expect: ["demo:retention"]
   - name: project-by-identity
     query: "repo:example/project"
@@ -17,14 +17,17 @@ cases:
     query: nonexistent-quasar
     empty: true
   - name: explicit-repository-relationship
-    relation: repository
-    target: repo:example/project
-    expect: [demo:retention]
+    read: "repo:example/project"
+    expect: ["demo:retention"]
+    text: [repository]
   - name: explicit-concept-backlink
-    relation: related-to
-    target: bf://example/concepts/retention.md
+    read: bf://example/concepts/retention.md
     expect: [projects/example.md]
-  - name: outgoing-project-claim
-    subject: bf://example/projects/example
-    relation: related-to
+    text: [related-to]
+  - name: active-projects
+    read: projects
     expect: [projects/example.md]
+  - name: resume-the-action
+    read: actions/2026-09-19_retention
+    expect: [projects/example.md]
+    text: [Next action]

@@ -1,9 +1,10 @@
 # https://fmind.github.io/brain-framework/
-version: 4
+version: 5
 name: example
 sensors:
   demo:
     command: [sensors/demo.py, "{{start}}", "{{end}}"]
+    trust: owner
     refresh: 3600
     fields:
       kind: { value: event }

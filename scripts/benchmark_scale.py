@@ -37,7 +37,7 @@ def main() -> None:
         (root / "brain").mkdir()
         os.environ["XDG_STATE_HOME"] = str(root / "state")
         store = Store(root / "brain")
-        store.write("bf.yaml", b"version: 4\nname: benchmark\n")
+        store.write("bf.yaml", b"version: 5\nname: benchmark\n")
         background = ("Routine project background. " * args.body_chars)[: args.body_chars]
         items = [
             Record(
@@ -85,7 +85,8 @@ def main() -> None:
             ),
             ("selective", lambda: search([store], Query(text="zirconium"))),
             ("common", lambda: search([store], Query(text="evidence"))),
-            ("timeline", lambda: search([store], Query(since="2026-06-01T00:00:00.000000Z", limit=50))),
+            ("timeline", lambda: read([store], "2026-06")),
+            ("home", lambda: read([store])),
             ("exact_read", lambda: read([store], "decision:0")),
             ("changed_record", change_record),
             ("unchanged_record", unchanged_record),

@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      BRAIN_FRAMEWORK: brain-framework==10.0.0
+      BRAIN_FRAMEWORK: brain-framework==11.0.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,7 +87,9 @@ jobs:
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${GITHUB_REF_NAME}"
 ```
 
-The collection job runs whatever sensor code is on its branch, with its provider token. Give that token read-only access to the selected sources, and require a reviewed pull request for changes to `bf.yaml`, `sensors/`, `routines/` and `.github/`, for example with a `CODEOWNERS` file. If branch rules also require pull requests for `memories/`, allow only this workflow to bypass them, or make its last step open a pull request.
+`bf update` also runs the brain's due [routines](sensors.md#routines) after its sensors. Their actions stay in the job's checkout unless the commit step also adds `actions/`; publish them only when every member should review them.
+
+The collection job runs whatever sensor and routine code is on its branch, with its provider token. Give that token read-only access to the selected sources, and require a reviewed pull request for changes to `bf.yaml`, `sensors/`, `routines/` and `.github/`, for example with a `CODEOWNERS` file. If branch rules also require pull requests for `memories/`, allow only this workflow to bypass them, or make its last step open a pull request.
 
 ## Keep it trustworthy
 

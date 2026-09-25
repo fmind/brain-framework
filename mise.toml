@@ -372,7 +372,7 @@ PYTHON
     "$bf_package_bin" status --check
     mkdir -p "$tmp/$distribution-brain/evals"
     cat > "$tmp/$distribution-brain/evals/retrieval.yaml" <<'YAML'
-version: 4
+version: 5
 cases:
   - name: installed-welcome
     query: welcome

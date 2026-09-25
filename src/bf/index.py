@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager, suppress
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from bf import links as bf_links
 from bf import ontology, records
@@ -17,9 +17,7 @@ from bf.markdown import authored, note
 from bf.models import AUTHORED, Error, Query, Record, digest, encode, moment
 from bf.storage import BusyError, Store, reader, writer
 
-SCHEMA = 14
-# Active projects whose note is older than this are listed for review; a reminder, never a failure.
-REVIEW_DAYS = 14
+SCHEMA = 15
 CACHE = ".bf/index.sqlite"
 _DDL = """
 CREATE TABLE ontology(signature TEXT NOT NULL);
@@ -34,7 +32,8 @@ CREATE TABLE files(path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, ctime INT
 CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT NOT NULL, kind TEXT NOT NULL,
                    source TEXT NOT NULL, title TEXT NOT NULL, time TEXT NOT NULL, type TEXT NOT NULL,
                    status TEXT NOT NULL, lead TEXT NOT NULL, url TEXT NOT NULL,
-                   updated TEXT NOT NULL, observed TEXT NOT NULL, partial INTEGER NOT NULL);
+                   updated TEXT NOT NULL, observed TEXT NOT NULL, partial INTEGER NOT NULL,
+                   tasks_open INTEGER NOT NULL, tasks_done INTEGER NOT NULL, next TEXT NOT NULL);
 CREATE INDEX items_path ON items(path);
 CREATE INDEX items_time ON items(time);
 CREATE TABLE passages(id INTEGER PRIMARY KEY, item INTEGER NOT NULL, fragment TEXT NOT NULL, title TEXT NOT NULL);
@@ -193,7 +192,10 @@ def _open(store: Store) -> sqlite3.Connection | None:
             # Version alone does not establish that an interrupted or damaged cache is usable.
             for statement in (
                 "SELECT path,size,mtime,ctime,inode,error FROM files LIMIT 0",
-                "SELECT ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial FROM items LIMIT 0",
+                (
+                    "SELECT ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
+                    "tasks_open,tasks_done,next FROM items LIMIT 0"
+                ),
                 "SELECT id,item,fragment,title FROM passages LIMIT 0",
                 "SELECT name,item FROM names LIMIT 0",
                 "SELECT item,target FROM links LIMIT 0",
@@ -256,9 +258,10 @@ def _insert(
 ) -> None:
     try:
         cursor = connection.execute(
-            "INSERT INTO items(ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial) "
-            "VALUES(:ref,:path,:kind,:source,:title,:time,:type,:status,:lead,:url,:updated,:observed,:partial)",
-            values,
+            "INSERT INTO items(ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
+            "tasks_open,tasks_done,next) VALUES(:ref,:path,:kind,:source,:title,:time,:type,:status,:lead,:url,"
+            ":updated,:observed,:partial,:tasks_open,:tasks_done,:next)",
+            {"tasks_open": 0, "tasks_done": 0, "next": "", **values},
         )
     except sqlite3.IntegrityError:
         raise Error(f"duplicate reference {values['ref']}; run bf validate") from None
@@ -315,6 +318,9 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
                 "updated": f"{knowledge.updated}T00:00:00.000000Z" if knowledge.updated else "",
                 "observed": "",
                 "partial": 0,
+                "tasks_open": sum(not done for done, _ in projection.tasks),
+                "tasks_done": sum(done for done, _ in projection.tasks),
+                "next": next((text for done, text in projection.tasks if not done), ""),
             },
             [
                 (p.fragment, p.title, p.heading, p.text, projection.title if p.fragment else metadata)
@@ -489,17 +495,36 @@ def _note_time(value: str) -> str:
     return moment(value[:10]) if value else ""
 
 
-_TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE i.time END"
-_UPDATED = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i.updated,''),i.time) END"
+# Fixed SQL expressions over `items i`, shared with page builders: event time and last modification.
+TIME = _TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE i.time END"
+UPDATED = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i.updated,''),i.time) END"
 _FIELDS = f"i.ref,i.kind,i.source,({_TIME}) AS time,i.type,i.status,i.url,i.updated,i.observed,i.partial"
-_FILTERS = f"""(:source='' OR i.source=:source) AND (:type='' OR i.type=:type) AND (:status='' OR i.status=:status)
-  AND ((:since='' AND :until='') OR i.time!='') AND (:since='' OR ({_TIME})>=:since) AND (:until='' OR ({_TIME})<:until)
-  AND (:changed_since='' OR ({_UPDATED})>=:changed_since)
-  AND ((:relation='' AND :target='' AND :subject='') OR EXISTS (
-       SELECT 1 FROM edges e WHERE e.item=i.id AND (:relation='' OR e.relation=:relation)
-       AND (:subject='' OR e.subject IN (SELECT value FROM json_each(:subjects)))
-       AND (:target='' OR e.target IN (SELECT value FROM json_each(:targets)))))
-  AND (:current=0 OR i.kind='note' OR i.source IN (SELECT value FROM json_each(:active_sources)))"""  # noqa: S608 - fixed SQL fragments
+_ROW = f"{_FIELDS},'' AS fragment,i.title,i.lead AS excerpt,i.tasks_open,i.tasks_done,i.next"
+# An item links to a target when it names it exactly, or names a section of a target note.
+_LINKED = """(l.target IN (SELECT value FROM json_each(:targets))
+  OR EXISTS (SELECT 1 FROM json_each(:sections) s WHERE l.target>s.value||'#' AND l.target<s.value||'$'))"""
+_FILTERS = f"""((:since='' AND :until='') OR i.time!='') AND (:since='' OR ({_TIME})>=:since) AND (:until='' OR ({_TIME})<:until)
+  AND (:prefix='' OR i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')
+  AND (:target='' OR EXISTS (SELECT 1 FROM links l WHERE l.item=i.id AND {_LINKED}))"""  # noqa: S608 - fixed SQL fragments
+
+
+def sections(targets: set[str]) -> list[str]:
+    """Identities whose #section links also count as links to them: BF addresses and note paths.
+
+    A BF address encodes a literal `#` in its path, so only a real fragment follows it; a bare
+    `source:id` may contain `#` in its id and never takes a section.
+    """
+    result = []
+    for value in targets:
+        with suppress(Error):
+            parsed = bf_links.parse(value)
+            if not parsed.fragment if parsed else authored(value):
+                result.append(value)
+    return sorted(result)
+
+
+def _parameters(targets: set[str]) -> dict[str, object]:
+    return {"targets": json.dumps(sorted(targets)), "sections": json.dumps(sections(targets))}
 
 
 def _lexical(connection: sqlite3.Connection, params: dict[str, object], match: str) -> list[dict[str, object]]:
@@ -512,8 +537,7 @@ def _lexical(connection: sqlite3.Connection, params: dict[str, object], match: s
            ranked AS (SELECT *,row_number() OVER (PARTITION BY ref ORDER BY score DESC,fragment) AS position
                       FROM matches)
            SELECT * FROM ranked WHERE position=1
-           ORDER BY CASE WHEN :recent THEN time END DESC,CASE WHEN :recent THEN ref END DESC,
-                    status IN ('deprecated','archived'),score * CASE WHEN kind='note' THEN 2 ELSE 1 END DESC,ref
+           ORDER BY status IN ('deprecated','archived'),score * CASE WHEN kind='note' THEN 2 ELSE 1 END DESC,ref
            LIMIT :limit""",  # noqa: S608 - fixed SQL
         {**params, "match": match},
     ).fetchall()
@@ -539,26 +563,15 @@ def search(
     connection: sqlite3.Connection,
     query: Query,
     *,
-    active_sources: set[str] | None = None,
     identities: set[str] | None = None,
     targets: set[str] | None = None,
-    subjects: set[str] | None = None,
 ) -> list[dict[str, object]]:
-    """Exact identities, lexical all-term then any-term matches, or a filtered listing."""
+    """Exact identities first, then lexical all-term and any-term matches, within the query's scope."""
     connection.create_function("note_time", 1, _note_time, deterministic=True)
     params: dict[str, object] = query.model_dump()
     params["text"] = query.text.strip()
-    params["active_sources"] = json.dumps(sorted(active_sources or ()))
     params["identities"] = json.dumps(sorted(identities or {str(params["text"])}))
-    params["targets"] = json.dumps(sorted(targets or {query.target}))
-    params["subjects"] = json.dumps(sorted(subjects or {query.subject}))
-    if not params["text"]:
-        rows = connection.execute(
-            f"""SELECT {_FIELDS},'' AS fragment,i.title,0 AS score,i.lead AS excerpt FROM items i
-               WHERE {_FILTERS} ORDER BY time DESC,i.ref LIMIT :limit""",  # noqa: S608 - fixed SQL
-            params,
-        ).fetchall()
-        return [_clean(dict(row)) for row in rows]
+    params.update(_parameters(targets or ({query.target} if query.target else set())))
     if identity(str(params["text"])):
         return [_clean(row) for row in _identity(connection, params)]
     groups = []
@@ -572,10 +585,65 @@ def search(
     for group in groups:
         for row in group:
             selected.setdefault(str(row["ref"]), row)
-    items = list(selected.values())
-    if query.recent:
-        items.sort(key=lambda r: (str(r["time"]), str(r["ref"])), reverse=True)
-    return [_clean(row) for row in items[: query.limit]]
+    return [_clean(row) for row in list(selected.values())[: query.limit]]
+
+
+def listing(
+    connection: sqlite3.Connection, where: str, params: Mapping[str, object], order: str, limit: int
+) -> tuple[list[dict[str, object]], int]:
+    """Items matching fixed SQL written by the page builders, with the total before the limit."""
+    connection.create_function("note_time", 1, _note_time, deterministic=True)
+    values = {"since": "", "until": "", "prefix": "", "target": "", **_parameters(set()), **params}
+    # `where` and `order` are fixed SQL written by the page builders; values stay bound parameters.
+    total = connection.execute(f"SELECT count(*) FROM items i WHERE {where}", values).fetchone()[0]  # noqa: S608
+    rows = connection.execute(
+        f"SELECT {_ROW} FROM items i WHERE {where} ORDER BY {order} LIMIT :limit",  # noqa: S608
+        {**values, "limit": limit},
+    ).fetchall()
+    return [_clean(dict(row)) for row in rows], total
+
+
+_INCOMING = f"""WITH typed AS (
+    SELECT DISTINCT e.item,e.relation FROM edges e WHERE e.relation!=''
+    AND (e.target IN (SELECT value FROM json_each(:targets)) OR EXISTS (
+         SELECT 1 FROM json_each(:sections) s WHERE e.target>s.value||'#' AND e.target<s.value||'$'))),
+  plain AS (SELECT DISTINCT l.item,'' AS relation FROM links l WHERE {_LINKED}
+            AND l.item NOT IN (SELECT item FROM typed)),
+  linked AS (SELECT * FROM typed UNION ALL SELECT * FROM plain)"""  # noqa: S608 - fixed SQL fragments
+_GROUPS = f"""{_INCOMING} SELECT k.relation,count(*) AS total FROM linked k JOIN items i ON i.id=k.item
+  WHERE i.ref!=:exclude GROUP BY k.relation ORDER BY k.relation='',k.relation LIMIT 64"""  # noqa: S608
+_GROUP = f"""{_INCOMING} SELECT {_ROW} FROM linked k JOIN items i ON i.id=k.item
+  WHERE k.relation=:relation AND i.ref!=:exclude ORDER BY time DESC,i.ref LIMIT :limit"""  # noqa: S608
+
+
+def incoming(
+    connection: sqlite3.Connection, targets: set[str], *, exclude: str = "", limit: int = 20
+) -> list[dict[str, object]]:
+    """Items linking to any target, grouped by explicit relationship; links without a role come last."""
+    connection.create_function("note_time", 1, _note_time, deterministic=True)
+    values = {**_parameters(targets), "exclude": exclude, "limit": limit}
+    groups = []
+    for relation, total in connection.execute(_GROUPS, values).fetchall():
+        rows = connection.execute(_GROUP, {**values, "relation": relation}).fetchall()
+        group: dict[str, object] = {"total": total, "items": [_clean(dict(row)) for row in rows]}
+        groups.append({"relation": relation, **group} if relation else group)
+    return groups
+
+
+def newer_links(connection: sqlite3.Connection, ref: str, after: str) -> int:
+    """How many other items link to a note and are dated after `after`: evidence the note may not reflect."""
+    connection.create_function("note_time", 1, _note_time, deterministic=True)
+    row = connection.execute("SELECT id FROM items WHERE ref=?", (ref,)).fetchone()
+    if row is None:
+        return 0
+    names = {name for (name,) in connection.execute("SELECT name FROM names WHERE item=?", (row[0],))} | {ref}
+    return int(
+        connection.execute(
+            f"""SELECT count(DISTINCT i.id) FROM links l JOIN items i ON i.id=l.item
+                WHERE {_LINKED} AND i.id!=:item AND i.time!='' AND ({_TIME})>=:after""",  # noqa: S608
+            {**_parameters(names), "item": row[0], "after": after},
+        ).fetchone()[0]
+    )
 
 
 def _clean(row: dict[str, object]) -> dict[str, object]:
@@ -584,6 +652,9 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
         row["ref"] = f"{row['ref']}#{fragment}"
     row.pop("score", None)
     row.pop("position", None)
+    opened, done = int(cast("int", row.pop("tasks_open", 0) or 0)), int(cast("int", row.pop("tasks_done", 0) or 0))
+    if opened or done:
+        row["tasks"] = {"open": opened, "done": done}
     if row.get("partial"):
         row["partial"] = True
     else:
@@ -602,24 +673,43 @@ def problems(connection: sqlite3.Connection) -> list[str]:
     ]
 
 
-def status(store: Store, now: datetime | None = None) -> dict[str, object]:
-    """Cache state, counts, skipped files, and active projects whose note has not been updated recently."""
-    cutoff = ((now or datetime.now(UTC)) - timedelta(days=REVIEW_DAYS)).strftime("%Y-%m-%d")
+def sources(connection: sqlite3.Connection) -> dict[str, dict[str, object]]:
+    """Indexed record totals and latest event time per source."""
+    return {
+        row["source"]: {"records": row["records"], "latest": row["latest"] or ""}
+        for row in connection.execute(
+            "SELECT source,count(*) AS records,max(time) AS latest FROM items WHERE kind='record' GROUP BY source"
+        )
+    }
+
+
+def activity(connection: sqlite3.Connection, since: str, until: str) -> list[tuple[str, int]]:
+    """Records per source whose event time falls in [since, until), busiest first."""
+    return [
+        (row[0], row[1])
+        for row in connection.execute(
+            "SELECT source,count(*) FROM items WHERE kind='record' AND time!='' AND time>=? AND time<? "
+            "GROUP BY source ORDER BY count(*) DESC,source",
+            (since, until),
+        )
+    ]
+
+
+def partitions(connection: sqlite3.Connection, source: str) -> list[tuple[str, int]]:
+    """Indexed partition files of one source with their record counts, newest first."""
+    return [
+        (row[0], row[1])
+        for row in connection.execute(
+            "SELECT path,count(*) FROM items WHERE kind='record' AND source=? GROUP BY path ORDER BY path DESC LIMIT 400",
+            (source,),
+        )
+    ]
+
+
+def status(store: Store) -> dict[str, object]:
+    """Cache state, note and record counts, and skipped files."""
     with database(store) as (connection, state):
-        sources = {
-            row["source"]: {"records": row["records"], "latest": row["latest"] or ""}
-            for row in connection.execute(
-                "SELECT source,count(*) AS records,max(time) AS latest FROM items WHERE kind='record' GROUP BY source"
-            )
-        }
+        counts = sources(connection)
         notes = connection.execute("SELECT count(*) FROM items WHERE kind='note'").fetchone()[0]
         skipped = problems(connection)
-        review = [
-            {"ref": row["ref"], "title": row["title"], "updated": row["time"][:10]}
-            for row in connection.execute(
-                """SELECT ref,title,time FROM items WHERE kind='note' AND type='project'
-                   AND status IN ('active','blocked') AND (time='' OR time<?) ORDER BY time,ref""",
-                (cutoff,),
-            )
-        ]
-    return {"index": state, "notes": notes, "sources": sources, "problems": skipped, "review": review}
+    return {"index": state, "notes": notes, "sources": counts, "problems": skipped}
