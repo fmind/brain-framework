@@ -215,3 +215,23 @@ def test_cli_mcp_and_evaluation_share_relationship_pages(brain: Store) -> None:
     )
     with pytest.raises(Error, match="duplicate"):
         evaluate(brain)
+
+
+def test_field_values_are_searchable_words_without_their_keys(brain: Store) -> None:
+    brain.write("bf.yaml", CONFIG)
+    assert ingest(
+        brain, [{"id": "one", "title": "Planning", "attributes": {"from": "person:alice", "category": "urgent"}}]
+    )
+    found = {str(i["ref"]) for i in search([brain], Query(text="urgent"))["items"]}
+    assert "mail:one" in found
+    # Field names and JSON punctuation are not words of the record: "label" and "kind" match nothing here.
+    assert search([brain], Query(text="label kind"))["items"] == []
+
+
+def test_loaded_configurations_are_independent_and_follow_edits(brain: Store) -> None:
+    brain.write("bf.yaml", CONFIG)
+    first = load(brain)
+    first.sensors.clear()
+    assert set(load(brain).sensors) == {"mail"}
+    brain.write("bf.yaml", CONFIG.replace(b"  mail:\n", b"  post:\n"))
+    assert set(load(brain).sensors) == {"post"}

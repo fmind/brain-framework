@@ -54,11 +54,11 @@ The fixed record envelope (`id`, `title`, `text`, `time`, `url`, `links`, `alias
 
 ## Graph and evidence
 
-A field with `relation: true` produces directed edges from the record ref to its identity values, labeled with the field name. Each edge is supported by the record file, with its upstream URL and available `updated`, `observed` and `partial` provenance. `fields` are searchable; `attributes` remain exact-read details. Generic `links` remain untyped relationships.
+A field with `relation: true` produces directed edges from the record ref to its identity values, labeled with the field name. Each edge is supported by the record file, with its upstream URL and available `updated`, `observed` and `partial` provenance. Field values are searchable words (their names are not); `attributes` remain exact-read details. Generic `links` remain untyped relationships.
 
 The graph is a disposable SQLite projection. Replacing or deleting a record removes its obsolete edges; deleting `.bf/` reconstructs the graph from files. Changing the schema invalidates the cache. Changing a sensor mapping affects subsequent collections, not historical evidence: explicitly backfill from retained structured evidence or recollect a chosen window. Never reconstruct missing roles from flattened links or similar names.
 
-Use `bf read person:email/alice@example.test`: its `backlinks` group the records and notes that link to Alice by relationship (`author`, `sender`, …), each with its claims and evidence; read the returned refs to inspect their fields. `bf search WORDS --scope person:email/alice@example.test` searches within them. Notes can declare the same normalized `fields` in frontmatter. Sensor mappings remain the only way to populate collected record fields. CLI, MCP and retrieval cases share these reads and scopes.
+Use `bf read person:email/alice@example.test`: its `backlinks` group the records and notes that link to Alice by relationship (`author`, `sender`, …), each with its claims and evidence; read the returned refs to inspect their fields. `bf search WORDS --scope person:email/alice@example.test` searches within them. Sensor mappings are the only way to populate record fields; notes state relationships with [typed links](#relationship-links). CLI, MCP and retrieval cases share these reads and scopes.
 
 ## BF links
 
@@ -91,7 +91,7 @@ Reviewed contact information.
 
 A fragment selects a Markdown heading in either a file or an entity's owning note. Use `## Display title {#stable-id}` to keep links valid when changing its wording; anchors accept letters, digits, underscores, hyphens and dots (for example `fmind.dev`). Duplicated explicit anchors are errors. A section does not establish an entity automatically. Fragments on records are rejected. Encode URI components separately: a literal `#` or `?` in a record ID or filename is `%23` or `%3F`, not a fragment or query delimiter.
 
-## Relationship shorthand
+## Relationship links
 
 Declare a role under the existing schema before using it:
 
@@ -103,9 +103,6 @@ schema:
     type: identity
     cardinality: many
     relation: true
-  since:
-    description: Stated start of the relationship, not the indexing time.
-    type: timestamp
 ```
 
 Inside a note representing Alice:
@@ -114,19 +111,11 @@ Inside a note representing Alice:
 [Marc](bf://team/people/marc?rel=friend) [Contact section](bf://team/people/marc?rel=friend#contact)
 ```
 
-The first target is Marc; the second is his contact section. Queries precede fragments. BF removes edge attributes from target identity, so `?rel=friend` and `?rel=author` do not create different Marc nodes. Only BF links use this convention: `https://example.test/?rel=friend` retains its full identity and is an untyped link.
+The first target is Marc; the second is his contact section. `rel` is the only query a BF link accepts: it names a declared `relation: true` field, and it precedes the fragment. BF removes it from the target identity, so `?rel=friend` and `?rel=author` do not create different Marc nodes. Only BF links use this convention: `https://example.test/?rel=friend` retains its full identity and is an untyped link.
 
-| Attribute     | Meaning                                                                                                           |
-| ------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `rel`         | Required when a BF link has query attributes; a declared `relation: true` field.                                  |
-| `subject`     | Optional explicit identity; defaults to the note's `entity`, otherwise its file URI, or the collected record URI. |
-| `evidence`    | Optional supporting identity; defaults to the containing Markdown section or record URI.                          |
-| `asserted-by` | Optional identity explicitly credited with the claim; no default and no authentication implication.               |
-| Other keys    | Declared non-relationship schema fields, such as `since`.                                                         |
+The subject is the note's `entity`, otherwise its file; a collected record's links have the record as subject. Other query keys, repeated or empty values, userinfo, ports, traversal and malformed percent encoding are rejected, and a link holds at most 8,192 characters. To state a relationship of another entity, write the link in that entity's note. For authorship and ownership, declare relationships such as `author` and `owner`, never URI userinfo; sensors map them for records.
 
-Unknown, repeated or empty keys are rejected; a link accepts at most 32 query fields and 8,192 characters. Strings, identities and timestamps use percent-encoded text; numbers and booleans use JSON literals, and cardinality-many attributes use a percent-encoded JSON array. `+` in query values represents a space; encode a literal plus as `%2B`. Userinfo, ports, traversal and malformed percent encoding are rejected. There is no implicit `source` meaning: use `evidence` for a supporting reference or explicitly declare a scalar `source` attribute. For authorship and ownership, use schema relationships (`fields: {author: [IDENTITY], owner: [IDENTITY]}`), never URI userinfo.
-
-Each projected claim retains `subject`, `relation`, `target`, `evidence`, optional `asserted_by` and typed `attributes`. `origin` always identifies the actual containing section or record; an explicit `evidence` attribute cannot replace that provenance. Two files asserting the same triple remain independently attributable, and removal of one removes only its support. Generic links remain untyped edges. Neither symmetric relationships nor transitive relationships are inferred.
+Each projected claim has a `subject`, a `relation`, a `target` and its `origin`: the Markdown section or record that contains it. Two files asserting the same claim remain independently attributable, and removal of one removes only its support; repeating a link within one section adds nothing. Generic links remain untyped edges. Neither symmetric relationships nor transitive relationships are inferred.
 
 ## Across brains
 

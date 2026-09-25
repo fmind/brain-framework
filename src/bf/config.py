@@ -11,13 +11,19 @@ import yaml
 import yaml.resolver
 from pydantic import ValidationError
 
-from bf.models import Config, Error, Registration, UserConfig, explain
+from bf.models import Config, Error, Registration, UserConfig, digest, explain
 from bf.storage import Store, writer
 
 _HEADER = "# https://fmind.github.io/brain-framework/\n"
 
 
-class _Loader(yaml.SafeLoader):
+# libyaml parses bf.yaml about nine times faster; the pure-Python loader remains the fallback.
+_SafeLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+# One command reads bf.yaml many times: reuse validated configurations by content digest.
+_LOADED: dict[str, Config] = {}
+
+
+class _Loader(_SafeLoader):
     """Reject duplicate mappings rather than accepting a hidden override."""
 
 
@@ -42,7 +48,7 @@ def yaml_object(data: bytes) -> dict[str, object]:
         raise Error("YAML exceeds 1 MiB")
     try:
         depth = 0
-        for count, event in enumerate(yaml.parse(data), 1):
+        for count, event in enumerate(yaml.parse(data, Loader=_SafeLoader), 1):
             if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
                 raise Error("YAML anchors and aliases are not supported")
             if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
@@ -62,11 +68,19 @@ def yaml_object(data: bytes) -> dict[str, object]:
 
 
 def load(store: Store) -> Config:
-    value = yaml_object(store.read("bf.yaml", 1 << 20))
-    try:
-        return Config.model_validate(value)
-    except ValidationError as error:
-        raise Error("invalid bf.yaml: " + explain(error)) from error
+    """The brain configuration; each call rereads the file, and a deep copy keeps the cached result intact."""
+    data = store.read("bf.yaml", 1 << 20)
+    key = digest(data)
+    if (config := _LOADED.get(key)) is None:
+        value = yaml_object(data)
+        try:
+            config = Config.model_validate(value)
+        except ValidationError as error:
+            raise Error("invalid bf.yaml: " + explain(error)) from error
+        if len(_LOADED) >= 64:
+            _LOADED.clear()
+        _LOADED[key] = config
+    return config.model_copy(deep=True)
 
 
 def user_path() -> Path:

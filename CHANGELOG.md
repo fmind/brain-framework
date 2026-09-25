@@ -2,6 +2,33 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v12.0.0](https://github.com/fmind/brain-framework/releases/tag/v12.0.0) - 2026-09-25
+
+Brain Framework 12 ranks notes and records in one search query and answers several times faster; BF links carry only a relationship. On a personal brain of 52,000 records, full cache builds take 13 s instead of 69 s, searches and reads 0.3–0.4 s instead of up to 1.8 s, and the cache shrinks from 357 MB to 239 MB. The `bf.yaml` and retrieval suite formats stay at version 5, but notes that use removed link attributes or frontmatter `fields` need the manual upgrade below. The search cache rebuilds automatically.
+
+### Changed
+
+- **Breaking**: search ranks every item containing any of the words in one BM25 query. The former all-words pass let long records that happened to contain every word fill the results before a note matching most of them; BM25 already ranks fuller matches higher.
+- Only projects, concepts and each action's `ACTION.md` receive the note ranking boost. `concepts/index.md`, `concepts/log.md` and an action's `inputs/` and `outputs/` rank like evidence.
+- A query shaped like an identity (`re:invent`, `python:3.14`) that no item is, names or links to ranks its words instead of returning a silent empty answer; the reply carries `"identity": "unknown"`.
+- Record field values are searchable words without their JSON keys, so a word such as `author` or `kind` no longer matches every record with that field.
+- **Breaking**: a BF link accepts only `?rel=ROLE`. The `subject`, `evidence` and `asserted-by` query keys and typed link attributes are removed; a link's subject is its note's `entity`, otherwise its file, or the collected record. Claims in `relations` and `claims` are `subject`, `relation`, `target` and `origin`: the `evidence`, `asserted_by` and `attributes` members are gone.
+- **Breaking**: note frontmatter `fields` no longer declares relationships; it is ordinary frontmatter data.
+
+### Fixed
+
+- Searches no longer compute an excerpt for every matching passage before ranking: only returned passages get one. A four-word query over 50,000 records took 1.9 s in excerpts alone.
+- `bf.yaml` is parsed once per content within a command, with libyaml when available, instead of several times per search and once per indexed file during a rebuild.
+- The relationship cache no longer copies an eight-column key into each of its indexes.
+- Backlinks, identity searches and project review signals look up links and relationships through indexes instead of scanning every link of the brain for each relationship group.
+
+### Upgrade
+
+1. Find removed link attributes: `grep -rnoE 'bf://[^) ]*\?[^) ]*' projects concepts actions | grep -vE '\?rel=[a-z0-9-]+(#[^) ]*)?$'`. Keep `?rel=ROLE`; move a relationship of another entity into that entity's note, and keep supporting references as ordinary links in the same section.
+1. Find frontmatter relationships: `grep -rln '^fields:' projects concepts actions`. Replace each identity value with a `[label](bf://NAME/path?rel=FIELD)` link in the note body.
+1. Consumers of `relations[].evidence`, `asserted_by` or `attributes` read `relations[].origin` instead.
+1. Run `bf validate`: remaining removed attributes are reported as invalid BF links.
+
 ## [v11.1.1](https://github.com/fmind/brain-framework/releases/tag/v11.1.1) - 2026-09-25
 
 First published 11.1 release. The v11.1.0 candidate stopped at the release test gate before publication; its tag remains unchanged.

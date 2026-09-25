@@ -17,15 +17,15 @@ from bf.markdown import LEAD, authored, note
 from bf.models import AUTHORED, MAX_NOTE, Error, Query, Record, digest, encode, moment
 from bf.storage import BusyError, Store, reader, writer
 
-SCHEMA = 16
+SCHEMA = 17
 CACHE = ".bf/index.sqlite"
 _DDL = """
 CREATE TABLE ontology(signature TEXT NOT NULL);
+-- A rowid table: secondary indexes of a WITHOUT ROWID table would copy its whole composite key.
 CREATE TABLE edges(item INTEGER NOT NULL, subject TEXT NOT NULL, relation TEXT NOT NULL, target TEXT NOT NULL,
-                   evidence TEXT NOT NULL, asserted_by TEXT NOT NULL, attributes TEXT NOT NULL, origin TEXT NOT NULL,
-                   PRIMARY KEY(item,subject,relation,target,evidence,asserted_by,attributes,origin)) WITHOUT ROWID;
-CREATE INDEX edges_target ON edges(relation,target);
-CREATE INDEX edges_incoming ON edges(target);
+                   origin TEXT NOT NULL);
+CREATE INDEX edges_item ON edges(item);
+CREATE INDEX edges_target ON edges(target);
 CREATE INDEX edges_subject ON edges(subject,relation);
 CREATE TABLE files(path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, ctime INTEGER, inode INTEGER,
                    error TEXT NOT NULL DEFAULT '');
@@ -33,7 +33,8 @@ CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT N
                    source TEXT NOT NULL, title TEXT NOT NULL, time TEXT NOT NULL, type TEXT NOT NULL,
                    status TEXT NOT NULL, lead TEXT NOT NULL, url TEXT NOT NULL,
                    updated TEXT NOT NULL, observed TEXT NOT NULL, partial INTEGER NOT NULL,
-                   tasks_open INTEGER NOT NULL, tasks_done INTEGER NOT NULL, next TEXT NOT NULL);
+                   tasks_open INTEGER NOT NULL, tasks_done INTEGER NOT NULL, next TEXT NOT NULL,
+                   weight INTEGER NOT NULL);
 CREATE INDEX items_path ON items(path);
 CREATE INDEX items_time ON items(time);
 CREATE TABLE passages(id INTEGER PRIMARY KEY, item INTEGER NOT NULL, fragment TEXT NOT NULL, title TEXT NOT NULL);
@@ -55,6 +56,24 @@ _STOP = frozenset(
     """.split()  # noqa: SIM905 - one readable word list, grouped by language
 )
 _IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
+# Only folders directly below actions/ hold an ACTION.md; inputs/ and outputs/ may hold other notes.
+ACTION = (
+    "i.kind='note' AND substr(i.path,1,8)='actions/' AND substr(i.path,-10)='/ACTION.md' "
+    "AND length(i.path)-length(replace(i.path,'/',''))=2"
+)
+
+
+def distilled(path: str) -> bool:
+    """Notes that distill an answer rank above evidence: projects, concepts and each action's ACTION.md.
+
+    OKF indexes and update logs navigate or record history; action inputs and outputs are working files.
+    """
+    parts = path.split("/")
+    if parts[0] == "projects":
+        return True
+    if parts[0] == "concepts":
+        return parts[-1] not in {"index.md", "log.md"}
+    return len(parts) == 3 and parts[0] == "actions" and parts[2] == "ACTION.md"
 
 
 def inputs(store: Store) -> dict[str, tuple[int, int, int, int]]:
@@ -94,12 +113,12 @@ def _open(store: Store) -> sqlite3.Connection | None:
                 "SELECT path,size,mtime,ctime,inode,error FROM files LIMIT 0",
                 (
                     "SELECT ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-                    "tasks_open,tasks_done,next FROM items LIMIT 0"
+                    "tasks_open,tasks_done,next,weight FROM items LIMIT 0"
                 ),
                 "SELECT id,item,fragment,title FROM passages LIMIT 0",
                 "SELECT name,item FROM names LIMIT 0",
                 "SELECT item,target FROM links LIMIT 0",
-                "SELECT item,subject,relation,target,evidence,asserted_by,attributes,origin FROM edges LIMIT 0",
+                "SELECT item,subject,relation,target,origin FROM edges LIMIT 0",
                 "SELECT title,text,names FROM search LIMIT 0",
             ):
                 connection.execute(statement)
@@ -159,9 +178,9 @@ def _insert(
     try:
         cursor = connection.execute(
             "INSERT INTO items(ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-            "tasks_open,tasks_done,next) VALUES(:ref,:path,:kind,:source,:title,:time,:type,:status,:lead,:url,"
-            ":updated,:observed,:partial,:tasks_open,:tasks_done,:next)",
-            {"tasks_open": 0, "tasks_done": 0, "next": "", **values},
+            "tasks_open,tasks_done,next,weight) VALUES(:ref,:path,:kind,:source,:title,:time,:type,:status,:lead,"
+            ":url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight)",
+            {"tasks_open": 0, "tasks_done": 0, "next": "", "weight": 1, **values},
         )
     except sqlite3.IntegrityError:
         raise Error(f"duplicate reference {values['ref']}; run bf validate") from None
@@ -176,22 +195,9 @@ def _insert(
         )
     connection.executemany("INSERT OR IGNORE INTO names VALUES(?,?)", ((name, item) for name in names))
     connection.executemany("INSERT OR IGNORE INTO links VALUES(?,?)", ((item, link) for link in links))
-    connection.executemany(
-        "INSERT OR IGNORE INTO edges VALUES(?,?,?,?,?,?,?,?)",
-        (
-            (
-                item,
-                e.subject,
-                e.relation,
-                e.target,
-                e.evidence,
-                e.asserted_by,
-                encode(e.attributes).decode(),
-                e.origin or e.evidence,
-            )
-            for e in edges
-        ),
-    )
+    # Two identical claims from one file are one edge; support from other files stays separate.
+    unique = dict.fromkeys((item, e.subject, e.relation, e.target, e.origin) for e in edges)
+    connection.executemany("INSERT INTO edges VALUES(?,?,?,?,?)", unique)
 
 
 def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]:
@@ -218,6 +224,7 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
                 "updated": f"{knowledge.updated}T00:00:00.000000Z" if knowledge.updated else "",
                 "observed": "",
                 "partial": 0,
+                "weight": 2 if distilled(path) else 1,
                 "tasks_open": sum(not done for done, _ in projection.tasks),
                 "tasks_done": sum(done for done, _ in projection.tasks),
                 "next": next((text for done, text in projection.tasks if not done), ""),
@@ -242,9 +249,9 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
     config = load(store)
     for record in records.load(store, path):
         edges = ontology.record_claims(record, config, f"{source}:{record.id}")
-        identity = " ".join(
-            [source, *record.aliases, *record.links, record.url, json.dumps(record.fields, ensure_ascii=False)]
-        )
+        # Field values are searchable words; their JSON keys and punctuation would match every record.
+        values = [v for value in record.fields.values() for v in (value if isinstance(value, list) else [value])]
+        identity = " ".join([source, *record.aliases, *record.links, record.url, *map(str, values)])
         try:
             _insert(
                 connection,
@@ -405,11 +412,13 @@ UPDATED = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i
 _FIELDS = f"i.ref,i.kind,i.source,({TIME}) AS time,i.type,i.status,i.url,i.updated,i.observed,i.partial"
 _ROW = f"{_FIELDS},'' AS fragment,i.title,i.lead AS excerpt,i.tasks_open,i.tasks_done,i.next"
 # An item links to a target when it names it exactly, or names a section of a target note.
-_LINKED = """(l.target IN (SELECT value FROM json_each(:targets))
-  OR EXISTS (SELECT 1 FROM json_each(:sections) s WHERE l.target>s.value||'#' AND l.target<s.value||'$'))"""
+# Two index lookups: exact targets, then the sections of targets. One OR across both would scan every link,
+# and CROSS JOIN keeps the few section prefixes as the outer loop of each range search.
+_LINKING = """SELECT l.item FROM links l WHERE l.target IN (SELECT value FROM json_each(:targets))
+  UNION SELECT l.item FROM json_each(:sections) s CROSS JOIN links l ON l.target>s.value||'#' AND l.target<s.value||'$'"""
 _FILTERS = f"""((:since='' AND :until='') OR i.time!='') AND (:since='' OR ({TIME})>=:since) AND (:until='' OR ({TIME})<:until)
   AND (:prefix='' OR i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')
-  AND (:target='' OR EXISTS (SELECT 1 FROM links l WHERE l.item=i.id AND {_LINKED}))"""  # noqa: S608 - fixed SQL fragments
+  AND (:target='' OR i.id IN ({_LINKING}))"""
 
 
 def sections(targets: set[str]) -> list[str]:
@@ -432,20 +441,31 @@ def _parameters(targets: set[str]) -> dict[str, object]:
 
 
 def _lexical(connection: sqlite3.Connection, params: dict[str, object], match: str) -> list[dict[str, object]]:
+    """One ranked any-word query: BM25 adds the weight of each matched term, so fuller matches rank higher.
+
+    Snippets cost far more than ranking, so only returned passages get an excerpt.
+    """
     rows = connection.execute(
         f"""WITH matches AS MATERIALIZED (
-           SELECT {_FIELDS},p.fragment,p.title,-bm25(search,10.0,1.0,0.5) AS score,
-                  snippet(search,1,'','',' … ',48) AS excerpt
+           SELECT {_FIELDS},p.fragment,p.title,p.id AS passage,-bm25(search,10.0,1.0,0.5)*i.weight AS score
            FROM search JOIN passages p ON p.id=search.rowid JOIN items i ON i.id=p.item
            WHERE search MATCH :match AND {_FILTERS}),
            ranked AS (SELECT *,row_number() OVER (PARTITION BY ref ORDER BY score DESC,fragment) AS position
                       FROM matches)
            SELECT * FROM ranked WHERE position=1
-           ORDER BY status IN ('deprecated','archived'),score * CASE WHEN kind='note' THEN 2 ELSE 1 END DESC,ref
+           ORDER BY status IN ('deprecated','archived'),score DESC,ref
            LIMIT :limit""",  # noqa: S608 - fixed SQL
         {**params, "match": match},
     ).fetchall()
-    return [dict(row) for row in rows]
+    result = []
+    for row in rows:
+        item = dict(row)
+        excerpt = connection.execute(
+            "SELECT snippet(search,1,'','',' … ',48) FROM search WHERE search MATCH ? AND rowid=?",
+            (match, item.pop("passage")),
+        ).fetchone()
+        result.append({**item, "excerpt": excerpt[0] if excerpt else ""})
+    return result
 
 
 def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> list[dict[str, object]]:
@@ -454,8 +474,8 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> list
               SELECT id AS item,2e6 AS score FROM items WHERE ref=:text
               UNION ALL SELECT item,1e6 FROM names WHERE name IN (SELECT value FROM json_each(:identities))
               UNION ALL SELECT item,1e3 FROM links WHERE target IN (SELECT value FROM json_each(:identities))
-                OR EXISTS (SELECT 1 FROM json_each(:identity_sections) s
-                           WHERE target>s.value||'#' AND target<s.value||'$')),
+              UNION ALL SELECT l.item,1e3 FROM json_each(:identity_sections) s
+                CROSS JOIN links l ON l.target>s.value||'#' AND l.target<s.value||'$'),
               owners AS (SELECT item,max(score) AS score FROM candidates GROUP BY item)
            SELECT {_FIELDS},'' AS fragment,i.title,c.score,i.lead AS excerpt FROM owners c
            JOIN items i ON i.id=c.item WHERE {_FILTERS}
@@ -465,34 +485,49 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> list
     return [dict(row) for row in rows]
 
 
+def known(connection: sqlite3.Connection, identities: set[str]) -> bool:
+    """Whether an item is, names or links to one of these identities, whatever the query's scope."""
+    values = {"values": json.dumps(sorted(identities)), "sections": json.dumps(sections(identities))}
+    return bool(
+        connection.execute(
+            """SELECT EXISTS (SELECT 1 FROM items WHERE ref IN (SELECT value FROM json_each(:values)))
+               OR EXISTS (SELECT 1 FROM names WHERE name IN (SELECT value FROM json_each(:values)))
+               OR EXISTS (SELECT 1 FROM links WHERE target IN (SELECT value FROM json_each(:values)))
+               OR EXISTS (SELECT 1 FROM json_each(:sections) s
+                          CROSS JOIN links l ON l.target>s.value||'#' AND l.target<s.value||'$')""",
+            values,
+        ).fetchone()[0]
+    )
+
+
 def search(
     connection: sqlite3.Connection,
     query: Query,
     *,
     identities: set[str] | None = None,
     targets: set[str] | None = None,
+    exact: bool | None = None,
 ) -> list[dict[str, object]]:
-    """Exact identities first, then lexical all-term and any-term matches, within the query's scope."""
+    """A known identity returns its owners, then what links to it; other text ranks lexically, within the scope.
+
+    Words shaped like an identity, such as re:invent, rank lexically when no item is, names or links to them.
+    """
     connection.create_function("note_time", 1, _note_time, deterministic=True)
     params: dict[str, object] = query.model_dump()
-    params["text"] = query.text.strip()
-    params["identities"] = json.dumps(sorted(identities or {str(params["text"])}))
-    params["identity_sections"] = json.dumps(sections(identities or {str(params["text"])}))
+    text = params["text"] = query.text.strip()
+    exact_identities = identities or {text}
+    params["identities"] = json.dumps(sorted(exact_identities))
+    params["identity_sections"] = json.dumps(sections(exact_identities))
     params.update(_parameters(targets or ({query.target} if query.target else set())))
-    if identity(str(params["text"])):
+    if exact is None:
+        exact = identity(text) and known(connection, exact_identities | {text})
+    if exact:
         return [_clean(row) for row in _identity(connection, params)]
-    groups = []
-    tokens = terms(str(params["text"]))
-    if tokens:
-        quoted = ['"' + t.replace('"', '""') + '"' for t in tokens]
-        groups.append(_lexical(connection, params, " ".join(quoted)))
-        if len(tokens) > 1:
-            groups.append(_lexical(connection, params, " OR ".join(quoted)))
-    selected: dict[str, dict[str, object]] = {}
-    for group in groups:
-        for row in group:
-            selected.setdefault(str(row["ref"]), row)
-    return [_clean(row) for row in list(selected.values())[: query.limit]]
+    tokens = terms(text)
+    if not tokens:
+        return []
+    match = " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+    return [_clean(row) for row in _lexical(connection, params, match)]
 
 
 def listing(
@@ -511,11 +546,10 @@ def listing(
 
 
 _INCOMING = f"""WITH typed AS (
-    SELECT DISTINCT e.item,e.relation FROM edges e WHERE e.relation!=''
-    AND (e.target IN (SELECT value FROM json_each(:targets)) OR EXISTS (
-         SELECT 1 FROM json_each(:sections) s WHERE e.target>s.value||'#' AND e.target<s.value||'$'))),
-  plain AS (SELECT DISTINCT l.item,'' AS relation FROM links l WHERE {_LINKED}
-            AND l.item NOT IN (SELECT item FROM typed)),
+    SELECT e.item,e.relation FROM edges e WHERE e.relation!='' AND e.target IN (SELECT value FROM json_each(:targets))
+    UNION SELECT e.item,e.relation FROM json_each(:sections) s
+      CROSS JOIN edges e ON e.target>s.value||'#' AND e.target<s.value||'$' WHERE e.relation!=''),
+  plain AS (SELECT item,'' AS relation FROM ({_LINKING}) WHERE item NOT IN (SELECT item FROM typed)),
   linked AS (SELECT * FROM typed UNION ALL SELECT * FROM plain)"""  # noqa: S608 - fixed SQL fragments
 _GROUPS = f"""{_INCOMING} SELECT k.relation,count(*) AS total FROM linked k JOIN items i ON i.id=k.item
   WHERE i.ref!=:exclude GROUP BY k.relation ORDER BY k.relation='',k.relation LIMIT 64"""  # noqa: S608
@@ -546,8 +580,8 @@ def newer_links(connection: sqlite3.Connection, ref: str, after: str) -> int:
     names = {name for (name,) in connection.execute("SELECT name FROM names WHERE item=?", (row[0],))} | {ref}
     return int(
         connection.execute(
-            f"""SELECT count(DISTINCT i.id) FROM links l JOIN items i ON i.id=l.item
-                WHERE {_LINKED} AND i.id!=:item AND i.time!='' AND ({TIME})>=:after""",  # noqa: S608
+            f"""SELECT count(*) FROM items i
+                WHERE i.id IN ({_LINKING}) AND i.id!=:item AND i.time!='' AND ({TIME})>=:after""",  # noqa: S608
             {**_parameters(names), "item": row[0], "after": after},
         ).fetchone()[0]
     )

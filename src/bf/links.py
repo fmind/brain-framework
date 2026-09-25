@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import cast
+from dataclasses import dataclass
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
-from pydantic import JsonValue
-
-from bf.models import NAME, Config, Error, clean, decode
-
-RESERVED = frozenset({"rel", "subject", "evidence", "asserted-by"})
+from bf.models import NAME, Config, Error, clean
 
 
 @dataclass(frozen=True)
@@ -19,7 +14,8 @@ class Address:
     brain: str
     path: str
     fragment: str
-    attributes: dict[str, str]
+    # The declared relationship of a `?rel=` link; the only query a BF link accepts.
+    relation: str = ""
 
     @property
     def identity(self) -> str:
@@ -52,24 +48,22 @@ def parse(value: str) -> Address | None:
         # A source:id is an opaque lookup key, never a filesystem path. Existing ids can contain URLs.
         if not record and ("\\" in path or any(p in {"", ".", ".."} for p in path.split("/"))):
             raise ValueError
-        pairs = parse_qsl(uri.query, keep_blank_values=True, strict_parsing=True, max_num_fields=32, errors="strict")
-        attributes: dict[str, str] = {}
-        for key, val in pairs:
-            if key in attributes or not re.fullmatch(NAME, key):
-                raise ValueError
-            attributes[key] = clean(val)
-        if attributes and not re.fullmatch(NAME, attributes.get("rel", "")):
+        pairs = parse_qsl(uri.query, keep_blank_values=True, strict_parsing=True, max_num_fields=1, errors="strict")
+        if pairs and (pairs[0][0] != "rel" or not re.fullmatch(NAME, pairs[0][1])):
             raise ValueError
-        return Address(uri.netloc, path, fragment, attributes)
+        return Address(uri.netloc, path, fragment, pairs[0][1] if pairs else "")
     except ValueError, UnicodeError:
-        raise Error("invalid BF link; use bf://brain/path?rel=role#section without userinfo or traversal") from None
+        raise Error(
+            "invalid BF link; use bf://brain/path?rel=role#section, with rel as the only query, "
+            "and without userinfo or traversal"
+        ) from None
 
 
 def identity(value: str) -> str:
-    """An identity contains no edge attributes; other schemes remain opaque."""
+    """An identity names no relationship; other schemes remain opaque."""
     if parsed := parse(value):
-        if parsed.attributes:
-            raise Error("identity must not contain link attributes")
+        if parsed.relation:
+            raise Error("identity must not contain a link relationship")
         return parsed.identity
     try:
         clean(value)
@@ -87,47 +81,20 @@ def target(value: str) -> str:
 
 @dataclass(frozen=True)
 class Claim:
+    """A directed link from a subject to a target, supported by the section or record that contains it."""
+
     subject: str
     relation: str
     target: str
-    evidence: str
-    asserted_by: str = ""
-    attributes: dict[str, JsonValue] = field(default_factory=dict)
-    origin: str = ""
+    origin: str
 
 
-def claim(value: str, config: Config, subject: str, evidence: str) -> Claim | None:
+def claim(value: str, config: Config, subject: str, origin: str) -> Claim | None:
+    """The typed claim of a `?rel=` link; other values are untyped links."""
     parsed = parse(value)
-    if not parsed or not parsed.attributes:
+    if not parsed or not parsed.relation:
         return None
-    params = parsed.attributes
-    role = params["rel"]
-    definition = config.ontology.get(role)
+    definition = config.ontology.get(parsed.relation)
     if not definition or not definition.relation:
-        raise Error(f"link relation {role}: declare an identity relationship in schema")
-    attributes: dict[str, JsonValue] = {}
-    for key, val in params.items():
-        if key in RESERVED:
-            continue
-        schema = config.ontology.get(key)
-        if not schema or schema.relation:
-            raise Error(f"link attribute {key}: declare a non-relationship schema field")
-        try:
-            scalar = (
-                val
-                if schema.cardinality != "many" and schema.type in {"string", "identity", "timestamp"}
-                else decode(val)
-            )
-            # JSON values are validated below; numeric/bool queries use JSON literal spelling.
-            attributes[key] = schema.normalize(cast(JsonValue, scalar))
-        except (ValueError, Error) as error:
-            raise Error(f"invalid link attribute {key}") from error
-    return Claim(
-        identity(params.get("subject", subject)),
-        role,
-        parsed.identity,
-        identity(params.get("evidence", evidence)),
-        identity(params["asserted-by"]) if "asserted-by" in params else "",
-        attributes,
-        evidence,
-    )
+        raise Error(f"link relation {parsed.relation}: declare an identity relationship in schema")
+    return Claim(subject, parsed.relation, parsed.identity, origin)

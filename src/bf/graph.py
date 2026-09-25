@@ -97,10 +97,10 @@ def explanations(connection: sqlite3.Connection, ref: str, targets: set[str]) ->
     if row is None:
         return [], False
     rows = connection.execute(
-        "SELECT subject,relation,target,evidence,asserted_by,attributes,origin FROM edges WHERE item=? "
+        "SELECT subject,relation,target,origin FROM edges WHERE item=? "
         "AND (target IN (SELECT value FROM json_each(?)) OR EXISTS (SELECT 1 FROM json_each(?) s "
         "WHERE target>s.value||'#' AND target<s.value||'$')) "
-        "ORDER BY relation,target,evidence,subject,asserted_by,attributes,origin LIMIT 51",
+        "ORDER BY relation,target,origin,subject LIMIT 51",
         (row[0], json.dumps(sorted(targets)), json.dumps(index.sections(targets))),
     ).fetchall()
     return _claims(rows[:50]), len(rows) > 50
@@ -109,19 +109,14 @@ def explanations(connection: sqlite3.Connection, ref: str, targets: set[str]) ->
 def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> list[dict[str, object]]:
     """Typed claims whose explicit subject is one of these identities, wherever they were asserted."""
     rows = connection.execute(
-        "SELECT subject,relation,target,evidence,asserted_by,attributes,origin FROM edges WHERE relation!='' "
+        "SELECT subject,relation,target,origin FROM edges WHERE relation!='' "
         "AND subject IN (SELECT value FROM json_each(?)) "
-        "ORDER BY relation,target,origin,evidence,asserted_by,attributes LIMIT 50",
+        "ORDER BY relation,target,origin,subject LIMIT 50",
         (json.dumps(sorted(subjects)),),
     ).fetchall()
     return _claims(rows)
 
 
 def _claims(rows: list[sqlite3.Row]) -> list[dict[str, object]]:
-    """Decode stored claim attributes and omit empty optional members."""
-    result = []
-    for row in rows:
-        claim = dict(row)
-        claim["attributes"] = json.loads(claim["attributes"])
-        result.append({key: val for key, val in claim.items() if val not in ("", {})})
-    return result
+    """Claims as mappings; an untyped link has no relation member."""
+    return [{key: val for key, val in dict(row).items() if val != ""} for row in rows]

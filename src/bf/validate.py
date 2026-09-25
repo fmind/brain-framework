@@ -53,9 +53,7 @@ def _validate(store: Store) -> dict[str, object]:
             for record in records.load(store, name):
                 ontology.validate(record, config)
                 for claim in ontology.record_claims(record, config, f"{source}:{record.id}"):
-                    addresses.update(
-                        v for v in (claim.subject, claim.target, claim.evidence, claim.asserted_by) if links.parse(v)
-                    )
+                    addresses.update(v for v in (claim.subject, claim.target) if links.parse(v))
                 count += 1
                 if record.id in seen:
                     problems.append(f"{name}: duplicate id {record.id!r} in source {source}")
@@ -76,9 +74,7 @@ def _validate(store: Store) -> dict[str, object]:
             data = store.read(name, MAX_NOTE)
             parsed_note = note(name, data)
             for claim in ontology.note_claims(parsed_note, config):
-                addresses.update(
-                    v for v in (claim.subject, claim.target, claim.evidence, claim.asserted_by) if links.parse(v)
-                )
+                addresses.update(v for v in (claim.subject, claim.target) if links.parse(v))
             notes.append(parsed_note)
             if name.startswith("concepts/"):
                 validate_concept(name, data)

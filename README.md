@@ -11,7 +11,7 @@ Brain Framework is one Python package and one command; it needs no model, hosted
 ## Try it
 
 ```bash
-uv tool install --python 3.14 'brain-framework==11.1.1'
+uv tool install --python 3.14 'brain-framework==12.0.0'
 bf init ~/knowledge          # creates a brain; no global configuration
 cd ~/knowledge               # keep this walkthrough in that brain
 bf read                      # the home page: projects, actions, activity, the coming week

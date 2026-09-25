@@ -470,7 +470,12 @@ def test_okf_provenance_resources_are_searchable_identity_links(brain: Store) ->
 
 def test_identity_search_does_not_infer_relations_from_words(brain: Store) -> None:
     brain.write("projects/prose.md", b"# Repo example\n\nThese words do not declare an identity.\n")
-    assert refs(brain, "repo:example") == []
+    # Nothing is, names or links to repo:example: its words rank, labeled, and claim no relation.
+    reply = search([brain], Query(text="repo:example"))
+    items = cast("list[dict[str, object]]", reply["items"])
+    assert reply["identity"] == "unknown"
+    assert items[0]["ref"] == "projects/prose.md"
+    assert not any("relations" in item for item in items)
     assert refs(brain, "repo:example/project") == ["projects/offline.md", "meetings:decision-1"]
 
 
@@ -659,3 +664,48 @@ def test_retrieval_cases_distinguish_record_ids_from_note_sections(brain: Store)
         b"version: 5\ncases:\n  - name: exact-record\n    query: hashneedle\n    expect: [issues:item]\n",
     )
     assert not evaluate(brain)["passed"]
+
+
+def test_one_ranked_query_keeps_notes_above_long_records_that_happen_to_hold_every_word(brain: Store) -> None:
+    # The note holds three of the four words; every trace holds all four in a long body.
+    brain.write("projects/ranking.md", b"# Search ranking\n\nThe framework orders results lexically.\n")
+    filler = " ".join(f"unrelated{i}" for i in range(400))
+    records_file(
+        brain,
+        "traces",
+        "undated",
+        [
+            Record(id=f"t{i}", title=f"Trace {i}", text=f"{filler} brain {filler} framework search ranking")
+            for i in range(12)
+        ],
+    )
+    # Before 12.0.0 every item holding all four words ranked first, so these traces hid the note entirely.
+    assert refs(brain, "brain framework search ranking", limit=3)[0] == "projects/ranking.md"
+
+
+def test_only_distilled_notes_rank_above_evidence() -> None:
+    assert index.distilled("projects/archive.md")
+    assert index.distilled("concepts/retention.md")
+    assert index.distilled("actions/2026-09-25_review/ACTION.md")
+    for working in (
+        "concepts/index.md",
+        "concepts/log.md",
+        "concepts/team/index.md",
+        "actions/2026-09-25_review/inputs/request.md",
+        "actions/2026-09-25_review/outputs/ACTION.md",
+    ):
+        assert not index.distilled(working)
+
+
+def test_a_known_identity_ignores_other_brains_words(brain: Store, tmp_path: Path) -> None:
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 5\nname: team\n")
+    team.write("projects/words.md", b"# Repo example project\n\nOnly words, no link.\n")
+    reply = search([brain, team], Query(text="repo:example/project"))
+    assert "identity" not in reply
+    assert {(i["brain"], i["ref"]) for i in cast("list[dict[str, object]]", reply["items"])} == {
+        ("fixture", "projects/offline.md"),
+        ("fixture", "meetings:decision-1"),
+    }

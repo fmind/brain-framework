@@ -34,7 +34,7 @@ Periods use local days on the reading machine, including daylight-saving offsets
 
 ## Notes, records and identities
 
-Reading a whole note or record also returns what links to it across the selected brains. `backlinks` groups linking items by explicit relationship: one group per `relation` declared in the schema, then untyped links, each with its `total` and its 20 newest items. An item linked by a Markdown link, a typed link or a record carries `relations`: the claims that link it, with `subject`, optional `relation`, `target`, the exact `origin` section or record, the cited `evidence`, optional `asserted_by` and typed attributes. A link that exists only in OKF `sources` frontmatter carries none. `claims` lists typed claims whose explicit subject is the item, wherever they were asserted. Reading a section (`path#heading`) returns only that section.
+Reading a whole note or record also returns what links to it across the selected brains. `backlinks` groups linking items by explicit relationship: one group per `relation` declared in the schema, then untyped links, each with its `total` and its 20 newest items. An item linked by a Markdown link, a typed link or a record carries `relations`: the claims that link it, with `subject`, optional `relation`, `target` and the exact `origin` section or record. A link that exists only in OKF `sources` frontmatter carries none. `claims` lists typed claims whose explicit subject is the item, wherever they were asserted. Reading a section (`path#heading`) returns only that section.
 
 An identity (`repo:...`, `person:...`, `bf://brain/people/marc`) reads as its owning note or record plus those backlinks. An identity without an owner still reads as a page listing what links to it and the claims made about it; a ref that nothing names or links to is not found. Identity matching is exact and case-sensitive, expands only explicit aliases of a unique owner across the selected brains, and never falls back to similar prose. Ambiguous identities fail and ask for an exact ref. See [BF links](schema.md#bf-links).
 
@@ -63,11 +63,10 @@ Records expose available `updated`, `observed` and `partial` metadata; exact rea
 
 ## Search
 
-1. **Exact identities**: a query shaped like `scheme:value` returns the item with that ref or alias, then items linking to it, newest first, with the claims that link them.
-2. **All words**: items containing every word, ranked by BM25 with headings weighted above body text.
-3. **Any word**: when fewer than `--limit` items matched every word, items containing some of them follow.
+1. **Exact identities**: a query shaped like `scheme:value` that an item is, names or links to returns the item with that ref or alias, then items linking to it, newest first, with the claims that link them.
+2. **Words**: otherwise, items containing any of the words, ranked by BM25 with headings weighted above body text. BM25 adds up the weight of every matched word, so an item matching more of the rarer words ranks higher; there is no separate all-words pass that long records could fill. Words shaped like an identity that nothing is, names or links to, such as `re:invent`, rank this way too, and the reply says `"identity": "unknown"`.
 
-Notes receive a ranking boost, because a note is the distilled answer and records are its evidence; deprecated and archived notes rank last. Each note appears once, through its best section. English and French function words such as "what", "the", "pourquoi" or "les" are dropped unless the query has nothing else. Case and diacritics do not matter (`reunion` finds `réunion`), and English stemming matches word forms (`meetings` finds `meeting`, `decided` finds `decide`). French matching is accent-insensitive but has no translation or French stemming. There is no model or embedding: the agent reformulates when a query misses, which is fast and explainable.
+Projects, concepts and each action's `ACTION.md` receive a ranking boost, because they distill the answer and records are its evidence; `concepts/index.md`, `concepts/log.md` and an action's `inputs/` and `outputs/` rank like evidence. Deprecated and archived notes rank last. Each note appears once, through its best section. English and French function words such as "what", "the", "pourquoi" or "les" are dropped unless the query has nothing else. Case and diacritics do not matter (`reunion` finds `réunion`), and English stemming matches word forms (`meetings` finds `meeting`, `decided` finds `decide`). French matching is accent-insensitive but has no translation or French stemming. There is no model or embedding: the agent reformulates when a query misses, which is fast and explainable.
 
 `--scope` bounds a search to one page's items:
 

@@ -44,7 +44,7 @@ wheels = [
 
 [[package]]
 name = "brain-framework"
-version = "11.1.1"
+version = "12.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "markdown-it-py" },

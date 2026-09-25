@@ -27,11 +27,6 @@ LISTING = 200
 BROWSE = ["projects", "concepts", "actions", "memories", "today", "7d"]
 _SCOPE = "scope accepts a folder (projects, memories/gmail), a period (today, 7d, 2026-09, 2026-09-25) or an identity"
 _MISSING = "page not found; read projects, concepts, actions or memories to browse the brain"
-# Only folders directly below actions/ hold an ACTION.md; inputs/ and outputs/ may hold other notes.
-_ACTIONS = (
-    "i.kind='note' AND substr(i.path,1,8)='actions/' AND substr(i.path,-10)='/ACTION.md' "
-    "AND length(i.path)-length(replace(i.path,'/',''))=2"
-)
 _BELOW = "(i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')"
 _CLOSED = {"done", "deprecated", "archived"}
 _ORDER = {
@@ -231,7 +226,7 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
             LISTING,
         )
         _review(connection, projects, now)
-        actions, _ = index.listing(connection, _ACTIONS, {}, "i.path DESC", 10)
+        actions, _ = index.listing(connection, index.ACTION, {}, "i.path DESC", 10)
         changed, _ = index.listing(
             connection,
             f"i.kind='note' AND i.time!='' AND ({index.TIME})>=:since",
@@ -324,7 +319,7 @@ def folder(stores: list[Store], path: str, now: datetime | None = None, *, count
     """Notes below an authored folder; the actions folder lists one ACTION.md per action, newest first."""
     now = now or datetime.now(UTC)
     top = path.split("/")[0]
-    where = _ACTIONS if path == "actions" else f"i.kind='note' AND {_BELOW}"
+    where = index.ACTION if path == "actions" else f"i.kind='note' AND {_BELOW}"
     order = _ORDER.get(top, "i.path")
 
     def build(_store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:

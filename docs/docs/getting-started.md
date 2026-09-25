@@ -5,7 +5,7 @@ By the end of this walkthrough, you will have a saved decision, a search that fi
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then Brain Framework. uv supplies Python 3.14 if needed. If `bf` is not on PATH, run `uv tool update-shell` and open a new shell.
 
 ```bash
-uv tool install --python 3.14 'brain-framework==11.1.1'
+uv tool install --python 3.14 'brain-framework==12.0.0'
 bf --version
 ```
 
@@ -156,7 +156,7 @@ The [runnable example](https://github.com/fmind/brain-framework/tree/main/exampl
 Read the [release notes](https://github.com/fmind/brain-framework/releases), then update the tool and check your brain:
 
 ```bash
-uv tool install --upgrade --python 3.14 'brain-framework==11.1.1'
+uv tool install --upgrade --python 3.14 'brain-framework==12.0.0'
 bf --version
 bf validate --brain ~/knowledge
 bf eval --brain ~/knowledge
@@ -164,6 +164,6 @@ bf eval --brain ~/knowledge
 
 Run `eval` once your brain has `evals/retrieval.yaml`. A name such as `--brain knowledge` works inside the brain, for its declared references, or after `bf register`; a path works from anywhere. Review and update separately installed skills, and restart an MCP host that still runs the old process. Within a major version, the brain format (`bf.yaml`, `evals/retrieval.yaml` and the folder layout) stays compatible. A new major version supports only its current format and documents manual upgrade steps; historical breaking changes are recorded in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md).
 
-## Upgrade from Brain Framework 10
+## Upgrade from Brain Framework 11
 
-Brain Framework 11 uses version 5 of `bf.yaml` and of retrieval suites. Search takes words and one `--scope`; listings, timelines, sources and relationships are pages read with `bf read`. Update every reader and writer together, change both versions to 5, and rewrite retrieval cases that used removed search fields: a time window or filter becomes a `read` of a page (`7d`, `2026-09`, `projects`, `memories/SOURCE`) or a `scope`, and a `relation`/`target`/`subject` case becomes a `read` of the identity. Reinstall the skills, then rebuild, validate and evaluate. Follow the complete manual steps in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md). There is no compatibility command or automatic migration.
+Brain Framework 12 keeps version 5 of `bf.yaml` and of retrieval suites; the search cache rebuilds itself. A BF link accepts only `?rel=ROLE`: find links that still carry `subject`, `evidence`, `asserted-by` or other query keys, and frontmatter `fields`, with the commands in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md), then write each relationship as a `?rel=` link in the note of its subject. Tools that read `relations[].evidence`, `asserted_by` or `attributes` read `relations[].origin`. Reinstall the skills, then validate and evaluate: search now ranks every item holding any of the words in one query, so re-check retrieval cases whose expected refs relied on the former all-words pass.

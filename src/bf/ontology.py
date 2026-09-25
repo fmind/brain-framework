@@ -6,7 +6,7 @@ from pydantic import JsonValue
 
 from bf import links
 from bf.markdown import Note, authored, reference, split_ref
-from bf.models import Config, Error, Knowledge, Record, Sensor
+from bf.models import Config, Error, Record, Sensor
 
 
 def pointer(document: JsonValue, path: str) -> JsonValue:
@@ -49,7 +49,7 @@ def project(record: Record, sensor: Sensor, config: Config) -> Record:
     return result
 
 
-def validate(record: Record | Knowledge, config: Config) -> None:
+def validate(record: Record, config: Config) -> None:
     """Validate persisted fields, including historical sources with no active sensor."""
     for name, value in record.fields.items():
         if name not in config.ontology:
@@ -68,11 +68,11 @@ def validate(record: Record | Knowledge, config: Config) -> None:
                 raise Error("BF aliases must belong to their own brain namespace")
     for target in record.links:
         links.claim(target, config, links.address(config.name, "item"), links.address(config.name, "item"))
-    if isinstance(record, Record) and record.url:
+    if record.url:
         links.claim(record.url, config, links.address(config.name, "item"), links.address(config.name, "item"))
 
 
-def relations(record: Record | Knowledge, config: Config) -> list[tuple[str, str]]:
+def relations(record: Record, config: Config) -> list[tuple[str, str]]:
     """Each edge is supported by this record; replacement removes its obsolete edges."""
     validate(record, config)
     return [
@@ -88,21 +88,22 @@ def qualify(config: Config, ref: str, fragment: str = "") -> str:
 
 
 def note_claims(note: Note, config: Config) -> list[links.Claim]:
-    origin = qualify(config, note.path)
-    subject = links.identity(note.knowledge.entity) if note.knowledge.entity else origin
+    """Each link claims a relation from the note's entity, otherwise its file, supported by its section."""
+    file = qualify(config, note.path)
+    subject = links.identity(note.knowledge.entity) if note.knowledge.entity else file
     if (entity := links.parse(subject)) and entity.brain != config.name:
         raise Error("a note entity must belong to its own brain namespace")
-    result = [links.Claim(subject, role, target, origin) for role, target in relations(note.knowledge, config)]
+    result = []
     for value, fragment in note.contexts:
-        evidence = qualify(config, note.path, fragment)
-        claim = links.claim(value, config, subject, evidence)
+        origin = qualify(config, note.path, fragment)
+        claim = links.claim(value, config, subject, origin)
         ref = reference(note.path, value)
         if not links.parse(value) and ":" not in ref.split("/")[0]:
             # reference() has already resolved a Markdown-relative path.
             path, section = split_ref(ref)
             if authored(path):
                 ref = qualify(config, path, section)
-        result.append(claim or links.Claim(subject, "", links.target(ref), evidence))
+        result.append(claim or links.Claim(subject, "", links.target(ref), origin))
     return result
 
 

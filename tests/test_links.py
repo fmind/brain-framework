@@ -33,9 +33,6 @@ schema:
     type: identity
     cardinality: many
     relation: true
-  since:
-    description: Stated start of a relationship.
-    type: timestamp
   weight:
     description: Reviewed weight, not inferred confidence.
     type: number
@@ -52,7 +49,7 @@ aliases: [person:alice]
 ---
 # Alice
 ## Relationships {#friends}
-[Bob](bf://fixture/people/bob?rel=friend&weight=1)
+[Bob](bf://fixture/people/bob?rel=friend)
 """,
     )
     brain.write(
@@ -88,6 +85,12 @@ A reviewed profile.
         "bf://brain/a?rel=friend&weight=%zz",
         "bf://brain/a%FF",
         "bf://brain/a?rel=friend&x",
+        # Only the relationship is a link query: subjects, evidence and attributes are not claims a link makes.
+        "bf://brain/a?rel=friend&weight=1",
+        "bf://brain/a?subject=person:alice&rel=friend",
+        "bf://brain/a?rel=friend&asserted-by=person:alice",
+        "bf://brain/a?rel=friend&evidence=https%3A%2F%2Fexample.test",
+        "bf://brain/a?rel=Friend",
     ],
 )
 def test_reject_ambiguous_and_unsafe_addresses(value: str) -> None:
@@ -104,7 +107,7 @@ def test_component_encoding_and_external_urls() -> None:
     external = "https://example.test/a?rel=friend&source=x%26y#part"
     assert links.target(external) == external
     assert links.parse(external) is None
-    with pytest.raises(Error, match="attributes"):
+    with pytest.raises(Error, match="relationship"):
         links.identity("bf://team/people/marc?rel=friend")
 
 
@@ -124,11 +127,9 @@ def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
         "subject": "bf://fixture/people/alice",
         "relation": "friend",
         "target": "bf://fixture/people/bob",
-        "evidence": "bf://fixture/projects/alice.md#friends",
-        "attributes": {"weight": 1},
         "origin": "bf://fixture/projects/alice.md#friends",
     }
-    assert "Bob" in str(read([brain], claim["evidence"])["text"])
+    assert "Bob" in str(read([brain], claim["origin"])["text"])
     assert read([brain], "person:bob")["backlinks"] == bob["backlinks"]
     # A typed claim is also listed on its subject, where it was asserted.
     alice = read([brain], "person:alice")
@@ -141,26 +142,33 @@ def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
     assert read([brain], "bf://fixture/people/bob?rel=friend#about")["ref"] == "projects/bob.md#about"
 
 
-def test_explicit_subject_author_and_independent_support(brain: Store) -> None:
+def test_independent_support_and_no_claims_from_frontmatter_fields(brain: Store) -> None:
     people(brain)
     brain.write(
         "projects/evidence.md",
         b"""---
 fields:
-  author: [person:alice]
+  friend: [person:bob]
 ---
 # Evidence
 ## Meeting
-[Bob](bf://fixture/people/bob?rel=friend&subject=person:alice&asserted-by=person:alice&since=2026-01-01T00%3A00%3A00Z)
+[Bob](bf://fixture/people/bob?rel=friend)
 """,
     )
-    assert group(read([brain], "person:bob"), "friend")["total"] == 2
-    assert group(read([brain], "person:alice"), "author")["items"][0]["ref"] == "projects/evidence.md"
+    # Each file supports its own claim; frontmatter `fields` are ordinary data, not relationships.
+    friends = group(read([brain], "person:bob"), "friend")
+    assert friends["total"] == 2
+    evidence = next(i for i in friends["items"] if i["ref"] == "projects/evidence.md")
+    assert evidence["relations"] == [
+        {
+            "subject": "bf://fixture/projects/evidence.md",
+            "relation": "friend",
+            "target": "bf://fixture/people/bob",
+            "origin": "bf://fixture/projects/evidence.md#meeting",
+        }
+    ]
     subjects = cast(list[dict], read([brain], "person:alice")["claims"])
-    assert {(c["relation"], c["origin"]) for c in subjects} == {
-        ("friend", "bf://fixture/projects/alice.md#friends"),
-        ("friend", "bf://fixture/projects/evidence.md#meeting"),
-    }
+    assert [(c["relation"], c["origin"]) for c in subjects] == [("friend", "bf://fixture/projects/alice.md#friends")]
     brain.delete("projects/evidence.md")
     assert group(read([brain], "person:bob"), "friend")["total"] == 1
     with writer(brain):
@@ -168,6 +176,13 @@ fields:
     assert group(read([brain], "person:bob"), "friend")["total"] == 1
     brain.write("projects/alice.md", b"# Alice\nNo assertion remains.\n")
     assert read([brain], "person:bob")["backlinks"] == []
+
+
+def test_links_with_removed_attributes_are_reported(brain: Store) -> None:
+    people(brain)
+    brain.write("projects/bad.md", b"# Old\n[Bob](bf://fixture/people/bob?rel=friend&subject=person:alice)\n")
+    assert search([brain], Query(text="old")).get("problems")
+    assert any("invalid BF link" in str(p) for p in cast(list, validate(brain)["problems"]))
 
 
 def test_federation_and_no_implicit_brain_access(brain: Store, tmp_path: Path) -> None:
@@ -242,7 +257,7 @@ def test_explicit_anchors_are_stable_and_duplicates_fail() -> None:
 
 def test_sensor_link_failure_is_atomic(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG + b"sensors:\n  fake:\n    command: [fake-provider]\n")
-    with pytest.raises(Error, match="link attribute"):
+    with pytest.raises(Error, match="invalid BF link"):
         collect(
             brain,
             "fake",
@@ -280,17 +295,15 @@ def test_cli_mcp_and_evals_expose_links(brain: Store) -> None:
 def test_explanations_preserve_origin_and_report_truncation(brain: Store) -> None:
     people(brain)
     body = "---\nentity: bf://fixture/people/alice\n---\n# Alice\n" + "\n".join(
-        f"## Event {i}\n[Bob](bf://fixture/people/bob?rel=friend&evidence=https%3A%2F%2Fexample.test%2Fproof)"
-        for i in range(51)
+        f"## Event {i}\nMet at event {i}: [Bob](bf://fixture/people/bob?rel=friend)" for i in range(51)
     )
     brain.write("projects/alice.md", body.encode())
     result = group(read([brain], "person:bob"), "friend")["items"][0]
     assert result["relations_truncated"]
     assert len(result["relations"]) == 50
     claim = result["relations"][0]
-    assert claim["evidence"] == "https://example.test/proof"
     assert claim["origin"].startswith("bf://fixture/projects/alice.md#event-")
-    assert "example.test" in str(read([brain], claim["origin"])["text"])
+    assert "Met at event" in str(read([brain], claim["origin"])["text"])
 
 
 def test_same_brain_ambiguity_does_not_expand_and_qualified_refs_still_work(brain: Store) -> None:
@@ -331,3 +344,13 @@ def test_canonical_record_backlinks_keep_evidence(brain: Store) -> None:
     assert item["relations"][0]["target"] == "meetings:decision-1"
     scoped = search([brain], Query(text="decided", target="bf://fixture/meetings:decision-1"))["items"]
     assert [i["ref"] for i in cast(list[dict], scoped)] == ["projects/offline.md"]
+
+
+def test_repeated_links_in_one_section_are_one_claim(brain: Store) -> None:
+    people(brain)
+    brain.write(
+        "projects/carol.md",
+        b"# Carol\n## Friends\n[Bob](bf://fixture/people/bob?rel=friend) and again [Bob](bf://fixture/people/bob?rel=friend)\n",
+    )
+    item = next(i for i in group(read([brain], "person:bob"), "friend")["items"] if i["ref"] == "projects/carol.md")
+    assert len(item["relations"]) == 1

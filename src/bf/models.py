@@ -196,7 +196,6 @@ class Knowledge(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     links: list[str] = Field(default_factory=list)
     entity: Annotated[str, Field(max_length=8192)] = ""
-    fields: dict[Annotated[str, Field(pattern=NAME)], JsonValue] = Field(default_factory=dict)
 
     _identities = field_validator("aliases", "links")(identities)
 

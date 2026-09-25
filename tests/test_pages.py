@@ -202,7 +202,6 @@ def test_note_reads_carry_backlinks_grouped_by_relationship(brain: Store) -> Non
     assert (item["ref"], item["uri"]) == ("meetings:decision-1", "bf://fixture/meetings:decision-1")
     assert item["relations"] == [
         {
-            "evidence": "bf://fixture/meetings:decision-1",
             "origin": "bf://fixture/meetings:decision-1",
             "subject": "bf://fixture/meetings:decision-1",
             "target": "repo:example/project",

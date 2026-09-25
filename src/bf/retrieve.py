@@ -22,16 +22,19 @@ def bounded(value: dict[str, object], limit: int = MAX_REPLY) -> dict[str, objec
 
 
 def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[str, object]:
-    """Merge per-brain results: relevance keeps each brain's order, identities interleave by time."""
+    """Merge per-brain results: relevance keeps each brain's order, identities interleave by time.
+
+    An identity-shaped query is an identity search when a selected brain knows it; otherwise its words rank.
+    """
     stores, scope_problems = related(stores)
-    results: list[list[dict[str, object]]] = []
+    results: list[tuple[bool, list[dict[str, object]]]] = []
     stale = []
     brains = []
     problems: list[dict[str, object]] = list(scope_problems)
     last_error: Exception | None = None
     owners: set[tuple[str, str]] = set()
-    identity = index.identity(query.text)
-    identities, identity_problems = graph.expand(stores, query.text.strip()) if identity else (set(), [])
+    shaped = index.identity(query.text)
+    identities, identity_problems = graph.expand(stores, query.text.strip()) if shaped else (set(), [])
     targets, target_problems = graph.expand(stores, query.target)
     problems.extend([*identity_problems, *target_problems])
     for store in stores:
@@ -41,7 +44,8 @@ def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[s
             with index.database(store) as (connection, state):
                 local_targets = graph.local_refs(connection, targets)
                 local_identities = graph.local_refs(connection, identities)
-                items = index.search(connection, query, identities=local_identities, targets=local_targets)
+                exact = shaped and index.known(connection, local_identities | {query.text.strip()})
+                items = index.search(connection, query, identities=local_identities, targets=local_targets, exact=exact)
                 # Searches keep excerpts: the agent asked. External records stay labeled as such.
                 pages.guard(items, pages.owned(store), excerpts=True)
                 for position, item in enumerate(items):
@@ -49,7 +53,7 @@ def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[s
                         graph.explanations(
                             connection, str(item["ref"]), local_targets if query.target else local_identities
                         )
-                        if identity or query.target
+                        if exact or query.target
                         else ([], False)
                     )
                     item = items[position] = pages.label(name, item)
@@ -58,7 +62,7 @@ def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[s
                     if truncated:
                         item["relations_truncated"] = True
                 skipped = index.problems(connection)
-                if identity:
+                if exact:
                     owners.update((name, ref) for ref in index.identity_owners(connection, query.text))
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
             if len(stores) == 1:
@@ -77,15 +81,18 @@ def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[s
             stale.append(name)
         if counted:
             usage.note(store, "search", len(items))
-        results.append(items)
+        results.append((exact, items))
     if not results and scope_problems:
         raise Error("no unambiguous brain could be searched; check bf.yaml brain references")
     if not results:
         raise Error("no selected brain could be searched; run bf status with --brain for each brain") from last_error
+    identity = any(exact for exact, _ in results)
+    # A brain that does not know a known identity ranked its words instead: that is not an identity answer.
+    ranked = [items for exact, items in results if exact or not identity]
     if identity:
         # Keep canonical refs, alias owners and related evidence in that order, then newest first.
         merged = sorted(
-            (i for r in results for i in r), key=lambda i: (str(i.get("time", "")), str(i["ref"])), reverse=True
+            (i for r in ranked for i in r), key=lambda i: (str(i.get("time", "")), str(i["ref"])), reverse=True
         )
         merged.sort(
             key=lambda item: (
@@ -95,9 +102,12 @@ def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[s
         )
     else:
         # Interleave by rank: bm25 scores from different corpora are not comparable.
-        merged = [i for rank in range(query.limit) for r in results if rank < len(r) for i in [r[rank]]]
+        merged = [i for rank in range(query.limit) for r in ranked if rank < len(r) for i in [r[rank]]]
     selected = merged[: query.limit]
     reply: dict[str, object] = {"items": selected, "notice": NOTICE}
+    if shaped and not identity:
+        # Nothing is, names or links to it: say so, since its items only share words with the query.
+        reply["identity"] = "unknown"
     scoped = query.prefix.split("/")[1] if query.prefix.startswith("memories/") else ""
     coverage = []
     for store, name in brains:
