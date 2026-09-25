@@ -1,6 +1,0 @@
-[extend]
-useDefault = true
-
-[[allowlists]]
-description = "Ignore the generated third-party SAST rule cache"
-paths = ['''^\.opengrep/''']

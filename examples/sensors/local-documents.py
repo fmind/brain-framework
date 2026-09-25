@@ -15,7 +15,7 @@ import tempfile
 import time
 
 # UTF-8-only XML is rejected before parsing if it contains a DTD/entity; depth/nodes are bounded below.
-import xml.etree.ElementTree as ET  # nosemgrep: opengrep.rules.python.lang.security.use-defused-xml
+import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime

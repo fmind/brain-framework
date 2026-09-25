@@ -229,8 +229,8 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
         actions, _ = index.listing(connection, index.ACTION, {}, "i.path DESC", 10)
         changed, _ = index.listing(
             connection,
-            f"i.kind='note' AND i.time!='' AND ({index.TIME})>=:since",
-            {"since": week},
+            f"i.kind='note' AND i.time!='' AND ({index.TIME})>=:since AND ({index.TIME})<:until",
+            {"since": week, "until": stamp},
             "time DESC",
             SECTION,
         )
@@ -560,9 +560,11 @@ def identity(stores: list[Store], value: str, *, counted: bool = True) -> dict[s
     parts, extra = _brains(stores, build, strict=False, counted=counted)
     backlinks = _merge(parts)
     claims = [claim for _, part in parts for claim in cast("list[dict[str, object]]", part["claims"])]
-    if not backlinks and not claims:
-        return None
     issues = [*problems, *cast("list", extra.get("problems", []))]
+    if not backlinks and not claims:
+        if issues or extra.get("stale"):
+            raise Error("identity read is incomplete; run bf status before concluding it is absent")
+        return None
     return {
         "page": value,
         "backlinks": backlinks,

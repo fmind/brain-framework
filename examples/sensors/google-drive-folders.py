@@ -17,9 +17,7 @@ FOLDER = "application/vnd.google-apps.folder"
 def run(argv: list[str], limit: int, timeout: int) -> bytes:
     """Bound provider output while it runs; inherit Brain Framework's cancellable process group."""
     # Only literal provider commands reach this helper; no shell interprets argv.
-    child = subprocess.Popen(  # nosemgrep: dangerous-subprocess-use-audit
-        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
+    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     output = bytearray()
     deadline = time.monotonic() + timeout
     try:

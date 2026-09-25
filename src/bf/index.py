@@ -332,7 +332,7 @@ def _refresh(store: Store, *, full: bool, wait: float) -> dict[str, object]:
                     )
                     connection.execute("INSERT INTO files VALUES(?,?,?,?,?,?)", (path, *current[path], error))
                 # PRAGMA has no bound-parameter form; SCHEMA is an internal integer constant.
-                connection.execute(f"PRAGMA user_version={SCHEMA}")  # nosemgrep: formatted-sql-query
+                connection.execute(f"PRAGMA user_version={SCHEMA}")
             skipped = connection.execute("SELECT count(*) FROM files WHERE error!=''").fetchone()[0]
         return {"files": len(current), "changed": len(changed), "removed": len(removed), "problems": skipped}
 

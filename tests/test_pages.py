@@ -77,6 +77,14 @@ def test_home_lists_what_needs_attention(brain: Store) -> None:
     assert read([brain], "bf://fixture/")["pages"] == pages.BROWSE
 
 
+def test_home_keeps_future_notes_out_of_recent_changes(brain: Store) -> None:
+    populate(brain)
+    brain.write("concepts/planned.md", b"---\nupdated: 2026-09-26\n---\n# Planned review\n")
+    home = pages.home([brain], NOW)
+    assert refs(home, "changed") == ["projects/fresh.md", "projects/closed.md"]
+    assert refs(home, "upcoming") == ["concepts/planned.md", "mail:tomorrow"]
+
+
 def test_folder_pages_list_notes_in_useful_order(brain: Store) -> None:
     populate(brain)
     projects = read([brain], "projects")

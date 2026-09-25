@@ -21,7 +21,7 @@ from bf import records
 from bf.collect import collect, due, log_path, run, state
 from bf.config import register
 from bf.models import Error, Program, Sensor, timestamp
-from bf.storage import BusyError, Store, writer
+from bf.storage import BusyError, Store, state_store, writer
 from bf.update import update
 
 START = "2026-09-01T00:00:00.000000Z"
@@ -378,8 +378,6 @@ def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_pat
 
 
 def test_invalid_history_and_other_brain_errors_do_not_stop_update(configured: Store, tmp_path: Path) -> None:
-    from bf.storage import state_store
-
     state_store(configured.root).write("sensors.json", b'{"sample":{"success":"not-a-date"},"folders":[]}')
     assert state(configured) == {}
     state_store(configured.root).write("sensors.json", b"broken")
@@ -469,3 +467,18 @@ def test_failed_run_history_reports_that_records_were_committed(
     with pytest.raises(Error, match="records were committed"):
         collect(configured, "sample", start=START, end=END, runner=lambda *_: emit({"id": "one", "title": "Saved"}))
     assert records.find(configured, "sample", "one") is not None
+
+
+@pytest.mark.parametrize("previous_start", ["2026-08-01T00:00:00.000000Z", "2026-12-01T00:00:00.000000Z"])
+def test_future_run_history_cannot_block_current_collection(configured: Store, previous_start: str) -> None:
+    state_store(configured.root).write(
+        "sensors.json",
+        json.dumps({"sample": {"start": previous_start, "end": "2027-01-01T00:00:00Z", "success": START}}).encode(),
+    )
+    report = cast("Any", update([configured], now=NOW, runner=lambda *_: b"[]"))
+    assert report["ok"]
+    entry = state(configured)["sample"]
+    assert entry["success"] == NOW.isoformat()
+    assert entry["end"] == END
+    assert entry["start"] == min(previous_start, START)
+    assert not due(configured, NOW)

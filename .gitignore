@@ -1,26 +1,12 @@
-# Generated package and coverage artifacts.
-/dist/
-/.coverage
-/.cache/
-/.pytest_cache/
-/.opengrep/
-/coverage.out
-/.venv/
-/htmlcov/
-*.egg-info/
-
-# Machine-local: a developer's exported credentials, agent scratch space, prompts, plans, and
-# local skills. Contributor skills under .agents/skills/ stay versioned.
-/.env
-/.agents/AGENTS.md
-/.agents/PLAN.md
-/.agents/tmp/
-/.agents/prompts/
-/.agents/skills/local-*/
-
 .DS_Store
-__pycache__/
-*.pyc
+/.agents/tmp/
+/.cache/
+/.coverage
+/.env
+/.pytest_cache/
 /.ruff_cache/
+/.venv/
+/dist/
+/htmlcov/
 /site/
-/.ty/
+__pycache__/

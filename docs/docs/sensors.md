@@ -44,6 +44,14 @@ sensors:
 
 Sensors run from the brain root with your environment minus loader-injection variables and relative `PATH` entries, stdin closed, and stderr captured to a private per-sensor log of at most 256 KiB under `~/.local/state/bf/`. Errors name the log, never its content. The [example sensors](https://github.com/fmind/brain-framework/tree/main/examples/sensors) show local Git history, Google Calendar, a complete Drive folder snapshot and scoped local documents; copy them into `sensors/` and adapt them with tests.
 
+## Any source you can script
+
+The sensor interface is open-ended. A source with a CLI, API, database query or readable export can be connected by a script that prints the record array above. Use Python or another language; Brain Framework needs the output contract, not a provider-specific plugin.
+
+For example, a custom sensor can fetch [GitHub issues and pull requests](https://docs.github.com/en/rest/issues/issues), [Jira work items](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/) or [Airtable records](https://support.airtable.com/articles/6292134965-getting-started-with-airtable-s-web-api), select the fields worth remembering and preserve each item's stable id and source URL. These are possible integrations, not bundled connectors. The four reviewed examples cover local Git history, local documents, Google Calendar and Drive folders.
+
+Your script owns provider authentication, pagination, rate limits and the scope of collection. Prefer an authenticated provider CLI where available; keep credentials out of the brain and emitted records. Finish all pages before printing, and fail without output if collection is incomplete. Test with a fake provider, review the code and grant machine trust before running it. Once collected, the records can be searched and read offline.
+
 ## Collect and update
 
 Review the sensor code, then explicitly grant machine collection trust. New brains and referenced brains have no implicit execution permission.

@@ -103,6 +103,18 @@ def test_conflicting_names_are_excluded_and_paths_deduplicated(tmp_path: Path) -
     assert not problems
 
 
+@pytest.mark.parametrize("ref", ["projects/absent.md", "repo:example/absent", "memories/absent"])
+def test_missing_read_cannot_prove_absence_with_an_unavailable_brain(tmp_path: Path, ref: str) -> None:
+    first = make(tmp_path / "first", "first", {"missing": "../absent"})
+    first.write(
+        "evals/retrieval.yaml",
+        yaml.safe_dump({"version": 5, "cases": [{"name": "absent", "read": ref, "empty": True}]}).encode(),
+    )
+    assert not evaluate(first)["passed"]
+    with pytest.raises(Error, match="incomplete"):
+        read([first], ref)
+
+
 def test_absolute_and_home_paths_and_no_collection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     first = make(tmp_path / "first", "first", {"second": "~/second", "third": str(tmp_path / "third")})

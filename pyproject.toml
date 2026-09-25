@@ -1,14 +1,14 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "12.0.0"
-description = "Plain-file brains for people and their agents"
+version = "12.0.1"
+description = "🧠 AI Brain Factory for infinite knowledge. Not for 🐙 mindflayers or 🧟 zombies."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Médéric Hurier" }]
-keywords = ["agents", "knowledge", "mcp", "retrieval"]
+keywords = ["ai-agents", "knowledge-management", "local-first", "mcp", "second-brain", "plain-text"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Environment :: Console",
@@ -65,37 +65,37 @@ quote-style = "double"
 
 [tool.ruff.lint]
 select = [
-  "A",
-  "ARG",
-  "ASYNC",
-  "B",
-  "C4",
-  "E",
-  "ERA",
-  "F",
-  "FA",
-  "FURB",
-  "I",
-  "ISC",
-  "LOG",
-  "N",
-  "PERF",
-  "PGH",
-  "PIE",
-  "PT",
-  "PTH",
-  "Q",
-  "RET",
-  "RSE",
-  "RUF",
-  "S",
-  "SIM",
-  "SLF",
-  "T10",
-  "T20",
-  "TID",
-  "UP",
-  "W",
+  "A", # Avoid shadowing Python builtins.
+  "ARG", # Find unused function arguments.
+  "ASYNC", # Catch async and cancellation mistakes.
+  "B", # Catch likely bugs (flake8-bugbear).
+  "C4", # Simplify comprehensions.
+  "E", # Enforce pycodestyle errors.
+  "ERA", # Remove commented-out code.
+  "F", # Find undefined names and unused imports (Pyflakes).
+  "FA", # Check future-annotations usage.
+  "FURB", # Modernize and simplify Python idioms (refurb).
+  "I", # Sort imports (isort).
+  "ISC", # Catch accidental implicit string concatenation.
+  "LOG", # Check logging API usage.
+  "N", # Enforce Python naming conventions.
+  "PERF", # Avoid common performance pitfalls.
+  "PGH", # Require specific lint and type-checker suppressions.
+  "PIE", # Remove unnecessary code constructs.
+  "PT", # Keep pytest fixtures and assertions consistent.
+  "PTH", # Prefer pathlib for filesystem operations.
+  "Q", # Keep string quoting consistent.
+  "RET", # Simplify return statements.
+  "RSE", # Remove redundant exception syntax.
+  "RUF", # Enable Ruff-specific correctness and style checks.
+  "S", # Catch common security mistakes (Bandit).
+  "SIM", # Simplify control flow and expressions.
+  "SLF", # Flag access to private class members.
+  "T10", # Remove debugger calls.
+  "T20", # Flag accidental print statements.
+  "TID", # Keep imports explicit and tidy.
+  "UP", # Use syntax supported by the target Python version.
+  "W", # Enforce pycodestyle warnings.
 ]
 ignore = [
   "ASYNC240", # Brain Framework performs bounded local filesystem work from async MCP handlers.
@@ -127,6 +127,7 @@ branch = true
 source = ["bf"]
 
 [tool.coverage.report]
+fail_under = 85
 show_missing = true
 skip_covered = true
 skip_empty = true

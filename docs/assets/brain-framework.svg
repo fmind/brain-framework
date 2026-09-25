@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Brain Framework</title>
+  <desc id="desc">A white factory with brain-shaped smoke on a deep blue rounded square.</desc>
+  <rect width="256" height="256" rx="56" fill="#174EA6"/>
+  <path d="M46 212V151L90 126V151L134 126V151H174V112H202V212Z" fill="none" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <g transform="translate(18 0) scale(0.85)">
+    <path d="M121 49C114 32 90 34 85 51C68 53 61 72 72 84C61 98 70 118 87 119C90 136 112 139 121 123C130 139 152 136 155 119C172 118 181 98 170 84C181 72 174 53 157 51C152 34 128 32 121 49Z" transform="translate(0 -13)" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M121 36V110M85 39V58L99 69M73 71H89V89M157 39V58L143 69M169 71H153V89" fill="none" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <circle cx="183" cy="91" r="5" fill="#D2E3FC"/>
+  <circle cx="190" cy="102" r="3" fill="#D2E3FC"/>
+  <rect x="65" y="173" width="20" height="20" rx="3" fill="#D2E3FC"/>
+  <rect x="101" y="173" width="20" height="20" rx="3" fill="#D2E3FC"/>
+  <rect x="137" y="173" width="20" height="20" rx="3" fill="#D2E3FC"/>
+  <path d="M174 212V178H183V212" fill="#D2E3FC"/>
+</svg>

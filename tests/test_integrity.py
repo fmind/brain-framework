@@ -11,7 +11,9 @@ from typer.testing import CliRunner
 
 from bf import index, records
 from bf.cli import app
+from bf.evaluate import evaluate
 from bf.models import Error
+from bf.retrieve import read
 from bf.storage import Store, writer
 from bf.update import update
 from bf.validate import validate
@@ -41,6 +43,17 @@ def test_missing_record_in_corrupt_source_is_not_proven_absent(brain: Store) -> 
     with pytest.raises(Error, match="unreadable partitions"):
         records.find(brain, "meetings", "possibly-in-broken-file")
     assert records.find(brain, "other", "absent") is None
+
+
+def test_missing_identity_in_skipped_evidence_is_not_proven_absent(brain: Store) -> None:
+    brain.write("projects/broken.md", b"---\nstatus: invalid\n---\n# Broken\n")
+    brain.write(
+        "evals/retrieval.yaml",
+        b"version: 5\ncases:\n- name: absent\n  read: 'repo:example/absent'\n  empty: true\n",
+    )
+    assert not evaluate(brain)["passed"]
+    with pytest.raises(Error, match="incomplete"):
+        read([brain], "repo:example/absent")
 
 
 @pytest.mark.parametrize("path", ["memories/orphan.jsonl", "memories/Bad/2026-09.jsonl", "memories/mail/2026-99.jsonl"])

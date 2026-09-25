@@ -122,7 +122,8 @@ def test_pdf_converter_is_killed_on_timeout_or_excess_output(
     executable.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.defpath)
     monkeypatch.setattr(documents, "FILE_BYTES", 256)
-    monkeypatch.setattr(documents, "PDF_TIMEOUT", 1)
+    # Include interpreter startup under CI load; the output test must reach its byte limit first.
+    monkeypatch.setattr(documents, "PDF_TIMEOUT", 10 if flood else 5)
     with pytest.raises(ValueError, match="limit" if flood else "timed out"):
         documents.extract(b"%PDF synthetic", ".pdf")
     assert marker.exists()

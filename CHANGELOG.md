@@ -2,6 +2,24 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v12.0.1](https://github.com/fmind/brain-framework/releases/tag/v12.0.1) - 2026-09-25
+
+A maintenance release for reliable absence checks, documentation and release verification. Brain configuration and retrieval suites remain at version 5; no manual upgrade is needed.
+
+### Fixed
+
+- Collection bounds saved coverage by its successful run and the current observation time. A future window left in run history no longer keeps successful scheduled collection permanently stale.
+- A missing read no longer proves absence when a directly referenced brain is unavailable or identity lookup skipped invalid evidence. Retrieval evaluations expecting an empty answer fail visibly until the incomplete scope is repaired.
+- Future-dated notes appear in the home page's upcoming items without displacing recent changes.
+- PDF converter process tests allow interpreter startup on busy machines while still asserting output limits, timeouts and process cleanup.
+
+### Changed
+
+- CI and release publication share the four-platform verification workflow. PyPI and GitHub receive the exact distributions that passed isolated installation tests, with hash comparisons before and after publication.
+- Wheel and source-distribution checks install locked runtime dependencies outside the checkout and exercise initialization, validation, search, exact reads, status and retrieval evaluation.
+- Development tasks and hooks use native tools with separate import sorting and formatting, a configured coverage floor, strict rendered documentation links and disposable schema generation.
+- Refresh the README, documentation overview and branding; clarify which sensor integrations ship as reviewed examples and how to create others.
+
 ## [v12.0.0](https://github.com/fmind/brain-framework/releases/tag/v12.0.0) - 2026-09-25
 
 Brain Framework 12 ranks notes and records in one search query and answers several times faster; BF links carry only a relationship. On a personal brain of 52,000 records, full cache builds take 13 s instead of 69 s, searches and reads 0.3–0.4 s instead of up to 1.8 s, and the cache shrinks from 357 MB to 239 MB. The `bf.yaml` and retrieval suite formats stay at version 5, but notes that use removed link attributes or frontmatter `fields` need the manual upgrade below. The search cache rebuilds automatically.

@@ -2,11 +2,12 @@
 [project]
 site_name = "Brain Framework"
 site_url = "https://fmind.github.io/brain-framework/"
-site_description = "Plain-file brains for people and their agents."
+site_description = "🧠 AI Brain Factory for infinite knowledge. Not for 🐙 mindflayers or 🧟 zombies."
 site_author = "Médéric Hurier"
 copyright = "Copyright &copy; 2026 Médéric Hurier (Fmind)."
 docs_dir = "docs"
-site_dir = "site"
+# Mirror the public URL path so offline link checks need no temporary symlinks.
+site_dir = "site/brain-framework"
 strict = true
 extra_css = ["stylesheets/extra.css"]
 extra_javascript = ["javascripts/accessibility.js"]
@@ -36,8 +37,8 @@ nav = [
 [project.theme]
 custom_dir = "overrides"
 language = "en"
-logo = "fmind-logo.webp"
-favicon = "fmind-logo.webp"
+logo = "assets/brain-framework.svg"
+favicon = "assets/brain-framework.svg"
 font = false
 features = [
   "content.code.copy",

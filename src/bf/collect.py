@@ -96,7 +96,7 @@ def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
     else:
         executable = found
     try:
-        child = subprocess.Popen(  # noqa: S603  # nosemgrep: dangerous-subprocess-use-audit
+        child = subprocess.Popen(  # noqa: S603
             # Direct argv from the owner's bf.yaml; no shell interprets it.
             [executable, *argv[1:]],
             cwd=store.root,
@@ -216,6 +216,13 @@ def _coverage(previous: dict[str, object], start: str, end: str, observed: str) 
     """
     covered = min(end, observed)
     before_start, before_end = str(previous.get("start", "")), str(previous.get("end", ""))
+    if before_end:
+        # Saved state may predate the coverage bound or follow a clock correction. It cannot
+        # prove coverage beyond its successful run, nor prevent a current run becoming fresh.
+        before_end = min(timestamp(before_end), timestamp(str(previous.get("success") or observed)), observed)
+        before_start = timestamp(before_start) if before_start else ""
+        if before_start >= before_end:
+            before_start = before_end = ""
     if start >= covered:
         return ({"start": before_start, "end": before_end} if before_end else {}), False
     latest = not before_end or covered >= before_end

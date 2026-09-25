@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Brain Framework is a typed Python package and the `bf` command for keeping knowledge in plain files and retrieving it offline. People and agents interpret the evidence and maintain the notes; the framework stores, searches and reads them.
+Brain Framework is a Python package and the `bf` command for keeping knowledge in plain files and retrieving it offline. People and agents interpret the evidence and maintain the notes; the framework stores, searches and reads them.
 
 Start contribution work with [bf-contribute](.agents/skills/bf-contribute/SKILL.md). [README.md](README.md) explains the product; [CONTRIBUTING.md](CONTRIBUTING.md) owns development and release procedures.
 

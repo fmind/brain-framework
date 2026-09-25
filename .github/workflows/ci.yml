@@ -1,9 +1,10 @@
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
 name: CI
 on:
   push:
     branches: [main]
   pull_request:
-  workflow_call: # A tag release verifies the exact commit through the same canonical gate.
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -11,32 +12,27 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   verify:
-    name: Verify Python package (${{ matrix.target }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: linux-x64
-            runner: ubuntu-24.04
-          - target: linux-arm64
-            runner: ubuntu-24.04-arm
-          - target: macos-x64
-            runner: macos-15-intel
-          - target: macos-arm64
-            runner: macos-15
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    uses: ./.github/workflows/verify.yml
+  pages:
+    name: Publish verified documentation
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pages: write # Publish the artifact produced by the read-only gate.
+      id-token: write # Authenticate the Pages deployment.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 100 # check:leaks scans the last 100 commits; a shallower clone hides them.
-          persist-credentials: false
-      - name: Install locked toolchain
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          version: 2026.9.1
-      - name: Run canonical gate
-        run: mise run all
-      - name: Verify clean checkout
-        run: test -z "$(git status --porcelain)"
+      - name: Read current main commit
+        id: main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '"sha=" + .object.sha' >> "$GITHUB_OUTPUT"
+      - name: Deploy documentation
+        id: deployment
+        if: steps.main.outputs.sha == github.sha
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

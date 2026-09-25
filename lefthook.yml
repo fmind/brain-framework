@@ -6,17 +6,22 @@ pre-commit:
       glob: "*.{md,json,jsonc,yaml,yml,toml}"
       run: mise run format:dprint {staged_files}
       stage_fixed: true
-    format:python:
+    format:imports:
       priority: 2
+      glob: "*.py"
+      run: mise run format:imports {staged_files}
+      stage_fixed: true
+    format:python:
+      priority: 3
       glob: "*.py"
       run: mise run format:python {staged_files}
       stage_fixed: true
     # The default history/worktree pass cannot see a partially staged snapshot exactly.
     leaks:
-      priority: 3
-      run: mise run check:leaks --staged
-    check:
       priority: 4
+      run: mise run check:leaks:staged
+    check:
+      priority: 5
       run: mise run check
 pre-push:
   parallel: false

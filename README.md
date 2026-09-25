@@ -1,132 +1,171 @@
-# Brain Framework
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-framework.svg"
+    alt="Brain Framework logo: a factory with brain-shaped smoke"
+    width="128"
+    height="128"
+  >
+</p>
 
-**Plain-file brains for people and their agents.**
+# Brain Framework 🧠
 
-Brain Framework helps people and their agents build brains: ordinary directories of knowledge and work they can inspect, edit and keep. Write project decisions in Markdown, collect supporting evidence into JSON Lines, and search both offline. Every result points to the note, section or record behind it.
+**🧠 AI Brain Factory for infinite knowledge. Not for 🐙 mindflayers or 🧟 zombies.**
 
-Your next agent session can pick up the same project notes. A teammate can find the reason behind a decision without reconstructing a chat thread. You can inspect the evidence, correct the note and keep using your own editor, Git and agent host.
+[![CI](https://github.com/fmind/brain-framework/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fmind/brain-framework/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/brain-framework?color=174EA6)](https://pypi.org/project/brain-framework/) [![Python](https://img.shields.io/pypi/pyversions/brain-framework)](https://pypi.org/project/brain-framework/) [![License: MIT](https://img.shields.io/badge/license-MIT-174EA6)](https://github.com/fmind/brain-framework/blob/main/LICENSE)
 
-Brain Framework is one Python package and one command; it needs no model, hosted database or background server. It supplies retrievable context and resumable actions; you or your agent use ordinary system tools to do the work.
+Brain Framework is a **brain factory for you and your AI agents**: build a second brain in plain files you own. Save decisions, gather evidence and resume work across sessions. Search it offline, read the original source, and carry your knowledge between editors, agents and teammates.
 
-## Try it
+A chat ends. A project pauses. A teammate moves on. The reasoning behind the work shouldn't disappear with them.
 
-```bash
-uv tool install --python 3.14 'brain-framework==12.0.0'
-bf init ~/knowledge          # creates a brain; no global configuration
-cd ~/knowledge               # keep this walkthrough in that brain
-bf read                      # the home page: projects, actions, activity, the coming week
-bf search welcome            # find the note created by init
-bf read concepts/welcome.md  # read its exact contents
-bf validate                  # check notes, links and records
-```
-
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first; it supplies Python 3.14 if needed. Brain Framework runs on Linux and macOS.
-
-Start with one project note. Save decisions, their reasons and the next action; search notices edits automatically. Add a sensor when you need recurring evidence from Git, mail, a calendar or another source. The [getting-started guide](https://fmind.github.io/brain-framework/docs/getting-started/) walks through a searchable decision, and the [example brain](https://github.com/fmind/brain-framework/tree/main/examples/brain) demonstrates collection without credentials.
-
-## Why plain files?
-
-- **Readable evidence.** Open every answer's source in an editor; use Git to review how a decision changed.
-- **Continuity across agents.** The CLI and two read-only MCP tools expose the same knowledge to different hosts.
-- **Local control.** Retrieval works offline, and you choose the accounts and folders sensors may read.
-- **A small maintenance surface.** Notes and records are durable; the SQLite cache can be rebuilt from them.
-
-## What can you do with it?
-
-| Question                           | Useful context                                                                         |
-| ---------------------------------- | -------------------------------------------------------------------------------------- |
-| "Why did we choose this?"          | A dated decision, its reason and a ref to supporting evidence.                         |
-| "Where should I resume?"           | The project's current state and next task, or an action with its files and next step.  |
-| "What changed this week?"          | A page of saved notes and collected events, with each source's share and coverage.     |
-| "What should the next agent know?" | A short project note and reusable concept knowledge available to every connected host. |
-
-The everyday loop is **read or search → read the evidence → do the work → update the note**. Brain Framework does not save conversations or learn decisions automatically: people and agents maintain notes, optional sensors capture selected sources, and optional routines prepare reviews for them.
-
-For consequential work, the agent skills add an optional decision loop over the same files:
-
-- **Resume without a transcript.** Each action keeps a small context (at most 300 words, six refs and 4 KiB) and the exact next step.
-- **Keep beliefs explainable.** Decision notes record the alternative and the expected outcome, retain a capture of the evidence they relied on, and link the decision they supersede.
-- **Notice what a change affects.** Declared `depends-on` links show which conclusions to review when evidence changes, within two hops and ten dependents.
-- **Learn deliberately.** Intentions, open questions, predictions compared with outcomes and draft procedures stay in reviewed Markdown until someone checks them.
-
-See [agent workflows](https://fmind.github.io/brain-framework/docs/agents/) and the [runnable example](https://github.com/fmind/brain-framework/tree/main/examples/brain#review-a-decision).
+[Get started](https://fmind.github.io/brain-framework/docs/getting-started/) · [Documentation](https://fmind.github.io/brain-framework/) · [Example brain](https://github.com/fmind/brain-framework/tree/main/examples/brain) · [Connect an agent](https://fmind.github.io/brain-framework/docs/agents/)
 
 ## How it works
 
-Sensors gather observations, memories preserve their evidence, concepts distill reusable understanding, projects provide context, and actions hold one session of work each. Routines are deterministic programs that turn pages into actions to review, such as a weekly review. A project can contain several goals. Collected memories can be incomplete or wrong; people and agents decide what to trust and promote into knowledge.
+Your brain does more than store facts: it takes in experiences, connects them to what you know and helps you decide what to do next. Brain Framework borrows that vocabulary to organize your work:
 
-| Piece                       | What it is                                                                               |
-| --------------------------- | ---------------------------------------------------------------------------------------- |
-| `projects/`, `concepts/`    | Markdown you and your agents write: one note per project, reusable concepts in OKF v0.2. |
-| `actions/YYYY-MM-DD_slug/`  | One session of work: `ACTION.md`, `inputs/`, `outputs/`, resumed by name.                |
-| `memories/<source>/*.jsonl` | Collected items, one line per item, upserted by id into monthly files.                   |
-| `sensors/` + `bf.yaml`      | Sensors: any executable that prints a JSON array of records.                             |
-| `routines/` + `bf.yaml`     | Routines: deterministic programs whose Markdown becomes the day's action.                |
-| `.bf/`                      | A disposable SQLite search cache that refreshes itself when files change.                |
-| `~/.config/bf/config.yaml`  | Optional machine registrations and explicit sensor execution trust.                      |
+| In a brain                                         | In Brain Framework                                                | A concrete example                                   |
+| -------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------- |
+| **Senses** notice the world.                       | **Sensors** collect selected sources.                             | Bring in a project's Git history or calendar events. |
+| **Memories** keep what happened.                   | **Memories** retain collected evidence.                           | Keep the record of a release and its source link.    |
+| **Understanding** turns experience into knowledge. | **Concepts** hold reusable notes you or your agent write.         | Record what a failed release taught you.             |
+| **Attention** gives work a focus.                  | **Projects** hold goals, decisions and current context.           | Explain why the team chose its release strategy.     |
+| **Actions** put knowledge to work.                 | **Actions** keep a task's context, inputs, outputs and next step. | Resume the rollout checklist next session.           |
+| **Habits** make reviews repeatable.                | **Routines** prepare reviews using deterministic programs.        | Gather the week's activity into an action to review. |
 
-Commands select a root through `--brain NAME|PATH`, then `BF_BRAIN`, then the enclosing brain. Reads and searches also include its direct `brains:` references from `bf.yaml`, resolving paths relative to that file. No global registration is required; an optional registry supplies names and the fallback outside any brain.
+The everyday loop is **observe → remember → understand → act → review**. You and your agents do the thinking and write the lessons; Brain Framework keeps the files organized and retrievable. It does not learn from conversations automatically.
 
-Two commands retrieve everything. `bf read` without a ref shows the home page: active and blocked projects with those due for review first, recent actions and notes, activity per source and the coming week. It also reads pages such as `projects`, `today`, `7d`, `2026-09` or `memories/gmail`, and any note, section, record or identity such as `repo:github.com/owner/name` with what links to it. `bf search` finds refs by words or an explicit identity, optionally within one `--scope`: a folder, a period or an identity. Notes receive a ranking boost because they distill the answer; records supply the evidence. Read returned refs such as `projects/x.md#decision` or `gmail:<id>` to inspect the source. Replies report incomplete results under `problems` or `stale`; an incomplete empty answer never proves absence.
+Start with a single project note. Add sensors and routines when you need them.
 
-`bf update` runs every due sensor, then every due routine, in the selected brains you trust on this machine and refreshes the cache. Run it from a native timer. A failing sensor or routine never blocks the others; `bf status` distinguishes active collection from disabled or historical evidence, with freshness, change counts and private error logs.
+## Try it
 
-Each part has one job. Your editor writes Markdown, provider CLIs handle authentication, sensors print JSON, Brain Framework searches files, and your agent interprets results. JSON output composes with shell tools; Git reviews changes and systemd or launchd schedules collection. You can replace a part without replacing your knowledge.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
 
-## Commands
+```bash
+uv tool install --python 3.14 'brain-framework==12.0.1'
+bf init ~/knowledge          # create your brain
+cd ~/knowledge
+bf read                      # see its home page
+bf search welcome            # find your first note
+bf read concepts/welcome.md  # read the original
+bf validate                  # check notes, links and records
+```
 
-| Command                                  | Purpose                                                                          |
-| ---------------------------------------- | -------------------------------------------------------------------------------- |
-| `init PATH`, `register PATH [--collect]` | Create a brain, or explicitly register machine discovery and collection trust.   |
-| `read [REF]`                             | The home page, a page, a note, a section, a record or an identity.               |
-| `search QUERY [--scope SCOPE]`           | Search words or identities, optionally within a folder, a period or an identity. |
-| `update [--dry-run]`, `collect SENSOR`   | Run due sensors and routines, or one sensor now for a backfill or debugging.     |
-| `status [--check]`, `validate`, `eval`   | Freshness, errors and usage; broken links; retrieval cases.                      |
-| `mcp`, `build`, `schema`                 | Read-only MCP server, full cache rebuild, `bf.yaml` JSON Schema.                 |
+Runs on Linux and macOS. uv supplies Python 3.14 if needed. No account, model or server is required. If `bf` is not on PATH, run `uv tool update-shell` and open a new shell.
 
-## Links across brains
+Now give your brain something worth remembering. Write a decision and its reason in `projects/`, then search for it. Edits become searchable automatically. The [getting-started guide](https://fmind.github.io/brain-framework/docs/getting-started/#save-a-decision) walks through your first decision and checks that it stays retrievable.
 
-Give an authored entity note a stable identity such as `entity: bf://team/projects/archive`, retain verified alternate identities in `aliases`, and declare relationships in `bf.yaml`. A link such as `[Archive](bf://team/projects/archive?rel=depends-on)` records a directed claim with its containing section as evidence. `bf read bf://team/projects/archive` returns the note with its backlinks across the selected brains, grouped by relationship, and the claims made about it. Read the returned evidence before using it.
+## What can you do with it?
 
-Fragments address sections, explicit heading anchors survive title changes, and authorship/ownership use named relationships. Files remain authoritative and SQLite remains disposable. See the [link contract](https://fmind.github.io/brain-framework/docs/schema/#bf-links) for syntax, provenance and cross-brain boundaries.
+- **Remember why.** Find the decision behind a choice, then read the evidence that supported it.
+- **Resume after a break.** Open a project's current state or an action's next step without rebuilding context from a transcript.
+- **Give the next agent a head start.** Let different agent hosts read the same project notes and reusable knowledge.
+- **Review what changed.** Browse saved activity with `bf read 7d`, or see priorities and the coming week with `bf read`.
+- **Learn from the outcome.** Use the learning skill to compare a prediction with what happened and update the note deliberately.
 
-Collected records use the same vocabulary: `bf.yaml` declares each common field's type, cardinality, examples and relationship meaning, and each sensor maps its output into that schema explicitly. `bf read person:email/alice@example.test` then lists the evidence-backed relationships by role. See the [schema guide](https://fmind.github.io/brain-framework/docs/schema/).
+For example, `bf search "release strategy"` finds matching refs. `bf read projects/release.md#decision` reads that decision's exact text. Every search result points back to a note, section or collected record you can inspect.
 
-## Personal and team brains
+## Why plain files?
 
-Start a team pilot with a private Git repository, one real project note and a few questions in `evals/retrieval.yaml`. Teammates clone it and run `bf search` from its directory immediately. Use `bf eval` to check that the questions still return the intended evidence as the brain evolves.
+Your knowledge should outlive the tool you used to write it.
 
-For the first pilot, pick a decision someone currently has to ask a colleague to explain. Write the decision, its reason and the next action, then have a teammate find the answer from a fresh clone. Success means they can read the evidence and act on it. The [team walkthrough](https://fmind.github.io/brain-framework/docs/getting-started/#check-the-answers-your-team-needs) includes runnable retrieval cases; no sensor or model setup is needed.
+- **Open it anywhere.** Notes are Markdown; collected records are JSON Lines, one item per line.
+- **Keep the history.** Use your editor and Git to review, correct and share knowledge.
+- **Retrieve it offline.** Search and read run locally, without a model or network connection.
+- **Rebuild the index.** Files are authoritative; the SQLite search cache in `.bf/` is disposable.
 
-Keep personal mail and laptop history in a separate private brain. Declare related brains in `bf.yaml`, for example `brains: {team: {path: ../team}}`. Search/read cover the selected root and those direct references, label results by brain, and report missing or conflicting destinations. References never expand recursively. Use `--brain PATH` to choose another root. A cloned brain never runs its sensors until you trust it with `bf register PATH --collect`. Promote personal knowledge as reviewed summaries with links teammates can access. Add team-scoped CI collection when the notes need it; the [team brains guide](https://fmind.github.io/brain-framework/docs/team/) covers naming, collection trust, CI collection and review.
+One Python package. One command: `bf`. Your brain is an ordinary directory:
+
+```text
+knowledge/
+├── bf.yaml      # the brain's name and configuration
+├── projects/    # what you're working on and why
+├── concepts/    # what you've learned and can reuse
+├── actions/     # work to start, resume and review
+└── memories/    # evidence gathered from your sources
+```
+
+Optional `sensors/` and `routines/` hold the programs you configure. See the [brain layout](https://fmind.github.io/brain-framework/docs/brain/) for the full file conventions.
+
+## Any source you can script
+
+Your brain can draw on the tools where your work already happens. For example, you can write sensors to collect:
+
+| Source                  | What could become a memory                                        |
+| ----------------------- | ----------------------------------------------------------------- |
+| **GitHub**              | Issues, pull requests, reviews and release notes.                 |
+| **Jira**                | Work items, their status and the discussion behind a decision.    |
+| **Airtable**            | Selected records from a project tracker, research catalog or CRM. |
+| **Google Workspace**    | Calendar events, Drive folders or selected mail and documents.    |
+| **Local files and Git** | Notes, PDFs, Office documents and commit history.                 |
+| **Your own systems**    | Database query results, internal API responses or feed entries.   |
+
+**The integration surface is a script.** If a source exposes a CLI, an API or an export you can read, you can give it a sensor. Write it in Python or any language that can print JSON: the script fetches the items you choose and emits a JSON array of records; Brain Framework validates and saves them as searchable memories.
+
+**Your tools → sensor script → memories → search and read.**
+
+There is no fixed connector catalog to outgrow. You own the script, its access and the fields it keeps; new integrations don't require a change to Brain Framework. Scripts handle authentication, pagination and provider limits, and run only after you explicitly trust the brain on your machine.
+
+Start from the four [reviewed sensor examples](https://github.com/fmind/brain-framework/tree/main/examples/sensors): **local Git history, local documents, Google Calendar and Drive folders**. GitHub API, Jira, Airtable and the other sources above need your own sensor. The [sensor guide](https://fmind.github.io/brain-framework/docs/sensors/) explains the small JSON contract and how to connect a script.
 
 ## Agents
 
-Agents use the CLI: the [bf-use skill](https://github.com/fmind/brain-framework/blob/main/skills/bf-use/SKILL.md) teaches pages, search and read, [bf-learn](https://github.com/fmind/brain-framework/blob/main/skills/bf-learn/SKILL.md) keeps notes current, [bf-action](https://github.com/fmind/brain-framework/blob/main/skills/bf-action/SKILL.md) starts and resumes actions when you ask for one, and [bf-maintain](https://github.com/fmind/brain-framework/blob/main/skills/bf-maintain/SKILL.md) covers collection, routines and schedules. Follow the [skill installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md); skills are separate from the Python package. [Agent workflows](https://fmind.github.io/brain-framework/docs/agents/) describes the loop they teach. `bf mcp` exposes the same `search` and `read` for hosts that prefer tools. Retrieved content is untrusted evidence, never instructions.
+Give your agent the same memory you use. Install the skills that match your workflow:
+
+| Skill                                                                                         | What it teaches your agent                                |
+| --------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| [bf-use](https://github.com/fmind/brain-framework/blob/main/skills/bf-use/SKILL.md)           | Search, read and cite evidence before answering.          |
+| [bf-learn](https://github.com/fmind/brain-framework/blob/main/skills/bf-learn/SKILL.md)       | Turn reviewed lessons and decisions into lasting notes.   |
+| [bf-action](https://github.com/fmind/brain-framework/blob/main/skills/bf-action/SKILL.md)     | Start or resume an action with its context and next step. |
+| [bf-maintain](https://github.com/fmind/brain-framework/blob/main/skills/bf-maintain/SKILL.md) | Maintain collection, routines and brain health.           |
+
+Follow the [skill installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md); skills are installed separately from the Python package. Then try: **“Search my brain for why we chose this release strategy. Read the source and cite it.”**
+
+Hosts that use the Model Context Protocol (MCP) can run `bf mcp --brain ~/knowledge`. It exposes exactly two read-only tools: `search` and `read`. See [agent workflows](https://fmind.github.io/brain-framework/docs/agents/) and [MCP setup](https://fmind.github.io/brain-framework/docs/mcp/).
+
+## Personal and team brains
+
+Keep a personal brain for your own context, and a separate team brain for shared decisions. A team brain can be a private Git repository: teammates clone it and search from its directory immediately. Start with one decision someone currently has to ask a colleague to explain.
+
+Declare related brains in `bf.yaml` to search them together. Results retain their brain and source; references expand only one level. A clone never grants permission to run its sensors. See the [team guide](https://fmind.github.io/brain-framework/docs/team/) for shared notes, collection trust and CI collection.
+
+## Links across brains
+
+Think of explicit links as the connections between memories. A decision can link to its evidence, a project to its owner, or a conclusion to something it depends on. Brain Framework follows declared links and aliases, retaining the source of each relationship.
+
+Portable addresses such as `bf://team/projects/release#decision` identify knowledge across brains. Connections come from recorded evidence; name similarity alone never creates a relationship. See the [link and schema guide](https://fmind.github.io/brain-framework/docs/schema/#bf-links).
+
+## Commands
+
+| Command                               | Purpose                                                                 |
+| ------------------------------------- | ----------------------------------------------------------------------- |
+| `bf read [REF]`                       | Open the home page, a period, a source, a note or a record.             |
+| `bf search QUERY [--scope SCOPE]`     | Find words or identities within an optional folder, period or identity. |
+| `bf init PATH`                        | Create a brain.                                                         |
+| `bf register PATH --collect`          | Explicitly trust its sensors and routines on this machine.              |
+| `bf update [--dry-run]`               | Run due sensors and routines in selected, trusted brains.               |
+| `bf collect SENSOR`                   | Run one sensor.                                                         |
+| `bf status`, `bf validate`, `bf eval` | Check freshness, file integrity and your retrieval cases.               |
+| `bf mcp`, `bf build`, `bf schema`     | Serve MCP, rebuild the cache or print the configuration schema.         |
+
+Use `--brain NAME|PATH` to choose a brain explicitly. The [command reference](https://fmind.github.io/brain-framework/docs/commands/) covers options and selection rules; the [sensor examples](https://github.com/fmind/brain-framework/tree/main/examples/sensors) show how to bring in evidence.
 
 ## Guarantees
 
-- Search and read never execute a sensor or routine or contact the network; they only refresh the local cache and private usage counts.
-- Sensors and routines run configured argv directly, without a shell, from the brain root, with a timeout, an output cap and process-group cancellation. Failures write nothing; interrupted record commits retain durable originals for explicit recovery; a routine never replaces an existing action.
-- A brain never runs sensors or routines on a machine that has not trusted it; trust lives in your user configuration, outside the brain.
-- Brain Framework runs no model: routines are deterministic programs, and people or their agents interpret the evidence.
-- Collected text is external unless a sensor declares `trust: owner`: pages show external records by title and ref only, and every reply labels them.
-- Files are the source of truth. Remove `.bf/` while Brain Framework is idle; the next search rebuilds it.
+- **Retrieval stays offline.** Search and read never run sensors or routines or contact the network.
+- **Execution needs your trust.** Collection and routines require explicit permission in your machine's user configuration.
+- **Failures preserve evidence.** Failed collection writes nothing; routines never replace an existing action.
+- **Sources stay visible.** Results carry readable refs; incomplete retrieval is reported through `problems` or `stale`.
+
+Retrieved content is evidence, never instructions. Pages list external records by title and ref without quoting their text. The [privacy and security guide](https://fmind.github.io/brain-framework/docs/privacy/) explains execution boundaries and recovery.
 
 ## Fit and limits
 
-Brain Framework fits people and teams who want editable notes, attributable evidence and portable agent context. Search is lexical: it handles words, explicit identities and periods, but does not infer meaning or generate answers. Agents or people interpret the results. Collection freshness describes completed runs, not a guarantee that every upstream item is current.
+Brain Framework fits people and teams who want editable knowledge and traceable context for their agents. Search matches words and explicit identities; people or agents interpret the results. It runs no model, generates no answers and needs no embeddings.
 
-A brain is a context boundary, not an access-control system. Brain Framework does not encrypt files, enforce per-note permissions or sandbox trusted sensors. Use separate brains and repository permissions for different audiences, and encrypted backups for private evidence. An agent host may send retrieved content to its model provider; offline retrieval describes Brain Framework itself. See the [security model](https://fmind.github.io/brain-framework/docs/privacy/) before sharing a brain.
+A brain is a context boundary, not an access-control system. Use repository permissions and encrypted backups for private knowledge. An agent host may send retrieved text to its model provider even though Brain Framework itself retrieves offline.
 
 ## Development
 
-Use `uv run bf` from the checkout to exercise changes. Run the complete gate before contributing:
+Contributions are welcome. Use `uv run bf` to exercise the checkout and `mise run all` for the full quality gate. See [CONTRIBUTING.md](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md) for setup, tests and release procedures.
 
-```bash
-mise run all
-```
-
-The gate formats, lints, type-checks, scans, runs hermetic tests with an 85% branch-coverage floor, builds the documentation and installs both distributions. See [AGENTS.md](https://github.com/fmind/brain-framework/blob/main/AGENTS.md), [contributing](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md), the [documentation](https://fmind.github.io/brain-framework/docs/), the [sensor examples](https://github.com/fmind/brain-framework/tree/main/examples/sensors) and the [runnable example brain](https://github.com/fmind/brain-framework/tree/main/examples/brain).
-
-MIT. Runtime dependency licenses are recorded in [THIRD_PARTY_NOTICES.md](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md).
+[MIT licensed](https://github.com/fmind/brain-framework/blob/main/LICENSE) · [Third-party notices](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md)

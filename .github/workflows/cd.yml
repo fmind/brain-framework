@@ -1,12 +1,8 @@
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
 name: CD
 on:
   push:
     tags: ["v*"]
-  workflow_run: # zizmor: ignore[dangerous-triggers] guarded below before checkout or permissions
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
-  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -15,159 +11,12 @@ concurrency:
 jobs:
   verify:
     name: Verify release commit
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    uses: ./.github/workflows/ci.yml
+    uses: ./.github/workflows/verify.yml
     permissions:
       contents: read
-
-  build_python_package:
-    name: Build Python distributions
-    needs: verify
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install locked toolchain
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          version: 2026.9.1
-          cache: false # A release must not consume a cache a pull request could have poisoned.
-      - name: Match package version to tag
-        run: |
-          package_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          test "$GITHUB_REF_NAME" = "v${package_version}"
-      - name: Build and smoke-test distributions
-        run: mise run build
-      - name: Record distribution hashes
-        run: sha256sum dist/*.whl dist/*.tar.gz > python-package.sha256
-      - name: Upload distributions
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: python-package-distributions
-          path: |
-            dist/*.whl
-            dist/*.tar.gz
-            python-package.sha256
-          if-no-files-found: error
-          retention-days: 1
-
-  attest_python_package:
-    name: Attest Python distributions
-    needs: build_python_package
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      id-token: write # Mint the OIDC token only after the candidate has been built and transferred.
-      attestations: write # Publish provenance for the exact wheel and source archive.
-      artifact-metadata: write # Associate attestations with this repository.
-    steps:
-      - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-package-distributions
-      - name: Verify distribution hashes
-        run: |
-          sha256sum --check --strict python-package.sha256
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
-      - name: Attest distribution provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: |
-            dist/*.whl
-            dist/*.tar.gz
-
-  stage_github_release:
-    name: Stage draft GitHub release
-    needs: attest_python_package
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write # Create or verify the draft and upload its immutable candidates.
-    steps:
-      - name: Checkout release notes
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-package-distributions
-      - name: Verify distribution hashes
-        run: |
-          sha256sum --check --strict python-package.sha256
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
-      - name: Bind remote tag to workflow commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: scripts/verify-release-tag
-      - name: Create or verify draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          scripts/release-notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
-          release_args=(--prerelease=false)
-          case "$GITHUB_REF_NAME" in *-*) release_args=(--prerelease) ;; esac
-
-          if is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)"; then
-            test "$is_draft" = true || test "$is_draft" = false
-            existing="$RUNNER_TEMP/existing-release-assets"
-            mkdir "$existing"
-            gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' |
-              while IFS= read -r name; do
-                test -n "$name" || continue
-                test -f "dist/$name" || {
-                  echo "draft release has unexpected asset $name" >&2
-                  exit 1
-                }
-                gh release download "$GITHUB_REF_NAME" --pattern "$name" --dir "$existing"
-                cmp "dist/$name" "$existing/$name"
-              done
-            for asset in dist/*; do
-              name="${asset##*/}"
-              if ! gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | grep -Fqx "$name"; then
-                if [ "$is_draft" = true ]; then
-                  gh release upload "$GITHUB_REF_NAME" "$asset"
-                else
-                  echo "public release is missing expected asset $name" >&2
-                  exit 1
-                fi
-              fi
-            done
-            if [ "$is_draft" = false ]; then
-              echo "release $GITHUB_REF_NAME is already public with the exact artifacts"
-              exit 0
-            fi
-            gh release edit "$GITHUB_REF_NAME" --draft --verify-tag \
-              --title "$GITHUB_REF_NAME" \
-              --notes-file "$RUNNER_TEMP/release-notes.md" \
-              "${release_args[@]}"
-          else
-            gh release create "$GITHUB_REF_NAME" dist/* \
-              --draft \
-              --verify-tag \
-              --title "$GITHUB_REF_NAME" \
-              --notes-file "$RUNNER_TEMP/release-notes.md" \
-              "${release_args[@]}"
-          fi
-      - name: Verify staged release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: scripts/verify-release-assets
-
   publish_python_package:
     name: Publish to PyPI
-    needs: stage_github_release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
@@ -175,7 +24,9 @@ jobs:
       url: https://pypi.org/p/brain-framework
     permissions:
       contents: read # Check out the tag verifier without granting repository writes.
-      id-token: write # PyPI Trusted Publishing is the only authority this job receives.
+      id-token: write # Authenticate provenance and PyPI Trusted Publishing.
+      attestations: write # Publish provenance for the tested distributions.
+      artifact-metadata: write # Associate that provenance with repository artifacts.
     steps:
       - name: Checkout release verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -186,113 +37,35 @@ jobs:
         with:
           name: python-package-distributions
       - name: Verify distribution hashes
-        run: |
-          sha256sum --check --strict python-package.sha256
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+        run: sha256sum --check --strict python-package.sha256
+      - name: Verify distribution count
+        run: test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
       - name: Recheck remote tag before PyPI publication
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/verify-release-tag
+      - name: Attest distribution provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist/
           skip-existing: true
-      - name: Verify PyPI distribution integrity
-        run: |
-          python3 - <<'PY'
-          from __future__ import annotations
-
-          import hashlib
-          import json
-          import os
-          import time
-          import urllib.error
-          import urllib.parse
-          import urllib.request
-          from pathlib import Path
-
-          MAX_ATTEMPTS = 6
-          RETRY_SECONDS = 5
-
-          distribution_paths = [
-              path
-              for path in Path("dist").iterdir()
-              if path.is_file() and not path.name.endswith(".publish.attestation")
-          ]
-          expected = {
-              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-              for path in distribution_paths
-          }
-          if not expected:
-              raise SystemExit("dist/ contains no distributions")
-
-          tag = os.environ["GITHUB_REF_NAME"]
-          if not tag.startswith("v") or len(tag) == 1:
-              raise SystemExit(f"release tag has no v-prefixed version: {tag!r}")
-          version = urllib.parse.quote(tag[1:], safe="")
-          url = f"https://pypi.org/pypi/brain-framework/{version}/json"
-          last_transient = "PyPI release was not visible"
-
-          for attempt in range(1, MAX_ATTEMPTS + 1):
-              request = urllib.request.Request(
-                  url,
-                  headers={"Accept": "application/json", "Cache-Control": "no-cache"},
-              )
-              try:
-                  with urllib.request.urlopen(request, timeout=15) as response:
-                      payload = json.load(response)
-                  entries = payload["urls"]
-                  remote = {
-                      entry["filename"]: entry["digests"]["sha256"]
-                      for entry in entries
-                  }
-                  if len(remote) != len(entries):
-                      raise SystemExit("PyPI returned duplicate distribution filenames")
-              except urllib.error.HTTPError as error:
-                  error.close()
-                  if error.code not in {404, 429} and not 500 <= error.code < 600:
-                      raise
-                  last_transient = f"PyPI returned HTTP {error.code}"
-              except (
-                  json.JSONDecodeError,
-                  KeyError,
-                  TimeoutError,
-                  TypeError,
-                  UnicodeDecodeError,
-                  urllib.error.URLError,
-              ) as error:
-                  last_transient = f"PyPI returned an unusable response: {error}"
-              else:
-                  unexpected = sorted(remote.keys() - expected.keys())
-                  conflicts = sorted(
-                      name
-                      for name in remote.keys() & expected.keys()
-                      if remote[name] != expected[name]
-                  )
-                  if unexpected or conflicts:
-                      raise SystemExit(
-                          "PyPI distribution mismatch: "
-                          f"unexpected={unexpected}, conflicting_sha256={conflicts}"
-                      )
-                  missing = sorted(expected.keys() - remote.keys())
-                  if remote == expected:
-                      print("PyPI filenames and SHA-256 digests match dist/")
-                      break
-                  last_transient = f"PyPI release is missing {missing}"
-
-              if attempt == MAX_ATTEMPTS:
-                  raise SystemExit(
-                      f"PyPI integrity was not observable after {MAX_ATTEMPTS} attempts: "
-                      f"{last_transient}"
-                  )
-              time.sleep(RETRY_SECONDS)
-          PY
-
+      - name: Download PyPI release metadata
+        run: curl --fail --silent --show-error --retry 5 --retry-all-errors --max-time 30 "https://pypi.org/pypi/brain-framework/${GITHUB_REF_NAME#v}/json" --output "$RUNNER_TEMP/pypi.json"
+      - name: Extract published distribution hashes
+        run: jq -r '.urls[] | "\(.digests.sha256)  dist/\(.filename)"' "$RUNNER_TEMP/pypi.json" | sort > published.sha256
+      - name: Sort expected distribution hashes
+        run: sort python-package.sha256 > expected.sha256
+      - name: Compare published distributions
+        run: diff -u expected.sha256 published.sha256
   publish_github_release:
     name: Publish GitHub release
     needs: publish_python_package
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -307,117 +80,27 @@ jobs:
         with:
           name: python-package-distributions
       - name: Verify distribution hashes
-        run: |
-          sha256sum --check --strict python-package.sha256
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+        run: sha256sum --check --strict python-package.sha256
+      - name: Verify distribution count
+        run: test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
       - name: Recheck remote tag before GitHub publication
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/verify-release-tag
-      - name: Verify final release assets
+      - name: Extract release notes
+        run: scripts/release-notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/verify-release-assets
-      - name: Publish draft release
+          PRERELEASE: ${{ contains(github.ref_name, '-') }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.whl dist/*.tar.gz --draft --verify-tag --prerelease="$PRERELEASE" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
+      - name: Download draft assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)"
-          if [ "$is_draft" = true ]; then
-            gh release edit "$GITHUB_REF_NAME" --draft=false --verify-tag
-          elif [ "$is_draft" = false ]; then
-            echo "release $GITHUB_REF_NAME is already public"
-          else
-            echo "release $GITHUB_REF_NAME returned an invalid draft state" >&2
-            exit 1
-          fi
-
-  pages_candidate:
-    name: Admit current documentation candidate
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    outputs:
-      deploy: ${{ steps.gate.outputs.deploy }}
-    steps:
-      - name: Refuse a superseded main candidate
-        id: gate
+        run: gh release download "$GITHUB_REF_NAME" --dir "$RUNNER_TEMP/release-assets"
+      - name: Compare draft assets
+        run: diff --recursive dist "$RUNNER_TEMP/release-assets"
+      - name: Publish verified release
         env:
-          BF_CANDIDATE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
-          BF_CANDIDATE_REF: ${{ github.ref }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$BF_CANDIDATE_REF" != refs/heads/main ]; then
-            echo "deploy=false" >>"$GITHUB_OUTPUT"
-            echo "::notice::Skipping documentation because manual deployment must target main."
-            exit 0
-          fi
-          bf_current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          if [ "$BF_CANDIDATE_SHA" = "$bf_current_sha" ]; then
-            echo "deploy=true" >>"$GITHUB_OUTPUT"
-          else
-            echo "deploy=false" >>"$GITHUB_OUTPUT"
-            echo "::notice::Skipping documentation for a superseded main commit."
-          fi
-
-  pages:
-    name: Publish documentation
-    needs: pages_candidate
-    if: needs.pages_candidate.outputs.deploy == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    permissions:
-      contents: read
-      pages: write # configure-pages turns Pages on, deploy-pages publishes the artifact.
-      id-token: write # Authenticate both calls through GitHub's OIDC boundary.
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
-          persist-credentials: false
-      - name: Install locked toolchain
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          version: 2026.9.1
-          cache: false # Publishing must not consume a pull-request cache.
-      - name: Verify documentation
-        run: mise run check:docs
-      - name: Configure Pages
-        id: pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-        with:
-          enablement: true
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: site
-      - name: Recheck main immediately before deployment
-        id: current
-        env:
-          BF_CANDIDATE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          bf_current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          if [ "$BF_CANDIDATE_SHA" = "$bf_current_sha" ]; then
-            echo "deploy=true" >>"$GITHUB_OUTPUT"
-          else
-            echo "deploy=false" >>"$GITHUB_OUTPUT"
-            echo "::notice::Skipping deployment because main advanced during the build."
-          fi
-      - name: Deploy documentation
-        id: deployment
-        if: steps.current.outputs.deploy == 'true'
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --verify-tag

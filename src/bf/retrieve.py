@@ -176,7 +176,12 @@ def read(stores: list[Store], ref: str = "", brain: str = "", *, counted: bool =
         selected = _brain(selected, parsed.brain)
     path = parsed.path if parsed else ref
     if not (parsed and parsed.fragment):
-        view = pages.page(selected, path, counted=counted)
+        try:
+            view = pages.page(selected, path, counted=counted)
+        except Error as error:
+            if problems and str(error).startswith("page not found"):
+                raise Error("read is incomplete; run bf status before concluding a reference is absent") from error
+            raise
         if view is not None:
             return bounded({**view, "notice": NOTICE, **_problems(problems, view)})
         if re.fullmatch(r"actions/[^/#]+", path.rstrip("/")) and not authored(path):
@@ -188,6 +193,8 @@ def read(stores: list[Store], ref: str = "", brain: str = "", *, counted: bool =
         view = pages.identity(everywhere, ref, counted=counted)
         if view is not None:
             return bounded({**view, "notice": NOTICE, **_problems(problems, view)})
+        if problems:
+            raise Error("read is incomplete; run bf status before concluding a reference is absent")
         raise Error("reference not found; use bf search to locate it, or bf read to browse pages")
     if len(found) > 1:
         raise Error("reference exists in several brains; use a brain-qualified bf:// address")

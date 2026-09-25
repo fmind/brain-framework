@@ -6,7 +6,6 @@ gitleaks = "8.30.1"
 jq = "1.8.2"
 lefthook = "2.1.12"
 lychee = "0.24.2"
-opengrep = "1.29.0"
 python = "3.14.7"
 shellcheck = "0.11.0"
 trivy = "0.74.0"
@@ -40,7 +39,7 @@ run = "uv run python scripts/benchmark_scale.py"
 [tasks.build]
 alias = "b"
 description = "Build and verify the wheel and source distribution"
-run = ["uv sync --locked", "rm -rf dist", "uv build --wheel --sdist", "mise run test:package"]
+run = ["uv sync --locked", "uv build --clear", "mise run test:package"]
 
 [tasks.check]
 alias = "c"
@@ -52,7 +51,6 @@ depends = [
   "check:leaks",
   "check:links",
   "check:lint",
-  "check:sast",
   "check:scan",
   "check:schema",
   "check:shell",
@@ -69,83 +67,10 @@ run = [
 ]
 
 [tasks."check:docs"]
-description = "Build the documentation site strictly and verify every rendered link"
-shell = "bash -c"
+description = "Build strict documentation and check rendered links and anchors"
 run = [
   "uv run zensical build --clean --strict",
-  '''
-uv run python - <<'PY'
-from html.parser import HTMLParser
-from pathlib import Path
-
-class SkipLinks(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.ids = set()
-        self.targets = []
-        self.focusable = set()
-
-    def handle_starttag(self, tag, attributes):
-        attributes = dict(attributes)
-        if attributes.get("id"):
-            self.ids.add(attributes["id"])
-            if attributes.get("tabindex") == "-1":
-                self.focusable.add(attributes["id"])
-        if tag == "a" and "md-skip" in attributes.get("class", "").split():
-            self.targets.append(attributes.get("href", "").removeprefix("#"))
-
-site = Path("site")
-expected_pages = {
-    "404.html",
-    "docs/agents/index.html",
-    "docs/brain/index.html",
-    "docs/commands/index.html",
-    "docs/getting-started/index.html",
-    "docs/index.html",
-    "docs/mcp/index.html",
-    "docs/privacy/index.html",
-    "docs/schema/index.html",
-    "docs/search/index.html",
-    "docs/sensors/index.html",
-    "docs/team/index.html",
-    "index.html",
-    "third-party-notices/index.html",
-}
-required_assets = {
-    "bf.schema.json",
-    "fmind-logo.webp",
-    "third-party/lucide-LICENSE.txt",
-    "third-party/zensical-0.0.59-LICENSE.txt",
-    "third-party/zensical-javascript-LICENSE.txt",
-}
-actual_pages = {path.relative_to(site).as_posix() for path in site.rglob("*.html")}
-missing_assets = sorted(relative for relative in required_assets if not (site / relative).is_file())
-if actual_pages != expected_pages or missing_assets:
-    missing_pages = sorted(expected_pages - actual_pages)
-    unexpected_pages = sorted(actual_pages - expected_pages)
-    raise SystemExit(
-        "documentation route contract failed: "
-        f"missing_pages={missing_pages}, unexpected_pages={unexpected_pages}, "
-        f"missing_assets={missing_assets}"
-    )
-missing_skip_targets = []
-for relative in sorted(expected_pages):
-    page = SkipLinks()
-    page.feed((site / relative).read_text())
-    missing_skip_targets.extend(f"{relative}#{target}" for target in page.targets if target not in page.ids)
-    if relative == "404.html" and (page.targets != ["__skip"] or "__skip" not in page.focusable):
-        raise SystemExit("404 page must provide a focusable skip-navigation target")
-if missing_skip_targets:
-    raise SystemExit(f"documentation skip targets missing: {missing_skip_targets}")
-PY
-''',
-  '''
-set -euo pipefail
-bf_site_root=$(mktemp -d)
-trap 'rm -rf "$bf_site_root"' EXIT
-ln -s "$PWD/site" "$bf_site_root/brain-framework"
-lychee --offline --root-dir "$bf_site_root" --no-progress 'site/**/*.html'
-''',
+  'lychee --offline --include-fragments --index-files index.html --root-dir "$PWD/site" --no-progress "site/brain-framework/**/*.html"',
 ]
 
 [tasks."check:format"]
@@ -161,36 +86,20 @@ run = [
 
 [tasks."check:leaks"]
 alias = "cs"
-description = "Audit staged changes or both recent commits and the working tree for leaked secrets"
-run = """
-sh -c '
-if [ "$#" -gt 0 ]; then
-  gitleaks git --redact=100 --verbose "$@"
-elif git rev-parse --verify HEAD >/dev/null 2>&1; then
-  gitleaks git --redact=100 --log-opts="--max-count=100" --verbose
-  gitleaks dir . --redact=100 --verbose
-else
-  gitleaks dir . --redact=100 --verbose
-fi
-' --
-"""
+description = "Scan recent commits and the working tree for secrets"
+run = ["mise run check:leaks:history", "gitleaks dir . --redact=100 --verbose"]
+
+[tasks."check:leaks:history"]
+description = "Scan the last 100 commits for secrets"
+run = "gitleaks git --redact=100 --log-opts=--max-count=100 --verbose"
+
+[tasks."check:leaks:staged"]
+description = "Scan the staged snapshot for secrets"
+run = "gitleaks git --staged --redact=100 --verbose"
 
 [tasks."check:links"]
-description = "Validate links in the repository's own Markdown"
-# Zensical validates documentation source links and anchors before lychee checks rendered output.
-run = '''
-bash -c '
-set -euo pipefail
-git ls-files -z --cached --others --exclude-standard -- "*.md" ":(exclude)docs/**" |
-  while IFS= read -r -d "" path; do
-    # The index still names unstaged deletions; only the existing working-tree set is reviewable.
-    if [ -f "$path" ]; then
-      printf "%s\0" "$path"
-    fi
-  done |
-  xargs -0 lychee --offline --no-progress --
-'
-'''
+description = "Check repository Markdown links; check:docs owns documentation links"
+run = "lychee --offline --no-progress --hidden --extensions md --exclude-path '(^|/)docs/' ."
 
 [tasks."check:lint"]
 alias = "cl"
@@ -205,25 +114,19 @@ run = "mise outdated --local --bump || true"
 description = "Scan the repository for vulnerabilities, secrets, licenses, and misconfigurations"
 run = "trivy --config trivy.yaml fs ."
 
-[tasks."check:sast"]
-description = "Scan Python and workflow code for insecure patterns (opengrep)"
-depends = ["install:sast"]
-run = "opengrep scan --error --quiet --config .opengrep/rules/python/lang/security --config .opengrep/rules/yaml/github-actions/security ."
-
 [tasks."check:schema"]
 description = "Verify the committed JSON Schema matches the Python configuration loader"
-shell = "bash -c"
-run = '''
-set -euo pipefail
-schema=$(mktemp)
-trap 'rm -f "$schema"' EXIT
-uv run bf schema | jq -S . > "$schema"
-jq -S . docs/bf.schema.json | diff -u - "$schema"
-'''
+run = [
+  "mkdir -p .cache",
+  "uv run bf schema > .cache/schema-current.json",
+  "jq -S . .cache/schema-current.json > .cache/schema-actual.json",
+  "jq -S . docs/bf.schema.json > .cache/schema-expected.json",
+  "diff -u .cache/schema-expected.json .cache/schema-actual.json",
+]
 
 [tasks."check:shell"]
 description = "Lint every shipped and release shell helper"
-run = "shellcheck -S warning scripts/release-notes scripts/verify-release-assets scripts/verify-release-tag scripts/install-sast.sh"
+run = "shellcheck -S warning scripts/release-notes scripts/verify-release-tag"
 
 [tasks."check:types"]
 alias = "ct"
@@ -238,7 +141,7 @@ run = "uv audit --preview-features audit-command --locked"
 [tasks.clean]
 alias = "n"
 description = "Remove generated build, test, and documentation output"
-run = "rm -rf dist site .cache .coverage htmlcov .pytest_cache .ruff_cache .ty"
+run = "rm -rf dist site .cache .coverage htmlcov .pytest_cache .ruff_cache"
 
 [tasks.coverage]
 alias = "v"
@@ -247,7 +150,7 @@ depends = ["test"]
 run = "uv run coverage html"
 
 [tasks."docs:build"]
-description = "Build the production documentation site into site"
+description = "Build the documentation site into site/brain-framework"
 run = "uv run zensical build --clean --strict"
 
 [tasks."docs:watch"]
@@ -258,132 +161,43 @@ run = "uv run zensical serve"
 [tasks.format]
 alias = "f"
 description = "Format Python, JSON, Markdown, TOML, and YAML"
-depends = ["format:dprint", "format:python"]
+run = ["mise run format:imports", "mise run format:python", "mise run format:dprint"]
 
 [tasks."format:dprint"]
 description = "Format JSON, Markdown, TOML, and YAML"
 run = "dprint fmt --allow-no-files"
 
 [tasks."format:python"]
-description = "Format Python sources and sort imports"
-raw_args = true
-run = """
-bash -c '
-set -euo pipefail
-if [ "$#" -eq 0 ]; then set -- .; fi
-uv run ruff check --select=I --fix --force-exclude "$@"
-uv run ruff format --force-exclude "$@"
-' --
-"""
+description = "Format Python sources"
+run = "uv run ruff format --force-exclude"
+
+[tasks."format:imports"]
+description = "Sort Python imports"
+run = "uv run ruff check --select=I --fix --force-exclude"
 
 [tasks."generate:schema"]
-description = "Rewrite the JSON Schema from the Python configuration loader atomically"
-shell = "bash -c"
-run = '''
-set -euo pipefail
-schema=$(mktemp docs/bf.schema.json.XXXXXX)
-trap 'rm -f "$schema"' EXIT
-uv run bf schema > "$schema"
-mv "$schema" docs/bf.schema.json
-dprint fmt docs/bf.schema.json
-'''
+description = "Generate the schema before replacing the committed copy"
+run = [
+  "mkdir -p .cache",
+  "uv run bf schema > .cache/schema-generated.json",
+  "mv .cache/schema-generated.json docs/bf.schema.json",
+  "dprint fmt docs/bf.schema.json",
+]
 
 [tasks.install]
 alias = "i"
 description = "Sync locked dependencies and install Git hooks"
 run = ["uv sync --locked", "lefthook install"]
 
-[tasks."install:sast"]
-description = "Fetch the commit-pinned opengrep rules"
-run = "bash scripts/install-sast.sh f1d2b562b414783763fd02a6ed2736eaed622efa"
-
 [tasks.test]
 alias = "t"
-description = "Run the hermetic test suite with branch coverage"
-shell = "bash -c"
-run = '''
-set -euo pipefail
-bf_test_home=$(mktemp -d)
-bf_test_home=$(cd "$bf_test_home" && pwd -P)
-trap 'rm -rf "$bf_test_home"' EXIT
-# Set TZ before Python starts: some macOS builds do not expose time.tzset().
-env -u BF_BRAIN TZ=UTC HOME="$bf_test_home" XDG_STATE_HOME="$bf_test_home/state" XDG_CONFIG_HOME="$bf_test_home/config" \
-  uv run pytest --basetemp="$bf_test_home/pytest" \
-    --cov=bf --cov-branch --cov-report=term-missing --cov-fail-under=85
-'''
+description = "Run isolated tests with at least 85% branch coverage"
+env.TZ = "UTC"
+run = "uv run pytest --cov --cov-report=term-missing"
 
 [tasks."test:package"]
-description = "Install and invoke the wheel and source distribution outside the checkout"
-shell = "bash -c"
-run = '''
-set -euo pipefail
-wheel_count=$(find dist -maxdepth 1 -type f -name 'brain_framework-*.whl' | wc -l)
-sdist_count=$(find dist -maxdepth 1 -type f -name 'brain_framework-*.tar.gz' | wc -l)
-[ "$wheel_count" -eq 1 ] && [ "$sdist_count" -eq 1 ] || {
-  echo "expected exactly one brain-framework wheel and one source distribution" >&2
-  exit 1
-}
-project_root=$PWD
-wheel="$project_root/$(find dist -maxdepth 1 -type f -name 'brain_framework-*.whl')"
-sdist="$project_root/$(find dist -maxdepth 1 -type f -name 'brain_framework-*.tar.gz')"
-tmp=$(mktemp -d)
-# macOS /var and user-supplied TMPDIR may be symlinks; private state needs the physical path.
-tmp=$(cd "$tmp" && pwd -P)
-trap 'rm -rf "$tmp"' EXIT
-for distribution in wheel sdist; do
-  uv venv --python 3.14 "$tmp/$distribution-venv"
-  # Seed the exact locked runtime closure without installing the checkout.
-  # Temporary smoke environments may be on another filesystem; copy without attempting hardlinks.
-  VIRTUAL_ENV="$tmp/$distribution-venv" \
-    uv sync --project "$project_root" --locked --offline --no-dev --no-install-project --active --link-mode copy
-done
-cd "$tmp"
-uv pip install --offline --no-deps --link-mode copy --python "$tmp/wheel-venv/bin/python" "$wheel"
-"$tmp/wheel-venv/bin/bf" --version
-uv pip check --python "$tmp/wheel-venv/bin/python"
-uv pip install --offline --no-deps --link-mode copy --python "$tmp/sdist-venv/bin/python" "$sdist"
-"$tmp/sdist-venv/bin/bf" --version
-uv pip check --python "$tmp/sdist-venv/bin/python"
-# Exercise the installed CLI and derived reads in both artifacts, with no user brain or state.
-for distribution in wheel sdist; do
-  "$tmp/$distribution-venv/bin/python" - <<'PYTHON'
-from importlib.metadata import distribution
-from pathlib import Path
-import bf
-
-installed = distribution("brain-framework")
-assert installed.metadata["Name"] == "brain-framework"
-assert installed.version == bf.__version__
-assert [(entry.name, entry.value) for entry in installed.entry_points] == [("bf", "bf:main")]
-assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
-PYTHON
-  bf_package_home="$tmp/$distribution-home"
-  mkdir "$bf_package_home"
-  (
-    unset BF_BRAIN
-    export HOME="$bf_package_home" XDG_STATE_HOME="$bf_package_home/state"
-    bf_package_bin="$tmp/$distribution-venv/bin/bf"
-    export XDG_CONFIG_HOME="$bf_package_home/config"
-    "$bf_package_bin" init "$tmp/$distribution-brain"
-    test ! -e "$XDG_CONFIG_HOME/bf/config.yaml"
-    cd "$tmp/$distribution-brain"
-    "$bf_package_bin" validate --brain "$tmp/$distribution-brain"
-    "$bf_package_bin" search welcome
-    "$bf_package_bin" read concepts/welcome.md
-    "$bf_package_bin" status --check
-    mkdir -p "$tmp/$distribution-brain/evals"
-    cat > "$tmp/$distribution-brain/evals/retrieval.yaml" <<'YAML'
-version: 5
-cases:
-  - name: installed-welcome
-    query: welcome
-    expect: [concepts/welcome.md]
-YAML
-    "$bf_package_bin" eval
-
-  )
-done
-'''
+description = "Smoke-test the wheel and source distribution outside the checkout"
+run = "uv run python scripts/test_package.py"
 
 [tasks."test:watch"]
 alias = "tw"

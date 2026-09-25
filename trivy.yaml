@@ -1,11 +1,9 @@
+# https://trivy.dev/docs/latest/references/configuration/config-file/
 severity:
   - HIGH
   - CRITICAL
 exit-code: 1
 scan:
-  skip-dirs:
-    # This ignored checkout contains the SAST rule project's own intentionally vulnerable fixtures.
-    - .opengrep
   scanners:
     - license
     - misconfig

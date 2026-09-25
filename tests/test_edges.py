@@ -72,7 +72,8 @@ def test_a_shared_alias_never_merges_its_owners_links(brain: Store) -> None:
     found = search([brain], Query(text="works", **pages.scope(alias)))
     assert refs(found) == []
     assert "ambiguous" in str(found["problems"])
-    assert pages.identity([brain], alias) is None
+    with pytest.raises(Error, match="incomplete"):
+        pages.identity([brain], alias)
     with pytest.raises(Error, match="ambiguous"):
         read([brain], alias)
 
