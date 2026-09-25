@@ -13,7 +13,7 @@ import pytest
 from bf import index, records, retrieve
 from bf.config import may_collect, register
 from bf.models import Error, Query, Record
-from bf.storage import Store
+from bf.storage import Store, writer
 
 
 def lines(store: Store, name: str) -> list[str]:
@@ -267,6 +267,31 @@ def test_older_upstream_revision_cannot_replace_or_move_newer_evidence(brain: St
     assert found[1] == current
     assert found[0] == "memories/revisions/" + ("snapshot" if snapshot else "2026-09") + ".jsonl"
     assert (records.find(brain, "revisions", "other") is None) == snapshot
+
+
+def test_a_revision_dated_after_its_observation_cannot_freeze_a_record(brain: Store) -> None:
+    # A file with a future mtime claims to be modified in 2030 although it was first seen in 2026.
+    future = Record(
+        id="doc",
+        title="v1",
+        attributes={"updated": "2030-01-01T00:00:00Z", "observed": "2026-09-01T00:00:00Z"},
+    )
+    records.upsert(brain, "documents", [future], snapshot=True)
+    edited = Record(
+        id="doc",
+        title="v2",
+        attributes={"updated": "2026-09-02T00:00:00Z", "observed": "2026-09-02T00:00:00Z"},
+    )
+    assert records.upsert(brain, "documents", [edited], snapshot=True)["updated"] == 1
+    found = records.find(brain, "documents", "doc")
+    assert found is not None
+    assert found[1].title == "v2"
+
+
+def test_aliases_and_absent_sources_do_not_wait_for_writers(brain: Store) -> None:
+    with writer(brain):
+        # Existing sources still wait for a consistent set of partitions; an alias returns at once.
+        assert records.find(brain, "repo", "example/project") is None
 
 
 @pytest.mark.parametrize("separate_partitions", [False, True])

@@ -12,11 +12,14 @@ from bf.storage import Store
 
 
 def local_refs(connection: sqlite3.Connection, identities: set[str]) -> set[str]:
-    """Add local readable refs only inside the brain that owns a qualified BF address."""
+    """Add local readable refs only inside the brain that owns a qualified BF address.
+
+    A name that several local items claim identifies none of them: their links never merge.
+    """
     qualified = [value for value in identities if links.parse(value)]
     rows = connection.execute(
-        "SELECT DISTINCT i.ref FROM names n JOIN items i ON n.item=i.id "
-        "WHERE n.name IN (SELECT value FROM json_each(?)) LIMIT 1002",
+        "SELECT DISTINCT i.ref FROM items i JOIN (SELECT name,min(item) AS item FROM names "
+        "WHERE name IN (SELECT value FROM json_each(?)) GROUP BY name HAVING count(*)=1) o ON o.item=i.id LIMIT 1002",
         (json.dumps(qualified),),
     ).fetchall()
     if len(rows) > 1001:
@@ -100,12 +103,7 @@ def explanations(connection: sqlite3.Connection, ref: str, targets: set[str]) ->
         "ORDER BY relation,target,evidence,subject,asserted_by,attributes,origin LIMIT 51",
         (row[0], json.dumps(sorted(targets)), json.dumps(index.sections(targets))),
     ).fetchall()
-    result = []
-    for row in rows[:50]:
-        claim = dict(row)
-        claim["attributes"] = json.loads(claim["attributes"])
-        result.append({key: val for key, val in claim.items() if val not in ("", {})})
-    return result, len(rows) > 50
+    return _claims(rows[:50]), len(rows) > 50
 
 
 def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> list[dict[str, object]]:
@@ -116,6 +114,11 @@ def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> list[dict[st
         "ORDER BY relation,target,origin,evidence,asserted_by,attributes LIMIT 50",
         (json.dumps(sorted(subjects)),),
     ).fetchall()
+    return _claims(rows)
+
+
+def _claims(rows: list[sqlite3.Row]) -> list[dict[str, object]]:
+    """Decode stored claim attributes and omit empty optional members."""
     result = []
     for row in rows:
         claim = dict(row)

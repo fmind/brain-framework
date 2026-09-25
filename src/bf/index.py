@@ -13,11 +13,11 @@ from typing import cast
 from bf import links as bf_links
 from bf import ontology, records
 from bf.config import load
-from bf.markdown import authored, note
-from bf.models import AUTHORED, Error, Query, Record, digest, encode, moment
+from bf.markdown import LEAD, authored, note
+from bf.models import AUTHORED, MAX_NOTE, Error, Query, Record, digest, encode, moment
 from bf.storage import BusyError, Store, reader, writer
 
-SCHEMA = 15
+SCHEMA = 16
 CACHE = ".bf/index.sqlite"
 _DDL = """
 CREATE TABLE ontology(signature TEXT NOT NULL);
@@ -44,115 +44,15 @@ CREATE INDEX names_item ON names(item);
 CREATE TABLE links(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
 CREATE INDEX links_target ON links(target);
 """
-# Only function words are dropped: a subject such as "resume" or "active" stays literal.
+# Only English and French function words are dropped: a subject such as "resume" or "active" stays literal.
 _STOP = frozenset(
-    [
-        "a",
-        "an",
-        "and",
-        "are",
-        "as",
-        "at",
-        "be",
-        "by",
-        "can",
-        "could",
-        "did",
-        "do",
-        "does",
-        "for",
-        "from",
-        "how",
-        "i",
-        "in",
-        "is",
-        "it",
-        "me",
-        "my",
-        "of",
-        "on",
-        "or",
-        "please",
-        "that",
-        "the",
-        "their",
-        "this",
-        "to",
-        "was",
-        "we",
-        "were",
-        "what",
-        "when",
-        "where",
-        "which",
-        "who",
-        "why",
-        "with",
-        "would",
-        "you",
-        "your",
-        "au",
-        "aux",
-        "avec",
-        "ce",
-        "ces",
-        "cet",
-        "cette",
-        "comment",
-        "d",
-        "dans",
-        "de",
-        "des",
-        "du",
-        "elle",
-        "elles",
-        "en",
-        "est",
-        "et",
-        "eux",
-        "il",
-        "ils",
-        "je",
-        "l",
-        "la",
-        "le",
-        "les",
-        "leur",
-        "leurs",
-        "lui",
-        "mais",
-        "mes",
-        "mon",
-        "nos",
-        "notre",
-        "nous",
-        "où",
-        "par",
-        "pour",
-        "pourquoi",
-        "qu",
-        "que",
-        "quel",
-        "quelle",
-        "quelles",
-        "quels",
-        "qui",
-        "sa",
-        "se",
-        "ses",
-        "son",
-        "sur",
-        "tes",
-        "toi",
-        "ton",
-        "tu",
-        "un",
-        "une",
-        "vos",
-        "votre",
-        "vous",
-        "à",
-    ]
+    """
+    a an and are as at be by can could did do does for from how i in is it me my of on or please that the their
+    this to was we were what when where which who why with would you your
+    au aux avec ce ces cet cette comment d dans de des du elle elles en est et eux il ils je l la le les leur leurs
+    lui mais mes mon nos notre nous où par pour pourquoi qu que quel quelle quelles quels qui sa se ses son sur tes
+    toi ton tu un une vos votre vous à
+    """.split()  # noqa: SIM905 - one readable word list, grouped by language
 )
 _IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
 
@@ -298,7 +198,7 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
     """Insert one file; parse failures raise, while duplicate record ids are skipped and reported."""
     if authored(path):
         config = load(store)
-        projection = note(path, store.read(path, 4 << 20))
+        projection = note(path, store.read(path, MAX_NOTE))
         knowledge = projection.knowledge
         edges = ontology.note_claims(projection, config)
         metadata = " ".join([knowledge.type, *knowledge.tags, *knowledge.aliases, *projection.links])
@@ -376,7 +276,7 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
 
 
 def lead(record: Record) -> str:
-    return re.sub(r"\s+", " ", record.text).strip()[:320]
+    return re.sub(r"\s+", " ", record.text).strip()[:LEAD]
 
 
 def refresh(store: Store, *, full: bool = False, wait: float = 30) -> dict[str, object]:
@@ -492,18 +392,22 @@ def identity_owners(connection: sqlite3.Connection, text: str) -> set[str]:
 def _note_time(value: str) -> str:
     # Notes carry dates, not instants. Resolve midnight on the reading machine, including DST,
     # at query time so changing timezone never requires rebuilding a shared/disposable cache.
-    return moment(value[:10]) if value else ""
+    try:
+        return moment(value[:10]) if value else ""
+    except Error:
+        # SQLite would abort the whole query; an unplaceable date only leaves the note undated.
+        return ""
 
 
 # Fixed SQL expressions over `items i`, shared with page builders: event time and last modification.
-TIME = _TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE i.time END"
+TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE i.time END"
 UPDATED = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i.updated,''),i.time) END"
-_FIELDS = f"i.ref,i.kind,i.source,({_TIME}) AS time,i.type,i.status,i.url,i.updated,i.observed,i.partial"
+_FIELDS = f"i.ref,i.kind,i.source,({TIME}) AS time,i.type,i.status,i.url,i.updated,i.observed,i.partial"
 _ROW = f"{_FIELDS},'' AS fragment,i.title,i.lead AS excerpt,i.tasks_open,i.tasks_done,i.next"
 # An item links to a target when it names it exactly, or names a section of a target note.
 _LINKED = """(l.target IN (SELECT value FROM json_each(:targets))
   OR EXISTS (SELECT 1 FROM json_each(:sections) s WHERE l.target>s.value||'#' AND l.target<s.value||'$'))"""
-_FILTERS = f"""((:since='' AND :until='') OR i.time!='') AND (:since='' OR ({_TIME})>=:since) AND (:until='' OR ({_TIME})<:until)
+_FILTERS = f"""((:since='' AND :until='') OR i.time!='') AND (:since='' OR ({TIME})>=:since) AND (:until='' OR ({TIME})<:until)
   AND (:prefix='' OR i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')
   AND (:target='' OR EXISTS (SELECT 1 FROM links l WHERE l.item=i.id AND {_LINKED}))"""  # noqa: S608 - fixed SQL fragments
 
@@ -549,7 +453,9 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> list
         f"""WITH candidates AS (
               SELECT id AS item,2e6 AS score FROM items WHERE ref=:text
               UNION ALL SELECT item,1e6 FROM names WHERE name IN (SELECT value FROM json_each(:identities))
-              UNION ALL SELECT item,1e3 FROM links WHERE target IN (SELECT value FROM json_each(:identities))),
+              UNION ALL SELECT item,1e3 FROM links WHERE target IN (SELECT value FROM json_each(:identities))
+                OR EXISTS (SELECT 1 FROM json_each(:identity_sections) s
+                           WHERE target>s.value||'#' AND target<s.value||'$')),
               owners AS (SELECT item,max(score) AS score FROM candidates GROUP BY item)
            SELECT {_FIELDS},'' AS fragment,i.title,c.score,i.lead AS excerpt FROM owners c
            JOIN items i ON i.id=c.item WHERE {_FILTERS}
@@ -571,6 +477,7 @@ def search(
     params: dict[str, object] = query.model_dump()
     params["text"] = query.text.strip()
     params["identities"] = json.dumps(sorted(identities or {str(params["text"])}))
+    params["identity_sections"] = json.dumps(sections(identities or {str(params["text"])}))
     params.update(_parameters(targets or ({query.target} if query.target else set())))
     if identity(str(params["text"])):
         return [_clean(row) for row in _identity(connection, params)]
@@ -640,7 +547,7 @@ def newer_links(connection: sqlite3.Connection, ref: str, after: str) -> int:
     return int(
         connection.execute(
             f"""SELECT count(DISTINCT i.id) FROM links l JOIN items i ON i.id=l.item
-                WHERE {_LINKED} AND i.id!=:item AND i.time!='' AND ({_TIME})>=:after""",  # noqa: S608
+                WHERE {_LINKED} AND i.id!=:item AND i.time!='' AND ({TIME})>=:after""",  # noqa: S608
             {**_parameters(names), "item": row[0], "after": after},
         ).fetchone()[0]
     )
@@ -650,6 +557,9 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
     fragment = row.pop("fragment", "")
     if fragment:
         row["ref"] = f"{row['ref']}#{fragment}"
+    if isinstance(excerpt := row.get("excerpt"), str):
+        # A one-line preview; `bf read` returns the exact text.
+        row["excerpt"] = re.sub(r"\s+", " ", excerpt).strip()
     row.pop("score", None)
     row.pop("position", None)
     opened, done = int(cast("int", row.pop("tasks_open", 0) or 0)), int(cast("int", row.pop("tasks_done", 0) or 0))

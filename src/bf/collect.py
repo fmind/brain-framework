@@ -1,4 +1,4 @@
-"""Run configured collectors with direct argv, bounded output and process-group cancellation."""
+"""Run configured sensors and routines with direct argv, bounded output and process-group cancellation."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 from pydantic import Field, TypeAdapter, ValidationError, field_validator
 
@@ -27,17 +27,14 @@ SENSORS = "sensors.json"
 ROUTINES = "routines.json"
 
 _LOG = 256 << 10
+# Variables that make a shell, loader or interpreter run code before the program itself.
 _STARTUP = (
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "LD_AUDIT",
-    "DYLD_INSERT_LIBRARIES",
-    "DYLD_LIBRARY_PATH",
     "BASH_ENV",
     "ENV",
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "PYTHONSTARTUP",
+    "GCONV_PATH",
+    "JAVA_TOOL_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "_JAVA_OPTIONS",
     "NODE_OPTIONS",
     "NODE_PATH",
     "RUBYOPT",
@@ -46,6 +43,7 @@ _STARTUP = (
     "PERL5LIB",
     "PERLLIB",
 )
+_PREFIXES = ("LD_", "DYLD_", "BASH_FUNC_", "PYTHON", "LUA_INIT")
 
 
 class _Run(Model):
@@ -73,24 +71,30 @@ class Runner(Protocol):
     def __call__(self, argv: list[str], sensor: Program, store: Store, log: Path, /) -> bytes: ...
 
 
+def environment() -> dict[str, str]:
+    """The caller's environment without loader injection or relative PATH entries."""
+    env = {key: value for key, value in os.environ.items() if key not in _STARTUP and not key.startswith(_PREFIXES)}
+    if "PATH" in env:
+        # Programs run from the brain root, where a relative entry would find commands inside the brain.
+        env["PATH"] = os.pathsep.join(entry for entry in env["PATH"].split(os.pathsep) if Path(entry).is_absolute())
+    return env
+
+
 def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
     """Execute one sensor or routine from the brain root; stderr goes to a bounded private log, never to errors."""
+    env = environment()
     executable = argv[0]
     if executable.startswith(("sensors/", "routines/")):
         relative(executable)
-        store.read(executable, 1 << 20)
+        # A regular file below the brain, never a link; any size.
+        store.fingerprint(executable)
         executable = str(store.root / executable)
     elif "/" in executable:
         raise Error("executable must be a bare command name or a sensors/ or routines/ path")
-    elif (found := shutil.which(executable)) is None:
+    elif (found := shutil.which(executable, path=env.get("PATH"))) is None:
         raise Error(f"{executable} is not on PATH")
     else:
         executable = found
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in _STARTUP and not key.startswith(("LD_", "DYLD_", "BASH_FUNC_"))
-    }
     try:
         child = subprocess.Popen(  # noqa: S603  # nosemgrep: dangerous-subprocess-use-audit
             # Direct argv from the owner's bf.yaml; no shell interprets it.
@@ -175,6 +179,52 @@ def log_path(store: Store, name: str) -> Path:
     return state_store(store.root).root / f"{name}.log"
 
 
+def _window(start: str, end: str) -> tuple[str, str]:
+    try:
+        start, end = timestamp(start), timestamp(end)
+    except ValueError as error:
+        raise Error("start and end require timezone-aware timestamps") from error
+    if start >= end:
+        raise Error("start must be earlier than end")
+    return start, end
+
+
+def _trusted(store: Store, programs: str) -> None:
+    if not may_collect(store):
+        raise Error(f"this brain may not run {programs} here; trust it with bf register --collect")
+
+
+def _failed(
+    store: Store, name: str, file: str, started: datetime, message: str, cause: BaseException, *, dry_run: bool
+) -> NoReturn:
+    """Remember a failed run, then name its private log; provider output never enters the message."""
+    if not dry_run:
+        try:
+            with writer(store, wait=120):
+                _remember(store, name, file, run=started.isoformat(), error=message)
+        except (Error, OSError) as history_error:
+            raise Error(f"{name}: {message}; run history could not be saved") from history_error
+    raise Error(f"{name}: {message}; see {log_path(store, name)}") from cause
+
+
+def _coverage(previous: dict[str, object], start: str, end: str, observed: str) -> tuple[dict[str, str], bool]:
+    """The contiguous collected interval after a run, and whether the run is the latest window.
+
+    Coverage never extends past the run itself: later items can still appear upstream. A backfill that
+    ends before the recorded coverage neither moves the resume point nor counts as a fresh success, and
+    coverage never claims an uncollected gap.
+    """
+    covered = min(end, observed)
+    before_start, before_end = str(previous.get("start", "")), str(previous.get("end", ""))
+    if start >= covered:
+        return ({"start": before_start, "end": before_end} if before_end else {}), False
+    latest = not before_end or covered >= before_end
+    interval = (start, covered) if latest else (before_start, before_end)
+    if before_start and before_end and start <= before_end and covered >= before_start:
+        interval = (min(start, before_start), max(covered, before_end))
+    return {"start": interval[0], "end": interval[1]}, latest
+
+
 def collect(
     store: Store,
     name: str,
@@ -186,29 +236,24 @@ def collect(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
     """Run one sensor over [start, end) and upsert its records; failures write nothing."""
-    try:
-        start, end = timestamp(start), timestamp(end)
-    except ValueError as error:
-        raise Error("collection start/end require timezone-aware timestamps") from error
-    if start >= end:
-        raise Error("collection start must be earlier than end")
+    start, end = _window(start, end)
     config = load(store)
     sensor = config.sensors.get(name)
     if sensor is None or not sensor.enabled:
         raise Error(f"sensor {name} is unknown or disabled")
-    if not may_collect(store):
-        raise Error("this brain may not run collectors here; trust it with bf register --collect")
+    _trusted(store, "collectors")
     argv = _argv(store, sensor, start, end)
-    log = log_path(store, name)
     with collecting(store, name):
         started = clock()
         committed = False
         try:
-            raw = runner(argv, sensor, store, log)
+            raw = runner(argv, sensor, store, log_path(store, name))
             try:
                 incoming = TypeAdapter(list[Record]).validate_python(decode(raw))
             except ValidationError as error:
-                raise Error("collector must print one JSON array of records: " + explain(error)) from error
+                # Record fields and item positions only: a key the provider printed may be private text.
+                known = {*Record.model_fields, "[key]"}
+                raise Error("collector must print one JSON array of records: " + explain(error, known)) from error
             incoming = [ontology.project(record, sensor, config) for record in incoming]
             if len({r.id for r in incoming}) != len(incoming):
                 raise Error("collector returned duplicate record ids")
@@ -221,23 +266,21 @@ def collect(
             if dry_run:
                 return {**result, "samples": [r.model_dump(exclude_defaults=True) for r in incoming[:3]]}
             with writer(store, wait=120):
+                if sensor.mode == "snapshot" and not incoming and records.partitions(store, name):
+                    # A wrong account or an unmounted folder also looks empty: never erase a catalog silently.
+                    raise Error(
+                        f"snapshot returned no records; kept the existing catalog. Check the sensor's scope, "
+                        f"or delete memories/{name}/ to clear it deliberately"
+                    )
                 result.update(records.upsert(store, name, incoming, snapshot=sensor.mode == "snapshot"))
                 committed = True
-                previous = state(store).get(name, {})
-                # Coverage is a contiguous interval, not an assertion that omitted windows were collected.
-                previous_start, previous_end = str(previous.get("start", "")), str(previous.get("end", ""))
-                # A backfill ending before the recorded coverage neither moves the resume point nor
-                # counts as a fresh success: freshness describes the latest window, not any run.
-                latest = not previous_end or end >= previous_end
-                coverage_start, coverage_end = (start, end) if latest else (previous_start, previous_end)
-                if previous_start and previous_end and start <= previous_end and end >= previous_start:
-                    coverage_start, coverage_end = min(start, previous_start), max(end, previous_end)
+                coverage, latest = _coverage(state(store).get(name, {}), start, end, observed)
                 _remember(
                     store,
                     name,
+                    SENSORS,
                     run=started.isoformat(),
-                    start=coverage_start,
-                    end=coverage_end,
+                    **coverage,
                     error="",
                     **({"success": started.isoformat()} if latest else {}),
                     **{key: value for key, value in result.items() if key != "sensor"},
@@ -246,17 +289,11 @@ def collect(
             message = (
                 str(error)
                 if isinstance(error, Error)
-                else ("collector files are inaccessible; check its executable, record permissions and free space")
+                else "collector files are inaccessible; check its executable, record permissions and free space"
             )
             if committed:
                 message = "records were committed but local run history could not be saved; retry is safe"
-            if not dry_run:
-                try:
-                    with writer(store, wait=120):
-                        _remember(store, name, run=started.isoformat(), error=message)
-                except (Error, OSError) as history_error:
-                    raise Error(f"{name}: {message}; run history could not be saved") from history_error
-            raise Error(f"{name}: {message}; see {log}") from error
+            _failed(store, name, SENSORS, started, message, error, dry_run=dry_run)
         return result
 
 
@@ -280,24 +317,17 @@ def routine(
     Empty output means there is nothing to review. An existing action folder is never overwritten,
     so a routine writes at most one action per local day and never replaces a person's edits.
     """
-    try:
-        start, end = timestamp(start), timestamp(end)
-    except ValueError as error:
-        raise Error("routine start/end require timezone-aware timestamps") from error
-    if start >= end:
-        raise Error("routine start must be earlier than end")
+    start, end = _window(start, end)
     program = load(store).routines.get(name)
     if program is None or not program.enabled:
         raise Error(f"routine {name} is unknown or disabled")
-    if not may_collect(store):
-        raise Error("this brain may not run routines here; trust it with bf register --collect")
-    log = log_path(store, name)
+    _trusted(store, "routines")
     with collecting(store, name):
         started = clock()
         folder = f"actions/{started.astimezone().date().isoformat()}_{name}"
         path = f"{folder}/ACTION.md"
         try:
-            raw = runner(_argv(store, program, start, end), program, store, log)
+            raw = runner(_argv(store, program, start, end), program, store, log_path(store, name))
             try:
                 text = raw.decode("utf-8")
             except UnicodeError as error:
@@ -315,14 +345,15 @@ def routine(
                     result["skipped"] = "an action for this routine already exists today"
                 elif text.strip():
                     store.write(path, raw)
+                # A skipped review keeps its window open, so the next written action covers it.
+                reviewed = {} if "skipped" in result else {"start": start, "end": end}
                 _remember(
                     store,
                     name,
                     ROUTINES,
                     run=started.isoformat(),
                     success=started.isoformat(),
-                    start=start,
-                    end=end,
+                    **reviewed,
                     error="",
                     **({"action": path} if "action" in result else {}),
                 )
@@ -332,43 +363,39 @@ def routine(
                 if isinstance(error, Error)
                 else "routine files are inaccessible; check its executable, action folder permissions and free space"
             )
-            if not dry_run:
-                try:
-                    with writer(store, wait=120):
-                        _remember(store, name, ROUTINES, run=started.isoformat(), error=message)
-                except (Error, OSError) as history_error:
-                    raise Error(f"{name}: {message}; run history could not be saved") from history_error
-            raise Error(f"{name}: {message}; see {log}") from error
+            _failed(store, name, ROUTINES, started, message, error, dry_run=dry_run)
         return result
 
 
+def _due(program: Program, last: dict[str, object], now: datetime) -> bool:
+    """Enabled, scheduled, and its refresh interval has elapsed since the last success."""
+    success = str(last.get("success", ""))
+    elapsed = not success or now >= datetime.fromisoformat(success) + timedelta(seconds=program.refresh)
+    return program.enabled and bool(program.refresh) and elapsed
+
+
 def due_routines(store: Store, now: datetime) -> list[tuple[str, str, str]]:
-    """Enabled routines whose refresh interval elapsed; each covers the time since its last success."""
+    """Due routines; each covers the time since the end of its last reviewed window."""
     config, history = load(store), state(store, ROUTINES)
     windows = []
     for name, program in sorted(config.routines.items()):
-        if not program.enabled or not program.refresh:
-            continue
         last = history.get(name, {})
-        success = str(last.get("success", ""))
-        if success and now < datetime.fromisoformat(success) + timedelta(seconds=program.refresh):
+        if not _due(program, last, now):
             continue
-        start = datetime.fromisoformat(success) if success else now - timedelta(seconds=program.lookback)
+        start = now - timedelta(seconds=program.lookback)
+        if last.get("end") and (reviewed := datetime.fromisoformat(str(last["end"]))) < now:
+            start = reviewed
         windows.append((name, timestamp(start.isoformat()), timestamp(now.isoformat())))
     return windows
 
 
 def due(store: Store, now: datetime) -> list[tuple[str, str, str]]:
-    """Enabled sensors whose refresh interval elapsed, with the window each should collect."""
+    """Due sensors, with the window each should collect."""
     config, history = load(store), state(store)
     windows = []
     for name, sensor in sorted(config.sensors.items()):
-        if not sensor.enabled or not sensor.refresh:
-            continue
         last = history.get(name, {})
-        if last.get("success") and now < datetime.fromisoformat(str(last["success"])) + timedelta(
-            seconds=sensor.refresh
-        ):
+        if not _due(sensor, last, now):
             continue
         start = now - timedelta(seconds=sensor.lookback)
         if last.get("end") and sensor.mode == "window":

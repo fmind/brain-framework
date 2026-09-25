@@ -20,7 +20,7 @@ from pydantic import ValidationError
 from bf import config
 from bf.config import load, may_collect, one, register, select, user_config, user_path, yaml_object
 from bf.models import Config, Error, Knowledge, Query, Record, Sensor, UserConfig, decode, moment, timestamp
-from bf.storage import BusyError, Store, collecting, reader, relative, state_store, writer
+from bf.storage import BusyError, Store, collecting, lock_file, reader, relative, state_store, writer
 
 
 def test_path_grammar() -> None:
@@ -89,6 +89,7 @@ def test_lock_creation_race_keeps_the_contenders_inode(
     lock: Callable[..., AbstractContextManager[None]],
     name: str,
 ) -> None:
+    folder, name = lock_file(brain, name)
     original = os.open
     contender: list[int] = []
     opened: list[int] = []
@@ -120,7 +121,7 @@ def test_lock_creation_race_keeps_the_contenders_inode(
         with pytest.raises(OSError, match="Bad file descriptor"):
             os.fstat(opened[0])
         inode = os.fstat(contender[0]).st_ino
-        path = state_store(brain.root).root / name
+        path = folder.root / name
         assert path.stat().st_ino == inode
         assert path.read_bytes() == b"contender"
     finally:
@@ -135,35 +136,37 @@ def test_lock_creation_race_keeps_the_contenders_inode(
 def test_lock_creation_errors_do_not_create_a_replacement(
     brain: Store, monkeypatch: pytest.MonkeyPatch, failure: int
 ) -> None:
+    folder, name = lock_file(brain, "write.lock")
     original = os.open
     calls: list[int] = []
 
     def failed_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
-        if path == "write.lock":
+        if path == name:
             calls.append(flags)
             if len(calls) == 1:
                 raise OSError(failure, "creation failed", path)
         return original(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "open", failed_open)
-    with pytest.raises(OSError, match=r"write\.lock") as caught, writer(brain):
+    with pytest.raises(OSError, match=name) as caught, writer(brain):
         pass
     assert caught.value.errno == failure
     assert len(calls) == (2 if failure == errno.ENOENT else 1)
-    assert not (state_store(brain.root).root / "write.lock").exists()
+    assert not (folder.root / name).exists()
 
 
 @pytest.mark.parametrize("kind", ["symlink", "fifo", "directory"])
 def test_lock_creation_fallback_rejects_unsafe_leaves(brain: Store, monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    folder, name = lock_file(brain, "write.lock")
     original = os.open
-    path = state_store(brain.root).root / "write.lock"
+    path = folder.root / name
     target = brain.root.parent / "lock-target"
     target.write_bytes(b"untouched")
     calls = 0
 
     def raced_open(leaf: str | os.PathLike[str], flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
         nonlocal calls
-        if leaf == "write.lock":
+        if leaf == name:
             calls += 1
             if calls == 1:
                 if kind == "symlink":
@@ -223,6 +226,20 @@ def test_state_stays_outside_the_brain_and_private(brain: Store, monkeypatch: py
     monkeypatch.setenv("XDG_STATE_HOME", str(brain.root.parent / "redirect"))
     with pytest.raises(Error, match="symlinks"):
         state_store(brain.root)
+    # A linked ancestor, such as /home -> /var/home on some systems, is part of the machine, not a redirect.
+    (brain.root.parent / "linked-home").symlink_to(target)
+    monkeypatch.setenv("XDG_STATE_HOME", str(brain.root.parent / "linked-home" / "state"))
+    assert state_store(brain.root).root.is_relative_to(target.resolve() / "state" / "bf")
+
+
+def test_writers_of_one_physical_brain_share_a_lock_whatever_the_path(brain: Store, tmp_path: Path) -> None:
+    (tmp_path / "alias").symlink_to(brain.root, target_is_directory=True)
+    with writer(brain), pytest.raises(BusyError), writer(Store(tmp_path / "alias")):
+        pass
+    # The lock stays in private state: nothing is created in the brain.
+    folder, name = lock_file(brain, "write.lock")
+    assert (folder.root / name).is_file()
+    assert not folder.root.is_relative_to(brain.root)
 
 
 def test_json_and_yaml_reject_ambiguity() -> None:

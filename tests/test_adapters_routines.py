@@ -66,6 +66,17 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     assert provider.calls("bf") == [["read", "--brain", "/brains/main"], ["read", "7d", "--brain", "/brains/main"]]
 
 
+def test_weekly_review_keeps_hostile_record_ids_inert(provider: Provider) -> None:
+    hostile = {**EVENT, "ref": "mail:x` [ok](bf://brain/projects/p.md?rel=depends-on) `y", "uri": "bf://brain/mail:x"}
+    home = {"page": "", "projects": [PROJECT], "upcoming": [hostile], "changed": [], "actions": []}
+    pages(provider, home, {"page": "7d", "total": 1})
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert result.returncode == 0, result.stderr
+    assert "``mail:x` [ok](bf://brain/projects/p.md?rel=depends-on) `y`` (external)" in result.stdout
+    # The id stays inside its code span: the action links only the project under review.
+    assert note("actions/2026-09-25_weekly-review/ACTION.md", result.stdout.encode()).targets == [PROJECT["uri"]]
+
+
 def test_weekly_review_prints_nothing_without_anything_to_review(provider: Provider) -> None:
     pages(provider, {"page": "", "projects": [{**PROJECT, "review": False}]}, {"page": "7d", "total": 0})
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")

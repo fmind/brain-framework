@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import TypedDict, cast
 
 from bf import graph, index, links, usage
-from bf.config import load, may_collect
+from bf.config import load
 from bf.health import attention, source_health
 from bf.markdown import authored, note, reference, split_ref
 from bf.models import AUTHORED, NAME, Error, timestamp
@@ -158,6 +158,8 @@ def _brains(
                 skipped = index.problems(connection)
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
             if strict and len(stores) == 1:
+                if isinstance(error, sqlite3.DatabaseError):
+                    raise Error("the search cache is unavailable; run bf build") from error
                 raise
             message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; run bf status"
             problems.append({"brain": name, "error": message.replace(str(store.root), "<brain>")})
@@ -184,8 +186,15 @@ def _gather(parts: list[tuple[str, dict[str, object]]], key: str) -> list[dict[s
     ]
 
 
-def _newest(items: list[dict[str, object]], limit: int, *, oldest: bool = False) -> list[dict[str, object]]:
-    return sorted(items, key=lambda i: (str(i.get("time", "")), str(i["ref"])), reverse=not oldest)[:limit]
+def _newest(
+    items: list[dict[str, object]], limit: int, *, oldest: bool = False, modified: bool = False
+) -> list[dict[str, object]]:
+    """Newest event first, or newest modification first; a note's date is both."""
+
+    def key(item: dict[str, object]) -> tuple[str, str]:
+        return str((modified and item.get("updated")) or item.get("time", "")), str(item["ref"])
+
+    return sorted(items, key=key, reverse=not oldest)[:limit]
 
 
 def _next_day(instant: str) -> str:
@@ -294,7 +303,7 @@ def timeline(stores: list[Store], name: str, found: Period, *, counted: bool = T
         "until": found.until,
         "items": _newest(_gather(parts, "items"), PAGE),
         "total": sum(cast("int", part["total"]) for _, part in parts),
-        "changed": _newest(_gather(parts, "changed"), SECTION),
+        "changed": _newest(_gather(parts, "changed"), SECTION, modified=True),
         "sources": _gather(parts, "sources"),
     }
     if found.previous:
@@ -348,7 +357,7 @@ def memories(
 
         def overview(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
             counts = index.sources(connection)
-            health = source_health(store, counts, now=now, trusted=may_collect(store))
+            health = source_health(store, counts, now=now)
             return {
                 "sources": [
                     {"source": name, "page": f"memories/{name}", **counts.get(name, {"records": 0}), **value}
@@ -367,7 +376,7 @@ def memories(
             counts = index.sources(connection)
             if source not in counts and source not in load(store).sensors:
                 return None
-            health = source_health(store, [source], now=now, trusted=may_collect(store))[source]
+            health = source_health(store, [source], now=now)[source]
             items, total = index.listing(
                 connection, "i.kind='record' AND i.source=:source", {"source": source}, "time DESC,i.ref", SECTION
             )
@@ -400,11 +409,16 @@ def memories(
     else:
         raise Error(_MISSING)
 
-    def records(_store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
+    def records(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
+        if source not in index.sources(connection) and source not in load(store).sensors:
+            return None
         items, total = index.listing(connection, where, params, "time DESC,i.ref", PAGE)
         return {"items": items, "total": total}
 
     found, extra = _brains(stores, records, counted=counted)
+    if not found:
+        # Like the source page: an unknown source is a missing page, never an empty answer.
+        raise Error(_MISSING)
     reply: dict[str, object] = {
         "page": "/".join(parts),
         "items": _newest(_gather(found, "items"), PAGE),
@@ -482,7 +496,11 @@ def context(stores: list[Store], owner: Store, brain: str, reply: dict[str, obje
     if fragment:
         return {}
     identity = links.address(brain, ref) if record else links.address(brain, path)
-    targets, problems = graph.expand(stores, identity)
+    try:
+        targets, problems = graph.expand(stores, identity)
+    except Error:
+        # A very long record id has no valid BF address; the item itself still reads.
+        return {"problems": [{"brain": brain, "error": "backlinks are unavailable for this reference"}]}
 
     def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
         local = graph.local_refs(connection, targets)

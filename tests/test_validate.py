@@ -97,7 +97,7 @@ def test_note_projection_sections_and_titles() -> None:
     )
     assert footnoted.targets == ["other.md#part"]
     assert footnoted.knowledge.tags == ["2026", "x"]
-    assert note("actions/t/ACTION.md", b"# T\n\n## Only\n\nFirst section text.\n").lead == "Only First section text."
+    assert note("actions/t/ACTION.md", b"# T\n\n## Only\n\nFirst section text.\n").lead == "First section text."
     data = "# T\r\n\r\n## A\r\n\r\nx\u2028y\r\n\r\n## B\r\n".encode()
     assert section("concepts/t.md", data, "a") == "## A\r\n\r\nx\u2028y\r\n\r\n"
     for bad in [b"---\ntitle: x\n", b"\xff", b"---\ntags: x\n---\n"]:

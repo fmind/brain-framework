@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import PurePosixPath
@@ -27,6 +28,8 @@ class Heading:
     title: str
     level: int
     line: int
+    # The first line after the heading; a setext heading spans two lines.
+    end: int
 
 
 @dataclass
@@ -112,7 +115,11 @@ def parse(path: str, data: bytes) -> Markdown:
             anchor = re.search(r"\s+\{#([A-Za-z0-9][A-Za-z0-9_.-]*)\}$", title)
             if anchor:
                 title = title[: anchor.start()]
-            stem = slug = anchor[1] if anchor else slugify(title)
+                if anchor[1].endswith(".md"):
+                    # `note.md#part.md` would read as a file name, not a section.
+                    raise Error(f"{path}: explicit heading anchors cannot end in .md")
+            # A heading without word characters still needs an addressable, non-empty slug.
+            stem = slug = anchor[1] if anchor else slugify(title) or "section"
             if slug in used and (anchor or slug in explicit):
                 raise Error(f"{path}: duplicate explicit heading anchor")
             if anchor:
@@ -122,7 +129,7 @@ def parse(path: str, data: bytes) -> Markdown:
                 suffix += 1
                 slug = f"{stem}-{suffix}"
             used.add(slug)
-            headings.append(Heading(slug, title, int(token.tag[1:]), token.map[0] + offset))
+            headings.append(Heading(slug, title, int(token.tag[1:]), token.map[0] + offset, token.map[1] + offset))
             fragment = slug
         # A task is a list item whose paragraph starts with [ ] or [x]; code blocks never produce one.
         if (
@@ -162,17 +169,26 @@ def split_ref(ref: str) -> tuple[str, str]:
     return path, fragment
 
 
-def reference(path: str, target: str) -> str:
-    """Resolve a relative note link to a brain-relative path; identities and URLs stay unchanged."""
-    if scheme(path, target):
-        return bf_links.target(target)
+def resolve(path: str, target: str) -> tuple[str, str]:
+    """A relative link as a brain-relative path and a fragment, split at the link's first unescaped `#`.
+
+    Splitting before decoding keeps a literal `%23` in a file name, such as `data%231.csv`, in the path.
+    """
     name, _, fragment = target.partition("#")
     name, fragment = unquote(name), unquote(fragment)
     if name.startswith("/") and path.startswith("concepts/"):
         joined = posixpath.normpath("concepts/" + name.lstrip("/"))
     else:
         joined = posixpath.normpath(posixpath.join(posixpath.dirname(path), name)) if name else path
-    return joined + ("#" + fragment if fragment else "")
+    return joined, fragment
+
+
+def reference(path: str, target: str) -> str:
+    """Resolve a relative note link to a brain-relative path; identities and URLs stay unchanged."""
+    if scheme(path, target):
+        return bf_links.target(target)
+    name, fragment = resolve(path, target)
+    return name + ("#" + fragment if fragment else "")
 
 
 def scheme(path: str, target: str) -> str:
@@ -215,18 +231,22 @@ def note(path: str, data: bytes) -> Note:
     if not title.strip():
         raise Error(f"{path}: title must be nonempty")
     # H2+ sections are separate passages, so a search can land on the answering section.
+    # Headings rank through each passage's title; its text, and so its excerpt, starts below them.
     source_lines = lines(markdown.text)
     sections = [h for h in markdown.headings if h.level >= 2]
-    introduction = parse(path, "".join(source_lines[: sections[0].line] if sections else source_lines).encode()).body
+    titled = next((h for h in markdown.headings if h.level == 1 and h.title == title), None)
+    hidden = range(titled.line, titled.end) if titled else range(0)
+    opening = [line for n, line in enumerate(source_lines[: sections[0].line if sections else None]) if n not in hidden]
+    introduction = parse(path, "".join(opening).encode()).body
     summary = knowledge.summary or knowledge.description
     passages = [
         Passage("", title, title, "\n\n".join(part.strip() for part in (summary, introduction) if part.strip()))
     ]
     for i, heading in enumerate(sections):
         end = sections[i + 1].line if i + 1 < len(sections) else len(source_lines)
-        text = "".join(source_lines[heading.line : end])
+        text = "".join(source_lines[heading.end : end])
         passages.append(Passage(heading.slug, f"{title} — {heading.title}", heading.title, text))
-    lead = _plain(summary or introduction.replace(f"# {title}", "", 1))
+    lead = _plain(summary or introduction)
     if not lead and len(passages) > 1:
         lead = _plain(passages[1].text)
     targets = sorted(
@@ -260,16 +280,16 @@ def note(path: str, data: bytes) -> Note:
     )
 
 
-def broken(note: Note, exists: set[str], slugs: dict[str, set[str]]) -> list[str]:
+def broken(note: Note, exists: Callable[[str], bool], slugs: dict[str, set[str]]) -> list[str]:
     """Relative links must name an existing brain file and, for notes, an existing heading."""
     problems = []
     for target in note.targets:
         if scheme(note.path, target) or target == "#":
             continue
-        name, fragment = split_ref(reference(note.path, target))
+        name, fragment = resolve(note.path, target)
         if name == ".." or name.startswith("../"):
             problems.append(f"{note.path}: link leaves the brain: {target}")
-        elif name not in exists:
+        elif not exists(name):
             problems.append(f"{note.path}: broken link: {target}")
         elif fragment and name in slugs and fragment not in slugs[name]:
             problems.append(f"{note.path}: missing heading: {target}")

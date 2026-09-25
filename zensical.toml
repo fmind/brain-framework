@@ -24,6 +24,7 @@ nav = [
     { "Configuration schema" = "docs/schema.md" },
   ] },
   { "Connect agents" = [
+    { "Agent workflows" = "docs/agents.md" },
     { "MCP server" = "docs/mcp.md" },
   ] },
   { "Trust and legal" = [

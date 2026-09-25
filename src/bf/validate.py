@@ -9,8 +9,8 @@ from datetime import date
 
 from bf import links, ontology, records
 from bf.config import load
-from bf.markdown import Note, authored, broken, note, scheme, split_ref, validate_concept
-from bf.models import AUTHORED, Error
+from bf.markdown import Note, authored, broken, note, scheme, validate_concept
+from bf.models import AUTHORED, MAX_NOTE, Error
 from bf.storage import Store, relative
 
 _ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -73,7 +73,7 @@ def _validate(store: Store) -> dict[str, object]:
     notes: list[Note] = []
     for name in (n for directory in AUTHORED for n in listed[directory] if authored(n)):
         try:
-            data = store.read(name, 4 << 20)
+            data = store.read(name, MAX_NOTE)
             parsed_note = note(name, data)
             for claim in ontology.note_claims(parsed_note, config):
                 addresses.update(
@@ -104,7 +104,7 @@ def _validate(store: Store) -> dict[str, object]:
             *([item.knowledge.entity] if item.knowledge.entity else []),
         ]:
             aliases.setdefault(links.target(alias), set()).add(item.path)
-        problems.extend(broken(item, {split_ref(t)[0] for t in item.links if exists(split_ref(t)[0])}, slugs))
+        problems.extend(broken(item, exists, slugs))
         for target in item.targets:
             source = scheme(item.path, target)
             if (source in ids or source in config.sensors) and target.partition(":")[2] not in ids.get(source, set()):

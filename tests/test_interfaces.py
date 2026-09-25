@@ -84,9 +84,14 @@ def test_status_check_fails_on_stale_trusted_sources(brain: Store) -> None:
     assert report["brains"][0]["sources"]["mail"]["stale"] is True
     brain.write("bf.yaml", b"version: 5\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n")
     assert invoke("collect", "mail", "--brain", "fixture", "--since", "2d", code=1) == {}
-    entry = invoke("status", "--brain", "fixture", code=0)["brains"][0]["sources"]["mail"]
+    # A failed manual sensor is reported with its log, but only scheduled programs fail the check.
+    entry = invoke("status", "--brain", "fixture", "--check", code=0)["brains"][0]["sources"]["mail"]
     assert "status 3" in entry["error"]
     assert entry["log"].endswith("mail.log")
+    brain.write(
+        "bf.yaml", b"version: 5\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n    refresh: 60\n"
+    )
+    assert invoke("status", "--brain", "fixture", "--check", code=1)["healthy"] is False
 
 
 @pytest.mark.parametrize(
@@ -119,16 +124,19 @@ def test_console_errors_are_private_and_on_stderr(brain: Store) -> None:
             [sys.executable, "-m", "bf", *args], capture_output=True, text=True, check=False
         )
 
-    for args in [
-        ["read", "bf.yaml", "--brain", "fixture"],
-        ["search", "x", "--limit", "0"],
-        ["search", "x", "--scope", "soon"],
-        ["read", "memories/absent"],
+    # Exit 1 is a failed operation; exit 2 is invalid command-line input, including option values.
+    for args, code in [
+        (["read", "bf.yaml", "--brain", "fixture"], 1),
+        (["read", "memories/absent"], 1),
+        (["search", "x", "--limit", "0"], 2),
+        (["search", "x", "--scope", "soon"], 2),
+        (["collect", "mail", "--since", "soon"], 2),
+        (["collect", "mail", "--until", "2026-13-01"], 2),
     ]:
         result = bf(*args)
-        assert result.returncode
+        assert result.returncode == code, result.stderr
         assert not result.stdout
-        assert result.stderr.startswith("bf:")
+        assert result.stderr.startswith("bf:" if code == 1 else ("bf:", "Usage:"))
         assert str(brain.root) not in result.stderr
     assert "limit" in bf("search", "x", "--limit", "0").stderr
     assert "scope accepts" in bf("search", "x", "--scope", "soon").stderr

@@ -53,14 +53,22 @@ def link(item: dict) -> str:
     return f"[{plain(item.get('title', item['ref']))}]({item['uri']})"
 
 
+def code(value: object) -> str:
+    """A code span no backtick inside a record id can close, so a ref never becomes Markdown or a link."""
+    text = str(value)
+    fence = "`" * (max(map(len, re.findall(r"`+", text)), default=0) + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
 def mention(item: dict) -> str:
     """Name an item without linking it: a link from this dated action would count as newer evidence.
 
     External text (an invite's title, a mail subject) never enters the action: only its ref does.
     """
     if item.get("external"):
-        return f"`{item['ref']}` (external)"
-    return f"{plain(item.get('title', item['ref']))} (`{item['ref']}`)"
+        return f"{code(item['ref'])} (external)"
+    return f"{plain(item.get('title', item['ref']))} ({code(item['ref'])})"
 
 
 def render(day: str, home: dict, week: dict) -> Iterator[str]:

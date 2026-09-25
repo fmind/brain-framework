@@ -1,7 +1,7 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "11.0.0"
+version = "11.1.0"
 description = "Plain-file brains for people and their agents"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -55,6 +55,8 @@ dev = [
 [tool.ruff]
 line-length = 120
 src = ["src", "tests"]
+# Skill scripts run with the agent's python3, not the package interpreter.
+per-file-target-version = { "skills/*/scripts/*.py" = "py311" }
 
 [tool.ruff.format]
 docstring-code-format = true

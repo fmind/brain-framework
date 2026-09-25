@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      BRAIN_FRAMEWORK: brain-framework==11.0.0
+      BRAIN_FRAMEWORK: brain-framework==11.1.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,7 +96,11 @@ The collection job runs whatever sensor and routine code is on its branch, with 
 - Records committed to Git remain in its history; removing one later means rewriting history in every clone. Check your organization's data-protection and retention rules before publishing a source.
 - Collected records are evidence, not verified knowledge. Promote what matters into project notes and concepts through normal review, with links teammates can follow.
 - Add each question the team repeatedly asks to `evals/retrieval.yaml`, and run `bf validate` and `bf eval` in pull requests so broken links and lost answers fail before merge.
-- Check `bf status --brain team-knowledge` on a teammate's machine: run state stays with the collection job, so freshness there reads `unknown`; the latest record times still show what was collected.
+- Check `bf status --brain ~/team-knowledge` on a teammate's machine: run state stays with the collection job, so freshness there reads `unknown`; the latest record times still show what was collected.
+
+## Share from a personal brain
+
+For a selected transfer from a personal brain, use the `bf-learn` sharing guide to prepare a reviewable candidate and a manifest containing only destination paths and audience-accessible evidence. Keep private provenance mappings in the source action's inputs. Validate and evaluate a disposable destination without source-brain references; inspect unresolved foreign links and private identifiers separately, since link validation is not a privacy check. Future transfers compare the prior shared version, new candidate and destination edits before replacing anything. See [decision workflows](agents.md#decision-workflows).
 
 ## Shared links
 

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import cast
 
 from typer.testing import CliRunner
 
 from bf.cli import app
+from bf.config import register
 from bf.health import source_health
-from bf.models import encode
+from bf.models import Query, encode
+from bf.retrieve import read, search
 from bf.storage import Store, state_store
 
 
@@ -78,3 +81,17 @@ def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failure
     assert "window" not in health
     result = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
     assert result.exit_code == 0, result.output
+
+
+def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) -> None:
+    brain.write(
+        "bf.yaml", b"version: 5\nname: fixture\nsensors:\n  meetings:\n    command: [echo]\n    refresh: 3600\n"
+    )
+    record = cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])
+    found = cast("list[dict[str, object]]", search([brain], Query(text="offline retrieval"))["sources"])
+    status = source_health(brain)["meetings"]
+    # The brain is trusted here and the scheduled sensor never succeeded: every reply says so.
+    assert record["freshness"] == found[0]["freshness"] == status["freshness"] == "never"
+    register(brain, collect=False)
+    record = cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])
+    assert record["freshness"] == "unknown"

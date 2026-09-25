@@ -11,7 +11,7 @@ from bf import graph, index, links, pages, records, usage
 from bf.config import load, related
 from bf.health import source_health
 from bf.markdown import authored, section, split_ref
-from bf.models import MAX_REPLY, NOTICE, Error, Query, encode
+from bf.models import MAX_NOTE, MAX_REPLY, NOTICE, Error, Query, encode
 from bf.storage import Store, relative
 
 
@@ -62,6 +62,9 @@ def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[s
                     owners.update((name, ref) for ref in index.identity_owners(connection, query.text))
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
             if len(stores) == 1:
+                if isinstance(error, sqlite3.DatabaseError):
+                    # A damaged cache is a brain problem to report, not a crash.
+                    raise Error("the search cache is unavailable; run bf build") from error
                 raise
             last_error = error
             message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; run bf status"
@@ -119,6 +122,21 @@ def search(stores: list[Store], query: Query, *, counted: bool = True) -> dict[s
     return bounded(reply)
 
 
+def _configured(stores: list[Store], problems: list[dict[str, object]]) -> list[Store]:
+    """Skip a brain whose bf.yaml does not load, unless it is the only one: the others still answer."""
+    if len(stores) == 1:
+        return stores
+    result = []
+    for store in stores:
+        try:
+            load(store)
+        except Error, OSError, UnicodeError:
+            problems.append({"brain": store.root.name, "error": "bf.yaml is invalid or inaccessible; run bf validate"})
+            continue
+        result.append(store)
+    return result
+
+
 def _brain(stores: list[Store], name: str) -> list[Store]:
     if not name:
         return stores
@@ -137,6 +155,7 @@ def read(stores: list[Store], ref: str = "", brain: str = "", *, counted: bool =
     if len(ref) > 8192:
         raise Error("expected a reference of at most 8192 characters")
     stores, problems = related(stores)
+    stores = _configured(stores, problems)
     # A qualified address resolves in its brain; backlinks and identities still span the whole selection.
     selected = everywhere = _brain(stores, brain)
     ref = ref.strip()
@@ -205,7 +224,7 @@ def _read(store: Store, ref: str) -> dict[str, object] | None:
     if authored(path):
         relative(path)
         try:
-            data = store.read(path, 4 << 20)
+            data = store.read(path, MAX_NOTE)
         except FileNotFoundError:
             return None
         text = section(path, data, fragment) if fragment else data.decode("utf-8")

@@ -54,16 +54,16 @@ The current state, in a short paragraph.
 - [ ] Publish the retention guide.
 ```
 
-| Field                      | Effect                                                                                                                                                                   |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `title`                    | Result title; otherwise the first H1, then the file name.                                                                                                                |
-| `type`                     | Shown in results and pages; defaults to `project`, `action` or `concept` from the folder.                                                                                |
-| `status`                   | One of `draft`, `active`, `paused`, `blocked`, `done`, `stable`, `deprecated`, `archived`. Folder pages list active work first; deprecated and archived notes rank last. |
-| `updated`                  | `YYYY-MM-DD`; interpreted at local midnight on the reading machine for periods such as `7d` or `2026-09`.                                                                |
-| `summary`, `description`   | The note's lead in results.                                                                                                                                              |
-| `tags`, `aliases`, `links` | Searchable; `aliases` are exact identities that resolve to the note; `links` add explicit relations.                                                                     |
+| Field                      | Effect                                                                                                                                                                                                                      |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `title`                    | Result title; otherwise the first H1, then the file name.                                                                                                                                                                   |
+| `type`                     | Shown in results and pages; defaults to `project`, `action` or `concept` from the folder.                                                                                                                                   |
+| `status`                   | One of `draft`, `active`, `paused`, `blocked`, `done`, `stable`, `deprecated`, `archived`. The `projects` page lists closed work (`done`, `deprecated`, `archived`) last; searches rank deprecated and archived notes last. |
+| `updated`                  | `YYYY-MM-DD`; places the note on pages at local midnight of the reading machine. A note without it appears in no period and its project is due for review.                                                                  |
+| `summary`, `description`   | The note's lead in results.                                                                                                                                                                                                 |
+| `tags`, `aliases`, `links` | Searchable; `aliases` are exact identities that resolve to the note; `links` add explicit relations.                                                                                                                        |
 
-Keep notes current rather than cumulative. `bf read projects` and the home page mark active or blocked project notes with `review` when their `updated` date is more than 14 days old or when items dated after it link to them (`new_links`), as a reminder rather than a failure. Task list items (`- [ ]`, `- [x]`) are counted as `tasks` and the first open one is shown as `next`. Git holds history, so replace outdated text instead of appending history sections. Each H2 or deeper section is its own search passage, and `path#section` reads exactly that section. Markdown links between notes, to brain files and to records (`[meeting](meetings:retention-1)`) are checked by `bf validate`.
+Keep notes current rather than cumulative. `bf read projects` and the home page mark active or blocked project notes with `review` when their `updated` date is missing or more than 14 days old, or when items dated after it link to them (`new_links`), as a reminder rather than a failure. Task list items (`- [ ]`, `- [x]`) are counted as `tasks` and the first open one is shown as `next`. Git holds history, so replace outdated text instead of appending history sections. Each H2 or deeper section is its own search passage, and `path#section` reads exactly that section. Markdown links between notes, to brain files and to records (`[meeting](meetings:retention-1)`) are checked by `bf validate`.
 
 `concepts/` follows [OKF v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md): each concept declares a `type`; lifecycle is `draft`, `stable` or `deprecated`; `sources` are mappings with a `resource`; `verified` events carry `by` and `at`. `concepts/index.md` may only declare `okf_version`, and an optional `concepts/log.md` groups changes under ISO date headings. `bf validate` checks this structure; it does not verify claims.
 
@@ -76,20 +76,20 @@ A record is one source item. Sensors print them; Brain Framework stores one JSON
 | `id`         | Stable per source; the record's ref is `<source>:<id>`.                                  |
 | `title`      | Short, meaningful title.                                                                 |
 | `text`       | The searchable body: the facts someone would ask about.                                  |
-| `time`       | Event time with a timezone; drives `--since` and `--until`.                              |
+| `time`       | Event time with a timezone; places the record on period pages and in time scopes.        |
 | `url`        | Where the item lives upstream.                                                           |
 | `links`      | Explicit identities it relates to: `repo:github.com/owner/name`, `person:email/address`. |
 | `aliases`    | Other exact identities of this item.                                                     |
 | `fields`     | Normalized schema values; searchable, with typed relationship edges.                     |
 | `attributes` | Structured details kept for exact reads, not searched.                                   |
 
-Collecting the same id again replaces its line, moving it if its month changed; each id appears once per source. If both revisions declare `attributes.updated`, an older revision cannot overwrite a newer one. History lives in Git or in your backups, not in duplicate records.
+Collecting the same id again replaces its line, moving it if its month changed; each id appears once per source. If both revisions declare `attributes.updated`, an older revision cannot overwrite a newer one, unless the stored revision claims a modification after it was first observed, which reveals an unreliable clock. History lives in Git or in your backups, not in duplicate records.
 
 If files already contain duplicate IDs, collection stops before changing that source. Run `bf validate`, preserve the conflicting revisions and reconcile them deliberately; collection never chooses which conflicting evidence to discard.
 
 Three reserved attributes describe evidence quality: `updated` is the upstream modification timestamp, `observed` is when Brain Framework first collected this revision, and `partial: true` marks intentionally incomplete content. Timestamps require a timezone. `time` keeps its event meaning; period pages list items modified in the period under `changed` using `updated`, falling back to event time when unavailable. Collection preserves `observed` when content has not changed. Other attributes remain provider-specific.
 
-Record writes use a recoverable transaction under `memories/.pending/`. It holds originals only while a write is incomplete; explicit `bf build`, collection or backup recovers it after an interruption; ordinary reads report the pending transaction without changing evidence. Keep this directory with the records when backing up a stopped brain, and never delete it as cache. A live backup must hold the same brain writer lock while copying files.
+Record writes use a recoverable transaction under `memories/.pending/`. It holds originals only while a write is incomplete. After an interruption, `bf build` or the next collection restores them; ordinary reads fail with a message to run `bf build` and never change evidence. Keep this directory with the records when backing up a stopped brain, and never delete it as cache. A live backup must hold the same brain writer lock while copying files.
 
 ## Personal and team brains
 
@@ -134,7 +134,7 @@ brains:
 
 Commands select `--brain NAME|PATH`, then `BF_BRAIN`, then the brain containing the working directory, then every registered brain. Search/read expand direct declarations of those roots; elsewhere the optional registry supplies roots. Promote personal knowledge to the team by writing a summary in the team brain and linking to what others can read.
 
-`XDG_CONFIG_HOME` overrides `~/.config` for the registry; `XDG_STATE_HOME` overrides `~/.local/state` for private run history, locks and usage, kept in `bf/<sha256 of the brain path>/`. Any command that opens a brain creates that folder, so delete the folders of brains you remove; the state is disposable. Registration serializes updates and writes the registry atomically with owner-only file permissions; it keeps the file's leading comment lines but not other comments. Names are unique per machine: registering a second brain under a taken name fails, so choose distinctive names before sharing links. If renaming is unavoidable, update affected BF addresses explicitly; do not give clones of one shared brain different names. Automatic selection skips registered directories absent from this machine; selecting an absent brain explicitly fails. Use `--brain NAME` when a particular brain must be present for your answer.
+`XDG_CONFIG_HOME` overrides `~/.config` for the registry; `XDG_STATE_HOME` overrides `~/.local/state` for private run history, locks and usage, kept in `bf/<sha256 of the brain path>/`. Registered paths must be absolute or start with `~`. The writer lock follows the brain directory itself, so bind mounts and other spellings of its path share it; every process that writes one brain must use the same state directory. Any command that opens a brain creates that folder, so delete the folders of brains you remove; the state is disposable. Registration serializes updates and writes the registry atomically with owner-only file permissions; it keeps the file's leading comment lines but not other comments. Names are unique per machine: registering a second brain under a taken name fails, so choose distinctive names before sharing links. If renaming is unavoidable, update affected BF addresses explicitly; do not give clones of one shared brain different names. Automatic selection skips registered directories absent from this machine; selecting an absent brain explicitly fails. Use `--brain NAME` when a particular brain must be present for your answer.
 
 Running `bf register PATH` again without `--collect` revokes collection trust while keeping the brain searchable. To stop selecting it automatically, remove its entry from the registry; the files remain in place. Set `enabled: false` to stop a single sensor while keeping its existing records searchable.
 
@@ -147,3 +147,7 @@ An action is one session of work: `actions/YYYY-MM-DD_slug/ACTION.md` with its o
 A routine is a deterministic program declared under `routines:` in `bf.yaml`, usually a script in `routines/`. `bf update` runs each due routine after the brain's sensors, with the same collection trust, direct argv, timeout, output bound and private log. Its standard output is Markdown that becomes that day's action, `actions/YYYY-MM-DD_NAME/ACTION.md`, for people and agents to review; empty output means there is nothing to review. See [routines](sensors.md#routines).
 
 Technical checks belong in `tests/`; retrieval suites belong in `evals/`. See [retrieval cases](search.md#retrieval-cases).
+
+## Decision workflows
+
+The `bf-action` and `bf-learn` skills add optional workflows over these files: a small working context in each action, decisions with expected outcomes, conditional intentions, explicit unknowns, retained evidence captures, bounded dependency review and reviewed knowledge transfer. They change neither `bf.yaml` nor the retrieval suite format. See [agent workflows](agents.md#decision-workflows).

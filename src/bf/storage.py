@@ -157,14 +157,18 @@ class Store:
             return info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino
 
 
-def state_store(root: Path) -> Store:
-    """Private runtime state stays outside the evidence brain."""
-    home = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))).expanduser()
-    if not home.is_absolute() or home.resolve().is_relative_to(root):
+def _private(*parts: str, root: Path) -> Store:
+    """A private directory below XDG_STATE_HOME, or ~/.local/state, outside the evidence brain."""
+    base = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))).expanduser()
+    if not base.is_absolute() or base.resolve().is_relative_to(root):
         raise Error("state directory must be absolute and outside the brain")
-    directory = home / "bf" / digest(os.fsencode(root))
+    # Operating systems may link an ancestor, such as /home to /var/home; the state root itself may not be a link.
+    home = base.parent.resolve() / base.name
+    directory = home.joinpath("bf", *parts)
     # Reject redirected state roots before creating any descendant.
     for path in [directory, *directory.parents]:
+        if path == home.parent:
+            break
         if path.is_symlink():
             raise Error("state directory may not contain symlinks")
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -173,9 +177,22 @@ def state_store(root: Path) -> Store:
     return Store(directory)
 
 
+def state_store(root: Path) -> Store:
+    """Private runtime state stays outside the evidence brain."""
+    return _private(digest(os.fsencode(root)), root=root)
+
+
+def lock_file(store: Store, name: str) -> tuple[Store, str]:
+    """Where a lock lives; the writer lock follows the physical brain, whatever path or mount reached it."""
+    if name != "write.lock":
+        return state_store(store.root), name
+    info = store.root.stat()
+    return _private("locks", root=store.root), f"{info.st_dev}-{info.st_ino}.lock"
+
+
 @contextmanager
 def _lock(store: Store, name: str, wait: float, *, shared: bool = False) -> Iterator[None]:
-    state = state_store(store.root)
+    state, name = lock_file(store, name)
     with state.parent(name) as (parent, leaf):
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
         try:

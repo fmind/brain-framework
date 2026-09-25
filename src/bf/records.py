@@ -222,8 +222,10 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
     for record in incoming:
         key = SNAPSHOT if snapshot else partition(record)
         previous = before.get(located.get(record.id, ""), {}).get(record.id)
-        if previous and previous.updated and record.updated and previous.updated > record.updated:
-            # Historical backfills must not replace a known newer upstream revision.
+        # Historical backfills must not replace a known newer upstream revision. A revision claiming
+        # to be modified after it was first observed has an unreliable clock and cannot block others.
+        reliable = previous and not (previous.observed and previous.updated > previous.observed)
+        if reliable and previous.updated and record.updated and previous.updated > record.updated:
             record = previous
             key = SNAPSHOT if snapshot else partition(record)
         if previous is None:
@@ -258,7 +260,8 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
 
 def find(store: Store, source: str, record_id: str) -> tuple[str, Record] | None:
     """Scan one source directly: exact record reads never depend on the derived index."""
-    if not re.fullmatch(NAME, source):
+    if not re.fullmatch(NAME, source) or not partitions(store, source):
+        # An alias or an absent source has nothing to read, and never waits for a writer.
         return None
     unreadable = False
     with reading(store):

@@ -31,3 +31,22 @@ cases:
     read: actions/2026-09-19_retention
     expect: [projects/example.md]
     text: [Next action]
+  - name: compact-working-context
+    read: actions/2026-09-25_retention-review/ACTION.md#context
+    text: [capture only selected evidence]
+  - name: changed-policy-dependency
+    read: bf://example/concepts/archive-policy.md
+    expect: [actions/2026-09-25_retention-review/outputs/decision.md]
+    text: [depends-on]
+  - name: superseded-prediction
+    read: actions/2026-09-25_retention-review/outputs/prior-decision.md
+    text: [unverified belief, prediction is missed, supersedes]
+  - name: prospective-intention
+    read: projects/example.md#intention
+    text: [State, waiting, unknown]
+  - name: material-unknown
+    read: projects/example.md#unknown
+    text: [storage cost, unresolved]
+  - name: provisional-procedure
+    read: concepts/selected-evidence.md
+    text: [draft, separate synthetic case, No verification]

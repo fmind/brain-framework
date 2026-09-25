@@ -14,7 +14,7 @@ from typing import cast
 import pytest
 
 from bf import index, usage
-from bf.config import register
+from bf.config import register, user_path
 from bf.models import Error, Query, Record, timestamp
 from bf.pages import scope
 from bf.retrieve import read, search
@@ -60,6 +60,12 @@ def test_results_are_compact_and_cite_readable_refs(brain: Store) -> None:
         "external": True,
     }
     assert "untrusted" in str(reply["notice"])
+    # Note excerpts preview the section's words on one line; its heading is already the title.
+    note = cast("list[dict[str, str]]", search([brain], Query(text="historical evidence"))["items"])[0]
+    assert (note["ref"], note["title"]) == ("projects/offline.md#decision", "Offline retrieval — Decision")
+    assert note["excerpt"].startswith("Provider retention cannot guarantee")
+    concepts = search([brain], Query(text="durable evidence", **scope("concepts")))["items"]
+    assert cast("list[dict[str, str]]", concepts)[0]["excerpt"] == "Originals outlive providers."
 
 
 def test_exact_identities_and_their_linked_items(brain: Store) -> None:
@@ -448,8 +454,11 @@ def test_searches_report_collection_coverage_of_their_sources(brain: Store) -> N
     ]
     collection = read([brain], "meetings:decision-1")["collection"]
     assert isinstance(collection, dict)
-    # Retrieval does not consult machine collection trust; no local run means unknown coverage.
-    assert collection["freshness"] == "unknown"
+    # The brain is trusted here, so a scheduled sensor without a successful run has never collected.
+    assert collection["freshness"] == "never"
+    user_path().write_text("brains: [not a mapping]\n")
+    # An unreadable registry grants no trust: coverage becomes unknown, and the read still answers.
+    assert cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])["freshness"] == "unknown"
 
 
 def test_okf_provenance_resources_are_searchable_identity_links(brain: Store) -> None:

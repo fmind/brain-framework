@@ -44,10 +44,12 @@ def summary(store: Store, now: datetime | None = None) -> dict[str, dict[str, in
     for raw in data.splitlines():
         try:
             event = decode(raw)
-            assert isinstance(event, dict)  # noqa: S101 - malformed lines are skipped below
+            if not isinstance(event, dict):
+                continue
             age = now - datetime.fromisoformat(str(event["at"]))
             operation, results = str(event["op"]), int(event["results"])
-        except Error, AssertionError, KeyError, TypeError, ValueError:
+        except Error, KeyError, TypeError, ValueError:
+            # Private counts are advisory: a malformed line never hides the rest.
             continue
         for window, days in WINDOWS.items():
             if age <= timedelta(days=days) and operation in {"search", "read"}:

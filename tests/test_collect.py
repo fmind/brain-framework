@@ -100,6 +100,18 @@ def test_invalid_output_writes_nothing_and_is_remembered(configured: Store, outp
     assert match.split()[0] in str(state(configured)["sample"]["error"])
 
 
+def test_provider_keys_never_reach_errors_or_history(configured: Store) -> None:
+    for output in [
+        b'[{"id":"x","title":"A","From: ceo@corp.example Subject: layoffs":1}]',
+        b'[{"id":"x","title":"A","fields":{"From: ceo@corp.example":1}}]',
+    ]:
+        with pytest.raises(Error, match="one JSON array") as failure:
+            collect(configured, "sample", start=START, end=END, runner=lambda *_, data=output: data)
+        assert "ceo@corp" not in str(failure.value)
+        assert "<key>" in str(failure.value)
+        assert "ceo@corp" not in str(state(configured)["sample"]["error"])
+
+
 def test_collection_requires_a_known_enabled_trusted_source_and_a_window(configured: Store, tmp_path: Path) -> None:
     for name in ["absent", "disabled"]:
         with pytest.raises(Error, match="unknown or disabled"):
@@ -239,6 +251,18 @@ def test_success_and_failure_history_are_serialized(configured: Store, monkeypat
     assert set(state(configured)) == {"sample", "folders"}
 
 
+def test_an_empty_snapshot_never_erases_an_existing_catalog(configured: Store) -> None:
+    collect(configured, "folders", start=START, end=END, runner=lambda *_: emit({"id": "one", "title": "Kept"}))
+    # A wrong account or an unmounted folder also returns an empty catalog.
+    with pytest.raises(Error, match="snapshot returned no records"):
+        collect(configured, "folders", start=START, end=END, runner=lambda *_: b"[]")
+    assert records.find(configured, "folders", "one") is not None
+    assert "snapshot returned no records" in str(state(configured)["folders"]["error"])
+    # A first empty catalog is a valid answer.
+    configured.delete("memories/folders/snapshot.jsonl")
+    assert collect(configured, "folders", start=START, end=END, runner=lambda *_: b"[]")["records"] == 0
+
+
 def test_overlapping_source_run_cannot_overwrite_newer_snapshot(configured: Store) -> None:
     entered, release = Event(), Event()
 
@@ -260,20 +284,38 @@ def test_overlapping_source_run_cannot_overwrite_newer_snapshot(configured: Stor
 
 
 def test_interpreter_startup_injection_is_removed(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    for key in ("PYTHONPATH", "PYTHONHOME", "NODE_OPTIONS", "RUBYOPT", "PERL5OPT", "DYLD_FALLBACK_LIBRARY_PATH"):
+    variables = (
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONUSERBASE",
+        "PYTHONWARNINGS",
+        "NODE_OPTIONS",
+        "RUBYOPT",
+        "PERL5OPT",
+        "JAVA_TOOL_OPTIONS",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+    )
+    for key in variables:
         monkeypatch.setenv(key, "startup-injection")
+    # A relative PATH entry would resolve inside the brain, where only sensors/ and routines/ may run.
+    configured.write("bin/tool", b"#!/bin/sh\necho injected\n")
+    (configured.root / "bin/tool").chmod(0o700)
+    monkeypatch.setenv("PATH", "bin:/usr/bin:/bin")
     source = Sensor(command=["sh"])
+    log = log_path(configured, "sample")
     output = run(
-        ["sh", "-c", 'printf "%s" "$PYTHONPATH$PYTHONHOME$NODE_OPTIONS$RUBYOPT$PERL5OPT$DYLD_FALLBACK_LIBRARY_PATH"'],
+        ["sh", "-c", 'printf "%s|%s" "$PATH" "' + "".join(f"${key}" for key in variables) + '"'],
         source,
         configured,
-        log_path(configured, "sample"),
+        log,
     )
-    assert output == b""
+    assert output == b"/usr/bin:/bin|"
+    with pytest.raises(Error, match="not on PATH"):
+        run(["tool"], source, configured, log)
 
 
-def test_sigterm_cancels_collector_and_descendants(configured: Store, tmp_path: Path) -> None:
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP], ids=["stop", "hangup"])
+def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_path: Path, signum: int) -> None:
     marker = tmp_path / "children"
     configured.write("sensors/wait.sh", b'#!/bin/sh\nsleep 60 &\nprintf "%s %s\\n" "$$" "$!" > "$1"\nwait\n')
     (configured.root / "sensors/wait.sh").chmod(0o700)
@@ -312,7 +354,7 @@ def test_sigterm_cancels_collector_and_descendants(configured: Store, tmp_path: 
             time.sleep(0.02)
         assert marker.exists(), "collector did not start"
         pids = [int(value) for value in marker.read_text().split()]
-        child.send_signal(signal.SIGTERM)
+        child.send_signal(signum)
         stdout, stderr = child.communicate(timeout=10)
         assert child.returncode == 130, stderr.decode()
         assert stdout == b""
@@ -384,20 +426,33 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
         ("sample", "2026-09-01T23:55:00.000000Z", timestamp((NOW + timedelta(days=1)).isoformat())),
     ]
     # A newer, disjoint window becomes the coverage and the latest success.
+    newer = datetime(2026, 9, 11, 1, tzinfo=UTC)
     collect(
         configured,
         "sample",
         start="2026-09-10T00:00:00Z",
         end="2026-09-11T00:00:00Z",
         runner=lambda *_: b"[]",
-        clock=lambda: later,
+        clock=lambda: newer,
     )
     entry = state(configured)["sample"]
     assert (entry["start"], entry["end"], entry["success"]) == (
         "2026-09-10T00:00:00.000000Z",
         "2026-09-11T00:00:00.000000Z",
-        later.isoformat(),
+        newer.isoformat(),
     )
+    # A window ending after its run covers only up to the run, so later scheduled runs stay the latest.
+    ahead = newer + timedelta(hours=1)
+    collect(configured, "sample", start=END, end="2026-12-31T00:00:00Z", runner=lambda *_: b"[]", clock=lambda: ahead)
+    assert state(configured)["sample"]["end"] == timestamp(ahead.isoformat())
+    after = ahead + timedelta(hours=2)
+    window = due(configured, after)[-1]
+    collect(configured, "sample", start=window[1], end=window[2], runner=lambda *_: b"[]", clock=lambda: after)
+    assert state(configured)["sample"]["success"] == after.isoformat()
+    # A window entirely after its run claims no coverage and no success.
+    collect(configured, "sample", start="2027-01-01T00:00:00Z", end="2027-01-02T00:00:00Z", runner=lambda *_: b"[]")
+    assert state(configured)["sample"]["success"] == after.isoformat()
+    assert state(configured)["sample"]["end"] == window[2]
 
 
 def test_failed_run_history_reports_that_records_were_committed(

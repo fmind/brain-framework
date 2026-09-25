@@ -150,12 +150,25 @@ def test_routines_require_trust_and_valid_windows(configured: Store, tmp_path: P
     ]
 
 
-def test_due_routines_cover_the_time_since_their_last_success(configured: Store) -> None:
+def test_due_routines_cover_the_time_since_their_last_reviewed_window(configured: Store) -> None:
     assert due_routines(configured, NOW) == [("digest", START, END)]
     routine(configured, "digest", start=START, end=END, runner=printing(b""), clock=lambda: NOW)
     assert due_routines(configured, NOW + timedelta(hours=1)) == []
     later = NOW + timedelta(days=1)
     assert due_routines(configured, later) == [("digest", END, "2026-09-26T08:00:00.000000Z")]
+
+
+def test_a_skipped_review_keeps_its_window_for_the_next_action(configured: Store) -> None:
+    configured.write("bf.yaml", CONFIG.replace(b"refresh: 86400", b"refresh: 3600"))
+    routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
+    hour = NOW + timedelta(hours=1)
+    ((_, start, end),) = [window for window in due_routines(configured, hour) if window[0] == "digest"]
+    assert start == END
+    skipped = routine(configured, "digest", start=start, end=end, runner=printing(ACTION), clock=lambda: hour)
+    assert "skipped" in skipped
+    # The hour whose output was discarded stays in the next window, which a later action covers.
+    ((_, start, _),) = [w for w in due_routines(configured, NOW + timedelta(days=1)) if w[0] == "digest"]
+    assert start == END
 
 
 def test_update_runs_routines_after_sensors_and_isolates_failures(configured: Store) -> None:

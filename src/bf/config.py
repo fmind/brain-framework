@@ -175,8 +175,7 @@ def _located(value: str) -> Store:
             return nearest
         if value in config.brains:
             return _reference(nearest, value, config.brains[value].path)
-    if Path(value).expanduser().is_dir():
-        return Store(Path(value).expanduser())
+    # A registered name wins over a same-named directory below the working directory.
     registry = user_config()
     if value in registry.brains:
         return Store(Path(registry.brains[value].path).expanduser())

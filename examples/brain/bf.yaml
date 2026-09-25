@@ -10,6 +10,16 @@ sensors:
       kind: { value: event }
       repository: { path: /links }
 schema:
+  depends-on:
+    description: This conclusion needs review when the target evidence changes.
+    type: identity
+    cardinality: many
+    relation: true
+  supersedes:
+    description: This authored decision explicitly replaces the target decision.
+    type: identity
+    cardinality: many
+    relation: true
   related-to:
     description: An explicit association without a more specific known role.
     type: identity

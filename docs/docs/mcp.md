@@ -16,7 +16,7 @@ Text and structured results carry the same value. Errors hide brain paths. There
 
 ## Connect a host
 
-In your host's MCP settings, create a stdio server with command `bf` and arguments `mcp`, `--brain`, `brain` (replace `brain` with the intended brain's absolute path or locally declared name). Use the full executable path from `command -v bf` if the host does not inherit your shell's PATH. The host starts and stops the process; you do not need a separate daemon or network port.
+In your host's MCP settings, create a stdio server with command `bf` and arguments `mcp`, `--brain`, `/home/me/knowledge` (the intended brain's absolute path; a registered name also works, but the host's working directory decides which enclosing brain a bare name can match). Use the full executable path from `command -v bf` if the host does not inherit your shell's PATH. The host starts and stops the process; you do not need a separate daemon or network port.
 
 Selected roots are fixed when the server starts; their direct `brains:` declarations are reread for each request. Restart after changing root selection or updating Brain Framework. Search and read cover those roots and direct references; the `brain` argument on `read` disambiguates a returned ref, and cannot open a brain outside that selection.
 

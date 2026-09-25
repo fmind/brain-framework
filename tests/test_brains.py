@@ -12,7 +12,7 @@ from mcp.types import CallToolResult
 from typer.testing import CliRunner
 
 from bf.cli import app
-from bf.config import load, may_collect, one, related, select, user_path
+from bf.config import load, may_collect, one, register, related, select, user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
 from bf.models import Error, Query
@@ -174,3 +174,19 @@ def test_mcp_and_evaluations_share_local_scope(tmp_path: Path) -> None:
         assert result.structured_content["problems"]
 
     asyncio.run(check())
+
+
+def test_registry_paths_are_absolute_and_names_win_over_local_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registered = make(tmp_path / "registered", "shared")
+    register(registered, collect=True)
+    # A same-named directory below the working directory does not replace the registered brain.
+    (tmp_path / "work").mkdir()
+    make(tmp_path / "work" / "shared", "shared")
+    monkeypatch.chdir(tmp_path / "work")
+    assert [store.root for store in select("shared")] == [registered.root]
+    # A relative registry path would resolve against the working directory and could trust another clone.
+    user_path().write_text("brains:\n  shared:\n    path: shared\n    collect: true\n")
+    with pytest.raises(Error, match="absolute"):
+        may_collect(registered)

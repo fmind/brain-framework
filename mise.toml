@@ -97,6 +97,7 @@ class SkipLinks(HTMLParser):
 site = Path("site")
 expected_pages = {
     "404.html",
+    "docs/agents/index.html",
     "docs/brain/index.html",
     "docs/commands/index.html",
     "docs/getting-started/index.html",

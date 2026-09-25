@@ -9,7 +9,7 @@ from typing import cast
 from bf import index, usage
 from bf.collect import ROUTINES, log_path, state
 from bf.config import load, may_collect
-from bf.models import Program
+from bf.models import Error, Program
 from bf.storage import Store
 
 
@@ -25,10 +25,19 @@ def _freshness(program: Program, success: str, now: datetime, trusted: bool) -> 
 
 
 def source_health(
-    store: Store, names: Iterable[str] = (), *, now: datetime | None = None, trusted: bool = False
+    store: Store, names: Iterable[str] = (), *, now: datetime | None = None, trusted: bool | None = None
 ) -> dict[str, dict[str, object]]:
-    """Describe active, disabled and historical sources without running them or exposing logs."""
+    """Describe active, disabled and historical sources without running them or exposing logs.
+
+    `trusted` defaults to this machine's collection trust, so every reply reports the same freshness.
+    """
     now = now or datetime.now(UTC)
+    if trusted is None:
+        try:
+            trusted = may_collect(store)
+        except Error, OSError, UnicodeError:
+            # An unreadable registry grants nothing: freshness stays unknown and the read still answers.
+            trusted = False
     config, history = load(store), state(store)
     result: dict[str, dict[str, object]] = {}
     for name in sorted({*config.sensors, *names}):
@@ -132,7 +141,8 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
                     healthy &= not entry["stale"]
                 if entry.get("error"):
                     entry["log"] = str(log_path(store, name))
-                    healthy &= not settings.enabled
+                    # Like routines, only a scheduled sensor this machine runs fails the check.
+                    healthy &= not (settings.enabled and settings.refresh and trusted)
             sources[name] = {key: value for key, value in entry.items() if value != ""}
         routines = routine_health(store, now=now, trusted=trusted)
         for name, entry in routines.items():

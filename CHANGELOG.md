@@ -2,6 +2,47 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## [v11.1.0](https://github.com/fmind/brain-framework/releases/tag/v11.1.0) - 2026-09-25
+
+Brain Framework 11.1 adds optional decision workflows to the agent skills and hardens collection, retrieval and validation after a full review. The brain format is unchanged: `bf.yaml` and retrieval suites stay at version 5.
+
+### Added
+
+- Decision workflows in the `bf-action` and `bf-learn` skills, loaded on demand: a small working context in each action (`## Context {#context}` of at most 300 words, six refs and 4 KiB, and `## Resume {#resume}`), decisions with alternatives and expected outcomes, conditional intentions, explicit unknowns, belief revision with a declared `supersedes` role, dependency review bounded to two hops and ten dependents, procedures learned from outcomes and reviewed transfer to another brain.
+- `skills/bf-learn/scripts/evidence.py`, a standard-library helper for Python 3.11 or later: `capture` retains one exact `bf read` with its digest and limitations, and `compare` returns a compact `changed`, `unchanged` or `unknown` verdict for a new read. It reads stdin only and never opens a brain, runs a provider or uses a model.
+- An [agent workflows](https://fmind.github.io/brain-framework/docs/agents/) page covers the skills, the everyday loop, resuming actions, decision workflows and evidence captures.
+- The example brain demonstrates a decision review: a fictional policy, a superseded decision, an intention, an unknown, a draft procedure, a prepared transfer and retrieval cases for each.
+
+### Changed
+
+- Search excerpts are one line and start below a section's heading, which the result title already names. The search cache rebuilds automatically.
+- Exact record reads and search coverage report the same freshness as `bf status` and source pages: a trusted scheduled sensor that never succeeded is `never`. An unreadable registry grants no trust and leaves freshness `unknown`.
+- An invalid `--scope`, `--since` or `--until` exits 2 as invalid input, like other command-line errors. A closed terminal (SIGHUP) cancels like SIGTERM and kills running providers; `nohup` keeps it ignored.
+- `bf status --check` fails only for scheduled sensors this machine runs, as documented; a failed manual collection is still reported with its log.
+- Registered brains win over a same-named directory below the working directory for `--brain NAME`.
+
+### Fixed
+
+- The brain writer lock follows the brain directory's device and inode, so bind mounts and differently spelled paths of one brain no longer commit concurrently. Writers must share one private state directory.
+- A state directory below a linked ancestor, such as `/home` linked to `/var/home`, no longer breaks every command; the state root itself still may not be a link.
+- A registry entry with a relative path is rejected instead of granting collection trust to whatever that path means in the working directory.
+- Relative `PATH` entries no longer let a bare command resolve inside the brain, and every `PYTHON*` variable plus Java, Lua and `GCONV_PATH` startup variables are removed before a sensor or routine starts. Brain executables may exceed 1 MiB.
+- Invalid sensor output is reported by record position and field name only: keys the provider printed no longer reach errors, logs or run history.
+- An empty snapshot no longer erases a non-empty catalog; the run fails and keeps the records. Delete `memories/SOURCE/` to clear a source deliberately.
+- A backfill whose `--until` lies in the future no longer blocks later scheduled successes: coverage never extends past the run.
+- A routine run skipped because today's action exists no longer loses its window; the next written action covers it.
+- A stored revision claiming a modification after it was first observed, such as a file with a future mtime, no longer freezes a record against newer collections.
+- A note dated `0001-01-01` or `9999-12-31` is invalid instead of crashing searches and pages; a damaged cache reports "run bf build" instead of a traceback.
+- `read` keeps answering from the other brains when one selected brain has an invalid `bf.yaml`, and reports it under `problems`.
+- An alias claimed by several notes no longer merges their backlinks in scoped searches and identity pages.
+- Identity searches include links to a note's sections, like scoped searches and backlinks.
+- Period pages order `changed` items by modification time across brains.
+- `memories/SOURCE/PERIOD` for an unknown source is a missing page instead of an empty answer.
+- Reading an identity or an absent source no longer waits for a running writer.
+- A record id too long for a BF address still reads, with its backlinks reported as unavailable.
+- Headings without word characters get an addressable `section` slug; explicit anchors cannot end in `.md`; a link to a non-Markdown file whose name contains `#` validates.
+- The session hook and the weekly review show local dates, and the weekly review writes one paragraph per line and fences record ids so that none can become a link.
+
 ## [v11.0.0](https://github.com/fmind/brain-framework/releases/tag/v11.0.0) - 2026-09-25
 
 Brain Framework 11 turns listings into pages, gives actions a resumable page and schedules deterministic routines next to sensors. Search takes words and one scope; everything else is a page that `read` resolves. The brain format changes: `bf.yaml` and retrieval suites move to version 5.

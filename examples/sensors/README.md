@@ -16,7 +16,7 @@ name: knowledge
 sensors:
   git-commits:
     command: [sensors/git-history.py, "{{home}}", "{{start}}", "{{end}}"]
-    trust: owner # commit messages you and your collaborators wrote in your repositories
+    trust: owner # only for repositories whose commit messages you write; keep external otherwise
     refresh: 3600
   google-calendar-events:
     command: [sensors/google-calendar.py, primary, "{{start}}", "{{end}}"]
