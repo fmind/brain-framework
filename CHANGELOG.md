@@ -2,7 +2,9 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
-## [v11.1.0](https://github.com/fmind/brain-framework/releases/tag/v11.1.0) - 2026-09-25
+## [v11.1.1](https://github.com/fmind/brain-framework/releases/tag/v11.1.1) - 2026-09-25
+
+First published 11.1 release. The v11.1.0 candidate stopped at the release test gate before publication; its tag remains unchanged.
 
 Brain Framework 11.1 adds optional decision workflows to the agent skills and hardens collection, retrieval and validation after a full review. The brain format is unchanged: `bf.yaml` and retrieval suites stay at version 5.
 
@@ -42,6 +44,7 @@ Brain Framework 11.1 adds optional decision workflows to the agent skills and ha
 - A record id too long for a BF address still reads, with its backlinks reported as unavailable.
 - Headings without word characters get an addressable `section` slug; explicit anchors cannot end in `.md`; a link to a non-Markdown file whose name contains `#` validates.
 - The session hook and the weekly review show local dates, and the weekly review writes one paragraph per line and fences record ids so that none can become a link.
+- The exit-code test accepts colored usage errors, as CI terminals print them.
 
 ## [v11.0.0](https://github.com/fmind/brain-framework/releases/tag/v11.0.0) - 2026-09-25
 

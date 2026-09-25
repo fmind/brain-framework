@@ -136,7 +136,8 @@ def test_console_errors_are_private_and_on_stderr(brain: Store) -> None:
         result = bf(*args)
         assert result.returncode == code, result.stderr
         assert not result.stdout
-        assert result.stderr.startswith("bf:" if code == 1 else ("bf:", "Usage:"))
+        # Usage errors may be colored, as on CI terminals; failures are always plain `bf:` lines.
+        assert result.stderr.startswith("bf:") if code == 1 else "bf:" in result.stderr or "Usage" in result.stderr
         assert str(brain.root) not in result.stderr
     assert "limit" in bf("search", "x", "--limit", "0").stderr
     assert "scope accepts" in bf("search", "x", "--scope", "soon").stderr

@@ -5,7 +5,7 @@ By the end of this walkthrough, you will have a saved decision, a search that fi
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then Brain Framework. uv supplies Python 3.14 if needed. If `bf` is not on PATH, run `uv tool update-shell` and open a new shell.
 
 ```bash
-uv tool install --python 3.14 'brain-framework==11.1.0'
+uv tool install --python 3.14 'brain-framework==11.1.1'
 bf --version
 ```
 
@@ -156,7 +156,7 @@ The [runnable example](https://github.com/fmind/brain-framework/tree/main/exampl
 Read the [release notes](https://github.com/fmind/brain-framework/releases), then update the tool and check your brain:
 
 ```bash
-uv tool install --upgrade --python 3.14 'brain-framework==11.1.0'
+uv tool install --upgrade --python 3.14 'brain-framework==11.1.1'
 bf --version
 bf validate --brain ~/knowledge
 bf eval --brain ~/knowledge

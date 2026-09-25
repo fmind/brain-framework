@@ -12,7 +12,7 @@ Start with one decision worth remembering. Search it, read its source, and keep 
 
 Use your editor for notes, Git for review, provider CLIs for authentication and a native timer for collection. Brain Framework contributes one command, a rebuildable SQLite cache, browsable pages and two read-only MCP tools. It requires no model, hosted database or background server. Search matches words and explicit identities, optionally within a folder, a period or an identity; it does not generate answers or automatically learn from conversations.
 
-These docs describe Brain Framework 11.1.0. Read the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md) for release changes. Check `bf --version` and follow the [installation guide](getting-started.md) to update an older copy.
+These docs describe Brain Framework 11.1.1. Read the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md) for release changes. Check `bf --version` and follow the [installation guide](getting-started.md) to update an older copy.
 
 ## Start with the question you need to answer
 
