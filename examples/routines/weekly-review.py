@@ -41,6 +41,14 @@ def plain(value: object) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[\[\]()<>`]", "", str(value))).strip() or "untitled"
 
 
+def local(value: object) -> str:
+    """The local date of a returned UTC time: a note dated 2026-09-25 is local midnight, not the UTC day."""
+    try:
+        return datetime.fromisoformat(str(value)).astimezone().date().isoformat()
+    except ValueError:
+        return ""
+
+
 def link(item: dict) -> str:
     return f"[{plain(item.get('title', item['ref']))}]({item['uri']})"
 
@@ -72,7 +80,7 @@ def render(day: str, home: dict, week: dict) -> Iterator[str]:
     yield "## Projects to review"
     yield ""
     for project in review:
-        details = [str(project.get("status", "")), f"updated {str(project.get('time', ''))[:10] or 'never'}"]
+        details = [str(project.get("status", "")), f"updated {local(project.get('time')) or 'never'}"]
         if project.get("new_links"):
             details.append(f"{project['new_links']} newer linked items")
         line = f"- [ ] {link(project)} ({', '.join(details)})"

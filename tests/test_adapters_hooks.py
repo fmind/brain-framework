@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from conftest import Provider
 
 REPO = "repo:github.com/fmind/brain-framework"
@@ -32,20 +34,16 @@ PAGE = {
         {"total": 3, "items": []},
     ],
 }
-PROJECTS = {
-    "page": "projects",
-    "items": [
-        {
-            "ref": "projects/brain-framework.md",
-            "title": "Brain Framework",
-            "status": "active",
-            "time": "2026-09-20T00:00:00Z",
-            "review": True,
-            "new_links": 4,
-            "next": "Qualify v11.",
-        }
-    ],
+PROJECT = {
+    "ref": "projects/brain-framework.md",
+    "title": "Brain Framework",
+    "status": "active",
+    "time": "2026-09-20T00:00:00Z",
+    "review": True,
+    "new_links": 4,
+    "next": "Qualify v11.",
 }
+PROJECTS = {"page": "projects", "items": [PROJECT]}
 
 
 def install(provider: Provider, remote: str, page: object = PAGE, code: int = 0) -> None:
@@ -91,3 +89,20 @@ def test_session_context_is_silent_when_nothing_applies(provider: Provider) -> N
         assert (result.returncode, result.stdout) == (0, "")
     provider.install("git", [{"match": ["remote"], "code": 128, "stderr": "not a repository"}])
     assert provider.run("session-context.py", folder="hooks").stdout == ""
+
+
+def test_session_context_shows_local_dates(provider: Provider, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A note updated on 2026-09-20 is local midnight, which is 2026-09-19 in UTC east of Greenwich.
+    monkeypatch.setenv("TZ", "Europe/Paris")
+    install(provider, "git@github.com:fmind/brain-framework.git")
+    provider.install(
+        "bf",
+        [
+            {
+                "match": ["read", "projects"],
+                "stdout": {"items": [{**PROJECT, "time": "2026-09-19T22:00:00Z"}]},
+            },
+            {"match": ["read", REPO], "stdout": PAGE},
+        ],
+    )
+    assert "updated 2026-09-20" in provider.run("session-context.py", "/brains/main", folder="hooks").stdout
