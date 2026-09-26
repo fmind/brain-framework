@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import date
@@ -34,6 +36,11 @@ class _Journal(Model):
 
 def _pending(store: Store) -> bool:
     try:
+        # An excluded memories root cannot contain an accessible transaction. Retrieval reports
+        # the root through its scan; a linked .pending inside a real root still fails closed.
+        with store.parent("memories") as (parent, leaf):
+            if not stat.S_ISDIR(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode):
+                return False
         with store.parent(_MANIFEST):
             return True
     except FileNotFoundError:
@@ -154,9 +161,15 @@ def line(record: Record) -> bytes:
     return encode(record.model_dump(exclude_defaults=True))
 
 
-def partitions(store: Store, source: str = "") -> list[str]:
-    """Record partitions of one source, or of every source; other files under memories/ are ignored."""
-    return [name for name in store.files(f"memories/{source}" if source else "memories") if name.endswith(".jsonl")]
+def partitions(
+    store: Store, source: str = "", *, skipped: dict[str, tuple[int, int, int, int]] | None = None
+) -> list[str]:
+    """Record partitions of one source, or of every source; other files under memories/ are ignored.
+
+    With `skipped`, symlinks and special files are collected there instead of failing the listing.
+    """
+    directory = f"memories/{source}" if source else "memories"
+    return [name for name in store.files(directory, skipped=skipped) if name.endswith(".jsonl")]
 
 
 def parse(name: str, data: bytes) -> Iterator[Record]:
@@ -260,12 +273,16 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
 
 def find(store: Store, source: str, record_id: str) -> tuple[str, Record] | None:
     """Scan one source directly: exact record reads never depend on the derived index."""
-    if not re.fullmatch(NAME, source) or not partitions(store, source):
+    skipped: dict[str, tuple[int, int, int, int]] = {}
+    if not re.fullmatch(NAME, source) or not (partitions(store, source, skipped=skipped) or skipped):
         # An alias or an absent source has nothing to read, and never waits for a writer.
         return None
-    unreadable = False
     with reading(store):
-        for name in sorted(partitions(store, source), reverse=True):
+        skipped.clear()
+        names = partitions(store, source, skipped=skipped)
+        # A linked or special partition is never read: it is unreadable evidence, never an absence.
+        unreadable = bool(skipped)
+        for name in sorted(names, reverse=True):
             try:
                 items = load(store, name)
             except Error, OSError, UnicodeError:

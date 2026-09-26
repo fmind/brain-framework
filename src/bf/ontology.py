@@ -66,10 +66,9 @@ def validate(record: Record, config: Config) -> None:
             links.identity(alias)
             if parsed.brain != config.name:
                 raise Error("BF aliases must belong to their own brain namespace")
-    for target in record.links:
-        links.claim(target, config, links.address(config.name, "item"), links.address(config.name, "item"))
-    if record.url:
-        links.claim(record.url, config, links.address(config.name, "item"), links.address(config.name, "item"))
+    item = links.address(config.name, "item")
+    for target in [*record.links, *([record.url] if record.url else [])]:
+        links.claim(target, config, item, item)
 
 
 def relations(record: Record, config: Config) -> list[tuple[str, str]]:

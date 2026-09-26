@@ -7,15 +7,19 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
+from functools import cache
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlsplit
 
-from markdown_it import MarkdownIt
 from pydantic import ValidationError
 
 from bf import links as bf_links
 from bf.config import yaml_object
 from bf.models import AUTHORED, Error, Knowledge, explain
+
+if TYPE_CHECKING:
+    from markdown_it import MarkdownIt
 
 LEAD = 320
 _FOOTNOTE = re.compile(r"^\[\^([^\]\s]+)\]:", re.MULTILINE)
@@ -78,6 +82,14 @@ def slugify(title: str) -> str:
     return re.sub(r"\s", "-", re.sub(r"[^\w\s-]", "", title.lower()))
 
 
+@cache
+def _parser() -> MarkdownIt:
+    """One CommonMark parser, imported on first use: a fresh cache answers searches and pages without it."""
+    from markdown_it import MarkdownIt
+
+    return MarkdownIt()
+
+
 def parse(path: str, data: bytes) -> Markdown:
     try:
         text = data.decode("utf-8")
@@ -90,15 +102,12 @@ def parse(path: str, data: bytes) -> Markdown:
         end = next((i for i, line in enumerate(source_lines[1:], 1) if line.rstrip("\r\n") == "---"), None)
         if end is None:
             raise Error(f"{path}: unclosed frontmatter")
-        try:
-            attributes = yaml_object("".join(source_lines[1:end]).encode())
-        except Error as error:
-            raise Error(f"{path}: {error}") from error
+        attributes = yaml_object("".join(source_lines[1:end]).encode(), path, line=2)
         offset = end + 1
     body = "".join(source_lines[offset:])
     # OKF claim footnotes (`[^id]: [Source](ref)`) are not link reference definitions in CommonMark;
     # parse them as ordinary lines so their links are checked, on a copy with the same line numbers.
-    tokens = MarkdownIt().parse(_FOOTNOTE.sub(r"\1:", body))
+    tokens = _parser().parse(_FOOTNOTE.sub(r"\1:", body))
     headings: list[Heading] = []
     links: list[str] = []
     contexts: list[tuple[str, str]] = []

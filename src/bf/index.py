@@ -7,6 +7,7 @@ import re
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager, suppress
+from contextvars import ContextVar
 from pathlib import Path
 from typing import cast
 
@@ -17,16 +18,13 @@ from bf.markdown import LEAD, authored, note
 from bf.models import AUTHORED, MAX_NOTE, Error, Query, Record, digest, encode, moment
 from bf.storage import BusyError, Store, reader, writer
 
-SCHEMA = 17
+SCHEMA = 18
 CACHE = ".bf/index.sqlite"
 _DDL = """
 CREATE TABLE ontology(signature TEXT NOT NULL);
 -- A rowid table: secondary indexes of a WITHOUT ROWID table would copy its whole composite key.
 CREATE TABLE edges(item INTEGER NOT NULL, subject TEXT NOT NULL, relation TEXT NOT NULL, target TEXT NOT NULL,
                    origin TEXT NOT NULL);
-CREATE INDEX edges_item ON edges(item);
-CREATE INDEX edges_target ON edges(target);
-CREATE INDEX edges_subject ON edges(subject,relation);
 CREATE TABLE files(path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, ctime INTEGER, inode INTEGER,
                    error TEXT NOT NULL DEFAULT '');
 CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT NOT NULL, kind TEXT NOT NULL,
@@ -35,16 +33,26 @@ CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT N
                    updated TEXT NOT NULL, observed TEXT NOT NULL, partial INTEGER NOT NULL,
                    tasks_open INTEGER NOT NULL, tasks_done INTEGER NOT NULL, next TEXT NOT NULL,
                    weight INTEGER NOT NULL);
-CREATE INDEX items_path ON items(path);
-CREATE INDEX items_time ON items(time);
 CREATE TABLE passages(id INTEGER PRIMARY KEY, item INTEGER NOT NULL, fragment TEXT NOT NULL, title TEXT NOT NULL);
-CREATE INDEX passages_item ON passages(item);
 CREATE VIRTUAL TABLE search USING fts5(title, text, names, tokenize='porter unicode61 remove_diacritics 2');
 CREATE TABLE names(name TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY(name, item)) WITHOUT ROWID;
-CREATE INDEX names_item ON names(item);
 CREATE TABLE links(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
-CREATE INDEX links_target ON links(target);
 """
+# A full build creates secondary indexes after loading every file: sorting once beats growing each B-tree.
+# Pages list notes by kind, records by time, and each source's records and totals without scanning every item.
+_INDEXES = (
+    "CREATE INDEX edges_item ON edges(item)",
+    "CREATE INDEX edges_target ON edges(target)",
+    "CREATE INDEX edges_subject ON edges(subject,relation)",
+    "CREATE INDEX items_path ON items(path)",
+    "CREATE INDEX items_kind_time ON items(kind,time)",
+    "CREATE INDEX items_kind_source_time ON items(kind,source,time)",
+    # The expression must stay identical to the record branch of MODIFIED for SQLite to use it.
+    "CREATE INDEX items_kind_modified ON items(kind,coalesce(nullif(updated,''),time))",
+    "CREATE INDEX passages_item ON passages(item)",
+    "CREATE INDEX names_item ON names(item)",
+    "CREATE INDEX links_target ON links(target)",
+)
 # Only English and French function words are dropped: a subject such as "resume" or "active" stays literal.
 _STOP = frozenset(
     """
@@ -77,13 +85,24 @@ def distilled(path: str) -> bool:
 
 
 def inputs(store: Store) -> dict[str, tuple[int, int, int, int]]:
-    """Authored notes and record partitions with their file fingerprints."""
-    names = [n for d in AUTHORED for n in store.files(d) if authored(n)] + records.partitions(store)
-    current = {}
-    for name in names:
-        with suppress(FileNotFoundError):
-            current[name] = store.fingerprint(name)
-    return current
+    """Authored notes and record partitions with their file fingerprints.
+
+    Every symlink or special entry stays an input so its exclusion is reported. A link can hide
+    a whole directory regardless of its filename; never inspect its target to guess its contents.
+    """
+    found: dict[str, tuple[int, int, int, int]] = {}
+    for directory in (*AUTHORED, "memories"):
+        skipped: dict[str, tuple[int, int, int, int]] = {}
+        scanned = store.scan(directory, skipped=skipped)
+        found.update(
+            {
+                name: info
+                for name, info in scanned.items()
+                if (name.endswith(".jsonl") if directory == "memories" else authored(name))
+            }
+        )
+        found.update(skipped)
+    return found
 
 
 def _path(store: Store) -> Path:
@@ -106,6 +125,8 @@ def _open(store: Store) -> sqlite3.Connection | None:
     expected_signature = _signature(store)
     connection = sqlite3.connect(path, timeout=30)
     connection.row_factory = sqlite3.Row
+    # Queries shared with page builders place notes in time on the reading machine.
+    connection.create_function("note_time", 1, _note_time, deterministic=True)
     try:
         if connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA:
             # Version alone does not establish that an interrupted or damaged cache is usable.
@@ -137,6 +158,11 @@ def _signature(store: Store) -> str:
 
 
 def _create(store: Store) -> sqlite3.Connection:
+    """An empty generation in rollback-journal mode; the caller switches it to WAL once it is filled.
+
+    A new file needs almost no rollback journal, while WAL would write every page twice: once to the log
+    and again when checkpointing it.
+    """
     path = _path(store)
     for suffix in ("", "-wal", "-shm", "-journal"):
         path.with_name(path.name + suffix).unlink(missing_ok=True)
@@ -145,7 +171,6 @@ def _create(store: Store) -> sqlite3.Connection:
     connection.executescript(_DDL)
     connection.execute("INSERT INTO ontology VALUES(?)", (_signature(store),))
     connection.commit()
-    connection.execute("PRAGMA journal_mode=WAL")
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -158,58 +183,89 @@ def _known(connection: sqlite3.Connection) -> dict[str, tuple[int, int, int, int
 
 
 def _drop(connection: sqlite3.Connection, path: str) -> None:
-    items = [row[0] for row in connection.execute("SELECT id FROM items WHERE path=?", (path,))]
-    for item in items:
-        connection.execute("DELETE FROM search WHERE rowid IN (SELECT id FROM passages WHERE item=?)", (item,))
-        for table in ("passages", "names", "links", "edges"):
-            connection.execute(f"DELETE FROM {table} WHERE item=?", (item,))  # noqa: S608 - fixed table names
+    """Delete one file's rows with one statement per table, however many items the file holds."""
+    owned = "item IN (SELECT id FROM items WHERE path=:path)"
+    values = {"path": path}
+    connection.execute(f"DELETE FROM search WHERE rowid IN (SELECT id FROM passages WHERE {owned})", values)  # noqa: S608 - fixed SQL
+    for table in ("passages", "names", "links", "edges"):
+        connection.execute(f"DELETE FROM {table} WHERE {owned}", values)  # noqa: S608 - fixed table names
     connection.execute("DELETE FROM items WHERE path=?", (path,))
     connection.execute("DELETE FROM files WHERE path=?", (path,))
 
 
-def _insert(
-    connection: sqlite3.Connection,
-    values: dict[str, str | int],
-    passages: list[tuple[str, str, str, str, str]],
-    names: list[str],
-    links: list[str],
-    edges: Sequence[bf_links.Claim] = (),
-) -> None:
-    try:
-        cursor = connection.execute(
-            "INSERT INTO items(ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-            "tasks_open,tasks_done,next,weight) VALUES(:ref,:path,:kind,:source,:title,:time,:type,:status,:lead,"
-            ":url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight)",
-            {"tasks_open": 0, "tasks_done": 0, "next": "", "weight": 1, **values},
+class _Rows:
+    """One file's rows, numbered up front so each table takes a single batched insert."""
+
+    def __init__(self, connection: sqlite3.Connection, refs: list[str]) -> None:
+        self.item, self.passage = connection.execute(
+            "SELECT (SELECT coalesce(max(id),0)+1 FROM items),(SELECT coalesce(max(id),0)+1 FROM passages)"
+        ).fetchone()
+        # Refs that other files already hold; the first file to claim a ref keeps it, as the order of indexing.
+        self.taken = {
+            row[0]
+            for row in connection.execute(
+                "SELECT ref FROM items WHERE ref IN (SELECT value FROM json_each(?))", (json.dumps(refs),)
+            )
+        }
+        self.items: list[dict[str, str | int]] = []
+        self.passages: list[tuple[int, int, str, str]] = []
+        self.search: list[tuple[int, str, str, str]] = []
+        self.names: list[tuple[str, int]] = []
+        self.links: list[tuple[int, str]] = []
+        self.edges: dict[tuple[int, str, str, str, str], None] = {}
+
+    def add(
+        self,
+        values: dict[str, str | int],
+        passages: list[tuple[str, str, str, str, str]],
+        names: list[str],
+        links: list[str],
+        edges: Sequence[bf_links.Claim] = (),
+    ) -> None:
+        ref = str(values["ref"])
+        if ref in self.taken:
+            raise Error(f"duplicate reference {ref}; run bf validate")
+        self.taken.add(ref)
+        item = self.item
+        self.item += 1
+        self.items.append({"id": item, "tasks_open": 0, "tasks_done": 0, "next": "", "weight": 1, **values})
+        # `heading` is what ranks; `title` is what readers see, such as "Note — Section".
+        for fragment, title, heading, text, extra in passages:
+            self.passages.append((self.passage, item, fragment, title))
+            self.search.append((self.passage, heading, text, extra))
+            self.passage += 1
+        self.names.extend((name, item) for name in names)
+        self.links.extend((item, link) for link in links)
+        # Two identical claims from one file are one edge; support from other files stays separate.
+        self.edges.update(dict.fromkeys((item, e.subject, e.relation, e.target, e.origin) for e in edges))
+
+    def write(self, connection: sqlite3.Connection) -> None:
+        connection.executemany(
+            "INSERT INTO items(id,ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
+            "tasks_open,tasks_done,next,weight) VALUES(:id,:ref,:path,:kind,:source,:title,:time,:type,:status,"
+            ":lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight)",
+            self.items,
         )
-    except sqlite3.IntegrityError:
-        raise Error(f"duplicate reference {values['ref']}; run bf validate") from None
-    item = cursor.lastrowid
-    # `heading` is what ranks; `title` is what readers see, such as "Note — Section".
-    for fragment, title, heading, text, extra in passages:
-        passage = connection.execute(
-            "INSERT INTO passages(item,fragment,title) VALUES(?,?,?)", (item, fragment, title)
-        ).lastrowid
-        connection.execute(
-            "INSERT INTO search(rowid,title,text,names) VALUES(?,?,?,?)", (passage, heading, text, extra)
-        )
-    connection.executemany("INSERT OR IGNORE INTO names VALUES(?,?)", ((name, item) for name in names))
-    connection.executemany("INSERT OR IGNORE INTO links VALUES(?,?)", ((item, link) for link in links))
-    # Two identical claims from one file are one edge; support from other files stays separate.
-    unique = dict.fromkeys((item, e.subject, e.relation, e.target, e.origin) for e in edges)
-    connection.executemany("INSERT INTO edges VALUES(?,?,?,?,?)", unique)
+        connection.executemany("INSERT INTO passages(id,item,fragment,title) VALUES(?,?,?,?)", self.passages)
+        connection.executemany("INSERT INTO search(rowid,title,text,names) VALUES(?,?,?,?)", self.search)
+        connection.executemany("INSERT OR IGNORE INTO names VALUES(?,?)", self.names)
+        connection.executemany("INSERT OR IGNORE INTO links VALUES(?,?)", self.links)
+        connection.executemany("INSERT INTO edges VALUES(?,?,?,?,?)", self.edges)
 
 
 def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]:
     """Insert one file; parse failures raise, while duplicate record ids are skipped and reported."""
+    config = load(store)
+    # Validate skipped entries before interpreting their extension as a partition.
+    if not authored(path) and not path.endswith(".jsonl"):
+        store.read(path, 0)
     if authored(path):
-        config = load(store)
         projection = note(path, store.read(path, MAX_NOTE))
         knowledge = projection.knowledge
         edges = ontology.note_claims(projection, config)
         metadata = " ".join([knowledge.type, *knowledge.tags, *knowledge.aliases, *projection.links])
-        _insert(
-            connection,
+        rows = _Rows(connection, [path])
+        rows.add(
             {
                 "ref": path,
                 "path": path,
@@ -243,18 +299,19 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
             sorted({*projection.links, *(e.target for e in edges)}),
             edges,
         )
+        rows.write(connection)
         return []
     source = records.source_of(path)
     problems = []
-    config = load(store)
-    for record in records.load(store, path):
+    loaded = records.load(store, path)
+    rows = _Rows(connection, [f"{source}:{record.id}" for record in loaded])
+    for record in loaded:
         edges = ontology.record_claims(record, config, f"{source}:{record.id}")
         # Field values are searchable words; their JSON keys and punctuation would match every record.
         values = [v for value in record.fields.values() for v in (value if isinstance(value, list) else [value])]
         identity = " ".join([source, *record.aliases, *record.links, record.url, *map(str, values)])
         try:
-            _insert(
-                connection,
+            rows.add(
                 {
                     "ref": f"{source}:{record.id}",
                     "path": path,
@@ -279,11 +336,21 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
             )
         except Error as error:
             problems.append(str(error))
+    rows.write(connection)
     return problems
 
 
 def lead(record: Record) -> str:
-    return re.sub(r"\s+", " ", record.text).strip()[:LEAD]
+    """The first LEAD characters with whitespace collapsed, reading only a growing prefix of a long text.
+
+    Collapsing a prefix always yields a prefix of the collapsed text, even when the cut splits a word.
+    """
+    size = 4 * LEAD
+    while True:
+        collapsed = " ".join(record.text[:size].split())
+        if len(collapsed) >= LEAD or size >= len(record.text):
+            return collapsed[:LEAD]
+        size *= 4
 
 
 def refresh(store: Store, *, full: bool = False, wait: float = 30) -> dict[str, object]:
@@ -300,8 +367,11 @@ def _refresh(store: Store, *, full: bool, wait: float) -> dict[str, object]:
             records.recover(store)
         else:
             records.require_ready(store)
-        connection = (None if full else _open(store)) or _create(store)
+        existing = None if full else _open(store)
+        connection = existing or _create(store)
         with closing(connection):
+            # Keep the index B-trees being written in memory: up to 64 MiB, released when the refresh closes.
+            connection.execute("PRAGMA cache_size=-65536")
             current = inputs(store)
             known = _known(connection)
             changed = sorted(path for path, info in current.items() if known.get(path) != info)
@@ -312,7 +382,8 @@ def _refresh(store: Store, *, full: bool, wait: float) -> dict[str, object]:
                 changed = sorted(set(changed) | (retry & current.keys()))
             with connection:
                 connection.execute("BEGIN")
-                for path in removed + changed:
+                # A new generation has nothing to drop.
+                for path in (removed + changed) if existing else ():
                     _drop(connection, path)
                 for path in changed:
                     connection.execute("SAVEPOINT file")
@@ -331,8 +402,14 @@ def _refresh(store: Store, *, full: bool, wait: float) -> dict[str, object]:
                         else ""
                     )
                     connection.execute("INSERT INTO files VALUES(?,?,?,?,?,?)", (path, *current[path], error))
+                if existing is None:
+                    for statement in _INDEXES:
+                        connection.execute(statement)
                 # PRAGMA has no bound-parameter form; SCHEMA is an internal integer constant.
                 connection.execute(f"PRAGMA user_version={SCHEMA}")
+            if existing is None:
+                # Incremental refreshes then commit beside readers instead of blocking them.
+                connection.execute("PRAGMA journal_mode=WAL")
             skipped = connection.execute("SELECT count(*) FROM files WHERE error!=''").fetchone()[0]
         return {"files": len(current), "changed": len(changed), "removed": len(removed), "problems": skipped}
 
@@ -360,17 +437,37 @@ def fresh(store: Store) -> str:
     return "ready"
 
 
+# Freshness already established for each brain root within the current reply, when one is being built.
+_CHECKED: ContextVar[dict[Path, str] | None] = ContextVar("checked", default=None)
+
+
+@contextmanager
+def session() -> Iterator[None]:
+    """Compare each brain's files with its cache once per reply, however many views the reply opens."""
+    token = _CHECKED.set({})
+    try:
+        yield
+    finally:
+        _CHECKED.reset(token)
+
+
 @contextmanager
 def database(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
-    # A full rebuild may replace the generation between the freshness check and open.
-    # Retry once: fresh() waits for an in-progress generation instead of serving it.
-    for _ in range(2):
-        state = fresh(store)
-        connection = _open(store)
-        if connection is not None:
-            break
-    else:
-        raise Error("the search cache is unavailable; run bf build")
+    checked = _CHECKED.get()
+    state = checked.get(store.root, "") if checked is not None else ""
+    connection = _open(store) if state else None
+    if connection is None:
+        # A full rebuild may replace the generation between the freshness check and open.
+        # Retry once: fresh() waits for an in-progress generation instead of serving it.
+        for _ in range(2):
+            state = fresh(store)
+            connection = _open(store)
+            if connection is not None:
+                break
+        else:
+            raise Error("the search cache is unavailable; run bf build")
+        if checked is not None:
+            checked[store.root] = state
     with closing(connection):
         connection.execute("PRAGMA query_only=ON")
         yield connection, state
@@ -383,17 +480,6 @@ def terms(text: str) -> list[str]:
 
 def identity(text: str) -> bool:
     return _IDENTITY.fullmatch(text.strip()) is not None
-
-
-def identity_owners(connection: sqlite3.Connection, text: str) -> set[str]:
-    """Explicit owners for cross-brain identity ordering, kept separate from public results."""
-    return {
-        row[0]
-        for row in connection.execute(
-            "SELECT ref FROM items WHERE ref=? OR id IN (SELECT item FROM names WHERE name=?)",
-            (text.strip(), text.strip()),
-        )
-    }
 
 
 def _note_time(value: str) -> str:
@@ -409,6 +495,18 @@ def _note_time(value: str) -> str:
 # Fixed SQL expressions over `items i`, shared with page builders: event time and last modification.
 TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE i.time END"
 UPDATED = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i.updated,''),i.time) END"
+# Event time within [:since, :until), both given. Records compare their stored instants as a range on
+# items(kind,time); only the few notes resolve their dates one by one.
+WITHIN = (
+    "((i.kind='record' AND i.time>=:since AND i.time<:until) "
+    "OR (i.kind='note' AND i.time!='' AND note_time(i.time)>=:since AND note_time(i.time)<:until))"
+)
+# UPDATED within [:since, :until), both given, with the same split over items_kind_modified.
+MODIFIED = (
+    "((i.kind='record' AND coalesce(nullif(i.updated,''),i.time)>=:since "
+    "AND coalesce(nullif(i.updated,''),i.time)<:until) "
+    "OR (i.kind='note' AND i.time!='' AND note_time(i.time)>=:since AND note_time(i.time)<:until))"
+)
 _FIELDS = f"i.ref,i.kind,i.source,({TIME}) AS time,i.type,i.status,i.url,i.updated,i.observed,i.partial"
 _ROW = f"{_FIELDS},'' AS fragment,i.title,i.lead AS excerpt,i.tasks_open,i.tasks_done,i.next"
 # An item links to a target when it names it exactly, or names a section of a target note.
@@ -440,35 +538,37 @@ def _parameters(targets: set[str]) -> dict[str, object]:
     return {"targets": json.dumps(sorted(targets)), "sections": json.dumps(sections(targets))}
 
 
-def _lexical(connection: sqlite3.Connection, params: dict[str, object], match: str) -> list[dict[str, object]]:
+def _lexical(connection: sqlite3.Connection, params: dict[str, object], match: str) -> Iterator[dict[str, object]]:
     """One ranked any-word query: BM25 adds the weight of each matched term, so fuller matches rank higher.
 
+    Every match is ranked on narrow rows; only the returned items read their display fields.
     Snippets cost far more than ranking, so only returned passages get an excerpt.
     """
     rows = connection.execute(
         f"""WITH matches AS MATERIALIZED (
-           SELECT {_FIELDS},p.fragment,p.title,p.id AS passage,-bm25(search,10.0,1.0,0.5)*i.weight AS score
-           FROM search JOIN passages p ON p.id=search.rowid JOIN items i ON i.id=p.item
-           WHERE search MATCH :match AND {_FILTERS}),
-           ranked AS (SELECT *,row_number() OVER (PARTITION BY ref ORDER BY score DESC,fragment) AS position
-                      FROM matches)
-           SELECT * FROM ranked WHERE position=1
-           ORDER BY status IN ('deprecated','archived'),score DESC,ref
-           LIMIT :limit""",  # noqa: S608 - fixed SQL
+             SELECT p.item,p.id AS passage,p.fragment,i.ref,i.status IN ('deprecated','archived') AS closed,
+                    -bm25(search,10.0,1.0,0.5)*i.weight AS score
+             FROM search JOIN passages p ON p.id=search.rowid JOIN items i ON i.id=p.item
+             WHERE search MATCH :match AND {_FILTERS}),
+           top AS (
+             SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY item ORDER BY score DESC,fragment) AS position
+                            FROM matches)
+             WHERE position=1 ORDER BY closed,score DESC,ref LIMIT :limit)
+           SELECT {_FIELDS},t.fragment,p.title,t.passage FROM top t
+           JOIN items i ON i.id=t.item JOIN passages p ON p.id=t.passage
+           ORDER BY t.closed,t.score DESC,t.ref""",  # noqa: S608 - fixed SQL
         {**params, "match": match},
-    ).fetchall()
-    result = []
+    )
     for row in rows:
         item = dict(row)
         excerpt = connection.execute(
             "SELECT snippet(search,1,'','',' … ',48) FROM search WHERE search MATCH ? AND rowid=?",
             (match, item.pop("passage")),
         ).fetchone()
-        result.append({**item, "excerpt": excerpt[0] if excerpt else ""})
-    return result
+        yield {**item, "excerpt": excerpt[0] if excerpt else ""}
 
 
-def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> list[dict[str, object]]:
+def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> Iterator[dict[str, object]]:
     rows = connection.execute(
         f"""WITH candidates AS (
               SELECT id AS item,2e6 AS score FROM items WHERE ref=:text
@@ -479,10 +579,10 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> list
               owners AS (SELECT item,max(score) AS score FROM candidates GROUP BY item)
            SELECT {_FIELDS},'' AS fragment,i.title,c.score,i.lead AS excerpt FROM owners c
            JOIN items i ON i.id=c.item WHERE {_FILTERS}
-           ORDER BY c.score DESC,time DESC,i.ref LIMIT :limit""",  # noqa: S608 - fixed SQL
+           ORDER BY c.score DESC,time DESC,i.ref DESC LIMIT :limit""",  # noqa: S608 - fixed SQL
         params,
-    ).fetchall()
-    return [dict(row) for row in rows]
+    )
+    return (dict(row) for row in rows)
 
 
 def known(connection: sqlite3.Connection, identities: set[str]) -> bool:
@@ -507,13 +607,15 @@ def search(
     identities: set[str] | None = None,
     targets: set[str] | None = None,
     exact: bool | None = None,
-) -> list[dict[str, object]]:
+    limit: int = 0,
+) -> Iterator[dict[str, object]]:
     """A known identity returns its owners, then what links to it; other text ranks lexically, within the scope.
 
     Words shaped like an identity, such as re:invent, rank lexically when no item is, names or links to them.
+    `limit` overrides the query's own, such as one more row to tell whether further results exist.
     """
-    connection.create_function("note_time", 1, _note_time, deterministic=True)
     params: dict[str, object] = query.model_dump()
+    params["limit"] = limit or query.limit
     text = params["text"] = query.text.strip()
     exact_identities = identities or {text}
     params["identities"] = json.dumps(sorted(exact_identities))
@@ -522,19 +624,27 @@ def search(
     if exact is None:
         exact = identity(text) and known(connection, exact_identities | {text})
     if exact:
-        return [_clean(row) for row in _identity(connection, params)]
+        return ({**_clean(dict(row)), "_rank": row["score"]} for row in _identity(connection, params))
     tokens = terms(text)
     if not tokens:
-        return []
+        return iter(())
     match = " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)
-    return [_clean(row) for row in _lexical(connection, params, match)]
+    return (_clean(row) for row in _lexical(connection, params, match))
+
+
+def listing_rows(
+    connection: sqlite3.Connection, where: str, params: Mapping[str, object], order: str
+) -> tuple[Iterator[dict[str, object]], int]:
+    """Stream fixed page SQL in order without retaining skipped rows in Python."""
+    total = connection.execute(f"SELECT count(*) FROM items i WHERE {where}", params).fetchone()[0]  # noqa: S608
+    rows = connection.execute(f"SELECT {_ROW} FROM items i WHERE {where} ORDER BY {order}", params)  # noqa: S608
+    return (_clean(dict(row)) for row in rows), total
 
 
 def listing(
     connection: sqlite3.Connection, where: str, params: Mapping[str, object], order: str, limit: int
 ) -> tuple[list[dict[str, object]], int]:
     """Items matching fixed SQL written by the page builders, with the total before the limit."""
-    connection.create_function("note_time", 1, _note_time, deterministic=True)
     values = {"since": "", "until": "", "prefix": "", "target": "", **_parameters(set()), **params}
     # `where` and `order` are fixed SQL written by the page builders; values stay bound parameters.
     total = connection.execute(f"SELECT count(*) FROM items i WHERE {where}", values).fetchone()[0]  # noqa: S608
@@ -561,7 +671,6 @@ def incoming(
     connection: sqlite3.Connection, targets: set[str], *, exclude: str = "", limit: int = 20
 ) -> list[dict[str, object]]:
     """Items linking to any target, grouped by explicit relationship; links without a role come last."""
-    connection.create_function("note_time", 1, _note_time, deterministic=True)
     values = {**_parameters(targets), "exclude": exclude, "limit": limit}
     groups = []
     for relation, total in connection.execute(_GROUPS, values).fetchall():
@@ -573,7 +682,6 @@ def incoming(
 
 def newer_links(connection: sqlite3.Connection, ref: str, after: str) -> int:
     """How many other items link to a note and are dated after `after`: evidence the note may not reflect."""
-    connection.create_function("note_time", 1, _note_time, deterministic=True)
     row = connection.execute("SELECT id FROM items WHERE ref=?", (ref,)).fetchone()
     if row is None:
         return 0
@@ -612,7 +720,8 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
 def problems(connection: sqlite3.Connection) -> list[str]:
     """Bound diagnostics shared by search and status; full validation remains available."""
     return [
-        f"{row['path']}: {row['error']}"
+        # Most parse errors already name their file; name it once.
+        row["error"] if row["error"].startswith(row["path"] + ":") else f"{row['path']}: {row['error']}"
         for row in connection.execute("SELECT path,error FROM files WHERE error!='' ORDER BY path LIMIT 200")
     ]
 

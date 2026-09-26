@@ -46,7 +46,9 @@ def _validate(store: Store) -> dict[str, object]:
     addresses: set[str] = set()
     unresolved: set[str] = set()
     count = 0
-    for name in records.partitions(store):
+    # Linked and special files are never followed; the check reports those that would hold evidence.
+    skipped: dict[str, tuple[int, int, int, int]] = {}
+    for name in records.partitions(store, skipped=skipped):
         try:
             source, key = records.source_of(name), name.rsplit("/", 1)[1].removesuffix(".jsonl")
             seen = ids.setdefault(source, set())
@@ -66,7 +68,10 @@ def _validate(store: Store) -> dict[str, object]:
             problems.append(str(error))
         except OSError:
             problems.append(f"{name}: inaccessible file; check permissions")
-    listed = {directory: store.files(directory) for directory in AUTHORED}
+    listed = {directory: store.files(directory, skipped=skipped) for directory in AUTHORED}
+    problems.extend(
+        f"{name}: symlinks and special files are not read; replace it with a regular file" for name in sorted(skipped)
+    )
     problems.extend(_actions(listed["actions"]))
     notes: list[Note] = []
     for name in (n for directory in AUTHORED for n in listed[directory] if authored(n)):

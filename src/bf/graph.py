@@ -106,15 +106,15 @@ def explanations(connection: sqlite3.Connection, ref: str, targets: set[str]) ->
     return _claims(rows[:50]), len(rows) > 50
 
 
-def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> list[dict[str, object]]:
+def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> tuple[list[dict[str, object]], bool]:
     """Typed claims whose explicit subject is one of these identities, wherever they were asserted."""
     rows = connection.execute(
         "SELECT subject,relation,target,origin FROM edges WHERE relation!='' "
         "AND subject IN (SELECT value FROM json_each(?)) "
-        "ORDER BY relation,target,origin,subject LIMIT 50",
+        "ORDER BY relation,target,origin,subject LIMIT 51",
         (json.dumps(sorted(subjects)),),
     ).fetchall()
-    return _claims(rows)
+    return _claims(rows[:50]), len(rows) > 50
 
 
 def _claims(rows: list[sqlite3.Row]) -> list[dict[str, object]]:

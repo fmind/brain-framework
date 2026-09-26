@@ -46,6 +46,7 @@ def test_a_damaged_cache_is_an_error_not_a_crash(brain: Store, monkeypatch: pyte
 
     monkeypatch.setattr(index, "search", damaged)
     monkeypatch.setattr(index, "listing", damaged)
+    monkeypatch.setattr(index, "listing_rows", damaged)
     for operation in (lambda: search([brain], Query(text="offline")), lambda: read([brain], "projects")):
         with pytest.raises(Error, match="run bf build"):
             operation()

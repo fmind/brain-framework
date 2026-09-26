@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import re
 import sqlite3
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from itertools import islice
 from typing import TypedDict, cast
 
 from bf import graph, index, links, usage
 from bf.config import load
 from bf.health import attention, source_health
 from bf.markdown import authored, note, reference, split_ref
-from bf.models import AUTHORED, NAME, Error, timestamp
+from bf.models import AUTHORED, NAME, Error, NotFoundError, timestamp
 from bf.storage import Store, relative
 
 # Active or blocked projects whose note is older than this are marked for review; a reminder, never a failure.
@@ -29,11 +32,7 @@ _SCOPE = "scope accepts a folder (projects, memories/gmail), a period (today, 7d
 _MISSING = "page not found; read projects, concepts, actions or memories to browse the brain"
 _BELOW = "(i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')"
 _CLOSED = {"done", "deprecated", "archived"}
-_ORDER = {
-    "projects": "i.status IN ('done','deprecated','archived'),time DESC,i.ref",
-    "concepts": "i.title,i.ref",
-    "actions": "i.path DESC",
-}
+
 
 Build = Callable[[Store, str, sqlite3.Connection], dict[str, object] | None]
 
@@ -138,7 +137,7 @@ def label(brain: str, item: dict[str, object]) -> dict[str, object]:
 
 
 def _brains(
-    stores: list[Store], build: Build, *, strict: bool = True, counted: bool = True
+    stores: list[Store], build: Build, *, strict: bool = True, counted: bool = True, stack: ExitStack | None = None
 ) -> tuple[list[tuple[str, dict[str, object]]], dict[str, object]]:
     """Build one part per brain; a failing brain is reported unless it is the only one requested."""
     parts: list[tuple[str, dict[str, object]]] = []
@@ -148,7 +147,8 @@ def _brains(
         name = store.root.name
         try:
             name = load(store).name
-            with index.database(store) as (connection, state):
+            with ExitStack() as local:
+                connection, state = (stack or local).enter_context(index.database(store))
                 part = guard(build(store, name, connection), owned(store))
                 skipped = index.problems(connection)
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
@@ -165,6 +165,7 @@ def _brains(
             stale.append(name)
         if part is None:
             continue
+        problems.extend(cast("list[dict[str, object]]", part.pop("problems", [])))
         if counted:
             usage.note(store, "read", 1)
         parts.append((name, part))
@@ -190,6 +191,61 @@ def _newest(
         return str((modified and item.get("updated")) or item.get("time", "")), str(item["ref"])
 
     return sorted(items, key=key, reverse=not oldest)[:limit]
+
+
+def _listing(
+    stores: list[Store],
+    where: str,
+    params: Mapping[str, object],
+    order: str,
+    key: Callable[[dict[str, object]], tuple[str, ...]],
+    limit: int,
+    offset: int,
+    *,
+    reverse: bool = True,
+    review: datetime | None = None,
+) -> dict[str, object]:
+    """Merge ordered SQLite streams, retaining only the requested page in memory."""
+
+    def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+        rows, total = index.listing_rows(connection, where, params, order)
+        sources = owned(store)
+
+        def items() -> Iterator[dict[str, object]]:
+            for row in rows:
+                yield label(name, guard(row, sources))
+
+        return {"rows": items(), "total": total}
+
+    with ExitStack() as stack:
+        parts, extra = _brains(stores, build, counted=False, stack=stack)
+        streams = [cast("Iterator[dict[str, object]]", part["rows"]) for _, part in parts]
+        try:
+            merged = heapq.merge(*streams, key=key, reverse=reverse)
+            items = list(islice(islice(merged, offset, None), limit))
+        except sqlite3.DatabaseError as error:
+            raise Error("the search cache is unavailable; run bf build") from error
+        if review:
+            for store in stores:
+                try:
+                    name = load(store).name
+                except Error, OSError, UnicodeError:
+                    continue  # _brains already reports this unavailable brain.
+                selected = [item for item in items if item["brain"] == name]
+                if selected:
+                    with index.database(store) as (connection, _state):
+                        _review(connection, selected, review)
+        total = sum(cast("int", part["total"]) for _, part in parts)
+    return {
+        "items": items,
+        "total": total,
+        **extra,
+        **({"next_offset": offset + len(items)} if offset + len(items) < total else {}),
+    }
+
+
+def _time_key(item: dict[str, object]) -> tuple[str, str]:
+    return str(item.get("time", "")), str(item["ref"])
 
 
 def _next_day(instant: str) -> str:
@@ -236,7 +292,7 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
         )
         upcoming, _ = index.listing(
             connection,
-            f"i.time!='' AND ({index.TIME})>=:since AND ({index.TIME})<:until",
+            index.WITHIN,
             {"since": stamp, "until": ahead},
             "time,i.ref",
             SECTION,
@@ -245,13 +301,22 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
             {"source": source, "records": count, "page": f"memories/{source}/24h"}
             for source, count in index.activity(connection, day, stamp)
         ]
+        issues: list[dict[str, object]] = []
+        try:
+            alerts = attention(store, now)
+        except Error, OSError, UnicodeError:
+            alerts = []
+            issues.append(
+                {"brain": _name, "error": "operational status is unavailable; check the user registry and bf status"}
+            )
         return {
+            "problems": issues,
             "projects": projects,
             "actions": actions,
             "changed": changed,
             "activity": activity,
             "upcoming": upcoming,
-            "attention": attention(store, now),
+            "attention": alerts,
         }
 
     parts, extra = _brains(stores, build, counted=counted)
@@ -271,16 +336,17 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
     }
 
 
-def timeline(stores: list[Store], name: str, found: Period, *, counted: bool = True) -> dict[str, object]:
+def timeline(
+    stores: list[Store], name: str, found: Period, *, offset: int = 0, counted: bool = True
+) -> dict[str, object]:
     """Items dated within a period, items modified within it, and each source's share of the period."""
-    within = f"i.time!='' AND ({index.TIME})>=:since AND ({index.TIME})<:until"
+    within = index.WITHIN
     params = {"since": found.since, "until": found.until}
 
     def build(_store: Store, _brain: str, connection: sqlite3.Connection) -> dict[str, object]:
-        items, total = index.listing(connection, within, params, "time DESC,i.ref", PAGE)
         changed, _ = index.listing(
             connection,
-            f"({index.UPDATED})>=:since AND ({index.UPDATED})<:until AND NOT ({within})",
+            f"{index.MODIFIED} AND NOT ({within})",
             params,
             f"({index.UPDATED}) DESC,i.ref",
             SECTION,
@@ -289,21 +355,23 @@ def timeline(stores: list[Store], name: str, found: Period, *, counted: bool = T
             {"source": source, "records": count, "page": f"memories/{source}/{name}"}
             for source, count in index.activity(connection, found.since, found.until)
         ]
-        return {"items": items, "total": total, "changed": changed, "sources": sources}
+        return {"changed": changed, "sources": sources}
 
     parts, extra = _brains(stores, build, counted=counted)
     reply: dict[str, object] = {
         "page": name,
         "since": found.since,
         "until": found.until,
-        "items": _newest(_gather(parts, "items"), PAGE),
-        "total": sum(cast("int", part["total"]) for _, part in parts),
+        **_listing(stores, within, params, "time DESC,i.ref DESC", _time_key, PAGE, offset),
         "changed": _newest(_gather(parts, "changed"), SECTION, modified=True),
         "sources": _gather(parts, "sources"),
     }
     if found.previous:
         reply.update(previous=found.previous, next=found.next)
-    return {**reply, **extra}
+    for field in ("problems", "stale"):
+        if field in extra:
+            reply[field] = [*cast("list", reply.get(field, [])), *cast("list", extra[field])]
+    return reply
 
 
 def _directory(store: Store, path: str) -> bool:
@@ -315,40 +383,42 @@ def _directory(store: Store, path: str) -> bool:
         return False
 
 
-def folder(stores: list[Store], path: str, now: datetime | None = None, *, counted: bool = True) -> dict[str, object]:
-    """Notes below an authored folder; the actions folder lists one ACTION.md per action, newest first."""
+def folder(
+    stores: list[Store], path: str, now: datetime | None = None, *, offset: int = 0, counted: bool = True
+) -> dict[str, object]:
+    """Notes below an authored folder, with a continuation through the complete global order."""
     now = now or datetime.now(UTC)
     top = path.split("/")[0]
     where = index.ACTION if path == "actions" else f"i.kind='note' AND {_BELOW}"
-    order = _ORDER.get(top, "i.path")
+    order = {
+        "projects": "i.status IN ('done','deprecated','archived'),time DESC,i.ref DESC",
+        "concepts": "i.title,i.ref",
+    }.get(top, "i.path DESC")
 
-    def build(_store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
-        items, total = index.listing(connection, where, {"prefix": path}, order, LISTING)
-        _review(connection, items, now)
-        return {"items": items, "total": total}
+    def key(item: dict[str, object]) -> tuple[str, ...]:
+        if top == "projects":
+            return (str(item.get("status") not in _CLOSED), *_time_key(item))
+        if top == "concepts":
+            return str(item.get("title", "")), str(item["ref"])
+        return (str(item["ref"]),)
 
-    parts, extra = _brains(stores, build, counted=counted)
-    items = sorted(_gather(parts, "items"), key=lambda item: str(item["ref"]))
-    if top == "projects":
-        items = sorted(_newest(items, len(items)), key=lambda item: item.get("status") in _CLOSED)
-    elif top == "concepts":
-        items.sort(key=lambda item: str(item.get("title", "")))
-    elif top == "actions":
-        items.reverse()
-    return {
-        "page": path,
-        "items": items,
-        "total": sum(cast("int", part["total"]) for _, part in parts),
-        **extra,
-    }
+    reply = _listing(
+        stores, where, {"prefix": path}, order, key, LISTING, offset, reverse=top != "concepts", review=now
+    )
+    if counted:
+        for store in stores:
+            usage.note(store, "read", 1)
+    return {"page": path, **reply}
 
 
 def memories(
-    stores: list[Store], parts: tuple[str, ...], now: datetime | None = None, *, counted: bool = True
+    stores: list[Store], parts: tuple[str, ...], now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
     """Sources with their coverage, one source with its partitions, or one source's records in a period."""
     now = now or datetime.now(UTC)
     if len(parts) == 1:
+        if offset:
+            raise Error("offset applies to a source's records; read memories/SOURCE")
 
         def overview(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
             counts = index.sources(connection)
@@ -364,7 +434,7 @@ def memories(
         return {"page": "memories", "sources": _gather(found, "sources"), **extra}
     source = parts[1]
     if not re.fullmatch(NAME, source) or len(parts) > 3:
-        raise Error(_MISSING)
+        raise NotFoundError(_MISSING)
     if len(parts) == 2:
 
         def page(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
@@ -372,25 +442,27 @@ def memories(
             if source not in counts and source not in load(store).sensors:
                 return None
             health = source_health(store, [source], now=now)[source]
-            items, total = index.listing(
-                connection, "i.kind='record' AND i.source=:source", {"source": source}, "time DESC,i.ref", SECTION
-            )
             return {
                 "sources": [{"source": source, **counts.get(source, {"records": 0}), **health}],
                 "partitions": [{"ref": path, "records": count} for path, count in index.partitions(connection, source)],
-                "items": items,
-                "total": total,
             }
 
         found, extra = _brains(stores, page, counted=counted)
         if not found:
-            raise Error(_MISSING)
+            raise NotFoundError(_MISSING)
         return {
             "page": "/".join(parts),
             "sources": _gather(found, "sources"),
             "partitions": [{"brain": name, **p} for name, part in found for p in cast("list", part["partitions"])],
-            "items": _newest(_gather(found, "items"), SECTION),
-            "total": sum(cast("int", part["total"]) for _, part in found),
+            **_listing(
+                stores,
+                "i.kind='record' AND i.source=:source",
+                {"source": source},
+                "time DESC,i.ref DESC",
+                _time_key,
+                SECTION,
+                offset,
+            ),
             **extra,
         }
     name = parts[2].removesuffix(".jsonl")
@@ -402,22 +474,20 @@ def memories(
         # A partition file, as listed on the source page: its records match its count exactly.
         where, params = "i.kind='record' AND i.path=:path", {"path": f"memories/{source}/{name}.jsonl"}
     else:
-        raise Error(_MISSING)
+        raise NotFoundError(_MISSING)
 
     def records(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
         if source not in index.sources(connection) and source not in load(store).sensors:
             return None
-        items, total = index.listing(connection, where, params, "time DESC,i.ref", PAGE)
-        return {"items": items, "total": total}
+        return {}
 
     found, extra = _brains(stores, records, counted=counted)
     if not found:
         # Like the source page: an unknown source is a missing page, never an empty answer.
-        raise Error(_MISSING)
+        raise NotFoundError(_MISSING)
     reply: dict[str, object] = {
         "page": "/".join(parts),
-        "items": _newest(_gather(found, "items"), PAGE),
-        "total": sum(cast("int", part["total"]) for _, part in found),
+        **_listing(stores, where, params, "time DESC,i.ref DESC", _time_key, PAGE, offset),
     }
     if window and window.previous:
         reply.update(previous=f"memories/{source}/{window.previous}", next=f"memories/{source}/{window.next}")
@@ -425,17 +495,19 @@ def memories(
 
 
 def page(
-    stores: list[Store], path: str, now: datetime | None = None, *, counted: bool = True
+    stores: list[Store], path: str, now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object] | None:
     """The page a ref names, or None when it names a note, a record or an identity."""
     if not path:
+        if offset:
+            raise Error("offset applies to listing pages; follow a home page's projects, actions or period link")
         return home(stores, now, counted=counted)
     if found := period(path, now):
-        return timeline(stores, path, found, counted=counted)
+        return timeline(stores, path, found, offset=offset, counted=counted)
     parts = tuple(path.rstrip("/").split("/"))
     if parts[0] == "memories":
         relative("/".join(parts))
-        return memories(stores, parts, now, counted=counted)
+        return memories(stores, parts, now, offset=offset, counted=counted)
     # Notes and their sections (`path#heading`) are items, not folders.
     if authored(split_ref(path)[0]):
         return None
@@ -444,7 +516,7 @@ def page(
         relative(name)
         # Entity names such as projects/archive are logical: only an existing folder is a page.
         if name in AUTHORED or any(_directory(store, name) for store in stores):
-            return folder(stores, name, now, counted=counted)
+            return folder(stores, name, now, offset=offset, counted=counted)
     return None
 
 
@@ -499,21 +571,36 @@ def context(stores: list[Store], owner: Store, brain: str, reply: dict[str, obje
 
     def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
         local = graph.local_refs(connection, targets)
+        claims, truncated = graph.outgoing(connection, local)
         return {
             "backlinks": _backlinks(connection, name, local, ref if store.root == owner.root else ""),
-            "claims": [{"brain": name, **claim} for claim in graph.outgoing(connection, local)],
+            "claims": [{"brain": name, **claim} for claim in claims],
+            "claims_truncated": truncated,
         }
 
     parts, extra = _brains(stores, build, strict=False, counted=False)
     result: dict[str, object] = {"backlinks": _merge(parts)}
     if claims := [claim for _, part in parts for claim in cast("list[dict[str, object]]", part["claims"])]:
         result["claims"] = claims
+    if any(part.get("claims_truncated") for _, part in parts):
+        result["claims_truncated"] = True
     issues = [*problems, *cast("list", extra.get("problems", []))]
     if not record and re.fullmatch(r"actions/[^/]+/ACTION\.md", path):
+        skipped: dict[str, tuple[int, int, int, int]] = {}
         try:
-            result.update(_action(owner, brain, path, str(reply["text"])))
+            result.update(_action(owner, brain, path, str(reply["text"]), skipped))
         except Error, OSError, sqlite3.DatabaseError:
             issues.append({"brain": brain, "error": "the action's files or projects are unavailable; run bf status"})
+        if skipped:
+            # Never followed, so never offered as the action's files; the owner can replace them.
+            issues.append(
+                {
+                    "brain": brain,
+                    "files": [
+                        f"{name}: symlinks and special files are not listed" for name in sorted(skipped)[:LISTING]
+                    ],
+                }
+            )
     return {
         **result,
         **({"stale": extra["stale"]} if "stale" in extra else {}),
@@ -521,10 +608,12 @@ def context(stores: list[Store], owner: Store, brain: str, reply: dict[str, obje
     }
 
 
-def _action(store: Store, brain: str, path: str, text: str) -> dict[str, object]:
+def _action(
+    store: Store, brain: str, path: str, text: str, skipped: dict[str, tuple[int, int, int, int]]
+) -> dict[str, object]:
     """The files kept with an action, and the projects its ACTION.md links to."""
     folder = path.rsplit("/", 1)[0]
-    files = [name for name in store.files(folder) if name != path][:LISTING]
+    files = [name for name in store.files(folder, skipped=skipped) if name != path][:LISTING]
     projects = set()
     for target in note(path, text.encode()).targets:
         resolved = reference(path, target)
@@ -554,8 +643,12 @@ def identity(stores: list[Store], value: str, *, counted: bool = True) -> dict[s
 
     def build(_store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
         local = graph.local_refs(connection, targets)
-        claims = [{"brain": name, **claim} for claim in graph.outgoing(connection, local)]
-        return {"backlinks": _backlinks(connection, name, local), "claims": claims}
+        claims, truncated = graph.outgoing(connection, local)
+        return {
+            "backlinks": _backlinks(connection, name, local),
+            "claims": [{"brain": name, **claim} for claim in claims],
+            "claims_truncated": truncated,
+        }
 
     parts, extra = _brains(stores, build, strict=False, counted=counted)
     backlinks = _merge(parts)
@@ -569,6 +662,7 @@ def identity(stores: list[Store], value: str, *, counted: bool = True) -> dict[s
         "page": value,
         "backlinks": backlinks,
         **({"claims": claims} if claims else {}),
+        **({"claims_truncated": True} if any(part.get("claims_truncated") for _, part in parts) else {}),
         **({"stale": extra["stale"]} if "stale" in extra else {}),
         **({"problems": issues} if issues else {}),
     }

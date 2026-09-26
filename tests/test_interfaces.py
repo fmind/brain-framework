@@ -11,6 +11,7 @@ from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 from typer.testing import CliRunner
 
@@ -129,6 +130,8 @@ def test_console_errors_are_private_and_on_stderr(brain: Store) -> None:
         (["read", "bf.yaml", "--brain", "fixture"], 1),
         (["read", "memories/absent"], 1),
         (["search", "x", "--limit", "0"], 2),
+        (["search", "x", "--offset", "-1"], 2),
+        (["read", "projects", "--offset", "-1"], 2),
         (["search", "x", "--scope", "soon"], 2),
         (["collect", "mail", "--since", "soon"], 2),
         (["collect", "mail", "--until", "2026-13-01"], 2),
@@ -200,6 +203,14 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
             assert tool.annotations is not None
             assert tool.annotations.read_only_hint
             assert not tool.annotations.destructive_hint
+            # Agents choose arguments from the schema: every parameter explains itself.
+            assert all(value.get("description") for value in tool.input_schema["properties"].values())
+        limit = next(t for t in tools if t.name == "search").input_schema["properties"]["limit"]
+        assert (limit["minimum"], limit["maximum"]) == (1, 50)
+        with pytest.raises(ToolError, match="greater than or equal to 1"):
+            await mcp.call_tool("search", {"query": "x", "limit": 0})
+        with pytest.raises(ToolError, match="greater than or equal to 0"):
+            await mcp.call_tool("read", {"ref": "projects", "offset": -1})
         found = await mcp.call_tool("search", {"query": "offline", "limit": 2})
         assert isinstance(found, CallToolResult)
         assert json.loads(text(found)) == found.structured_content
@@ -215,7 +226,7 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
         assert "Provider retention" in json.loads(text(exact))["text"]
         for name, arguments, message in [
             ("read", {"ref": "bf.yaml"}, "not found"),
-            ("search", {"query": "x", "limit": 0}, "invalid"),
+            ("search", {"query": "   "}, "invalid"),
             ("search", {"query": "x", "scope": "soon"}, "scope accepts"),
         ]:
             failed = await mcp.call_tool(name, arguments)

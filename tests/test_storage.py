@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from bf import config
 from bf.config import load, may_collect, one, register, select, user_config, user_path, yaml_object
+from bf.markdown import note
 from bf.models import Config, Error, Knowledge, Query, Record, Sensor, UserConfig, decode, moment, timestamp
 from bf.storage import BusyError, Store, collecting, lock_file, reader, relative, state_store, writer
 
@@ -37,10 +38,17 @@ def test_no_follow_reads_writes_and_traversal(tmp_path: Path) -> None:
     (tmp_path / "outside").write_text("secret")
     (root / "concepts").mkdir()
     (root / "concepts/link.md").symlink_to(tmp_path / "outside")
-    with pytest.raises(OSError, match="symbolic links"):
+    with pytest.raises(Error, match="symlinks are not followed"):
         store.read("concepts/link.md")
     with pytest.raises(Error, match="symlinks"):
         store.files("concepts")
+    # A caller that reports skipped entries gets them, fingerprinted without following the link.
+    os.mkfifo(root / "concepts/pipe.md")
+    skipped: dict[str, tuple[int, int, int, int]] = {}
+    assert store.files("concepts", skipped=skipped) == []
+    assert sorted(skipped) == ["concepts/link.md", "concepts/pipe.md"]
+    assert skipped["concepts/link.md"][3] == (root / "concepts/link.md").lstat().st_ino
+    (root / "concepts/pipe.md").unlink()
     (root / "concepts/link.md").unlink()
     (root / "linked").symlink_to(tmp_path)
     with pytest.raises(OSError, match=r"Not a directory|symbolic links"):
@@ -56,6 +64,12 @@ def test_no_follow_reads_writes_and_traversal(tmp_path: Path) -> None:
         store.write("concepts/dir.md", b"x")
     with pytest.raises(Error):
         store.delete("concepts/dir.md")
+    store.write("concepts/nested/b.md", b"three")
+    assert store.files("concepts") == ["concepts/a.md", "concepts/nested/b.md"]
+    assert store.scan("concepts") == {name: store.fingerprint(name) for name in store.files("concepts")}
+    assert store.scan("missing") == {}
+    store.delete("concepts/nested/b.md")
+    store.rmdir("concepts/nested")
     store.delete("concepts/a.md")
     assert store.files("concepts") == []
     assert store.files("missing") == []
@@ -251,6 +265,13 @@ def test_json_and_yaml_reject_ambiguity() -> None:
         with pytest.raises(Error):
             yaml_object(bad)
     assert yaml_object(b"") == {}
+    # Syntax errors name the file and the position, never the content.
+    with pytest.raises(Error, match=r"^suite.yaml: invalid YAML at line 2, column 4$"):
+        yaml_object(b"a: 1\n  b: secret\n", "suite.yaml")
+    with pytest.raises(Error, match=r"^projects/x.md: invalid YAML at line 3, column 9$"):
+        note("projects/x.md", b"---\ntype: project\n  status: secret\n---\n# X\n")
+    with pytest.raises(Error, match=r"^suite.yaml: YAML mapping keys must be unique strings$"):
+        yaml_object(b"a: 1\na: 2\n", "suite.yaml")
     assert yaml_object(b"day: 2026-09-01\n") == {"day": "2026-09-01"}
 
 
@@ -350,6 +371,20 @@ def test_registry_selection_and_collection_trust(brain: Store, tmp_path: Path, m
     user_path().write_text("brains:\n  bad:\n    path: 1\n")
     with pytest.raises(Error, match="invalid"):
         user_config()
+    user_path().write_text("brains: [oops\n")
+    with pytest.raises(Error, match=f"^{user_path()}: invalid YAML at line 2"):
+        user_config()
+
+
+def test_collection_trust_names_the_brain_at_its_path(brain: Store) -> None:
+    assert may_collect(brain)
+    # Another brain placed at a trusted path, such as a different clone, is not trusted.
+    brain.write("bf.yaml", b"version: 5\nname: other\n")
+    assert not may_collect(brain)
+    with pytest.raises(Error, match="already registered as fixture"):
+        register(brain, collect=True)
+    brain.write("bf.yaml", b"version: 5\nname: fixture\n")
+    assert may_collect(brain)
 
 
 def test_registration_keeps_the_owner_header(brain: Store) -> None:

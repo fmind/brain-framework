@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import yaml
 
-from bf import retrieve
+from bf import __version__, retrieve
 from bf.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -200,3 +201,12 @@ def test_real_reads_keep_history_after_replacement_and_explain_direct_impact(bra
     assert "origin" in json.dumps(groups)
     # The helper reads only stdin. A changed answer does not silently rewrite the conclusion.
     assert brain.read("projects/decision.md").startswith(b"# Decision")
+
+
+@pytest.mark.parametrize("skill", sorted((ROOT / "skills").glob("*/SKILL.md")), ids=lambda path: path.parent.name)
+def test_distributed_skills_name_the_release_they_were_copied_from(skill: Path) -> None:
+    # Skills are copied into hosts separately from the package: their version shows a stale copy.
+    frontmatter = yaml.safe_load(skill.read_text(encoding="utf-8").split("---\n")[1])
+    assert frontmatter["name"] == skill.parent.name
+    assert frontmatter["metadata"] == {"version": __version__}
+    assert f"Brain Framework {__version__.split('.')[0]} " in frontmatter["compatibility"]

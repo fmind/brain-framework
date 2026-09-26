@@ -29,10 +29,15 @@ class Error(Exception):
     """A safe, actionable error; never includes provider output."""
 
 
+class NotFoundError(Error):
+    """A complete lookup found no such page or reference; an incomplete read is never NotFoundError."""
+
+
 class Model(BaseModel):
     """Reject accidental fields and coercions at every external boundary."""
 
-    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    # Each command validates only a few models: build a model's validator when it is first used, not at import.
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False, defer_build=True)
 
 
 def encode(value: object) -> bytes:
@@ -124,8 +129,12 @@ def moment(value: str, now: datetime | None = None) -> str:
         raise Error(f"time is outside the supported range: {value}") from error
 
 
+# C0 and C1 control characters, including DEL.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
 def clean(value: str) -> str:
-    if not value.strip() or any(ord(c) < 32 or 127 <= ord(c) < 160 for c in value):
+    if not value.strip() or _CONTROL.search(value):
         raise ValueError("value must be nonempty and contain no control characters")
     return value
 
@@ -185,7 +194,7 @@ class Record(Model):
 class Knowledge(BaseModel):
     """Only the note metadata that changes retrieval is typed; other fields, such as OKF provenance, remain data."""
 
-    model_config = ConfigDict(extra="ignore", strict=True)
+    model_config = ConfigDict(extra="ignore", strict=True, defer_build=True)
     title: str = ""
     type: Annotated[str, Field(max_length=128)] = ""
     status: Status = ""
@@ -221,6 +230,8 @@ class Knowledge(BaseModel):
 
 class SchemaField(Model):
     """A shared meaning; cardinality applies when a sensor maps this field."""
+
+    model_config = ConfigDict(frozen=True)
 
     description: Annotated[str, Field(min_length=1, max_length=4096)]
     type: Literal["string", "integer", "number", "boolean", "timestamp", "identity"]
@@ -273,6 +284,8 @@ class SchemaField(Model):
 class Mapping(Model):
     """One JSON Pointer into sensor output, or one literal value; never executable expressions."""
 
+    model_config = ConfigDict(frozen=True)
+
     path: Annotated[str, Field(max_length=4096)] | None = None
     value: JsonValue = None
 
@@ -290,6 +303,8 @@ class Mapping(Model):
 
 class Program(Model):
     """A trusted executable declared in bf.yaml: direct argv, bounded runtime and a due rule."""
+
+    model_config = ConfigDict(frozen=True)
 
     command: Annotated[list[str], Field(min_length=1, max_length=128)]
     enabled: bool = True
@@ -335,18 +350,19 @@ class Routine(Program):
 class BrainReference(Model):
     """A directly related brain, located relative to the declaring brain."""
 
+    model_config = ConfigDict(frozen=True)
+
     path: Annotated[str, Field(min_length=1, max_length=4096)]
 
-    @field_validator("path")
-    @classmethod
-    def valid_path(cls, value: str) -> str:
-        if not value.strip() or any(ord(char) < 32 for char in value):
-            raise ValueError("brain path must be nonempty and contain no control characters")
-        return value
+    _clean = field_validator("path")(clean)
 
 
 class Config(Model):
     """One brain: its name, related brains, shared schema, and the sensors and routines it may run."""
+
+    # One validated configuration is shared by a whole command; freezing keeps it intact. Freezing does not
+    # reach its dictionaries: read them, never change them, or a later load returns the changed value.
+    model_config = ConfigDict(frozen=True)
 
     version: Literal[5] = 5
     name: Annotated[str, Field(pattern=NAME)]
@@ -400,6 +416,7 @@ class Query(Model):
 
     text: Annotated[str, Field(max_length=4096)]
     limit: Annotated[int, Field(ge=1, le=50)] = 10
+    offset: Annotated[int, Field(ge=0, le=2**63 - 1)] = 0
     since: str = ""
     until: str = ""
     # A brain-relative folder or file; matches that path and everything below it.

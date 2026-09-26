@@ -10,7 +10,7 @@ from pydantic import Field, ValidationError
 from bf import links
 from bf.config import yaml_object
 from bf.markdown import authored, split_ref
-from bf.models import Error, Model, Query, explain
+from bf.models import Error, Model, NotFoundError, Query, explain
 from bf.pages import scope
 from bf.retrieve import read, search
 from bf.storage import Store
@@ -53,11 +53,11 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
     if case.read is not None:
         try:
             reply = read([store], case.read, counted=False)
-        except Error as error:
+        except NotFoundError:
             # Nothing to read answers "is anything there?"; every other failure fails the case.
-            if not str(error).startswith(("reference not found", "page not found")):
-                raise
             reply = {}
+        if "chunk" in reply:
+            raise Error("exact reply requires JSON chunk assembly; use a smaller note section or a search case")
         pairs = [(key, value) for key, value in _strings(reply) if key != "notice"]
         return (
             reply,
@@ -99,7 +99,7 @@ def evaluate(store: Store, path: str = "evals") -> dict[str, object]:
     cases: list[tuple[str, Case]] = []
     for name in paths:
         try:
-            suite = Suite.model_validate(yaml_object(store.read(name, 1 << 20)))
+            suite = Suite.model_validate(yaml_object(store.read(name, 1 << 20), name))
         except FileNotFoundError:
             raise Error(f"{name} does not exist; add retrieval cases before running bf eval") from None
         except ValidationError as error:

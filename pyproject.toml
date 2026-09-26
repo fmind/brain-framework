@@ -1,8 +1,8 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "12.0.2"
-description = "🧠 AI Brain Factory for infinite knowledge. Not for 🐙 mindflayers or 🧟 zombies."
+version = "13.0.0"
+description = "A file-based brain for people and AI agents: gather information, connect knowledge and act with context."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
@@ -21,7 +21,6 @@ keywords = [
   "second-brain",
 ]
 classifiers = [
-  "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",

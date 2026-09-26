@@ -6,12 +6,16 @@ Brain Framework gives agents two retrieval commands and plain files to update. T
 
 | Skill                                                                                         | Teaches the agent to                                                                                        |
 | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| [bf-setup](https://github.com/fmind/brain-framework/blob/main/skills/bf-setup/SKILL.md)       | Set up a useful brain and verify agent access.                                                              |
+| [bf-scan](https://github.com/fmind/brain-framework/blob/main/skills/bf-scan/SKILL.md)         | Discover useful sources within an approved inspection scope.                                                |
 | [bf-use](https://github.com/fmind/brain-framework/blob/main/skills/bf-use/SKILL.md)           | Read pages, search, read exact refs and cite them.                                                          |
 | [bf-learn](https://github.com/fmind/brain-framework/blob/main/skills/bf-learn/SKILL.md)       | Keep project notes and concepts current, retain selected evidence, review dependencies and share knowledge. |
 | [bf-action](https://github.com/fmind/brain-framework/blob/main/skills/bf-action/SKILL.md)     | Start, resume and close one session of work on request, with a small working context.                       |
 | [bf-maintain](https://github.com/fmind/brain-framework/blob/main/skills/bf-maintain/SKILL.md) | Diagnose sensors and routines, schedule updates, backfill and add retrieval cases.                          |
 
-Start with `bf-use`. Copy each complete folder, including `references/`, `templates/` and `scripts/`, into a directory your host discovers; the [installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md) covers updates and host discovery. Then start a new session and ask a question only your brain can answer, such as "Search my brain for why we keep original evidence, read the source and cite its ref." The agent should read `projects/archive.md#decision` from the [getting-started walkthrough](getting-started.md#save-a-decision) before answering. Hosts that prefer tools can use the [MCP server](mcp.md) instead.
+For guided onboarding, add `bf-setup`; it starts with real questions, checks retrieval and verifies that the host reaches the brain. Optional `bf-scan` discovers useful sources within a user-approved scope and hands selected integrations to `bf-maintain`. Scanning bookmarks or tools does not authorize authentication, collection or scheduling.
+
+For everyday retrieval, start with `bf-use`. Copy each complete folder, including `references/`, `templates/` and `scripts/`, into a directory your host discovers; the [installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md) covers updates and host discovery. Then start a new session and ask a question only your brain can answer, such as "Search my brain for why we keep original evidence, read the source and cite its ref." The agent should read `projects/archive.md#decision` from the [getting-started walkthrough](getting-started.md#save-a-decision) before answering. Hosts that prefer tools can use the [MCP server](mcp.md) instead.
 
 ## The everyday loop
 

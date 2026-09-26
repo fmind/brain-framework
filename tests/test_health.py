@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
 
+import pytest
 from typer.testing import CliRunner
 
 from bf.cli import app
@@ -95,3 +97,22 @@ def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) ->
     register(brain, collect=False)
     record = cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])
     assert record["freshness"] == "unknown"
+
+
+@pytest.mark.usefixtures("brain")
+def test_status_reports_a_broken_brain_and_still_reports_the_others(tmp_path: Path) -> None:
+    (tmp_path / "other").mkdir()
+    other = Store(tmp_path / "other")
+    other.write("bf.yaml", b"version: 5\nname: other\n")
+    register(other, collect=False)
+    other.write("bf.yaml", b"version: 5\nname: [broken\n")
+    result = CliRunner().invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    brains = json.loads(result.stdout)["brains"]
+    assert [entry["brain"] for entry in brains] == ["fixture", "other"]
+    assert brains[1]["error"] == "bf.yaml: invalid YAML at line 3, column 1"
+    assert CliRunner().invoke(app, ["status", "--check"]).exit_code == 1
+    # A brain chosen alone still fails with the named file.
+    alone = CliRunner().invoke(app, ["status", "--brain", str(other.root)])
+    assert alone.exit_code == 1
+    assert "bf.yaml: invalid YAML at line 3" in str(alone.exception)

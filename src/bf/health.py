@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -117,7 +118,18 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
     now = now or datetime.now(UTC)
     brains, healthy = [], True
     for store in stores:
-        config, history, summary, trusted = load(store), state(store), index.status(store), may_collect(store)
+        try:
+            config, history, summary, trusted = load(store), state(store), index.status(store), may_collect(store)
+        except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
+            if len(stores) == 1:
+                if isinstance(error, sqlite3.DatabaseError):
+                    raise Error("the search cache is unavailable; run bf build") from error
+                raise
+            # Status diagnoses brains: one that cannot load is reported, and the others still are.
+            message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; check its path"
+            brains.append({"brain": store.root.name, "path": str(store.root), "error": message})
+            healthy = False
+            continue
         counts = cast("dict[str, dict[str, object]]", summary.pop("sources"))
         coverage = source_health(store, counts, now=now, trusted=trusted)
         sources: dict[str, dict[str, object]] = {}

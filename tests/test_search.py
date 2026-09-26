@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -15,10 +16,12 @@ import pytest
 
 from bf import index, usage
 from bf.config import register, user_path
+from bf.markdown import LEAD
 from bf.models import Error, Query, Record, timestamp
 from bf.pages import scope
 from bf.retrieve import read, search
 from bf.storage import Store, state_store, writer
+from bf.validate import validate
 from conftest import records_file
 
 
@@ -128,8 +131,95 @@ def test_invalid_files_are_skipped_and_reported(brain: Store) -> None:
     problems = index.status(brain)["problems"]
     assert isinstance(problems, list)
     assert len(problems) == 3
-    assert any("projects/broken.md" in p and "status" in p for p in problems)
+    assert any(p.startswith("projects/broken.md: invalid frontmatter: status") for p in problems)
     assert any("duplicate reference dupes:a" in p for p in problems)
+
+
+def test_links_and_special_files_are_reported_without_hiding_the_brain(brain: Store, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside\n\nExfiltrated secret.\n")
+    brain.write("actions/2026-09-26_demo/ACTION.md", b"# Demo\n\nResume the offline import.\n")
+    # Every skipped link is reported: even a .bin path could point to a directory of notes.
+    (brain.root / "actions/2026-09-26_demo/inputs").mkdir()
+    (brain.root / "actions/2026-09-26_demo/inputs/dataset.bin").symlink_to(outside)
+    (brain.root / "concepts/linked.md").symlink_to(outside)
+    os.mkfifo(brain.root / "memories/meetings/2026-07.jsonl")
+    reply = search([brain], Query(text="offline"))
+    assert cast(list, reply["items"])[0]["ref"] == "projects/offline.md"
+    files = cast(list, reply["problems"])[0]["files"]
+    assert [name.split(":")[0] for name in files] == [
+        "actions/2026-09-26_demo/inputs/dataset.bin",
+        "concepts/linked.md",
+        "memories/meetings/2026-07.jsonl",
+    ]
+    assert "symlinks are not followed" in files[0]
+    assert refs(brain, "exfiltrated") == []
+    assert index.status(brain)["index"] == "ready"
+    assert "projects" in read([brain])
+    action = read([brain], "actions/2026-09-26_demo")
+    assert "actions/2026-09-26_demo/inputs/dataset.bin" not in cast(list, action["files"])
+    assert any(
+        "dataset.bin: symlinks and special files are not listed" in f
+        for p in cast(list, action["problems"])
+        for f in p.get("files", [])
+    )
+    # The cache names the partition, and a skipped partition keeps an absent record from looking absent.
+    assert cast(dict, read([brain], "meetings:decision-1")["record"])["id"] == "decision-1"
+    with pytest.raises(Error, match="unreadable partitions"):
+        read([brain], "meetings:missing")
+    report = validate(brain)
+    assert not report["valid"]
+    assert sorted(p.split(":")[0] for p in cast(list, report["problems"])) == [
+        "actions/2026-09-26_demo/inputs/dataset.bin",
+        "concepts/linked.md",
+        "memories/meetings/2026-07.jsonl",
+    ]
+
+
+def test_search_says_when_results_exist_beyond_the_limit(brain: Store) -> None:
+    assert search([brain], Query(text="offline", limit=1))["more"] is True
+    assert "more" not in search([brain], Query(text="offline", limit=50))
+
+
+def test_full_build_creates_every_index_after_loading_and_serves_in_wal_mode(brain: Store) -> None:
+    index.refresh(brain, full=True)
+    brain.write("concepts/late.md", b"# Late\n\nOsmium evidence.\n")
+    assert refs(brain, "osmium") == ["concepts/late.md"]
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        created = {row[0] for row in connection.execute("SELECT sql FROM sqlite_schema WHERE type='index'") if row[0]}
+    assert created == set(index._INDEXES)  # noqa: SLF001 - deferred secondary indexes
+
+
+def test_one_reply_compares_files_with_the_cache_once_per_brain(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    checked: list[Path] = []
+    original = index.fresh
+
+    def counted(store: Store) -> str:
+        checked.append(store.root)
+        return original(store)
+
+    monkeypatch.setattr(index, "fresh", counted)
+    # A note with backlinks opens the cache for identities, backlinks and claims.
+    read([brain], "projects/offline.md")
+    assert checked == [brain.root]
+    search([brain], Query(text="offline"))
+    assert checked == [brain.root, brain.root]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "  short\n\ttext  ",
+        " " * 1276 + "abcdefghijklmnop" * 40,
+        "\u00a0\u2003word\x1c" * 400,
+        "x" * 2000,
+        "a" * 1279 + " tail" * 200,
+    ],
+)
+def test_record_leads_collapse_whitespace_of_a_prefix_like_the_whole_text(text: str) -> None:
+    assert index.lead(Record(id="x", title="T", text=text)) == re.sub(r"\s+", " ", text).strip()[:LEAD]
 
 
 def test_outdated_or_corrupt_cache_is_rebuilt(brain: Store) -> None:
@@ -154,7 +244,8 @@ def test_a_busy_writer_serves_the_current_cache_as_stale(brain: Store) -> None:
     brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
     with writer(brain):
         reply = search([brain], Query(text="latecomer"))
-    assert reply == {"items": [], "notice": reply["notice"], "stale": ["fixture"]}
+    assert reply == {"items": [], "notice": reply["notice"], "stale": ["fixture"], "sources": reply["sources"]}
+    assert cast(list[dict], reply["sources"])[0]["source"] == "meetings"
     assert refs(brain, "latecomer") == ["concepts/late.md"]
 
 
@@ -287,13 +378,14 @@ def test_exact_reads(brain: Store) -> None:
         read([brain], "x" * 9000)
 
 
-def test_oversized_replies_are_rejected_not_truncated(brain: Store) -> None:
+def test_oversized_replies_are_explicit_json_chunks(brain: Store) -> None:
     brain.write("concepts/quoted.md", b"# Quoted\n\n" + b'"' * 3_000_000)
-    with pytest.raises(Error, match="byte limit"):
-        read([brain], "concepts/quoted.md")
-    brain.write("concepts/large.md", b"# Large\n\n" + b"x" * (5 << 20))
-    with pytest.raises(Error, match="exceeds"):
-        read([brain], "concepts/large.md")
+    reply = read([brain], "concepts/quoted.md")
+    assert reply["format"] == "json"
+    assert reply["offset"] == 0
+    assert reply["next_offset"] == 65536
+    assert reply["sha256"]
+    assert len(str(reply["chunk"])) == 65536
 
 
 def test_usage_counts_searches_empty_results_and_reads_without_queries(brain: Store) -> None:

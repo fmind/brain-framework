@@ -25,6 +25,7 @@ minimum_release_age = "0d"
 slsa = true
 
 [settings.task]
+quiet = true
 run_auto_install = false
 
 [tasks.all]
@@ -87,15 +88,15 @@ run = [
 [tasks."check:leaks"]
 alias = "cs"
 description = "Scan recent commits and the working tree for secrets"
-run = ["mise run check:leaks:history", "gitleaks dir . --redact=100 --verbose"]
+run = ["mise run check:leaks:history", "gitleaks dir . --redact=100 --verbose --no-banner"]
 
 [tasks."check:leaks:history"]
 description = "Scan the last 100 commits for secrets"
-run = "gitleaks git --redact=100 --log-opts=--max-count=100 --verbose"
+run = "gitleaks git --redact=100 --log-opts=--max-count=100 --verbose --no-banner"
 
 [tasks."check:leaks:staged"]
 description = "Scan the staged snapshot for secrets"
-run = "gitleaks git --staged --redact=100 --verbose"
+run = "gitleaks git --staged --redact=100 --verbose --no-banner"
 
 [tasks."check:links"]
 description = "Check repository Markdown links; check:docs owns documentation links"
@@ -193,7 +194,11 @@ run = ["uv sync --locked", "lefthook install"]
 alias = "t"
 description = "Run isolated tests with at least 85% branch coverage"
 env.TZ = "UTC"
-run = "uv run pytest --cov --cov-report=term-missing"
+run = "uv run pytest -q --cov --cov-report="
+
+[tasks."report:coverage"]
+description = "Show per-file coverage and missing lines from the last test run"
+run = "uv run coverage report --show-missing"
 
 [tasks."test:package"]
 description = "Smoke-test the wheel and source distribution outside the checkout"

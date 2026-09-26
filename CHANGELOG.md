@@ -2,6 +2,42 @@
 
 All notable changes to Brain Framework (formerly FKF) are documented here. This project follows [Semantic Versioning](https://semver.org/) from its first public release.
 
+## Unreleased
+
+## [v13.0.0](https://github.com/fmind/brain-framework/releases/tag/v13.0.0) - 2026-09-26
+
+Brain Framework 13 makes retrieval navigable through complete listings and lossless large reads, adds guided setup and source discovery, and reduces cache-build and page-read work. Brain configuration and retrieval suites remain at version 5.
+
+### Added
+
+- `bf-setup` guides first-use onboarding through useful notes, retrieval checks, verified agent access and selected integrations; `bf-scan` recommends sources from explicitly approved discovery and hands sensor implementation to `bf-maintain`. Its local helper summarizes bookmark hosts and checks named tool availability without executing tools, contacting services or returning full bookmark URLs.
+
+### Fixed
+
+- Graph reads mark outgoing claim previews with `claims_truncated` when their 50-claim per-brain limit omits evidence.
+
+- Empty searches report coverage for all searched sources, including failed or never-collected sources with no matching records.
+- Symlink and special-file evidence roots are skipped and reported just like nested entries, so other evidence remains readable. A linked transaction directory still blocks reads until repaired.
+- Skipped links retain diagnostics even when their names have no evidence extension; their targets are never inspected, and validation reports them too.
+- A malformed optional user registry no longer prevents reading an explicitly selected brain's home page; operational status is reported unavailable and execution remains denied.
+- Oversized exact reads return digest-identified JSON chunks that can be reassembled without losing UTF-8 text, attributes or metadata.
+- A symlink or special file below a brain no longer stops search, read and validation for the whole brain. A linked or special note or record partition is skipped and reported under `problems`, and an exact record read in its source reports incomplete evidence instead of absence. Other linked files, such as a dataset in an action's `inputs/`, are never followed, indexed or listed; action reads report them.
+- `bf status` lists a brain whose configuration cannot load with its `error` and still reports the others; `--check` fails for it.
+- YAML errors name their file and position without quoting content, such as `bf.yaml: invalid YAML at line 3, column 1`, for brain configuration, the user registry, note frontmatter and retrieval suites.
+- Skipped-file problems in search, read and status name each file once instead of repeating its path.
+
+### Changed
+
+- Development tasks omit command echoes, test-file progress and decorative scanner banners while retaining failures, warnings, test counts and the coverage total; `mise run report:coverage` shows saved per-file coverage on demand.
+- The README, contributor instructions and documentation overview explain the gather-to-action loop, Unix-style composition and evidence-backed knowledge graph, while keeping data ownership, collection and sharing controls, offline retrieval and cloud-agent privacy explicit.
+- **Breaking:** Consumers must follow `next_offset` to enumerate complete listings and assemble digest-matching JSON chunks for oversized exact reads. Folder pages now cap the combined selection at 200 notes. Update CLI/MCP callers and reinstall the workflow skills before upgrading; brain configuration and retrieval-suite formats remain at version 5.
+
+- Collection trust names the registered brain as well as its path. Another brain later placed at a trusted path, such as a different clone, runs no sensors or routines until it is registered; a brain renamed in `bf.yaml` stops collecting until its registry entry names it again.
+- Search and listing pages accept `--offset` and return `next_offset` for complete traversal, including across selected brains. Search also retains `more: true`. SQLite rows are merged incrementally rather than materializing skipped results.
+- MCP tool schemas describe every parameter and bound `limit` to 1–50.
+- Distributed skills name their release in `metadata.version` and the Brain Framework major they require in `compatibility`.
+- Searches and pages start faster: Markdown parsing and pydantic validators load only when a command uses them.
+
 ## [v12.0.2](https://github.com/fmind/brain-framework/releases/tag/v12.0.2) - 2026-09-25
 
 First published 12.0.x maintenance release. The v12.0.1 tag stopped at the CI gate before publication and remains unchanged.
@@ -315,7 +351,6 @@ FKF 8 focuses on the loop that makes a knowledge base useful: collect on a sched
 - Rank exact identities first, then items matching all words, then any word; notes above records; deprecated and archived notes last; one result per note through its best section.
 - Collectors run from the base root with the user's environment minus loader-injection variables, and write stderr to a bounded private log.
 - Retrieval cases use `version: 2` with `expect`, `forbid`, `text`, `empty` and time filters.
-- Mark the package as beta while the format settles.
 
 ## [v7.0.1](https://github.com/fmind/fkf/releases/tag/v7.0.1) - 2026-09-21
 

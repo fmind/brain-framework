@@ -42,8 +42,21 @@ _Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping
 _Loader.add_constructor("tag:yaml.org,2002:timestamp", lambda loader, node: loader.construct_scalar(node))
 
 
-def yaml_object(data: bytes) -> dict[str, object]:
-    """No aliases, anchors, duplicate keys, deep documents or large node graphs."""
+def yaml_object(data: bytes, name: str = "", *, line: int = 1) -> dict[str, object]:
+    """No aliases, anchors, duplicate keys, deep documents or large node graphs.
+
+    Errors name the file and, for syntax errors, the position: `line` is the file line of the first
+    YAML line, such as 2 for Markdown frontmatter. They never quote the document's content.
+    """
+    try:
+        return _yaml_object(data, line)
+    except Error as error:
+        if not name:
+            raise
+        raise Error(f"{name}: {error}") from error
+
+
+def _yaml_object(data: bytes, line: int) -> dict[str, object]:
     if len(data) > 1 << 20:
         raise Error("YAML exceeds 1 MiB")
     try:
@@ -59,7 +72,10 @@ def yaml_object(data: bytes) -> dict[str, object]:
                 raise Error("YAML structure exceeds its limit")
         value = yaml.load(data, Loader=_Loader)  # noqa: S506 - restricted SafeLoader subclass
     except (yaml.YAMLError, UnicodeError) as error:
-        raise Error("invalid YAML") from error
+        mark = getattr(error, "problem_mark", None)
+        if mark is None:
+            raise Error("invalid YAML") from error
+        raise Error(f"invalid YAML at line {mark.line + line}, column {mark.column + 1}") from error
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -68,11 +84,14 @@ def yaml_object(data: bytes) -> dict[str, object]:
 
 
 def load(store: Store) -> Config:
-    """The brain configuration; each call rereads the file, and a deep copy keeps the cached result intact."""
+    """The brain configuration; each call rereads the file and shares one frozen result per content.
+
+    Callers must not change the returned dictionaries, such as `sensors`: other loads share them.
+    """
     data = store.read("bf.yaml", 1 << 20)
     key = digest(data)
     if (config := _LOADED.get(key)) is None:
-        value = yaml_object(data)
+        value = yaml_object(data, "bf.yaml")
         try:
             config = Config.model_validate(value)
         except ValidationError as error:
@@ -80,7 +99,7 @@ def load(store: Store) -> Config:
         if len(_LOADED) >= 64:
             _LOADED.clear()
         _LOADED[key] = config
-    return config.model_copy(deep=True)
+    return config
 
 
 def user_path() -> Path:
@@ -97,7 +116,7 @@ def _registry() -> tuple[UserConfig, str]:
     except FileNotFoundError:
         return UserConfig(), ""
     try:
-        registry = UserConfig.model_validate(yaml_object(data))
+        registry = UserConfig.model_validate(yaml_object(data, str(path)))
     except ValidationError as error:
         raise Error(f"invalid {path}: " + explain(error)) from error
     # yaml_object has already rejected invalid UTF-8.
@@ -226,7 +245,11 @@ def one(value: str = "") -> Store:
 
 
 def may_collect(store: Store) -> bool:
-    return any(
-        entry.collect and Path(entry.path).expanduser().resolve() == store.root
-        for entry in user_config().brains.values()
-    )
+    """Trust names a brain at a path: another brain later placed at that path, such as a different
+    clone, is not trusted until its owner registers it."""
+    names = {
+        name
+        for name, entry in user_config().brains.items()
+        if entry.collect and Path(entry.path).expanduser().resolve() == store.root
+    }
+    return bool(names) and load(store).name in names

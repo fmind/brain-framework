@@ -9,10 +9,10 @@ bf mcp --brain ~/brain  # explicit root and its direct references
 
 It exposes two read-only tools:
 
-- `read(ref, brain)` returns the same JSON as `bf read`: the home page when `ref` is empty, another [page](search.md#pages), a note, a section, a record or an identity with its backlinks.
-- `search(query, scope, limit)` returns the same JSON as `bf search`.
+- `read(ref, brain, offset)` returns the same JSON as `bf read`: the home page when `ref` is empty, another [page](search.md#pages), a note, a section, a record or an identity with its backlinks.
+- `search(query, scope, limit, offset)` returns the same JSON as `bf search`.
 
-Text and structured results carry the same value. Errors hide brain paths. There is no collection, routine, write or execution tool; retrieval may refresh the disposable cache and record private usage counts.
+Each parameter is described in the tool schema, which bounds `limit` to 1–50; arguments outside the schema fail before retrieval runs. Text and structured results carry the same value. Follow `next_offset` using the same arguments plus `offset`; search and listings count items, while oversized exact replies count characters in their JSON `chunk`. Concatenate chunks only when their `sha256` matches, verify the digest and parse the assembled JSON. Restart after evidence changes. See [retrieval](search.md) for bounds, source coverage and examples. Errors hide brain paths. There is no collection, routine, write or execution tool; retrieval may refresh the disposable cache and record private usage counts.
 
 ## Connect a host
 

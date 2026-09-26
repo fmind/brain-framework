@@ -228,10 +228,14 @@ def test_field_values_are_searchable_words_without_their_keys(brain: Store) -> N
     assert search([brain], Query(text="label kind"))["items"] == []
 
 
-def test_loaded_configurations_are_independent_and_follow_edits(brain: Store) -> None:
+def test_loaded_configurations_are_shared_frozen_and_follow_edits(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     first = load(brain)
-    first.sensors.clear()
-    assert set(load(brain).sensors) == {"mail"}
+    assert load(brain) is first
+    # One command shares this object, so neither the configuration nor its programs accept changes.
+    with pytest.raises(ValidationError):
+        setattr(first, "name", "other")  # noqa: B010 - exercise the frozen model at runtime
+    with pytest.raises(ValidationError):
+        setattr(first.sensors["mail"], "enabled", False)  # noqa: B010 - exercise the frozen model at runtime
     brain.write("bf.yaml", CONFIG.replace(b"  mail:\n", b"  post:\n"))
     assert set(load(brain).sensors) == {"post"}

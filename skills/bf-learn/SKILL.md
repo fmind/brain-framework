@@ -2,6 +2,9 @@
 name: bf-learn
 description: Keep Brain Framework project notes, concepts and action folders current after meaningful work. Use after a decision, a finished action, a corrected assumption, or when the user asks to remember something.
 license: MIT
+compatibility: Requires Brain Framework 13 (the bf command) on Linux or macOS.
+metadata:
+  version: "13.0.0"
 ---
 
 # bf-learn

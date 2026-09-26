@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import cast
 
 from bf import records
 from bf.index import refresh
@@ -54,8 +55,48 @@ def main() -> None:
             store.write(f"concepts/{n}.md", f"# Project {n}\n\n{background}\n\nKeep durable evidence.\n".encode())
         measurements = {}
         revision = 0
+        note_revision = 0
 
-        def change_record() -> None:
+        def change_note() -> dict[str, object]:
+            nonlocal note_revision
+            note_revision += 1
+            store.write("concepts/0.md", f"# Edited revision{note_revision}\n\nZirconium note.\n".encode())
+            return search([store], Query(text=f"revision{note_revision}"))
+
+        def check_result(name: str, result: dict[str, object]) -> None:
+            if result.get("problems") or result.get("stale"):
+                raise RuntimeError(f"{name}: incomplete benchmark result")
+            found = cast("list[dict[str, object]]", result.get("items", []))
+            refs = {item["ref"] for item in found}
+            valid = True
+            if name == "note_edit":
+                valid = refs == {"concepts/0.md"} and found[0]["title"] == f"Edited revision{note_revision}"
+            elif name == "selective":
+                valid = refs == ({"benchmark:0", "concepts/0.md"} if args.notes else {"benchmark:0"})
+            elif name == "common":
+                valid = len(found) == min(10, args.records + max(0, args.notes - 1))
+            elif name == "timeline":
+                since, until = str(result.get("since", "")), str(result.get("until", ""))
+                expected = sum(since <= item.time < until for item in items)
+                sources = cast("list[dict[str, object]]", result.get("sources", []))
+                valid = (
+                    result.get("page") == "2026-06"
+                    and sum(cast("int", source["records"]) for source in sources) == expected
+                )
+            elif name == "home":
+                valid = result.get("page") == "" and "memories" in cast("list[str]", result.get("pages", []))
+            elif name == "exact_read":
+                valid = result.get("ref") == "benchmark:0" and result.get("record") == items[0].model_dump(
+                    exclude_defaults=True
+                )
+            elif name == "changed_record":
+                valid = result.get("changed") == 1
+            elif name == "unchanged_record":
+                valid = result == {"added": 0, "updated": 0, "unchanged": 1, "removed": 0}
+            if not valid:
+                raise RuntimeError(f"{name}: unexpected benchmark result")
+
+        def change_record() -> dict[str, object]:
             nonlocal revision
             revision += 1
             with writer(store):
@@ -65,24 +106,18 @@ def main() -> None:
                     [items[0].model_copy(update={"title": f"Edited decision {revision}"})],
                     snapshot=False,
                 )
-            refresh(store)
+            return refresh(store)
 
-        def unchanged_record() -> None:
+        def unchanged_record() -> dict[str, object]:
             found = records.find(store, "benchmark", "0")
             if found is None:
                 raise RuntimeError("benchmark fixture record is missing")
             with writer(store):
-                records.upsert(store, "benchmark", [found[1]], snapshot=False)
+                return {**records.upsert(store, "benchmark", [found[1]], snapshot=False)}
 
         for name, operation in [
             ("build", lambda: refresh(store, full=True)),
-            (
-                "note_edit",
-                lambda: (
-                    store.write("concepts/0.md", b"# Edited\n\nZirconium note.\n"),
-                    search([store], Query(text="edited")),
-                ),
-            ),
+            ("note_edit", change_note),
             ("selective", lambda: search([store], Query(text="zirconium"))),
             ("common", lambda: search([store], Query(text="evidence"))),
             ("timeline", lambda: read([store], "2026-06")),
@@ -91,11 +126,15 @@ def main() -> None:
             ("changed_record", change_record),
             ("unchanged_record", unchanged_record),
         ]:
+            if name == "note_edit" and not args.notes:
+                continue
             timings = []
             for _ in range(args.repeats):
                 start = time.perf_counter()
-                operation()
+                result = operation()
                 timings.append(time.perf_counter() - start)
+                # Check every sample outside its timer; never publish timings for incorrect results.
+                check_result(name, result)
             measurements[name] = {
                 "min": round(min(timings), 3),
                 "median": round(statistics.median(timings), 3),

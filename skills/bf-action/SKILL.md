@@ -2,6 +2,9 @@
 name: bf-action
 description: Start or resume one Brain Framework action, a folder that holds one session of work with its inputs, outputs and next step. Use only when the user explicitly asks to start, resume or close an action (for example "/bf-action retention" or "resume the weekly review").
 license: MIT
+compatibility: Requires Brain Framework 13 (the bf command) on Linux or macOS.
+metadata:
+  version: "13.0.0"
 ---
 
 # bf-action

@@ -2,10 +2,12 @@
 
 By the end of this walkthrough, you will have a saved decision, a search that finds its reason, three checks that keep it retrievable and an agent that cites it. No sensor, account credentials or model is needed.
 
+For an agent-guided walkthrough, install `bf-setup` and `bf-use` following the [skill installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md). Optional `bf-scan` helps discover useful sources from approved bookmarks, tools and folders; `bf-maintain` implements the selected integrations. You can also follow the steps below without an agent.
+
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then Brain Framework. uv supplies Python 3.14 if needed. If `bf` is not on PATH, run `uv tool update-shell` and open a new shell.
 
 ```bash
-uv tool install --python 3.14 'brain-framework==12.0.2'
+uv tool install --python 3.14 'brain-framework==13.0.0'
 bf --version
 ```
 
@@ -156,7 +158,7 @@ The [runnable example](https://github.com/fmind/brain-framework/tree/main/exampl
 Read the [release notes](https://github.com/fmind/brain-framework/releases), then update the tool and check your brain:
 
 ```bash
-uv tool install --upgrade --python 3.14 'brain-framework==12.0.2'
+uv tool install --upgrade --python 3.14 'brain-framework==13.0.0'
 bf --version
 bf validate --brain ~/knowledge
 bf eval --brain ~/knowledge
@@ -164,6 +166,10 @@ bf eval --brain ~/knowledge
 
 Run `eval` once your brain has `evals/retrieval.yaml`. A name such as `--brain knowledge` works inside the brain, for its declared references, or after `bf register`; a path works from anywhere. Review and update separately installed skills, and restart an MCP host that still runs the old process. Within a major version, the brain format (`bf.yaml`, `evals/retrieval.yaml` and the folder layout) stays compatible. A new major version supports only its current format and documents manual upgrade steps; historical breaking changes are recorded in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md).
 
+## Upgrade from Brain Framework 12
+
+Brain Framework 13 keeps version 5 of `bf.yaml` and of retrieval suites; the search cache rebuilds itself. When upgrading from 12, update CLI and MCP callers to follow `next_offset` for complete listings and assemble digest-matching JSON chunks for oversized exact reads; see [retrieval](search.md). Reinstall the workflow skills for version 13. Collection trust now matches both the registered name and path: keep the brain name unchanged, or update its local registry entry after an intentional rename.
+
 ## Upgrade from Brain Framework 11
 
-Brain Framework 12 keeps version 5 of `bf.yaml` and of retrieval suites; the search cache rebuilds itself. A BF link accepts only `?rel=ROLE`: find links that still carry `subject`, `evidence`, `asserted-by` or other query keys, and frontmatter `fields`, with the commands in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md), then write each relationship as a `?rel=` link in the note of its subject. Tools that read `relations[].evidence`, `asserted_by` or `attributes` read `relations[].origin`. Reinstall the skills, then validate and evaluate: search now ranks every item holding any of the words in one query, so re-check retrieval cases whose expected refs relied on the former all-words pass.
+A BF link accepts only `?rel=ROLE`: find links that still carry `subject`, `evidence`, `asserted-by` or other query keys, and frontmatter `fields`, with the commands in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md), then write each relationship as a `?rel=` link in the note of its subject. Tools that read `relations[].evidence`, `asserted_by` or `attributes` read `relations[].origin`. Reinstall the skills, then validate and evaluate: search now ranks every item holding any of the words in one query, so re-check retrieval cases whose expected refs relied on the former all-words pass.

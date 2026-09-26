@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 import stat
@@ -62,7 +63,12 @@ class Store:
 
     def read(self, name: str, limit: int = MAX_FILE) -> bytes:
         with self.parent(name) as (parent, leaf):
-            fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+            try:
+                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+            except OSError as error:
+                if error.errno == errno.ELOOP:
+                    raise Error(f"{name}: symlinks are not followed; replace it with a regular file") from error
+                raise
             with os.fdopen(fd, "rb") as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     raise Error(f"{name}: expected a regular file")
@@ -109,10 +115,20 @@ class Store:
             os.rmdir(leaf, dir_fd=parent)
             os.fsync(parent)
 
-    def files(self, directory: str) -> list[str]:
-        """Bound the entire traversal, including directories and ignored extensions."""
+    def files(self, directory: str, *, skipped: dict[str, tuple[int, int, int, int]] | None = None) -> list[str]:
+        return sorted(self.scan(directory, skipped=skipped))
+
+    def scan(
+        self, directory: str, *, skipped: dict[str, tuple[int, int, int, int]] | None = None
+    ) -> dict[str, tuple[int, int, int, int]]:
+        """Regular files below a directory, fingerprinted by the traversal's own no-follow stats.
+
+        Symlinks and special files are never followed. They fail the scan, or, when the caller passes
+        `skipped`, land there with their own fingerprint so the caller can report them and carry on.
+        Bound the entire traversal, including directories and ignored extensions.
+        """
         relative(directory)
-        result: list[str] = []
+        result: dict[str, tuple[int, int, int, int]] = {}
         visited = 0
 
         def visit(fd: int, prefix: str) -> None:
@@ -123,7 +139,10 @@ class Store:
                 for entry in entries:
                     visited += 1
                     if visited > MAX_FILES:
-                        raise Error(f"{directory} exceeds the {MAX_FILES:,}-entry scan limit")
+                        raise Error(
+                            f"{directory} exceeds the {MAX_FILES:,}-entry scan limit; keep bulky files "
+                            "in the brain's root inputs/ or originals/, which are not scanned"
+                        )
                     path = f"{prefix}/{entry.name}"
                     info = entry.stat(follow_symlinks=False)
                     if stat.S_ISDIR(info.st_mode):
@@ -133,20 +152,34 @@ class Store:
                         finally:
                             os.close(child)
                     elif stat.S_ISREG(info.st_mode):
-                        result.append(path)
+                        result[path] = _fingerprint(info)
+                    elif skipped is not None:
+                        skipped[path] = _fingerprint(info)
                     else:
                         raise Error(f"{path}: symlinks and special files are forbidden")
 
+        fd = os.open(self.root, _DIR)
         try:
-            with self.parent(directory) as (parent, leaf):
-                fd = os.open(leaf, _DIR, dir_fd=parent)
-        except FileNotFoundError:
-            return []
-        try:
+            try:
+                prefix = []
+                for part in relative(directory):
+                    prefix.append(part)
+                    info = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                    if not stat.S_ISDIR(info.st_mode):
+                        path = "/".join(prefix)
+                        if skipped is None:
+                            raise Error(f"{path}: expected a directory; symlinks and special files are forbidden")
+                        skipped[path] = _fingerprint(info)
+                        return {}
+                    child = os.open(part, _DIR, dir_fd=fd)
+                    os.close(fd)
+                    fd = child
+            except FileNotFoundError:
+                return {}
             visit(fd, directory)
         finally:
             os.close(fd)
-        return sorted(result)
+        return result
 
     def fingerprint(self, name: str) -> tuple[int, int, int, int]:
         """Size, mtime, ctime and inode: ctime catches an edit whose mtime was preserved."""
@@ -154,7 +187,11 @@ class Store:
             info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
             if not stat.S_ISREG(info.st_mode):
                 raise Error(f"{name}: expected a regular file")
-            return info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino
+            return _fingerprint(info)
+
+
+def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
+    return info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino
 
 
 def _private(*parts: str, root: Path) -> Store:

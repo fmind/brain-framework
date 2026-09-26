@@ -4,6 +4,8 @@ Markdown packages that teach agents to use Brain Framework. They are distributed
 
 | Skill                               | Use                                                                                   |
 | ----------------------------------- | ------------------------------------------------------------------------------------- |
+| [bf-setup](bf-setup/SKILL.md)       | Set up a useful brain, verify agent access and connect the first selected sources.    |
+| [bf-scan](bf-scan/SKILL.md)         | Discover useful sources from approved bookmarks, tools and project folders.           |
 | [bf-use](bf-use/SKILL.md)           | Read pages, search and read notes and records from any repository.                    |
 | [bf-learn](bf-learn/SKILL.md)       | Keep notes current, retain decision evidence and prepare knowledge for another brain. |
 | [bf-action](bf-action/SKILL.md)     | Start, resume or close one action (one session of work) when the user asks for it.    |
@@ -11,20 +13,28 @@ Markdown packages that teach agents to use Brain Framework. They are distributed
 
 ## Install
 
-Start with `bf-use`; add `bf-learn` to maintain notes after work, `bf-action` to resume work by name and `bf-maintain` for brain operations. From a reviewed checkout of the release you use, copy each complete folder, including templates, into a skill directory your host discovers. For a host that reads `~/.agents/skills/`, a first installation is:
+For guided onboarding, install `bf-setup` with `bf-use`; add `bf-scan` for optional source discovery and `bf-maintain` to implement selected integrations. For an existing brain, start with `bf-use`; add `bf-learn` to maintain notes after work, `bf-action` to resume work by name and `bf-maintain` for brain operations. From a reviewed checkout of the release you use, copy each complete folder, including templates, into a skill directory your host discovers. For a host that reads `~/.agents/skills/`, a first installation is:
 
 ```bash
 mkdir -p ~/.agents/skills
 cp -R skills/bf-use ~/.agents/skills/bf-use
 ```
 
-Run this from the Brain Framework checkout only when that destination does not exist. For an existing installation, compare the folders and merge changes deliberately; preserve local customizations. Copy complete folders, including `references/` and `scripts/`. The Python package and `bf init` do not install skills.
+Run this from the Brain Framework checkout only when that destination does not exist. Each `SKILL.md` names the release it came from in `metadata.version`; compare it with `bf --version` after upgrading either one. For an existing installation, compare the folders and merge changes deliberately; preserve local customizations. Copy complete folders, including `references/` and `scripts/`. The Python package and `bf init` do not install skills.
 
 Host discovery paths differ. A brain's `skills/` can hold versioned workflow packages, but placing files there alone does not make a host load them. Use the host's configured discovery directory or a host-supported link, then start a new session and confirm `bf-use` is available.
 
 Ask the agent to search the intended brain, read one returned ref and cite it. This verifies the route from the host to your knowledge. Use `--brain PATH` for a work root; its direct `bf.yaml` brain references are also in scope; default selection otherwise depends on `BF_BRAIN`, the current directory and your registered brains. See the [agent walkthrough](../docs/docs/getting-started.md#give-agents-access) and [MCP alternative](../docs/docs/mcp.md).
 
 For development of Brain Framework itself, use the repository-local [bf-contribute](../.agents/skills/bf-contribute/SKILL.md) skill.
+
+## Setup and source discovery
+
+Ask `bf-setup`: "Help me set up a brain for this project and verify that my agent can explain our decisions." It establishes a small pilot, saves useful knowledge and verifies retrieval and agent access before adding integrations. It also works with an existing brain and preserves its configuration and notes.
+
+Ask `bf-scan`: "Help me find useful sources; propose an inspection scope before reading my bookmarks or project folders." Agree on specific inputs and what the agent may receive. It distinguishes observed tools or links from unverified account access, compares existing coverage and recommends connections for recurring questions. Its optional standard-library helper supports Python 3.11+, selected Chromium JSON or Netscape HTML bookmark exports, and named executable availability checks. It returns bounded host counts or availability, never full bookmark URLs or executable paths; hostnames can still be sensitive.
+
+Discovery does not enable sensors, authenticate accounts or save an inventory. Selected integrations pass to `bf-maintain` for disabled configuration, fake-provider tests and authorized live execution. Install companions as needed; the skills are independent folders, and sibling links do not install or activate another skill. Neither `bf-setup` nor `bf-scan` is a new `bf` subcommand.
 
 ## Decision workflows
 

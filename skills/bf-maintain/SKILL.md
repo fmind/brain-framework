@@ -2,9 +2,14 @@
 name: bf-maintain
 description: Maintain Brain Framework brains - sensor and routine health, scheduled updates, backfills, validation and retrieval cases. Use when bf status or the home page reports stale or failing sensors or routines, when adding a sensor or routine, or when setting up a schedule.
 license: MIT
+compatibility: Requires Brain Framework 13 (the bf command) on Linux or macOS.
+metadata:
+  version: "13.0.0"
 ---
 
 # bf-maintain
+
+For first-use onboarding, use [bf-setup](../bf-setup/SKILL.md); for approved source discovery, use [bf-scan](../bf-scan/SKILL.md). This skill owns implementing and operating their selected sensors and routines. Carry forward the recurring question, account/folder/repository scope, retained fields, exclusions, access gaps and freshness need. Discovery approval alone does not authorize provider execution; reuse explicit implementation and live-run authority already given.
 
 Select the intended brain before maintenance; use `--brain NAME` so the working directory cannot broaden the operation. Start with offline diagnosis. Live `update` and `collect` require the user's authorization; `collect --dry-run` still contacts the provider and writes its private stderr log.
 
