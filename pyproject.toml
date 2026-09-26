@@ -8,7 +8,18 @@ requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Médéric Hurier" }]
-keywords = ["ai-agents", "knowledge-management", "local-first", "mcp", "second-brain", "plain-text"]
+keywords = [
+  "ai",
+  "ai-agents",
+  "agent-memory",
+  "context-engineering",
+  "knowledge-management",
+  "local-first",
+  "mcp",
+  "model-context-protocol",
+  "python",
+  "second-brain",
+]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Environment :: Console",
