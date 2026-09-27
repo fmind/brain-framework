@@ -4,9 +4,9 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
-## [v13.0.1](https://github.com/fmind/brain-framework/releases/tag/v13.0.1) - 2026-09-27
+## [v13.0.2](https://github.com/fmind/brain-framework/releases/tag/v13.0.2) - 2026-09-27
 
-First published 13.0.x release. The v13.0.0 tag stopped before publication because its CI task runner could not parse the quiet-task setting; the tag remains unchanged. CI and scheduled security checks now pin mise 2026.9.15.
+First published 13.0.x release. The v13.0.0 and v13.0.1 tags stopped at verification before publication and remain unchanged. CI and scheduled security checks now pin mise 2026.9.15. Terminal-restoration checks exercise line input before comparing all settings, accounting for macOS kernel state while retaining cancellation and restoration assertions.
 
 Brain Framework 13 adds continuous collection, independent record files, complete retrieval and practical workflows from evidence to decisions. **Before upgrading from 12, follow the [manual upgrade procedure](https://fmind.github.io/brain-framework/docs/upgrades/#from-12-to-13)** on a backed-up copy with collection stopped.
 
@@ -48,9 +48,13 @@ Brain Framework 13 adds continuous collection, independent record files, complet
 - Retry failed scheduled programs on the next cycle even when an earlier success is still within its refresh interval. The watch display shows these retries as immediately due.
 - Remove empty code-line links from the documentation's keyboard navigation and accessibility tree.
 
+## [v13.0.1](https://github.com/fmind/brain-framework/tree/v13.0.1) - 2026-09-27
+
+Unpublished tag. The macOS terminal tests compared a transient kernel flag before processing the next input. See v13.0.2 for the full release notes and portable terminal checks.
+
 ## [v13.0.0](https://github.com/fmind/brain-framework/tree/v13.0.0) - 2026-09-27
 
-Unpublished tag. See v13.0.1 for the full release notes and corrected CI toolchain.
+Unpublished tag. See v13.0.2 for the full release notes and corrected CI toolchain.
 
 ## [v12.0.2](https://github.com/fmind/brain-framework/releases/tag/v12.0.2) - 2026-09-25
 

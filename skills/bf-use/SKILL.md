@@ -4,7 +4,7 @@ description: Search and read the user's brains with Brain Framework (project not
 license: MIT
 compatibility: Requires Brain Framework 13 (the bf command) on Linux or macOS.
 metadata:
-  version: "13.0.1"
+  version: "13.0.2"
 ---
 
 # bf-use

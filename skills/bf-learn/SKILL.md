@@ -4,7 +4,7 @@ description: Keep Brain Framework project notes, concepts and action folders cur
 license: MIT
 compatibility: Requires Brain Framework 13 (the bf command) on Linux or macOS.
 metadata:
-  version: "13.0.1"
+  version: "13.0.2"
 ---
 
 # bf-learn

@@ -167,6 +167,15 @@ def test_watch_rejects_non_tty_and_cli_invalid_options(brain: Store) -> None:
         assert result.exit_code == 0
 
 
+def assert_terminal_restored(master: int, slave: int, previous: list[object]) -> None:
+    # Darwin sets transient PENDIN when returning to canonical mode (xnu/bsd/kern/tty.c).
+    # Exercise the next input before comparing every setting; do not flush or discard user input.
+    os.write(master, b"restored\n")
+    assert select.select([slave], [], [], 1)[0], "restored terminal did not accept line input"
+    assert os.read(slave, 1024) == b"restored\n"
+    assert termios.tcgetattr(slave) == previous
+
+
 def test_keyboard_restores_terminal_after_failure() -> None:
     master, slave = pty.openpty()
     try:
@@ -178,7 +187,7 @@ def test_keyboard_restores_terminal_after_failure() -> None:
                 os.write(master, b"\x1b[B")
                 assert read_key(descriptor) == "\x1b[B"
                 raise RuntimeError("stop")
-            assert termios.tcgetattr(slave) == previous
+            assert_terminal_restored(master, slave, previous)
     finally:
         os.close(master)
         os.close(slave)
@@ -259,7 +268,7 @@ def test_tui_quit_restores_terminal_and_cancels_sensor(brain: Store, tmp_path: P
             if select.select([master], [], [], 0.1)[0]:
                 output.extend(os.read(master, 65536))
         assert child.wait(timeout=5) == 0
-        assert termios.tcgetattr(slave) == original
+        assert_terminal_restored(master, slave, original)
         pid = int(marker.read_text())
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)

@@ -4,7 +4,7 @@ description: Maintain Brain Framework brains - sensor and routine health, schedu
 license: MIT
 compatibility: Requires Brain Framework 13 (the bf command) on Linux or macOS.
 metadata:
-  version: "13.0.1"
+  version: "13.0.2"
 ---
 
 # bf-maintain
