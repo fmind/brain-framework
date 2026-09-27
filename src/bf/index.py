@@ -18,7 +18,7 @@ from bf.markdown import LEAD, authored, note
 from bf.models import AUTHORED, MAX_NOTE, Error, Query, Record, digest, encode, moment
 from bf.storage import BusyError, Store, reader, writer
 
-SCHEMA = 18
+SCHEMA = 21
 CACHE = ".bf/index.sqlite"
 _DDL = """
 CREATE TABLE ontology(signature TEXT NOT NULL);
@@ -37,6 +37,7 @@ CREATE TABLE passages(id INTEGER PRIMARY KEY, item INTEGER NOT NULL, fragment TE
 CREATE VIRTUAL TABLE search USING fts5(title, text, names, tokenize='porter unicode61 remove_diacritics 2');
 CREATE TABLE names(name TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY(name, item)) WITHOUT ROWID;
 CREATE TABLE links(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
+CREATE TABLE tags(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
 """
 # A full build creates secondary indexes after loading every file: sorting once beats growing each B-tree.
 # Pages list notes by kind, records by time, and each source's records and totals without scanning every item.
@@ -52,6 +53,7 @@ _INDEXES = (
     "CREATE INDEX passages_item ON passages(item)",
     "CREATE INDEX names_item ON names(item)",
     "CREATE INDEX links_target ON links(target)",
+    "CREATE INDEX tags_target ON tags(target)",
 )
 # Only English and French function words are dropped: a subject such as "resume" or "active" stays literal.
 _STOP = frozenset(
@@ -139,6 +141,7 @@ def _open(store: Store) -> sqlite3.Connection | None:
                 "SELECT id,item,fragment,title FROM passages LIMIT 0",
                 "SELECT name,item FROM names LIMIT 0",
                 "SELECT item,target FROM links LIMIT 0",
+                "SELECT item,target FROM tags LIMIT 0",
                 "SELECT item,subject,relation,target,origin FROM edges LIMIT 0",
                 "SELECT title,text,names FROM search LIMIT 0",
             ):
@@ -187,7 +190,7 @@ def _drop(connection: sqlite3.Connection, path: str) -> None:
     owned = "item IN (SELECT id FROM items WHERE path=:path)"
     values = {"path": path}
     connection.execute(f"DELETE FROM search WHERE rowid IN (SELECT id FROM passages WHERE {owned})", values)  # noqa: S608 - fixed SQL
-    for table in ("passages", "names", "links", "edges"):
+    for table in ("passages", "names", "links", "edges", "tags"):
         connection.execute(f"DELETE FROM {table} WHERE {owned}", values)  # noqa: S608 - fixed table names
     connection.execute("DELETE FROM items WHERE path=?", (path,))
     connection.execute("DELETE FROM files WHERE path=?", (path,))
@@ -300,6 +303,10 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
             edges,
         )
         rows.write(connection)
+        connection.executemany(
+            "INSERT INTO tags(item,target) SELECT id,? FROM items WHERE ref=?",
+            [(ontology.qualify(config, f"tags/{tag}"), path) for tag in knowledge.tags],
+        )
         return []
     source = records.source_of(path)
     problems = []
@@ -516,7 +523,8 @@ _LINKING = """SELECT l.item FROM links l WHERE l.target IN (SELECT value FROM js
   UNION SELECT l.item FROM json_each(:sections) s CROSS JOIN links l ON l.target>s.value||'#' AND l.target<s.value||'$'"""
 _FILTERS = f"""((:since='' AND :until='') OR i.time!='') AND (:since='' OR ({TIME})>=:since) AND (:until='' OR ({TIME})<:until)
   AND (:prefix='' OR i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')
-  AND (:target='' OR i.id IN ({_LINKING}))"""
+  AND (:target='' OR (:tag_scope AND i.id IN (SELECT item FROM tags WHERE target=:target))
+       OR (NOT :tag_scope AND i.id IN ({_LINKING})))"""  # noqa: S608 - fixed SQL
 
 
 def sections(targets: set[str]) -> list[str]:
@@ -569,6 +577,16 @@ def _lexical(connection: sqlite3.Connection, params: dict[str, object], match: s
 
 
 def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> Iterator[dict[str, object]]:
+    if bf_links.tag(str(params["text"])) is not None:
+        return (
+            dict(row)
+            for row in connection.execute(
+                f"SELECT {_FIELDS},'' AS fragment,i.title,1e3 AS score,i.lead AS excerpt FROM items i "  # noqa: S608 - fixed SQL
+                f"WHERE i.id IN (SELECT item FROM tags WHERE target=:text) AND {_FILTERS} "
+                "ORDER BY time DESC,i.ref DESC LIMIT :limit",
+                params,
+            )
+        )
     rows = connection.execute(
         f"""WITH candidates AS (
               SELECT id AS item,2e6 AS score FROM items WHERE ref=:text
@@ -615,8 +633,13 @@ def search(
     `limit` overrides the query's own, such as one more row to tell whether further results exist.
     """
     params: dict[str, object] = query.model_dump()
+    params["tag_scope"] = bf_links.tag(query.target) is not None
     params["limit"] = limit or query.limit
-    text = params["text"] = query.text.strip()
+    text = query.text.strip()
+    if bf_links.tag(text) is not None:
+        text = bf_links.identity(text)
+        exact = True
+    params["text"] = text
     exact_identities = identities or {text}
     params["identities"] = json.dumps(sorted(exact_identities))
     params["identity_sections"] = json.dumps(sections(exact_identities))

@@ -11,7 +11,7 @@ import sys
 import pytest
 
 from bf import index, records, retrieve
-from bf.config import may_collect, register
+from bf.config import register
 from bf.models import Error, Query, Record
 from bf.storage import Store, writer
 
@@ -71,6 +71,17 @@ def test_invalid_lines_name_their_location(brain: Store) -> None:
         records.load(brain, "memories/bad/2026-09.jsonl")
     brain.write("memories/bad/notes.txt", b"ignored")
     assert records.partitions(brain, "bad") == ["memories/bad/2026-09.jsonl"]
+
+
+def test_invalid_record_keys_stay_out_of_diagnostics(brain: Store) -> None:
+    path = "memories/bad/undated.jsonl"
+    brain.write(path, b'{"id":"x","title":"ok","private-provider-key":"private-value"}\n')
+    with pytest.raises(Error, match=r"undated.jsonl:1: invalid record: <key>") as failure:
+        records.load(brain, path)
+    assert "private" not in str(failure.value)
+    reply = retrieve.search([brain], Query(text="absent"))
+    assert "<key>" in str(reply["problems"])
+    assert "private" not in str(reply["problems"])
 
 
 def test_failed_partition_move_preserves_exact_original_bytes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,8 +232,7 @@ def test_failed_rollback_keeps_originals_for_explicit_build(brain: Store, monkey
 def test_untrusted_pending_journal_cannot_mutate_evidence_through_reads(
     brain: Store, *, cached: bool, existed: bool
 ) -> None:
-    register(brain, collect=False)
-    assert not may_collect(brain)
+    register(brain)
     if cached:
         index.refresh(brain)
         assert index.fresh(brain) == "ready"

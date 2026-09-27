@@ -14,7 +14,6 @@ bf() {
   env -u BF_BRAIN XDG_CONFIG_HOME="$bf_demo/config" XDG_STATE_HOME="$bf_demo/state" \
     uv run --project "$bf_checkout" bf "$@"
 }
-bf register . --collect
 bf update --dry-run
 bf update
 bf read
@@ -25,7 +24,9 @@ bf validate
 bf eval
 ```
 
-`register --collect` trusts this copy to run `sensors/demo.py`; the wrapper keeps the demo's registry and state in its temporary directory, leaving your real registrations unchanged. A second update within the hour runs nothing. The fake sensor emits one fictional event inside each requested window, always with the same id, so repeated runs update one line in `memories/demo/`.
+On this disposable copy, expect `bf validate` to return `"valid":true` and `bf eval` to return `"passed":true`. Reading `demo:retention` gives the fictional evidence that upstream content can disappear; the action read lists `ACTION.md`, its input request and the linked project.
+
+`update` runs the configured `sensors/demo.py` in this copy; the wrapper keeps the demo's configuration and state in its temporary directory. A second update within the hour runs nothing. The fake sensor emits one fictional event inside each requested window, always with the same id, so repeated runs update one line in `memories/demo/`.
 
 `bf read` shows the example project with its first open task, and `bf read actions/2026-09-19_retention` returns the action with its request file and the project that links to it. Continue that action by writing its answer with the record ref, then find it again:
 
@@ -39,7 +40,7 @@ bf search "keep originals" --scope actions
 bf validate
 ```
 
-Then tick the action's tasks in `ACTION.md`, fill its Outcome and set `status: done`. For real data, create your own brain with `bf init PATH` and copy the patterns you need. See the [brain layout](../../docs/docs/brain.md).
+Then tick the action's tasks in `ACTION.md`, fill its Outcome and record any next step in Resume. Use `status: stable` when the note is reviewed and ready to use; task completion and note maturity are separate. For real data, create your own brain with `bf init ~/brain` (or another chosen path) and copy the patterns you need. See the [brain layout](../../docs/docs/brain.md).
 
 ## Follow an explicit link
 
@@ -49,7 +50,7 @@ bf read bf://example/projects/example
 bf read 'bf://example/projects/example.md#now'
 ```
 
-The concept's `backlinks` list the project under `related-to`, and the project's `claims` list the same link: the project note owns a logical entity and its typed link preserves the exact origin section. `bf read repo:example/project` groups the collected record under its `repository` role. This example is fictional; do not copy its identities into a real brain.
+Read the concept's `backlinks` to find the project under `related-to`. Read the project's `claims` to find the same link and its origin, `projects/example.md#now`. These are two views of one declared relationship. `bf read repo:example/project` also groups the collected record under its `repository` role. Use real identities when adapting the example.
 
 ## Review a decision
 
@@ -89,8 +90,8 @@ Retain the exact policy section locally without inserting its body into an agent
   policy='bf://example/concepts/archive-policy.md#retention'
   capture=actions/2026-09-25_retention-review/inputs/policy-v1.json
   mkdir -p "${capture%/*}"
-  test ! -e "$capture" || { echo "keep the existing capture: $capture" >&2; exit 1; }
-  bf read "$policy" | python3 "$helper" capture > "$capture" || { rm -f -- "$capture"; exit 1; }
+  exec 3> "$capture" || exit 1
+  bf read "$policy" | python3 "$helper" capture >&3 || { rm -f -- "$capture"; exit 1; }
   { cat "$capture"; bf read "$policy"; } | python3 "$helper" compare
 )
 ```

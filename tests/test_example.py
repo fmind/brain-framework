@@ -21,8 +21,6 @@ def test_example_collects_searches_and_resumes(tmp_path: Path) -> None:
         assert result.exit_code == code, result.output
         return json.loads(result.stdout) if result.stdout else {}
 
-    assert invoke("update", "--dry-run")["brains"][0]["skipped"]
-    assert runner.invoke(app, ["register", str(brain), "--collect"]).exit_code == 0
     assert invoke("update", "--dry-run")["brains"][0]["sensors"][0]["status"] == "due"
     assert not (brain / "memories").exists()
     assert invoke("update")["brains"][0]["sensors"][0]["status"] == "collected"

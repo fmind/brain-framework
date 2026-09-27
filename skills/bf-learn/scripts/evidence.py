@@ -74,13 +74,6 @@ def fingerprint(value: dict[str, JSON]) -> str:
     return hashlib.sha256(encode(value)).hexdigest()
 
 
-def external(reply: dict[str, JSON]) -> bool:
-    """Notes are authored; a record is owner text only when its source is declared `trust: owner`."""
-    if reply.get("external") is True:
-        return True
-    return "record" in reply and object_value(reply.get("collection", {})).get("trust") != "owner"
-
-
 def limitations(reply: dict[str, JSON]) -> list[JSON]:
     result: list[JSON] = []
     if reply.get("problems") or reply.get("stale"):
@@ -107,7 +100,6 @@ def capture(reply: dict[str, JSON]) -> dict[str, JSON]:
         "ref": ref,
         **value,
         "sha256": fingerprint(value),
-        "external": external(reply),
         "collection": reply.get("collection", {}),
         "limitations": limitations(reply),
     }
@@ -137,7 +129,6 @@ def compare(before: dict[str, JSON], after: dict[str, JSON]) -> dict[str, JSON]:
         "content_changed": changed,
         "limitations": reasons,
         "baseline_at": captured_at,
-        "external": before.get("external") is True or external(after),
     }
 
 

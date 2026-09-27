@@ -1,4 +1,4 @@
-"""Collect every due sensor and run every due routine of the brains trusted here, then refresh their caches."""
+"""Collect every due sensor and run every due routine of the selected brains, then refresh their caches."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from bf import index
 from bf.collect import Runner, collect, due, due_routines, routine, run
-from bf.config import load, may_collect
+from bf.config import load
 from bf.models import Error
 from bf.storage import Store
 
@@ -28,9 +28,6 @@ def update(
     for store in stores:
         try:
             name = load(store).name
-            if not may_collect(store):
-                brains.append({"brain": name, "skipped": "not trusted to collect on this machine"})
-                continue
             windows = due(store, now)
             routines = due_routines(store, now)
         except (Error, OSError, UnicodeError) as error:

@@ -30,11 +30,13 @@ def make(root: Path, name: str, files: dict[str, str]) -> Store:
     return store
 
 
-def test_calendar_edge_dates_never_break_retrieval(brain: Store) -> None:
+@pytest.mark.parametrize("status", ["", "draft", "stable"])
+def test_calendar_edge_dates_never_break_retrieval(brain: Store, status: str) -> None:
     for value in ("0001-01-01", "9999-12-31"):
         with pytest.raises(ValueError, match="YYYY-MM-DD"):
             Knowledge.model_validate({"updated": value})
-    brain.write("projects/far.md", b"---\nupdated: 9999-12-30\n---\n# Far\n\nretention plan\n")
+    metadata = "type: project\n" + (f"status: {status}\n" if status else "")
+    brain.write("projects/far.md", f"---\n{metadata}updated: 9999-12-30\n---\n# Far\n\nretention plan\n".encode())
     assert "projects/far.md" in refs(search([brain], Query(text="retention plan")))
     assert "projects/far.md" in refs(read([brain], "projects"))
     assert read([brain])["page"] == ""
@@ -142,5 +144,8 @@ def test_headings_and_file_names_stay_addressable(brain: Store) -> None:
     parsed = note("projects/x.md", b"# X\n\n## ???\n\nFirst.\n\n## !!!\n\nSecond.\n")
     assert [passage.fragment for passage in parsed.passages] == ["", "section", "section-1"]
     brain.write("actions/2026-09-25_import/inputs/data#1.csv", b"a,b\n")
-    brain.write("actions/2026-09-25_import/ACTION.md", b"# Import\n\nSee [the data](inputs/data%231.csv).\n")
+    brain.write(
+        "actions/2026-09-25_import/ACTION.md",
+        b"---\ntype: action\n---\n# Import\n\nSee [the data](inputs/data%231.csv).\n",
+    )
     assert validate(brain)["valid"], validate(brain)["problems"]

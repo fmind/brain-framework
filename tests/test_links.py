@@ -44,6 +44,7 @@ def people(brain: Store) -> None:
     brain.write(
         "projects/alice.md",
         b"""---
+type: person
 entity: bf://fixture/people/alice
 aliases: [person:alice]
 ---
@@ -55,6 +56,7 @@ aliases: [person:alice]
     brain.write(
         "projects/bob.md",
         b"""---
+type: person
 entity: bf://fixture/people/bob
 aliases: [person:bob]
 ---
@@ -178,6 +180,27 @@ fields:
     assert read([brain], "person:bob")["backlinks"] == []
 
 
+@pytest.mark.parametrize("path", ["projects/new.md", "concepts/new.md", "actions/2026-09-27_new/ACTION.md"])
+def test_okf_source_claims_keep_their_file_origin(brain: Store, path: str) -> None:
+    people(brain)
+    brain.write(
+        path,
+        b"---\ntype: note\nsources:\n  - resource: bf://fixture/people/bob?rel=friend\n---\n# Source\n",
+    )
+    friends = group(read([brain], "person:bob"), "friend")
+    evidence = next((item for item in friends["items"] if item["ref"] == path), None)
+    assert evidence is not None
+    assert evidence["relations"] == [
+        {
+            "subject": f"bf://fixture/{path}",
+            "relation": "friend",
+            "target": "bf://fixture/people/bob",
+            "origin": f"bf://fixture/{path}",
+        }
+    ]
+    assert validate(brain)["valid"]
+
+
 def test_links_with_removed_attributes_are_reported(brain: Store) -> None:
     people(brain)
     brain.write("projects/bad.md", b"# Old\n[Bob](bf://fixture/people/bob?rel=friend&subject=person:alice)\n")
@@ -294,7 +317,7 @@ def test_cli_mcp_and_evals_expose_links(brain: Store) -> None:
 
 def test_explanations_preserve_origin_and_report_truncation(brain: Store) -> None:
     people(brain)
-    body = "---\nentity: bf://fixture/people/alice\n---\n# Alice\n" + "\n".join(
+    body = "---\ntype: person\nentity: bf://fixture/people/alice\n---\n# Alice\n" + "\n".join(
         f"## Event {i}\nMet at event {i}: [Bob](bf://fixture/people/bob?rel=friend)" for i in range(51)
     )
     brain.write("projects/alice.md", body.encode())
@@ -354,3 +377,18 @@ def test_repeated_links_in_one_section_are_one_claim(brain: Store) -> None:
     )
     item = next(i for i in group(read([brain], "person:bob"), "friend")["items"] if i["ref"] == "projects/carol.md")
     assert len(item["relations"]) == 1
+
+
+def test_notes_cannot_claim_another_brains_alias(brain: Store) -> None:
+    brain.write(
+        "projects/foreign.md",
+        b"---\naliases: [bf://other/people/alice]\n---\n# Foreign ownership\n",
+    )
+    result = validate(brain)
+    assert not result["valid"]
+    assert "own brain namespace" in str(result["problems"])
+    found = search([brain], Query(text="foreign ownership"))
+    assert found["items"] == []
+    assert "own brain namespace" in str(found["problems"])
+    # Exact bytes remain available to repair the invalid note.
+    assert "Foreign ownership" in str(read([brain], "projects/foreign.md")["text"])

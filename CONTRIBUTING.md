@@ -1,26 +1,61 @@
 # Contributing
 
-Read [AGENTS.md](AGENTS.md) for the core contracts and the local [bf-contribute skill](.agents/skills/bf-contribute/SKILL.md) for the contribution workflow. Keep the implementation small and preserve file-based knowledge, offline search, explicit trusted collection and readable refs. Discuss changes that enlarge the product surface before implementing them.
+Start with [AGENTS.md](AGENTS.md) and [bf-contribute](.agents/skills/bf-contribute/SKILL.md). Keep changes small, preserve offline retrieval and file-based knowledge, and use synthetic evidence. Discuss changes that enlarge the product before implementing them.
+
+## Set up and check a change
+
+From the checkout:
 
 ```bash
 mise run install
+uv run bf --help
 mise run all
 ```
 
-Use synthetic fixtures and fake providers. Add tests for useful outcomes and realistic failures. Regenerate `docs/bf.schema.json` after configuration changes and update the relevant documentation. Do not weaken checks or the branch-coverage floor.
+`install` syncs locked dependencies and installs Git hooks. `all` formats, checks, tests, evaluates retrieval and builds the distributions. Inspect its diff before committing; run mutating checks in an isolated copy when the checkout has unrelated work.
 
-Tasks use concise native output: mise omits command echoes, pytest keeps test counts, failures and the coverage total, and Gitleaks omits its banner while retaining redacted findings. Warnings and exit codes remain visible. Use `MISE_TASK_QUIET=false mise run <task>` to restore execution messages, `mise run test -vv` for verbose tests, and `mise run report:coverage` for per-file coverage and missing lines from the last test run; rerun tests first if the saved data are stale. `mise run coverage` still runs tests and writes the HTML report.
+Use a focused check while editing, then run the full gate:
 
-For documentation changes, walk through the commands with an isolated registry and a disposable brain, then check rendered links with `mise run check:docs` and repository links with `mise run check:links`. The README explains value and fit; `docs/` owns usage and reference details; `skills/` teaches agents the corresponding workflows. Keep claims consistent across them, including setup, brain selection, collection trust and limits. Do not put private-brain examples or evidence in this repository.
+| Changed area                   | Focused check                                    | What to verify                                                      |
+| ------------------------------ | ------------------------------------------------ | ------------------------------------------------------------------- |
+| Search                         | `TZ=UTC uv run pytest -q tests/test_search.py`   | Results and realistic failure cases.                                |
+| Retrieval quality              | `mise run eval`                                  | Questions still find the expected source, rank and answer fragment. |
+| Documentation                  | `mise run check:docs` and `mise run check:links` | Strict build, rendered anchors and local repository links.          |
+| Configuration model            | `mise run generate:schema`                       | Generated `docs/bf.schema.json` matches the loader.                 |
+| Indexing, retrieval or storage | `mise run benchmark` before and after            | Comparable timings with valid, complete results.                    |
 
-Keep task and workflow definitions declarative: one command per workflow step, short sequential mise command arrays, and native tool flags before custom shell. Do not compress branching or cleanup programs into inline `run` blocks. `format:imports` sorts imports and `format:python` formats them; Git hooks pass staged files to each separately. `check:leaks` scans recent history and the working tree, while `check:leaks:staged` checks exactly the staged changes. Tests isolate HOME, config and state in `tests/conftest.py`; the task sets UTC before Python starts. `test:package` installs both artifacts outside the checkout using locked dependencies, then exercises initialization, retrieval, validation and evaluation.
+For example, if a query finds the wrong project's budget, add that question and both competing project notes to [evals/](evals/README.md). Reproduce the miss before changing ranking; keep the expected answer tied to its source. A passing retrieval case checks that case, not source truth or arbitrary answer quality.
 
-The scripts each have one caller or purpose: `benchmark_scale.py` measures retrieval, `test_package.py` checks distributions, and `release-notes` plus `verify-release-tag` support CD. Documentation builds into `site/brain-framework/`, matching the public URL path so Lychee can check links and anchors directly. Zensical owns `.cache/`, which its clean build removes. Schema tasks use separate disposable `.schema-cache/schema-*.json` files and only replace the committed schema after generation succeeds.
+## Test outcomes and failures
 
-Run `mise run benchmark` manually when changing indexing, retrieval or storage. It reports latency over a synthetic corpus, checks each result outside the timer and fails without a timing report if a result is incorrect or incomplete. Every note-edit sample writes a distinct revision; `--notes 0` skips that measurement. This diagnostic has no performance threshold and is not part of the CI gate.
+Technical tests belong in `tests/`; question-to-evidence cases belong in `evals/`. Both run without an LLM. Use the fake providers in `tests/conftest.py`; tests isolate HOME, configuration and state. Do not use private brains or live credentials.
 
-CI and CD share `verify.yml`: it runs the four-platform gate and uploads the tested artifacts from Linux x64. CI deploys the documentation artifact only from current `main`; CD publishes the package artifact only from version tags. Builds have read-only permissions and do not use shared tool caches. Publication gets its own narrowly scoped jobs.
+For a sensor change, test a valid response and a realistic failure such as an incomplete provider page. Confirm that failure leaves saved evidence intact and diagnostics contain no provider text. Keep the 85% branch-coverage floor and all existing safety checks.
 
-Release maintainers follow the [release checklist](.agents/skills/bf-contribute/references/release.md). Publishing requires explicit authority and uses the tag-triggered CD workflow.
+For a documentation change, follow the actual commands in a disposable brain with isolated configuration and state: save a decision, search its reason, read its ref, validate and evaluate. Show the expected result beside the example. Keep the README focused on first use, `docs/` on user contracts and `skills/` on agent procedures.
 
-See [SECURITY.md](SECURITY.md) for private vulnerability reporting and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
+## Read check output
+
+Tasks keep failures, warnings, test counts and total coverage visible. Use these commands when more detail is needed:
+
+```bash
+MISE_TASK_QUIET=false mise run check:docs
+mise run test -vv
+mise run report:coverage
+```
+
+The first restores command echoes. The second runs verbose tests. The third reads the last saved coverage data; rerun tests first if the source changed. `mise run coverage` runs tests and writes an HTML report.
+
+## Maintain the shared gate
+
+Keep `mise.toml` and workflow steps declarative: one command per step, short command arrays and native flags. Git hooks run import sorting and Python formatting separately, with the staged file selection. Secret checks cover the working tree and recent history; `check:leaks:staged` checks staged content only.
+
+`test:package` installs the wheel and source distribution outside the checkout and exercises initialization, retrieval, validation and evaluation. The benchmark uses synthetic records, verifies results outside its timers and has no performance threshold. The owning scripts document the details.
+
+Docs build into `site/brain-framework/`. Zensical owns `.cache/`; schema generation uses separate `.schema-cache/` files so a clean docs build cannot remove them.
+
+## Release
+
+CI and CD share `.github/workflows/verify.yml`, which runs the gate on Linux and macOS, x64 and arm64. CI deploys docs from current `main`; tag-triggered CD publishes the tested package artifacts. Local success is separate from hosted CI and publication.
+
+Follow the [release checklist](.agents/skills/bf-contribute/references/release.md) only with release authorization. See [SECURITY.md](SECURITY.md) for private vulnerability reports and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.

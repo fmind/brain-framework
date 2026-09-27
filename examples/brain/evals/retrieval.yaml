@@ -50,3 +50,12 @@ cases:
   - name: provisional-procedure
     read: concepts/selected-evidence.md
     text: [draft, separate synthetic case, No verification]
+  - name: explicit-retention-tags
+    read: bf://example/tags/retention
+    expect: [projects/example.md, concepts/retention.md, actions/2026-09-19_retention/ACTION.md]
+    forbid: [concepts/selected-evidence.md, concepts/archive-policy.md]
+  - name: evidence-within-retention-tag
+    query: evidence
+    scope: bf://example/tags/retention
+    expect: [projects/example.md, concepts/retention.md, actions/2026-09-19_retention/ACTION.md]
+    forbid: [concepts/selected-evidence.md, concepts/archive-policy.md, "demo:retention"]

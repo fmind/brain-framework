@@ -4,6 +4,61 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+### Fixed
+
+- Remove unnamed, empty code-line links from the documentation's keyboard navigation and accessibility tree.
+
+- Preserve existing evidence-capture destinations in the runnable example, including dangling symlinks, when exclusive creation fails.
+- Retain OKF `sources` links on projects and actions as well as concepts; typed source links require a declared relationship and expose the note as their origin.
+- Keep provider-controlled field names out of malformed persisted-record diagnostics, matching collection error redaction.
+- Read validated typed links to tag pages through the CLI and MCP without treating their relationship as part of the tag identity.
+- Keep starter retrieval evaluations passing when ordinary notes mention topics, starters or pilots; use a single distinctive token for absent-evidence queries in the starter and examples.
+- Keep session-hook project metadata within its owning brain and suppress context when that metadata is incomplete.
+- Include older projects beyond the home-page preview in weekly reviews; incomplete project continuations fail before an action is written.
+- Keep Git history collection inside selected directories, exclude the window's end boundary, and retain in-window commits even when later commits have older dates. Reject invalid windows before invoking Git.
+- Reject authored-note aliases in another brain namespace during validation, indexing and routine output checks; stale projections rebuild automatically.
+
+### Added
+
+- Start every new brain with `tests/` for technical tests and a runnable `evals/retrieval.yaml` for deterministic retrieval checks. `bf eval` works immediately after `bf init`; extend or replace the welcome-note cases with the brain owner's questions and expected evidence.
+- Review stale projects, unresolved questions and decision outcomes through `bf-learn`; retain selected evidence and prepare knowledge transfers without requiring an action folder.
+- Evaluate retrieval separately from technical tests with a fixed fictional corpus under `evals/` and `mise run eval`, included in the full gate. Cases check expected evidence, answer fragments, ranking and scope without an LLM.
+- Browse note tags with `bf read tags`, follow brain-qualified tag pages with exact counts and pagination, and restrict search to explicit membership with `--scope bf://NAME/tags/LABEL`. Tag associations retain their originating note in the graph. Updated authoring skills and examples encourage a small reused vocabulary across projects, concepts and actions.
+
+### Changed
+
+- Rewrite the user guides around concrete tasks, shared examples and expected results. Shorten the README, explain reference contracts with tables and examples, and make contributor and adapter instructions easier to follow.
+
+- **Breaking; requires a major release:** `bf validate` enforces OKF structure for projects, concepts and canonical action `ACTION.md` notes: a nonempty `type`, structured sources and verification events, and `draft`/`stable`/`deprecated` lifecycle statuses. Project and concept folders also enforce reserved index/log rules. Routine output must pass OKF validation before an action is created. Move project and action work progress into the body or task list before upgrading; action inputs, outputs and loose helper notes can remain ordinary Markdown.
+
+- Simplify onboarding around the latest package, `~/brain`, agent-assisted setup and a product website decision. Remove development-edition notices, shorten tag guidance and distinguish maintenance scripts from configured review routines.
+
+- Recommend `~/brain` while showing alternative paths and stable brain names. Align action examples, templates and skills with OKF metadata, and make concrete examples with observable results a general contribution principle.
+
+- **Breaking; requires a major release:** note tags are now bounded labels (up to 1,000 per note, 1–128 characters each, without control characters, surrounding whitespace, slashes or dot segments). Before upgrading, rename invalid labels and replace any `bf://NAME/tags/LABEL` entity or alias with an ordinary link: these addresses now identify computed tag pages. Run `bf validate`; the disposable cache rebuilds automatically.
+
+- Teach core concepts through a shared decision example, shorten first-use setup with expected output, add concept and action authoring examples and a scoped sensor walkthrough, and separate everyday retrieval from its reference contract.
+
+- Lead the README with a runnable decision-to-evidence example and agent connection checks; explain the benefits for agent builders and link to sensor and schema walkthroughs.
+
+- **Breaking; requires a major release:** remove machine collection permissions and sensor content-trust settings. `collect` and `update` run enabled programs in selected roots without registration. Registration stores only names and paths; referenced brains are never executed implicitly.
+- Remove `collect` from init, registration and status replies, `trust` from source metadata, and `external` from retrieval and evidence-helper replies. Pages include record excerpts consistently. Hooks and review routines reference collected records without copying their text into authored context.
+- Scheduled-source freshness comes from local run history: without a successful local run it is `never`, including on a shared clone. An invalid optional registry does not affect a brain selected by path.
+- Shorten human guides, separate routines, scheduling, configuration and safeguards into focused pages, and place Reference immediately below Connect agents.
+
+### Manual upgrade
+
+Before using the next major release:
+
+1. Give project documents and each `actions/YYYY-MM-DD_slug/ACTION.md` a nonempty `type` (normally `project` or `action`). Replace work-progress statuses (`active`, `paused`, `blocked`, `done`, `archived`) with the reviewed OKF knowledge status (`draft`, `stable`, `deprecated`). Preserve work progress in the body or tasks. Check source and verification metadata with `bf validate`; update custom routines to emit OKF action frontmatter. Other action files need no conversion.
+1. Remove `trust` from every sensor in `bf.yaml` and `collect` from each entry in `~/.config/bf/config.yaml` (or its `XDG_CONFIG_HOME` location). Removed fields are rejected; there is no automatic migration.
+1. Remove `--collect` and `--no-collect` from `bf init` and `bf register` calls. Register only when name-based selection outside a brain is useful.
+1. Review timers and scripts: `bf update` outside a brain can run every registered brain. Set `--brain PATH` for the intended collector, and stop schedules you no longer want.
+1. Update CLI/MCP consumers for the removed fields and record excerpts on pages. Reinstall changed workflow skills; evidence captures no longer emit content-trust labels.
+1. Run `bf validate`, `bf eval` and `bf status --brain PATH`. Check collection freshness on the collecting machine; shared records do not include its run history.
+
+Brain and retrieval-suite version numbers remain unchanged here; package versions and installation pins are updated only during the authorized major release.
+
 ## [v13.0.0](https://github.com/fmind/brain-framework/releases/tag/v13.0.0) - 2026-09-26
 
 Brain Framework 13 makes retrieval navigable through complete listings and lossless large reads, adds guided setup and source discovery, and reduces cache-build and page-read work. Brain configuration and retrieval suites remain at version 5.
@@ -27,6 +82,8 @@ Brain Framework 13 makes retrieval navigable through complete listings and lossl
 - Skipped-file problems in search, read and status name each file once instead of repeating its path.
 
 ### Changed
+
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
 
 - Development tasks omit command echoes, test-file progress and decorative scanner banners while retaining failures, warnings, test counts and the coverage total; `mise run report:coverage` shows saved per-file coverage on demand.
 - The README, contributor instructions and documentation overview explain the gather-to-action loop, Unix-style composition and evidence-backed knowledge graph, while keeping data ownership, collection and sharing controls, offline retrieval and cloud-agent privacy explicit.
@@ -54,6 +111,8 @@ A maintenance release for reliable absence checks, documentation and release ver
 
 ### Changed
 
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
+
 - CI and release publication share the four-platform verification workflow. PyPI and GitHub receive the exact distributions that passed isolated installation tests, with hash comparisons before and after publication.
 - Wheel and source-distribution checks install locked runtime dependencies outside the checkout and exercise initialization, validation, search, exact reads, status and retrieval evaluation.
 - Development tasks and hooks use native tools with separate import sorting and formatting, a configured coverage floor, strict rendered documentation links and disposable schema generation.
@@ -64,6 +123,8 @@ A maintenance release for reliable absence checks, documentation and release ver
 Brain Framework 12 ranks notes and records in one search query and answers several times faster; BF links carry only a relationship. On a personal brain of 52,000 records, full cache builds take 13 s instead of 69 s, searches and reads 0.3–0.4 s instead of up to 1.8 s, and the cache shrinks from 357 MB to 239 MB. The `bf.yaml` and retrieval suite formats stay at version 5, but notes that use removed link attributes or frontmatter `fields` need the manual upgrade below. The search cache rebuilds automatically.
 
 ### Changed
+
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
 
 - **Breaking**: search ranks every item containing any of the words in one BM25 query. The former all-words pass let long records that happened to contain every word fill the results before a note matching most of them; BM25 already ranks fuller matches higher.
 - Only projects, concepts and each action's `ACTION.md` receive the note ranking boost. `concepts/index.md`, `concepts/log.md` and an action's `inputs/` and `outputs/` rank like evidence.
@@ -101,6 +162,8 @@ Brain Framework 11.1 adds optional decision workflows to the agent skills and ha
 
 ### Changed
 
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
+
 - Search excerpts are one line and start below a section's heading, which the result title already names. The search cache rebuilds automatically.
 - Exact record reads and search coverage report the same freshness as `bf status` and source pages: a trusted scheduled sensor that never succeeded is `never`. An unreadable registry grants no trust and leaves freshness `unknown`.
 - An invalid `--scope`, `--since` or `--until` exits 2 as invalid input, like other command-line errors. A closed terminal (SIGHUP) cancels like SIGTERM and kills running providers; `nohup` keeps it ignored.
@@ -136,6 +199,8 @@ Brain Framework 11 turns listings into pages, gives actions a resumable page and
 
 ### Changed
 
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
+
 - `bf read` without a ref returns the home page: active and blocked projects, the latest actions, notes changed in 7 days, record activity per source in 24 hours, items in the coming 7 days, and scheduled sensors or routines that need `attention`. Projects are marked for `review` when their note is older than 14 days or items dated after it link to them (`new_links`), and show open `tasks` with the `next` one.
 - `read` resolves pages: folders (`projects`, `concepts`, `actions` and subfolders), periods (`today`, `yesterday`, `YYYY-MM-DD`, `YYYY-MM`, `12h`, `7d`, `2w`) with items modified in the period and each source's share, `memories`, `memories/SOURCE` with its partitions, and `memories/SOURCE/PERIOD`, `snapshot` or `undated`. Pages combine the selected brains, stay bounded (50 period or source items, 200 notes per folder, 20 per section) and report totals; `bf://NAME/` and `bf://NAME/PAGE` select one brain.
 - Whole note and record reads include `backlinks` across the selected brains, grouped by explicit relationship with claim explanations, and `claims` whose explicit subject is the item. An identity without an owning note reads as a page of what links to it. `bf read actions/FOLDER` returns ACTION.md with the action's files and the projects it links to.
@@ -169,6 +234,8 @@ No migration tooling or legacy command surface is included. Runtime dependencies
 ## [v10.0.0](https://github.com/fmind/brain-framework/releases/tag/v10.0.0) - 2026-09-25
 
 ### Changed
+
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
 
 - Declare directly related brains in `bf.yaml` with stable names and relative, absolute or home-relative paths. Search, read, MCP and evaluations include direct references without recursive discovery or required global configuration. Missing references report incomplete scope; conflicting names are excluded.
 - `bf init` defaults to no global registration or collection trust; explicit `--collect` opts in. Maintenance commands do not expand references, and references never authorize sensors. Retrieval suites accept qualified BF addresses to distinguish same-named files across brains.
@@ -206,6 +273,8 @@ Brain Framework 9.2 starts new brains smaller, checks action folders and repairs
 
 ### Changed
 
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
+
 - `bf init` creates only `projects/`, `concepts/` and `actions/`; other folders appear when first needed.
 - `bf register` keeps the registry's leading comment lines when it rewrites the file.
 - Search, MCP and retrieval cases resolve relative times in one place. An invalid search time exits 2 as invalid input, and an invalid retrieval case names the case.
@@ -235,6 +304,8 @@ Brain Framework 9.1 prepares team deployments. The brain format is unchanged: ex
 - Unsupported platforms fail with a clear message instead of an import traceback.
 
 ### Changed
+
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
 
 - Call executable collectors sensors in command help, documentation and the `bf-maintain` skill; record refs, `--source`, health `sources` and OKF `sources` keep their provenance names. `search --source` now has help text.
 
@@ -274,6 +345,8 @@ Unpublished transition candidate. Publication stopped at the macOS ARM64 concurr
 
 ### Changed
 
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
+
 - Explain the value of shared, file-based knowledge through concrete questions and the search, read, work and update loop.
 - Add runnable team-pilot retrieval cases, routine upgrade instructions and host connection checks.
 - Align documentation and skills on base selection, skill discovery, collection trust, recovery and native scheduling.
@@ -301,6 +374,8 @@ FKF 8.2 makes incomplete results visible, preserves evidence through interrupted
 
 ### Changed
 
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
+
 - Rewrite onboarding around a runnable first decision and a small team pilot. Clarify offline and security limits, scheduler cadence and example isolation.
 - Expand failure tests, French retrieval cases and the benchmark's changed and unchanged record paths. No runtime dependencies or services added.
 
@@ -313,11 +388,15 @@ FKF 8.2 makes incomplete results visible, preserves evidence through interrupted
 
 ### Changed
 
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
+
 - The example Git collector skips hidden repositories, repositories named with `--skip`, and bot or reserved-test-domain authors.
 
 ## [v8.0.1](https://github.com/fmind/fkf/releases/tag/v8.0.1) - 2026-09-23
 
 ### Changed
+
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
 
 - Match English word forms with the FTS5 Porter stemmer, so `meetings` finds `meeting` and `decided` finds `decide`. Existing caches rebuild on the next search.
 
@@ -348,6 +427,8 @@ FKF 8 focuses on the loop that makes a knowledge base useful: collect on a sched
 
 ### Changed
 
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
+
 - Rank exact identities first, then items matching all words, then any word; notes above records; deprecated and archived notes last; one result per note through its best section.
 - Collectors run from the base root with the user's environment minus loader-injection variables, and write stderr to a bounded private log.
 - Retrieval cases use `version: 2` with `expect`, `forbid`, `text`, `empty` and time filters.
@@ -376,6 +457,8 @@ First published v7 release. The v7.0.0 candidate stopped at the macOS package ga
 
 ### Changed
 
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
+
 - Keep CLI and the three read-only MCP tools on shared services. Context includes the complete JSON and final newline within four UTF-8 bytes per budget unit; MCP also counts its response wrapper.
 - Match literal lexical terms with case and diacritic folding, explicit identities and authored-note preference. Keep event-time filtering separate from capture recency and decision validity.
 - Confine filesystem access, bound subprocess output and runtime, sanitize collection environments, and preserve atomic immutable evidence and a tested rebuild/recovery path.
@@ -403,6 +486,8 @@ First published v7 release. The v7.0.0 candidate stopped at the macOS package ga
 - Consolidate source execution and improve offline retrieval. Base-owned helpers now live in `sources/`, retrieval evaluations in `checks/queries.yaml`, and optional app scripts in `clients/`. Update declarations and reinstall managed harness hooks, review the resulting execution plan, and renew trust before collecting. Stored evidence remains readable without re-collection.
 
 ### Changed
+
+- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
 
 - Select a persistent launcher explicitly with `harness print/install --executable` when package-manager PATH entries disagree.
 - Reuse status narrative pages for briefing commitments instead of reading and parsing task/project files again.

@@ -59,8 +59,7 @@ def test_results_are_compact_and_cite_readable_refs(brain: Store) -> None:
         "time": "2026-08-31T12:00:00.000000Z",
         "title": "Preserve durable evidence",
         "type": "record",
-        # Collected by a source that is not declared as the owner's: searches keep the excerpt, labeled.
-        "external": True,
+        # Searches retain collected excerpts; the reply's notice marks all retrieved content as untrusted.
     }
     assert "untrusted" in str(reply["notice"])
     # Note excerpts preview the section's words on one line; its heading is already the title.
@@ -138,7 +137,7 @@ def test_invalid_files_are_skipped_and_reported(brain: Store) -> None:
 def test_links_and_special_files_are_reported_without_hiding_the_brain(brain: Store, tmp_path: Path) -> None:
     outside = tmp_path / "outside.md"
     outside.write_text("# Outside\n\nExfiltrated secret.\n")
-    brain.write("actions/2026-09-26_demo/ACTION.md", b"# Demo\n\nResume the offline import.\n")
+    brain.write("actions/2026-09-26_demo/ACTION.md", b"---\ntype: action\n---\n# Demo\n\nResume the offline import.\n")
     # Every skipped link is reported: even a .bin path could point to a directory of notes.
     (brain.root / "actions/2026-09-26_demo/inputs").mkdir()
     (brain.root / "actions/2026-09-26_demo/inputs/dataset.bin").symlink_to(outside)
@@ -333,7 +332,7 @@ def test_several_brains_interleave_and_reads_name_their_brain(brain: Store, tmp_
     team = Store(root)
     team.write("bf.yaml", b"version: 5\nname: team\n")
     team.write("projects/offline.md", b"# Team offline\n\nThe team keeps offline retrieval too.\n")
-    register(team, collect=False)
+    register(team)
     stores = [brain, team]
     items = search(stores, Query(text="offline retrieval"))["items"]
     assert isinstance(items, list)
@@ -542,22 +541,21 @@ def test_searches_report_collection_coverage_of_their_sources(brain: Store) -> N
     result = search([brain], Query(text="offline", **scope("memories/absent")))
     assert result["items"] == []
     assert result["sources"] == [
-        {"brain": "fixture", "source": "absent", "state": "historical", "freshness": "unknown", "trust": "external"}
+        {"brain": "fixture", "source": "absent", "state": "historical", "freshness": "unknown"}
     ]
     collection = read([brain], "meetings:decision-1")["collection"]
     assert isinstance(collection, dict)
-    # The brain is trusted here, so a scheduled sensor without a successful run has never collected.
+    # A scheduled sensor without a successful local run has never collected here.
     assert collection["freshness"] == "never"
     user_path().write_text("brains: [not a mapping]\n")
-    # An unreadable registry grants no trust: coverage becomes unknown, and the read still answers.
-    assert cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])["freshness"] == "unknown"
+    # Explicitly selected brains do not need a readable registry.
+    assert cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])["freshness"] == "never"
 
 
-def test_okf_provenance_resources_are_searchable_identity_links(brain: Store) -> None:
-    brain.write(
-        "concepts/concept.md", b'---\ntype: concept\nsources:\n  - resource: "repo:unique-source"\n---\n# Concept\n'
-    )
-    assert refs(brain, "repo:unique-source") == ["concepts/concept.md"]
+@pytest.mark.parametrize("path", ["projects/new.md", "concepts/new.md", "actions/2026-09-27_new/ACTION.md"])
+def test_okf_provenance_resources_are_searchable_identity_links(brain: Store, path: str) -> None:
+    brain.write(path, b'---\ntype: concept\nsources:\n  - resource: "repo:unique-source"\n---\n# Concept\n')
+    assert refs(brain, "repo:unique-source") == [path]
 
 
 def test_identity_search_does_not_infer_relations_from_words(brain: Store) -> None:

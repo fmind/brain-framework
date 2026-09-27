@@ -1,4 +1,4 @@
-"""Collection is explicit, trusted per machine, bounded, and never writes a partial result."""
+"""Collection is explicit, bounded, and never writes a partial result."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ import pytest
 
 from bf import records
 from bf.collect import collect, due, log_path, run, state
-from bf.config import register
 from bf.models import Error, Program, Sensor, timestamp
 from bf.storage import BusyError, Store, state_store, writer
 from bf.update import update
@@ -112,7 +111,7 @@ def test_provider_keys_never_reach_errors_or_history(configured: Store) -> None:
         assert "ceo@corp" not in str(state(configured)["sample"]["error"])
 
 
-def test_collection_requires_a_known_enabled_trusted_source_and_a_window(configured: Store, tmp_path: Path) -> None:
+def test_collection_requires_a_known_enabled_source_and_a_window(configured: Store, tmp_path: Path) -> None:
     for name in ["absent", "disabled"]:
         with pytest.raises(Error, match="unknown or disabled"):
             collect(configured, name, start=START, end=END, runner=lambda *_: b"[]")
@@ -123,10 +122,9 @@ def test_collection_requires_a_known_enabled_trusted_source_and_a_window(configu
     clone.mkdir()
     shared = Store(clone)
     shared.write("bf.yaml", CONFIG.replace(b"name: fixture", b"name: shared"))
-    with pytest.raises(Error, match="register --collect"):
-        collect(shared, "sample", start=START, end=END, runner=lambda *_: b"[]")
-    register(shared, collect=False)
-    assert update([shared])["brains"] == [{"brain": "shared", "skipped": "not trusted to collect on this machine"}]
+
+    assert collect(shared, "sample", start=START, end=END, runner=lambda *_: b"[]")["records"] == 0
+    assert update([shared], now=NOW, runner=lambda *_: b"[]")["ok"]
 
 
 def test_due_windows_resume_with_overlap_and_catch_up_at_most_30_days(configured: Store) -> None:

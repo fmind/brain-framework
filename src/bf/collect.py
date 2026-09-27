@@ -18,8 +18,8 @@ from typing import NoReturn, Protocol
 from pydantic import Field, TypeAdapter, ValidationError, field_validator
 
 from bf import ontology, records
-from bf.config import load, may_collect
-from bf.markdown import note
+from bf.config import load
+from bf.markdown import note, validate_okf
 from bf.models import NAME, Error, Model, Program, Record, decode, encode, explain, timestamp
 from bf.storage import Store, collecting, relative, state_store, writer
 
@@ -189,11 +189,6 @@ def _window(start: str, end: str) -> tuple[str, str]:
     return start, end
 
 
-def _trusted(store: Store, programs: str) -> None:
-    if not may_collect(store):
-        raise Error(f"this brain may not run {programs} here; trust it with bf register --collect")
-
-
 def _failed(
     store: Store, name: str, file: str, started: datetime, message: str, cause: BaseException, *, dry_run: bool
 ) -> NoReturn:
@@ -248,7 +243,6 @@ def collect(
     sensor = config.sensors.get(name)
     if sensor is None or not sensor.enabled:
         raise Error(f"sensor {name} is unknown or disabled")
-    _trusted(store, "collectors")
     argv = _argv(store, sensor, start, end)
     with collecting(store, name):
         started = clock()
@@ -328,7 +322,6 @@ def routine(
     program = load(store).routines.get(name)
     if program is None or not program.enabled:
         raise Error(f"routine {name} is unknown or disabled")
-    _trusted(store, "routines")
     with collecting(store, name):
         started = clock()
         folder = f"actions/{started.astimezone().date().isoformat()}_{name}"
@@ -341,8 +334,9 @@ def routine(
                 raise Error("routine must print UTF-8 Markdown") from error
             result: dict[str, object] = {"routine": name}
             if text.strip():
-                # Validate as an authored note, including its declared links, before anything is written.
+                # Validate the action's OKF metadata and declared links before anything is written.
                 ontology.note_claims(note(path, raw), load(store))
+                validate_okf(path, raw)
                 result["action"] = path
             if dry_run:
                 return {**result, **({"text": text} if text.strip() else {})}

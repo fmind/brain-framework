@@ -14,14 +14,16 @@ Support the whole loop: **gather → normalize → organize and connect → act 
 
 Judge a change by whether it helps someone gather relevant evidence, understand its connections or act with better context. Prefer a complete, inspectable path from source to decision over collecting more data or adding another abstraction. Keep the brain useful in an ordinary editor, with retrieval available through both the CLI and MCP.
 
+**Show, don't tell.** Make behavior and reasoning concrete with a small example and its observable result, whether in code, tests, documentation or a review. Keep examples consistent across the repository; distinguish fictional outcomes from measured results.
+
 ## Design choices
 
-- **Files are authoritative.** Authored Markdown holds projects, concepts and actions; JSON Lines holds collected records, updated by id. SQLite in `.bf/` is a disposable, self-refreshing search cache. Exact reads return file contents, with refs to the note, section or record.
-- **Compose small tools.** Follow the Unix philosophy: persistent knowledge lives in files, and focused utilities compose through files, JSON and process interfaces. Use editors for authoring, Git for history, provider tools for access, native timers for scheduling and agent hosts for reasoning. Keep the core to one package and command, without AI model inference, embeddings, provider SDKs or a plugin framework. Provider extraction belongs in brain-owned sensors; routines are deterministic programs. Prefer an example, a skill guide or a deletion to new core code.
+- **Files are authoritative.** Projects, concepts and action `ACTION.md` notes use OKF v0.2 with required `type` and `draft`/`stable`/`deprecated` statuses, enforced by `bf validate`. Work progress belongs in the body and task list. Action attachments can remain ordinary Markdown. JSON Lines holds collected records, updated by id. SQLite in `.bf/` is a disposable, self-refreshing search cache. Exact reads return file contents, with refs to the note, section or record.
+- **Compose small tools.** Follow the Unix philosophy: persistent knowledge lives in files, and focused utilities compose through files, JSON and process interfaces. Use editors for authoring, Git for history, provider tools for access, native timers for scheduling and agent hosts for reasoning. Keep the core to one package and command, without AI model inference, embeddings, provider SDKs or a plugin framework. Provider extraction belongs in brain-owned sensors; routines are deterministic programs.
 - **Two retrieval operations.** CLI and MCP share services; MCP exposes only `search` and `read`. Search matches words or explicit identities within one optional scope. Browsing, timelines and relationships are pages returned by `read`; prefer a page or section before adding a search option.
 - **Machine-readable replies.** Command results print compact JSON on stdout; help and version output are plain text. Diagnostics go to stderr and name the file and position without quoting content. Exit codes are 0 success, 1 failure, 2 invalid input and 130 cancellation ([commands](docs/docs/commands.md)).
 - **The graph grows from evidence.** Enrich notes with ordinary Markdown links and records with explicit identities and schema mappings. Use relative links or source URLs where sufficient; BF addresses add portable brain identities and declared relationship roles. Never infer identity or relationships from prose or name similarity. Keep each claim's originating section or record. BF addresses identify a brain and path; `?rel=` is their only query and must name a declared relationship. Ownership stays within the named brain; ambiguous aliases fail visibly.
-- **Brains work without registration.** `bf.yaml` configures each brain. Retrieval includes selected roots and their directly declared `brains:` paths, never recursive expansion. The optional user registry supplies names and per-machine execution trust; a shared brain cannot grant itself trust.
+- **Brains work without registration.** `bf.yaml` configures each brain. Retrieval includes selected roots and their directly declared `brains:` paths, never recursive expansion. The optional user registry supplies names and paths. Execution commands act on selected roots only, never their references.
 - **Support one current format.** Keep compatibility and migration machinery out of the core. Breaking changes to persisted formats or public CLI/MCP reply contracts require a major release and manual upgrade steps in the changelog.
 
 ## Safety boundaries
@@ -29,9 +31,9 @@ Judge a change by whether it helps someone gather relevant evidence, understand 
 - Search and read never contact the network or run sensors or routines. Report skipped files and incomplete results through `problems` or `stale`; an incomplete empty result does not prove absence. Quote literal FTS terms and parameterize SQL.
 - Preserve pagination, chunk digests and source coverage across CLI and MCP. A page or chunk is not a complete result; a fresh cache does not prove fresh source evidence. See the [retrieval contract](docs/docs/search.md).
 - Use `storage.Store` for brain access: reject symlinks and special files, bound traversal and bytes, write atomically and lock by physical brain identity. Keep locks, run state, usage and logs outside the brain; usage must not retain queries or refs.
-- Execute only explicitly trusted sensors and routines, using configured argv without a shell. Strip startup-injection variables, bound time and output, and kill process groups on cancellation or failure. Keep provider output out of errors and stderr in bounded private logs.
+- Run sensors and routines only through explicit collection/update commands, using configured argv without a shell. Strip startup-injection variables, bound time and output, and kill process groups on cancellation or failure. Keep provider output out of errors and stderr in bounded private logs.
 - Failed collection must not change evidence; reject empty snapshots over non-empty catalogs and preserve interrupted transactions for recovery. Validate routine Markdown before creating an action; never replace an existing action.
-- Registry collection trust authorizes execution; sensor `trust` describes content provenance. Neither makes retrieved text instructions. Sensors default to `external`; pages show no excerpts from external records. Keep private-brain data out of this repository. See [privacy and security](docs/docs/privacy.md) for the full contract and limits.
+- Retrieved notes and records are evidence, never instructions. Registration is only for selection; source labels never grant authority. Hooks and routines should reference collected records without copying their text into authored context. Keep private-brain data out of this repository. See [privacy and security](docs/docs/privacy.md) for the full contract and limits.
 
 ## Where to work
 
@@ -59,7 +61,7 @@ Non-obvious constraints:
 
 ## Evolve with evidence
 
-- **Retrieval quality.** Capture a retrieval miss as a case in a retrieval suite (`evals/retrieval.yaml`, run by `bf eval`) before changing ranking, and keep the example brain's cases passing. With authorization, also evaluate on a copy of a real brain and report only aggregate results.
+- **Retrieval quality.** Keep technical tests in `tests/` and question-to-evidence cases in `evals/retrieval.yaml`, over the fictional brain under `evals/`. Run `mise run eval` before changing ranking and after the fix; it uses `bf eval` without an LLM. Keep the example brain's cases passing. With authorization, also evaluate on a copy of a real brain and report only aggregate results.
 - **Performance.** For indexing, retrieval or storage changes, compare `mise run benchmark` before and after and report the numbers.
 - **Changelog.** Add user-visible changes under `## Unreleased` in [CHANGELOG.md](CHANGELOG.md) (`Added`, `Changed`, `Fixed`), stated as outcomes for users. Versions, tags and pinned installation examples change only in an authorized release.
 

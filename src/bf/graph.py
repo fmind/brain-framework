@@ -36,6 +36,8 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
     if not value:
         return set(), []
     value = links.identity(value)
+    if links.tag(value) is not None:
+        return {value}, []
     parsed = links.parse(value)
     matches: list[tuple[Store, int, set[str]]] = []
     problems: list[dict[str, object]] = []

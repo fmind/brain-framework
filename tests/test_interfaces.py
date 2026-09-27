@@ -15,6 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 from typer.testing import CliRunner
 
+from bf import links
 from bf.cli import app
 from bf.config import user_config
 from bf.mcp import server
@@ -30,8 +31,10 @@ def invoke(*args: str, code: int = 0) -> dict:
 def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
     assert CliRunner().invoke(app, ["--help"]).exit_code == 0
     target = tmp_path / "new"
-    created = invoke("init", str(target), "--name", "fresh", "--collect")
-    assert created["collect"] is True
+    created = invoke("init", str(target), "--name", "fresh")
+    assert created["brain"] == "fresh"
+    assert "fresh" not in user_config().brains
+    invoke("register", str(target))
     assert user_config().brains["fresh"].path == str(target)
     assert CliRunner().invoke(app, ["init", str(target)]).exit_code != 0
     assert invoke("validate", "--brain", "fresh")["valid"]
@@ -48,6 +51,10 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
     assert invoke("search", "offline", "--scope", "memories/meetings", "--brain", "fixture")["items"][0]["ref"] == (
         "meetings:decision-1"
     )
+    tag = "bf://fixture/tags/retention"
+    assert invoke("read", "tags", "--brain", "fixture")["items"][0]["ref"] == tag
+    assert invoke("read", tag)["total"] == 1
+    assert invoke("search", "evidence", "--scope", tag)["items"][0]["ref"].startswith("projects/offline.md")
     exact = invoke("read", "meetings:decision-1")
     assert exact["record"]["title"] == "Preserve durable evidence"
     assert invoke("build", "--brain", "fixture")["changed"] == 3
@@ -59,7 +66,6 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
         "configured": False,
         "state": "historical",
         "freshness": "unknown",
-        "trust": "external",
     }
     brain.write(
         "evals/retrieval.yaml",
@@ -72,14 +78,14 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
     other = tmp_path / "clone"
     other.mkdir()
     (other / "bf.yaml").write_text("version: 5\nname: clone\n")
-    assert invoke("register", str(other))["collect"] is False
-    assert invoke("update", "--brain", "clone", "--dry-run")["brains"][0]["skipped"]
+    assert invoke("register", str(other))["brain"] == "clone"
+    assert invoke("update", "--brain", "clone", "--dry-run")["brains"][0]["sensors"] == []
     brain.write("projects/bad.md", b"# Bad [x](missing.md)\n")
     assert not invoke("validate", "--brain", "fixture", code=1)["valid"]
     assert invoke("schema")["title"] == "Config"
 
 
-def test_status_check_fails_on_stale_trusted_sources(brain: Store) -> None:
+def test_status_check_fails_on_stale_sources(brain: Store) -> None:
     brain.write("bf.yaml", b"version: 5\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n")
     report = invoke("status", "--brain", "fixture", "--check", code=1)
     assert report["brains"][0]["sources"]["mail"]["stale"] is True
@@ -149,6 +155,30 @@ def test_console_errors_are_private_and_on_stderr(brain: Store) -> None:
     assert version.stdout.strip() == distribution_version("brain-framework")
 
 
+@pytest.mark.parametrize("full", [False, True], ids=["minimal", "full"])
+def test_new_brains_have_runnable_retrieval_cases(tmp_path: Path, full: bool) -> None:
+    target = tmp_path / "new-brain"
+    invoke("init", str(target), *(["--full"] if full else []))
+    assert (target / "tests").is_dir()
+    suite = target / "evals/retrieval.yaml"
+    original = suite.read_bytes()
+    assert invoke("eval", "--brain", str(target))["score"] == "3/3"
+    (target / "projects/topic.md").write_text("---\ntype: project\n---\n# Topic\n\nA starter project for a pilot.\n")
+    assert invoke("validate", "--brain", str(target))["valid"]
+    assert invoke("eval", "--brain", str(target))["score"] == "3/3"
+    # This is an executable acceptance suite, not a placeholder that always passes.
+    (target / "concepts/welcome.md").write_text("---\ntype: guide\n---\n# Welcome\n\nThe layout changed.\n")
+    failed = invoke("eval", "--brain", str(target), code=1)
+    assert not failed["passed"]
+    assert failed["score"] == "1/3"
+    assert {case["name"] for case in failed["cases"] if not case["passed"]} == {
+        "find-knowledge-layout",
+        "read-knowledge-layout",
+    }
+    assert CliRunner().invoke(app, ["init", str(target)]).exit_code != 0
+    assert suite.read_bytes() == original
+
+
 def test_initialization_obeys_the_physical_writer_lock(tmp_path: Path) -> None:
     target = tmp_path / "empty"
     target.mkdir()
@@ -161,15 +191,18 @@ def test_initialization_obeys_the_physical_writer_lock(tmp_path: Path) -> None:
 def test_initialization_names_team_brains_and_keeps_action_inputs_versioned(tmp_path: Path) -> None:
     clone = tmp_path / "Team_Knowledge"
     (clone / ".git").mkdir(parents=True)
-    created = invoke("init", str(clone), "--no-collect")
-    assert (created["brain"], created["collect"]) == ("team-knowledge", False)
+    created = invoke("init", str(clone))
+    assert created["brain"] == "team-knowledge"
+    assert "collect" not in created
     assert "team-knowledge" not in user_config().brains
     patterns = [line for line in (clone / ".gitignore").read_text().splitlines() if not line.startswith("#")]
     # Unanchored patterns would also hide actions/*/inputs/ from every clone.
     assert patterns == ["/.bf/", "/logs/", "/memories/", "/originals/", "/inputs/"]
     (clone / "actions/2026-09-24_pilot/inputs").mkdir(parents=True)
     (clone / "actions/2026-09-24_pilot/inputs/request.md").write_text("# Request\n")
-    (clone / "actions/2026-09-24_pilot/ACTION.md").write_text("# Pilot\n\n[Request](inputs/request.md)\n")
+    (clone / "actions/2026-09-24_pilot/ACTION.md").write_text(
+        "---\ntype: action\n---\n# Pilot\n\n[Request](inputs/request.md)\n"
+    )
     assert invoke("validate", "--brain", str(clone))["valid"]
     assert invoke("init", str(tmp_path / "Team_Knowledge_2"))["brain"] == "team-knowledge-2"
     for target, message in ((tmp_path / "2026", "choose a brain name"), (clone, "freshly cloned")):
@@ -191,6 +224,29 @@ def text(result: object) -> str:
     assert isinstance(result, CallToolResult)
     assert isinstance(result.content[0], TextContent)
     return result.content[0].text
+
+
+@pytest.mark.parametrize("tag", ["retention", "C#"])
+def test_typed_tag_links_validate_and_read_through_cli_and_mcp(brain: Store, tag: str) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 5\nname: fixture\nschema:\n  depends-on:\n"
+        b"    description: Explicit dependency.\n    type: identity\n    relation: true\n",
+    )
+    brain.write("projects/member.md", f"---\ntype: project\ntags: [{json.dumps(tag)}]\n---\n# Tagged\n".encode())
+    target = links.address("fixture", f"tags/{tag}")
+    typed = target + "?rel=depends-on"
+    brain.write("projects/tag-link.md", f"---\ntype: project\n---\n# Dependency\n\n[Topic]({typed})\n".encode())
+    assert invoke("validate", "--brain", "fixture")["valid"]
+    expected = invoke("read", target, "--brain", "fixture")
+    assert "projects/tag-link.md" not in {item["ref"] for item in expected["items"]}
+    assert invoke("read", typed, "--brain", "fixture") == expected
+
+    async def check() -> None:
+        result = await server([brain]).call_tool("read", {"ref": typed})
+        assert json.loads(text(result)) == expected
+
+    asyncio.run(check())
 
 
 def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None:
@@ -221,6 +277,12 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
         assert json.loads(text(home))["pages"][0] == "projects"
         scoped = await mcp.call_tool("search", {"query": "offline", "scope": "memories/meetings"})
         assert json.loads(text(scoped))["items"][0]["ref"] == "meetings:decision-1"
+        tag = "bf://fixture/tags/retention"
+        for ref in ("tags", tag):
+            result = await mcp.call_tool("read", {"ref": ref})
+            assert json.loads(text(result)) == invoke("read", ref, "--brain", "fixture")
+        result = await mcp.call_tool("search", {"query": "evidence", "scope": tag})
+        assert json.loads(text(result)) == invoke("search", "evidence", "--scope", tag, "--brain", "fixture")
         exact = await mcp.call_tool("read", {"ref": "projects/offline.md#decision", "brain": "fixture"})
         assert json.loads(text(exact))["brain"] == "fixture"
         assert "Provider retention" in json.loads(text(exact))["text"]

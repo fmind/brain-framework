@@ -179,7 +179,8 @@ def parse(name: str, data: bytes) -> Iterator[Record]:
         try:
             yield Record.model_validate(decode(raw))
         except ValidationError as error:
-            raise Error(f"{name}:{number}: invalid record: {explain(error)}") from error
+            known = {*Record.model_fields, "[key]"}
+            raise Error(f"{name}:{number}: invalid record: {explain(error, known)}") from error
         except Error as error:
             raise Error(f"{name}:{number}: {error}") from error
 

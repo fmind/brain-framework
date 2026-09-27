@@ -54,14 +54,16 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
             connection, state = stack.enter_context(index.database(store))
             local_targets = graph.local_refs(connection, targets)
             local_identities = graph.local_refs(connection, identities)
-            exact = shaped and index.known(connection, local_identities | {query.text.strip()})
+            exact = shaped and (
+                links.tag(query.text.strip()) is not None
+                or index.known(connection, local_identities | {query.text.strip()})
+            )
             rows = index.search(
                 connection, query, identities=local_identities, targets=local_targets, exact=exact, limit=-1
             )
             items = _search_items(
                 connection,
                 rows,
-                store,
                 name,
                 local_targets if query.target else local_identities,
                 exact or bool(query.target),
@@ -140,14 +142,12 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
 def _search_items(
     connection: sqlite3.Connection,
     rows: Iterator[dict[str, object]],
-    store: Store,
     name: str,
     targets: set[str],
     explain: bool,
 ) -> Iterator[dict[str, object]]:
-    sources = pages.owned(store)
     for row in rows:
-        item = pages.label(name, pages.guard(row, sources, excerpts=True))
+        item = pages.label(name, row)
         if explain:
             claims, truncated = graph.explanations(connection, str(item["ref"]), targets)
             if claims:
@@ -207,6 +207,8 @@ def _resolve(stores: list[Store], ref: str, brain: str, *, offset: int, counted:
         selected, ref = _brain(selected, home[1]), ""
     parsed = links.parse(ref) if ref else None
     if parsed:
+        # Reads follow a link's target; its relationship does not change the tag page.
+        links.tag(parsed.identity)
         selected = _brain(selected, parsed.brain)
     path = parsed.path if parsed else ref
     if not (parsed and parsed.fragment):
@@ -261,7 +263,6 @@ def _exact_reply(value: dict[str, object], offset: int) -> dict[str, object]:
             "total_characters": len(text),
             "sha256": digest(data),
             "notice": NOTICE,
-            **({"external": True} if value.get("external") else {}),
             **({"problems": value["problems"]} if value.get("problems") else {}),
             **({"stale": value["stale"]} if value.get("stale") else {}),
             **({"next_offset": end} if end < len(text) else {}),
@@ -344,7 +345,6 @@ def _read(store: Store, ref: str) -> dict[str, object] | None:
                 "path": found[0],
                 "record": found[1].model_dump(exclude_defaults=True),
                 "collection": collection,
-                **({"external": True} if collection["trust"] == "external" else {}),
             }
     if cache_error:
         raise Error("the search cache is unavailable; run bf build to resolve identities") from cache_error

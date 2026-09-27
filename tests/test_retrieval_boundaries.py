@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 from bf import retrieve
 from bf.cli import app
 from bf.collect import collect
-from bf.config import may_collect, user_path
+from bf.config import user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
 from bf.models import Error, Query, Record, digest, encode
@@ -138,7 +138,7 @@ def test_oversized_record_reassembles_exact_json(brain: Store, monkeypatch: pyte
     while True:
         reply = retrieve.read([brain], "bf://fixture/docs:large", offset=offset)
         assert reply["format"] == "json"
-        assert reply["external"] is True
+        assert "external" not in reply
         assert len(encode(reply)) <= retrieve.MAX_REPLY
         assert reply["offset"] == offset
         hashes.add(reply["sha256"])
@@ -153,14 +153,12 @@ def test_oversized_record_reassembles_exact_json(brain: Store, monkeypatch: pyte
         retrieve.read([brain], "docs:large", offset=len(raw) + 1000)
 
 
-def test_invalid_optional_registry_preserves_home_and_denies_execution(brain: Store) -> None:
+def test_invalid_optional_registry_does_not_affect_explicit_reads(brain: Store) -> None:
     user_path().write_text("brains: [broken]\n")
     reply = retrieve.read([brain])
     assert cast("list[dict]", reply["projects"])[0]["ref"] == "projects/offline.md"
     assert reply["attention"] == []
-    assert "operational status is unavailable" in str(reply["problems"])
-    with pytest.raises(Error):
-        may_collect(brain)
+    assert "problems" not in reply
 
 
 def test_cli_and_mcp_accept_continuations(brain: Store, tmp_path: Path) -> None:

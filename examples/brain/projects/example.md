@@ -1,7 +1,8 @@
 ---
 type: project
+tags: [retention, evidence]
 entity: bf://example/projects/example
-status: active
+status: stable
 updated: 2026-09-19
 aliases: ["repo:example/project"]
 ---

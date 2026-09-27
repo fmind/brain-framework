@@ -191,6 +191,14 @@ class Record(Model):
         return value if isinstance(value, str) else ""
 
 
+def tag_name(value: str) -> str:
+    """Tags are exact, bounded labels that fit one portable address component."""
+    clean(value)
+    if len(value) > 128 or value != value.strip() or value in {".", ".."} or "/" in value or "\\" in value:
+        raise ValueError("tag must be 1-128 characters without surrounding whitespace, slashes or dot segments")
+    return value
+
+
 class Knowledge(BaseModel):
     """Only the note metadata that changes retrieval is typed; other fields, such as OKF provenance, remain data."""
 
@@ -201,7 +209,7 @@ class Knowledge(BaseModel):
     updated: str = ""
     summary: str = ""
     description: str = ""
-    tags: list[str] = Field(default_factory=list)
+    tags: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)
     links: list[str] = Field(default_factory=list)
     entity: Annotated[str, Field(max_length=8192)] = ""
@@ -215,6 +223,11 @@ class Knowledge(BaseModel):
         if isinstance(value, list):
             return [str(v) if isinstance(v, int | float) and not isinstance(v, bool) else v for v in value]
         return value
+
+    @field_validator("tags")
+    @classmethod
+    def tagged(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(tag_name(value) for value in values))
 
     @field_validator("updated")
     @classmethod
@@ -302,7 +315,7 @@ class Mapping(Model):
 
 
 class Program(Model):
-    """A trusted executable declared in bf.yaml: direct argv, bounded runtime and a due rule."""
+    """An executable declared in bf.yaml: direct argv, bounded runtime and a due rule."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -334,9 +347,6 @@ class Sensor(Program):
     fields: dict[Annotated[str, Field(pattern=NAME)], Mapping] = Field(default_factory=dict)
     # A window sensor upserts the items it returns; a snapshot sensor replaces its complete catalog.
     mode: Literal["window", "snapshot"] = "window"
-    # Text that other people write (mail, chat, invites, feeds) is external. Only the owner's own
-    # sources are declared `owner`; pages show external items by title and ref, without excerpts.
-    trust: Literal["owner", "external"] = "external"
     overlap: Annotated[int, Field(ge=0, le=31_536_000)] = 300
 
 
@@ -389,13 +399,11 @@ class Config(Model):
 
 class Registration(Model):
     path: Annotated[str, Field(min_length=1, max_length=4096)]
-    # Collection trust lives outside the brain: a cloned or shared brain never runs its sensors by itself.
-    collect: bool = False
 
     @field_validator("path")
     @classmethod
     def absolute(cls, value: str) -> str:
-        # A relative path would resolve against the working directory and could trust another clone.
+        # A relative path would resolve against the working directory and could select another clone.
         try:
             absolute = Path(value).expanduser().is_absolute()
         except RuntimeError:
@@ -406,7 +414,7 @@ class Registration(Model):
 
 
 class UserConfig(Model):
-    """The brains this user searches by default, and which of them may run collectors on this machine."""
+    """The brains this user selects by default outside a brain directory."""
 
     brains: dict[Annotated[str, Field(pattern=NAME)], Registration] = Field(default_factory=dict)
 

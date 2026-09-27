@@ -2,21 +2,22 @@
 
 Standalone sensors for common providers. Copy the ones you need into a brain's `sensors/`, declare them in `bf.yaml`, and adapt and test them there; they then belong to the brain. The Python package neither bundles nor installs them.
 
-| Sensor                    | Arguments                              | Records                                                                                                                                                                                                                                   |
-| ------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `git-history.py`          | `ROOT START END [--skip REPO]...`      | Commits, separate author/repository references for schema mapping, author email identities and recognized GitHub repository links, one or two levels below `ROOT`; skips hidden repositories, named repositories and bot or test authors. |
-| `local-documents.py`      | `LABEL ROOT [--exclude GLOB]...`       | Complete scoped snapshot of text, Markdown, HTML, PDF (requires `pdftotext`), Word, Excel and PowerPoint; bounded text carries a partial marker.                                                                                          |
-| `google-calendar.py`      | `CALENDAR START END [--agenda-days N]` | Events of one calendar, separate organizer and invited-attendee references for schema mapping; optional separate agenda snapshot spans two days before END through N days after it, with distinct agenda identities.                      |
-| `google-drive-folders.py` | `[START END]`                          | The complete folder catalog with a validated Drive response kind, each folder linked to its parents; the window is ignored.                                                                                                               |
+| Sensor                    | Arguments                              | Saves                                                                 |
+| ------------------------- | -------------------------------------- | --------------------------------------------------------------------- |
+| `git-history.py`          | `ROOT START END [--skip REPO]...`      | Commits, with author and repository identities.                       |
+| `local-documents.py`      | `LABEL ROOT [--exclude GLOB]...`       | A snapshot of supported documents in the chosen folder.               |
+| `google-calendar.py`      | `CALENDAR START END [--agenda-days N]` | Calendar events, organizer/invitee identities and an optional agenda. |
+| `google-drive-folders.py` | `[START END]`                          | The full Drive folder catalog and parent links.                       |
+
+Start with the [one-file local walkthrough](../../docs/docs/sensors.md#your-first-sensor) or the [credential-free example brain](../brain/README.md). For other sources, copy the selected script and merge its configuration below into `bf.yaml`. Review paths and account scope first; do not copy all sources unless you intend to run them.
 
 ```yaml
 # https://fmind.github.io/brain-framework/
 version: 5
-name: knowledge
+name: brain
 sensors:
   git-commits:
     command: [sensors/git-history.py, "{{home}}", "{{start}}", "{{end}}"]
-    trust: owner # only for repositories whose commit messages you write; keep external otherwise
     refresh: 3600
   google-calendar-events:
     command: [sensors/google-calendar.py, primary, "{{start}}", "{{end}}"]
@@ -24,7 +25,6 @@ sensors:
   local-documents:
     command: [sensors/local-documents.py, work, "{{home}}/Documents/knowledge"]
     mode: snapshot
-    trust: owner # only if you wrote the selected folder yourself
     enabled: false # select the intended folder before enabling
   drive-folders:
     command: [sensors/google-drive-folders.py]
@@ -32,18 +32,29 @@ sensors:
     refresh: 86400
 ```
 
+## Preview one source
+
+After reviewing and configuring `git-commits`, preview a week's records:
+
+```bash
+bf collect git-commits --since 7d --dry-run --brain ~/brain
+```
+
+Inspect the returned samples and counts. A preview runs the sensor and may contact its provider, but does not save records. When the scope and output are correct, omit `--dry-run` to collect. Run `bf read memories/git-commits --brain ~/brain`, then pass a listed record ref to `bf read`.
+
+## Scope and limits
+
+- Git history scans repositories one or two levels below `ROOT`. It skips symlinked directories, hidden or named repositories, and bot/test authors. It includes commits within `START <= time < END` even when commit dates are out of order.
+- Local documents support text, Markdown, HTML, PDF (with `pdftotext`), Word, Excel and PowerPoint. Unsupported, hidden and common dependency files are outside the snapshot. It refuses symlinks and special files, bounds Office expansion, and converts PDFs in a private temporary directory. Bounded content carries a partial marker; there is no OCR.
+- Calendar's optional agenda snapshot runs from two days before END through N days after it, using separate agenda identities. An invitee entry means the person was listed, not that they attended.
+- Drive folders always emits a complete catalog; its time-window arguments are ignored. `mode: snapshot` removes missing folders after a successful nonempty replacement.
+
 ## Contract
 
-`tests/test_adapters_*.py` checks every example with fake provider executables.
+Each script uses Python 3.14's standard library, has an executable `#!/usr/bin/env python3` entry point and invokes provider CLIs with argument arrays, without a shell. Provider CLIs own credentials; sensors do not read credential files.
 
-- Python 3.14 standard library only, `#!/usr/bin/env python3`, executable bit set, no shell.
-- Provider access goes through the provider CLI (`gws`, `gh`, `git`) with explicit argv; the CLI owns credentials and sensors never read credential files.
-- `{{start}}` and `{{end}}` are timezone-aware ISO 8601 timestamps bounding a half-open window.
-- Stdout is exactly one JSON array of records with a stable `id`, a meaningful `title`, searchable facts in `text`, event `time`, `url`, explicit identities in `links` (`repo:github.com/owner/name`, `person:email/address`) and `aliases`, and selected `attributes`.
-- Provider stdout is bounded while the process runs; timeouts and overflow stop and reap the child. Pagination is finite and complete before output; a limit or provider failure exits 1 with nothing on stdout and one generic sentence on stderr.
-- Local documents skip hidden files and common dependency folders, refuse symlinks and special files, bound Office archive expansion, and process PDF input in a private temporary directory. The snapshot covers only supported extensions; deleted files disappear at the next successful run. Keep the scope small; this is not a filesystem crawler or OCR service.
-- Only reviewed fields are projected; raw payloads never land in `text`.
+Stdout is one JSON array. Each record has a stable `id`, meaningful `title`, searchable `text` and optional time, URL, identities and structured attributes. Keep raw provider payloads out of text. `{{start}}` and `{{end}}` are timezone-aware timestamps for a half-open window.
 
-Git history shows local collection, Calendar a windowed provider and Drive folders a complete snapshot: declare it with `mode: snapshot` so a folder missing from the catalog disappears from search. For a credential-free walkthrough, copy the [runnable example brain](../brain/README.md).
+Provider output, time and pagination are bounded. Failure, overflow or incomplete pagination stops the child and exits nonzero with no stdout and a generic stderr message. `tests/test_adapters_*.py` checks these boundaries with fake providers.
 
-Map Git `author` from `/attributes/author_refs` and `repository` from `/attributes/repository_refs`. Map Calendar `organizer`, `attendee` and `participant` from the corresponding `/attributes/*_refs` arrays. Declare these as `type: identity`, `cardinality: many`, `relation: true` under `schema`; see the [schema guide](../../docs/docs/schema.md). An attendee entry means the person was listed, not that they attended.
+For typed relationships, map Git's `/attributes/author_refs` and `/attributes/repository_refs`, or Calendar's `/attributes/organizer_refs`, `/attributes/attendee_refs` and `/attributes/participant_refs`. Declare each target field with `type: identity`, `cardinality: many` and `relation: true`; see the [schema example](../../docs/docs/schema.md#shared-fields-and-sensor-mappings).

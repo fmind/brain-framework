@@ -1,5 +1,6 @@
 ---
 type: concept
+tags: [retention, evidence]
 status: stable
 sources:
   - resource: "demo:retention"

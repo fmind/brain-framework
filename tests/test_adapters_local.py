@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import cast
+
+import pytest
 
 from bf.models import Query
 from bf.retrieve import search
@@ -185,3 +188,49 @@ def test_calendar_keeps_organizer_separate_from_invited_attendees(provider: Prov
         "person:email/owner@example.test",
         "person:email/guest@example.test",
     }
+
+
+@pytest.mark.parametrize("backdated_tip", [False, True])
+def test_git_history_obeys_half_open_windows_with_out_of_order_dates(
+    provider: Provider, tmp_path: Path, backdated_tip: bool
+) -> None:
+    root = tmp_path / "code"
+    repository = root / "project"
+    repository.mkdir(parents=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig")}
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(repository), *args], env=env, check=True, capture_output=True)  # noqa: S603,S607
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "owner@fmind.dev")
+    git("config", "user.name", "Owner")
+    dates = ["2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z"]
+    if backdated_tip:
+        dates.append("2026-08-01T00:00:00Z")
+    for when in dates:
+        env.update(GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
+        git("commit", "-q", "--allow-empty", "-m", "Evidence " + when)
+    start, end = "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z"
+    records = provider.records("git-history.py", str(root), start, end)
+    assert len(records) == 1
+    assert datetime.fromisoformat(records[0].time) == datetime.fromisoformat(start)
+    # Invalid windows fail even when the selected root contains no repositories.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    for invalid in ((end, start), (start, "not-a-date"), ("2026-09-01", end)):
+        result = provider.run("git-history.py", str(empty), *invalid)
+        assert result.returncode == 1
+        assert not result.stdout
+
+
+def test_git_history_does_not_follow_linked_ancestor_directories(provider: Provider, tmp_path: Path) -> None:
+    root = tmp_path / "code"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "project/.git").mkdir(parents=True)
+    (root / "owner").symlink_to(outside, target_is_directory=True)
+    provider.install("git", [{"match": [], "code": 97, "repeat": True}])
+    records = provider.records("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    assert records == []
+    assert provider.calls("git") == []

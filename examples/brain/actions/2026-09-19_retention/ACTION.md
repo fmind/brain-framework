@@ -1,6 +1,7 @@
 ---
 type: action
-status: active
+tags: [retention]
+status: draft
 ---
 
 # Explain the retention policy

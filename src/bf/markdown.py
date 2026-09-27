@@ -258,17 +258,14 @@ def note(path: str, data: bytes) -> Note:
     lead = _plain(summary or introduction)
     if not lead and len(passages) > 1:
         lead = _plain(passages[1].text)
-    targets = sorted(
-        {
-            target
-            for target in [
-                *markdown.links,
-                *knowledge.links,
-                *(_sources(path, markdown.attributes) if path.startswith("concepts/") else []),
-            ]
-            if target
-        }
+    # OKF provenance has the same explicit-link semantics in each authored note format.
+    # Working inputs and outputs remain ordinary Markdown, even when their filename is ACTION.md.
+    sources = (
+        _sources(path, markdown.attributes)
+        if path.startswith(("projects/", "concepts/")) or re.fullmatch(r"actions/[^/]+/ACTION\.md", path)
+        else []
     )
+    targets = sorted({target for target in [*markdown.links, *knowledge.links, *sources] if target})
     for target in targets:
         reference(path, target)
     if knowledge.entity:
@@ -284,7 +281,7 @@ def note(path: str, data: bytes) -> Note:
         passages=passages,
         slugs={h.slug for h in markdown.headings},
         targets=targets,
-        contexts=[*markdown.contexts, *((target, "") for target in knowledge.links)],
+        contexts=[*markdown.contexts, *((target, "") for target in [*knowledge.links, *sources])],
         tasks=markdown.tasks,
     )
 
@@ -305,12 +302,12 @@ def broken(note: Note, exists: Callable[[str], bool], slugs: dict[str, set[str]]
     return problems
 
 
-def validate_concept(path: str, data: bytes) -> None:
-    """Check authored OKF v0.2 structure; retrieval remains a tolerant consumer."""
+def validate_okf(path: str, data: bytes) -> None:
+    """Check project, concept and action OKF v0.2 structure; retrieval remains tolerant."""
     attributes = parse(path, data).attributes
     filename = PurePosixPath(path).name
     if filename == "index.md":
-        allowed = {"okf_version"} if path == "concepts/index.md" else set()
+        allowed = {"okf_version"} if path in {"projects/index.md", "concepts/index.md"} else set()
         if attributes.keys() - allowed:
             raise Error(f"{path}: OKF index frontmatter permits only the bundle-root okf_version")
         return
@@ -326,7 +323,7 @@ def validate_concept(path: str, data: bytes) -> None:
                     raise Error(f"{path}: OKF log dates must use YYYY-MM-DD") from None
         return
     if not isinstance(attributes.get("type"), str) or not str(attributes["type"]).strip():
-        raise Error(f"{path}: OKF concepts require a nonempty type in YAML frontmatter")
+        raise Error(f"{path}: OKF documents require a nonempty type in YAML frontmatter")
     if attributes.get("status", "stable") not in {"draft", "stable", "deprecated"}:
         raise Error(f"{path}: OKF status must be draft, stable or deprecated")
     _sources(path, attributes)

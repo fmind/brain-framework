@@ -52,7 +52,10 @@ def main() -> None:
         ]
         records.upsert(store, "benchmark", items, snapshot=False)
         for n in range(args.notes):
-            store.write(f"concepts/{n}.md", f"# Project {n}\n\n{background}\n\nKeep durable evidence.\n".encode())
+            store.write(
+                f"concepts/{n}.md",
+                f"---\ntype: concept\n---\n# Project {n}\n\n{background}\n\nKeep durable evidence.\n".encode(),
+            )
         measurements = {}
         revision = 0
         note_revision = 0
@@ -60,7 +63,10 @@ def main() -> None:
         def change_note() -> dict[str, object]:
             nonlocal note_revision
             note_revision += 1
-            store.write("concepts/0.md", f"# Edited revision{note_revision}\n\nZirconium note.\n".encode())
+            store.write(
+                "concepts/0.md",
+                f"---\ntype: concept\n---\n# Edited revision{note_revision}\n\nZirconium note.\n".encode(),
+            )
             return search([store], Query(text=f"revision{note_revision}"))
 
         def check_result(name: str, result: dict[str, object]) -> None:

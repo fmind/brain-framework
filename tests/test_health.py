@@ -39,12 +39,12 @@ def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> 
             }
         ),
     )
-    report = source_health(brain, ["archive"], now=datetime(2026, 9, 23, 13, tzinfo=UTC), trusted=True)
+    report = source_health(brain, ["archive"], now=datetime(2026, 9, 23, 13, tzinfo=UTC))
     assert report["current"]["freshness"] == "fresh"
     assert report["current"]["window"] == {"since": "2026-09-22T12:00:00Z", "until": "2026-09-23T12:00:00Z"}
     assert report["missing"]["freshness"] == "never"
     assert report["paused"]["state"] == "disabled"
-    assert report["archive"] == {"state": "historical", "freshness": "unknown", "trust": "external"}
+    assert report["archive"] == {"state": "historical", "freshness": "unknown"}
     assert report["manual"]["freshness"] == "manual"
     assert source_health(brain, now=datetime(2026, 9, 23, 15, tzinfo=UTC))["current"]["freshness"] == "stale"
 
@@ -92,11 +92,11 @@ def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) ->
     record = cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])
     found = cast("list[dict[str, object]]", search([brain], Query(text="offline retrieval"))["sources"])
     status = source_health(brain)["meetings"]
-    # The brain is trusted here and the scheduled sensor never succeeded: every reply says so.
+    # The scheduled sensor never succeeded on this machine: every reply says so.
     assert record["freshness"] == found[0]["freshness"] == status["freshness"] == "never"
-    register(brain, collect=False)
+    register(brain)
     record = cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])
-    assert record["freshness"] == "unknown"
+    assert record["freshness"] == "never"
 
 
 @pytest.mark.usefixtures("brain")
@@ -104,7 +104,7 @@ def test_status_reports_a_broken_brain_and_still_reports_the_others(tmp_path: Pa
     (tmp_path / "other").mkdir()
     other = Store(tmp_path / "other")
     other.write("bf.yaml", b"version: 5\nname: other\n")
-    register(other, collect=False)
+    register(other)
     other.write("bf.yaml", b"version: 5\nname: [broken\n")
     result = CliRunner().invoke(app, ["status"])
     assert result.exit_code == 0, result.output

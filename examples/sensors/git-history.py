@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from contextlib import suppress
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -71,16 +72,22 @@ AUTOMATED = re.compile(r"(\[bot\]@users\.noreply\.github\.com|@([a-z0-9-]+\.)*(i
 
 
 def collect(root: Path, start: str, end: str, skip: frozenset[str] = frozenset()) -> list[dict[str, object]]:
+    begin, finish = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    if begin.tzinfo is None or finish.tzinfo is None or begin >= finish:
+        raise ValueError("invalid Git history window")
     if not root.is_dir():
         raise ValueError("root is not a directory")
-    candidates = [p.parent for pattern in ("*/*/.git", "*/.git") for p in root.glob(pattern)]
+
+    def directories(parent: Path) -> list[Path]:
+        return [p for p in parent.iterdir() if not p.name.startswith(".") and not p.is_symlink() and p.is_dir()]
+
+    parents = directories(root)
+    candidates = [*parents, *(child for parent in parents for child in directories(parent))]
     repositories = sorted(
         {
             p
             for p in candidates
-            if not p.is_symlink()
-            and not any(part.startswith(".") for part in p.relative_to(root).parts)
-            and p.relative_to(root).as_posix() not in skip
+            if (p / ".git").exists() and not (p / ".git").is_symlink() and p.relative_to(root).as_posix() not in skip
         }
     )
     if len(repositories) > 200:
@@ -97,7 +104,8 @@ def collect(root: Path, start: str, end: str, skip: frozenset[str] = frozenset()
                 "log",
                 "--all",
                 "--max-count=10001",
-                f"--since={start}",
+                # Visit older commits too: committer dates need not follow ancestry order.
+                f"--since-as-filter={start}",
                 f"--until={end}",
                 "--no-show-signature",
                 "--no-notes",
@@ -115,6 +123,12 @@ def collect(root: Path, start: str, end: str, skip: frozenset[str] = frozenset()
             raise ValueError("Git history exceeds its completeness ceiling")
         for offset in range(0, len(fields) - 1, 4):
             commit, when, author, message = fields[offset : offset + 4]
+            # Git's date bounds are inclusive; BF windows are [start, end).
+            instant = datetime.fromisoformat(when)
+            if instant.tzinfo is None:
+                raise ValueError("commit time requires a timezone")
+            if not begin <= instant < finish:
+                continue
             author = author.strip().lower()
             if AUTOMATED.search(author):
                 continue

@@ -23,8 +23,7 @@ RECORD: dict = {
     "brain": "example",
     "ref": "mail:policy",
     "record": {"id": "policy", "title": "Policy", "text": "Keep one revision.", "attributes": {"observed": "old"}},
-    "external": True,
-    "collection": {"state": "active", "freshness": "fresh", "trust": "external"},
+    "collection": {"state": "active", "freshness": "fresh"},
 }
 
 
@@ -56,7 +55,7 @@ def test_capture_keeps_only_selected_evidence_and_comparison_is_compact() -> Non
     capture = run("capture", {**NOTE, "backlinks": [{"text": "UNRELATED"}], "claims": [{"text": "UNRELATED"}]})
     assert capture["text"] == NOTE["text"]
     assert "UNRELATED" not in json.dumps(capture)
-    assert capture["external"] is False
+    assert "external" not in capture
     assert len(capture["sha256"]) == 64
     assert run("compare", capture, NOTE)["state"] == "unchanged"
     changed = run("compare", capture, {**NOTE, "text": "## Retention\n\nKeep selected older versions.\n"})
@@ -66,23 +65,11 @@ def test_capture_keeps_only_selected_evidence_and_comparison_is_compact() -> Non
     assert len(json.dumps(changed)) < 512
 
 
-def test_only_records_from_owner_sources_are_owner_text() -> None:
-    owner = {**RECORD, "collection": {**RECORD["collection"], "trust": "owner"}}
-    del owner["external"]
-    capture = run("capture", owner)
-    assert capture["external"] is False
-    assert run("compare", capture, owner)["external"] is False
-    # A record without declared trust is external, whatever its reply omits.
-    unlabeled = {key: value for key, value in RECORD.items() if key != "external"}
-    assert run("capture", {**unlabeled, "collection": {"state": "active", "freshness": "fresh"}})["external"] is True
-    assert run("compare", capture, RECORD)["external"] is True
-
-
 def test_record_observation_does_not_retrigger_but_revision_and_fields_do() -> None:
     capture = run("capture", RECORD)
     observed = {**RECORD, "record": {**RECORD["record"], "attributes": {"observed": "new"}}}
     assert run("compare", capture, observed)["state"] == "unchanged"
-    assert run("compare", capture, observed)["external"] is True
+    assert "external" not in run("compare", capture, observed)
     for update in [
         {"fields": {"owner": "person:other"}},
         {"text": "Keep two revisions."},

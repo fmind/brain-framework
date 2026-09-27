@@ -1,35 +1,90 @@
 # Command reference
 
-Command results go to stdout as compact JSON; help and version output are plain text. Diagnostics go to stderr and name the file involved, such as `bf.yaml: invalid YAML at line 3, column 1`, without quoting its content. Exit 0 means success, 1 a failure or failed check, 2 invalid command-line input (including an invalid `--scope`, `--limit`, `--since` or `--until`) and 130 cancellation by Ctrl-C, SIGTERM or a closed terminal. `bf COMMAND --help` lists every option.
+Choose a command by what you want to do. Run `bf COMMAND --help` for every option; start with [Getting started](getting-started.md) for a complete first session.
 
-| Command                                                 | Contract                                                                                                                                                                                                                                                                                                 |
-| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `init PATH [--name NAME] [--collect] [--full]`          | Create a brain in a new, empty or freshly cloned directory without global configuration. Explicit `--collect` registers it with machine collection trust. It creates `projects/`, `concepts/` and `actions/`; `--full` adds the optional folders.                                                        |
-| `register [PATH] [--collect]`                           | Add an existing brain to `~/.config/bf/config.yaml`; `--collect` lets this machine run its sensors and routines.                                                                                                                                                                                         |
-| `read [REF] [--offset N]`                               | Read the home page without a ref, or a page (`projects`, `7d`, `2026-09`, `memories/SOURCE`), a note, `note#section`, `source:id` record, identity or portable `bf://brain/...` address. See [pages](search.md#pages).                                                                                   |
-| `search QUERY [--scope SCOPE] [--limit N] [--offset N]` | Search words or an identity, optionally within a folder, a period or an identity. See [search](search.md#search).                                                                                                                                                                                        |
-| `update [--dry-run]`                                    | Run due sensors, then due routines, of every trusted brain, then refresh their caches. Dry-run runs nothing.                                                                                                                                                                                             |
-| `collect SENSOR [--since] [--until] [--dry-run]`        | Run one sensor now; the window defaults to its lookback. Times accept `now`, `today`, `yesterday`, `12h`, `7d`, `2w`, `YYYY-MM-DD` or ISO 8601 with a timezone. Dry-run shows three samples and writes nothing.                                                                                          |
-| `status [--check]`                                      | Per brain: cache state, notes, records, each source's and routine's freshness, last error and log, and local `usage` counts. A brain that cannot load is listed with its `error`. `--check` exits 1 when a brain fails, a trusted scheduled sensor or routine is stale or failed, or a file was skipped. |
-| `validate`                                              | Check notes, OKF concept structure, action folders, links, cited records and record partitions; exit 1 on problems.                                                                                                                                                                                      |
-| `eval [--path evals]`                                   | Run retrieval cases; exit 1 when one fails.                                                                                                                                                                                                                                                              |
-| `build`                                                 | Explicitly recover interrupted record writes, then rebuild the search cache. Ordinary reads refresh only the cache.                                                                                                                                                                                      |
-| `mcp`                                                   | Serve `search` and `read` over MCP stdio.                                                                                                                                                                                                                                                                |
-| `schema`                                                | Print the JSON Schema of `bf.yaml`.                                                                                                                                                                                                                                                                      |
+## Commands
 
-Search items, page entries and exact reads identify their `brain`. Health replies group brains under `brains` and retain `sources` for collection coverage, including historical evidence, and `routines` for declared routines. Update replies report executed `sensors` and `routines` per brain; collection entries use `sensor`. These are execution names: record refs stay `source:id` and OKF provenance stays `sources`.
+| Command                                                    | Purpose                                                                                     |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `init PATH [--name NAME] [--full]`                         | Create a brain in a new, empty or freshly cloned directory. `--full` adds optional folders. |
+| `register [PATH]`                                          | Add a brain's name and path to the optional machine registry.                               |
+| `read [REF] [--offset N]`                                  | Open home, a page, note, section, record or identity.                                       |
+| `search QUERY [--scope SCOPE] [--limit N] [--offset N]`    | Find words or an identity, optionally within one scope.                                     |
+| `update [--dry-run]`                                       | Run due sensors, then routines, then refresh the cache. Dry-run executes nothing.           |
+| `collect SENSOR [--since TIME] [--until TIME] [--dry-run]` | Run one sensor now. Dry-run executes it and previews three samples without saving records.  |
+| `status [--check]`                                         | Report cache, evidence counts, source and routine health, logs and local usage.             |
+| `validate`                                                 | Check notes, concepts, actions, links and record partitions.                                |
+| `eval [--path evals]`                                      | Run retrieval acceptance cases.                                                             |
+| `build`                                                    | Recover interrupted record writes and rebuild the disposable search cache.                  |
+| `mcp`                                                      | Serve `search` and `read` over MCP stdio.                                                   |
+| `schema`                                                   | Print the JSON Schema for `bf.yaml`.                                                        |
 
-Existing-brain commands accept `--brain NAME|PATH`; `init` and `register` take a path argument instead. Without `--brain`, commands use `BF_BRAIN`, then the brain containing the working directory, then every registered brain. Search and read include the selected roots and their direct `brains:` references; reference paths resolve relative to the declaring root. Named selection checks the enclosing brain and its declarations before the optional registry. Commands that act on a single brain (`collect`, `validate`, `eval`, `build`) ask for `--brain` when several are registered.
+### Select a brain
 
-`status --check` also fails when the cache is stale because another writer is active. `update` exits 1 when collection, a routine or cache refresh fails, including skipped evidence files. Inspect the JSON diagnostics before treating an empty result as proof that nothing happened. `collect --dry-run` runs the provider and updates its private stderr log; it does not write records or success history. `update --dry-run` runs no providers or routines.
-
-Use `--brain NAME` for scripts and scheduled jobs that must target one brain. `update` acts only on selected roots: inside a brain it updates that brain; outside, it considers registered brains. It never expands `brains:` references. It skips those without collection trust.
-
-With [jq](https://jqlang.org/) installed, JSON results can feed an ordinary shell pipeline:
+Use `~/brain` for the examples, or substitute your own path:
 
 ```bash
-bf read projects --brain brain |
+bf read --brain ~/brain
+bf search "visitors clear explanation" --brain ~/brain --scope projects
+bf read projects/new-website.md#decision --brain ~/brain
+```
+
+The first command opens home; the other two find and read the website decision from [Getting started](getting-started.md).
+
+Existing-brain commands select roots in this order: `--brain NAME|PATH`, then `BF_BRAIN`, then the enclosing brain, then all registered brains. Commands needing one root ask for an explicit selection when several are registered. Registration is optional; see [configuration](configuration.md).
+
+### Preview an update or a collection
+
+These previews do different work:
+
+```bash
+bf update --brain ~/brain --dry-run
+bf collect local-documents --brain ~/brain --dry-run
+```
+
+`update --dry-run` lists due work and runs nothing. `collect --dry-run` runs the named sensor and returns up to three sample records; it can contact providers and update its private stderr log, but saves neither records nor success history. The second example requires the [local-documents sensor](sensors.md#your-first-sensor).
+
+Without time options, `collect` uses the sensor's lookback through now. For a configured `git-commits` window sensor, choose a period explicitly to backfill:
+
+```bash
+bf collect git-commits --brain ~/brain --since 2026-09-01 --until 2026-10-01
+```
+
+Times accept `now`, `today`, `yesterday`, `12h`, `7d`, `2w`, `YYYY-MM-DD` and timezone-aware ISO 8601 timestamps. A sensor decides how to apply that window; a [snapshot sensor](sensors.md) still represents a full current catalog.
+
+`update` acts only on selected roots, never their references. Use `--brain PATH` in scripts and schedules to make that selection explicit.
+
+## Exit codes
+
+Results use compact JSON on stdout; help and version use plain text. Diagnostics go to stderr and identify files and positions without quoting private content.
+
+| Code  | Meaning                                            |
+| ----- | -------------------------------------------------- |
+| `0`   | Success.                                           |
+| `1`   | Operation or check failed.                         |
+| `2`   | Invalid command-line input.                        |
+| `130` | Cancelled by Ctrl-C, SIGTERM or a closed terminal. |
+
+`status --check` fails for unavailable brains, skipped files, stale caches, or enabled scheduled programs that failed, never succeeded locally or exceeded twice their refresh interval. Use it when a script needs an exit status as well as a health report:
+
+```bash
+bf status --check --brain ~/brain
+```
+
+`update` fails if collection, a routine or cache refresh fails; successful programs still retain their results.
+
+## Using replies
+
+Search items, page entries and exact reads name their `brain`. Health and update replies group results under `brains`. Health uses `sources` for collected evidence and `routines` for declared routines; execution results use `sensors` and `routines`. Record refs remain `source:id`.
+
+Inspect `problems`, `stale` and source coverage before treating an answer as complete. Follow returned `next_offset` values and assemble large exact-read chunks as described in [continuations](retrieval.md#continuations).
+
+With [jq](https://jqlang.org/), list projects needing review:
+
+```bash
+set -o pipefail
+bf read projects --brain ~/brain |
   jq -r '.items[] | select(.review) | [.ref, .next // ""] | @tsv'
 ```
 
-Inspect `problems`, `stale` and source coverage before using a reply as a complete inventory. Follow `next_offset` with `--offset` to continue search or a listing. Large exact reads use explicitly marked JSON chunks; see [retrieval](search.md#notes-records-and-identities) for reassembly and hash verification. An unavailable optional registry leaves an explicitly selected brain readable; its home page reports unavailable operational status under `problems`, while execution trust remains denied. In shell automation, use `set -o pipefail` so a failed Brain Framework command is not hidden by a successful output formatter.
+Each output line contains a project ref and its first open task, if any. No lines means this page has no projects marked for review; check completeness and continue through any remaining pages before drawing a conclusion about the whole brain. `pipefail` preserves a failed Brain Framework command's exit status even when the formatter succeeds.

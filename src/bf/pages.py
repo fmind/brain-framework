@@ -9,7 +9,7 @@ import re
 import sqlite3
 import stat
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from itertools import islice
@@ -19,15 +19,15 @@ from bf import graph, index, links, usage
 from bf.config import load
 from bf.health import attention, source_health
 from bf.markdown import authored, note, reference, split_ref
-from bf.models import AUTHORED, NAME, Error, NotFoundError, timestamp
+from bf.models import AUTHORED, NAME, Error, NotFoundError, tag_name, timestamp
 from bf.storage import Store, relative
 
-# Active or blocked projects whose note is older than this are marked for review; a reminder, never a failure.
+# Draft or stable projects whose note is older than this are marked for review; a reminder, never a failure.
 REVIEW_DAYS = 14
 SECTION = 20
 PAGE = 50
 LISTING = 200
-BROWSE = ["projects", "concepts", "actions", "memories", "today", "7d"]
+BROWSE = ["projects", "concepts", "actions", "memories", "tags", "today", "7d"]
 _SCOPE = "scope accepts a folder (projects, memories/gmail), a period (today, 7d, 2026-09, 2026-09-25) or an identity"
 _MISSING = "page not found; read projects, concepts, actions or memories to browse the brain"
 _BELOW = "(i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')"
@@ -93,6 +93,7 @@ def scope(value: str, now: datetime | None = None) -> Scope:
     if found := period(value, now):
         return {"since": found.since, "until": found.until}
     if index.identity(value) or value.lower().startswith("bf:"):
+        links.tag(value)
         return {"target": links.identity(value)}
     path = value.rstrip("/")
     try:
@@ -107,26 +108,6 @@ def scope(value: str, now: datetime | None = None) -> Scope:
             return {"prefix": "/".join(parts[:2]), "since": found.since, "until": found.until}
         return {"prefix": f"memories/{parts[1]}/{parts[2].removesuffix('.jsonl')}.jsonl"}
     return {"prefix": path}
-
-
-def owned(store: Store) -> set[str]:
-    """Sources whose text the owner writes; every other record source is external."""
-    return {name for name, sensor in load(store).sensors.items() if sensor.trust == "owner"}
-
-
-def guard[T](value: T, sources: set[str], *, excerpts: bool = False) -> T:
-    """Mark external records wherever they appear; pages also drop their excerpts."""
-    if isinstance(value, list):
-        for child in value:
-            guard(child, sources, excerpts=excerpts)
-    elif isinstance(value, dict):
-        if value.get("kind") == "record" and value.get("source") not in sources:
-            value["external"] = True
-            if not excerpts:
-                value.pop("excerpt", None)
-        for child in value.values():
-            guard(child, sources, excerpts=excerpts)
-    return value
 
 
 def label(brain: str, item: dict[str, object]) -> dict[str, object]:
@@ -149,7 +130,7 @@ def _brains(
             name = load(store).name
             with ExitStack() as local:
                 connection, state = (stack or local).enter_context(index.database(store))
-                part = guard(build(store, name, connection), owned(store))
+                part = build(store, name, connection)
                 skipped = index.problems(connection)
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
             if strict and len(stores) == 1:
@@ -207,13 +188,12 @@ def _listing(
 ) -> dict[str, object]:
     """Merge ordered SQLite streams, retaining only the requested page in memory."""
 
-    def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+    def build(_store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
         rows, total = index.listing_rows(connection, where, params, order)
-        sources = owned(store)
 
         def items() -> Iterator[dict[str, object]]:
             for row in rows:
-                yield label(name, guard(row, sources))
+                yield label(name, row)
 
         return {"rows": items(), "total": total}
 
@@ -253,12 +233,19 @@ def _next_day(instant: str) -> str:
 
 
 def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now: datetime) -> None:
-    """Mark active projects whose note is old or has newer linked evidence than its `updated` date."""
+    """Mark current project notes whose note is old or has newer linked evidence than its `updated` date."""
     cutoff = timestamp((now - timedelta(days=REVIEW_DAYS)).isoformat())
     for item in items:
-        if item.get("type") != "project" or item.get("status") not in {"active", "blocked"}:
+        if (
+            item.get("type") != "project"
+            or item.get("status", "") not in {"", "draft", "stable"}
+            or str(item["ref"]).rsplit("/", 1)[-1] in {"index.md", "log.md"}
+        ):
             continue
         updated = str(item.get("time", ""))
+        # Future-dated notes are not due for review; avoid advancing dates at the calendar limit.
+        if updated > timestamp(now.isoformat()):
+            continue
         newer = index.newer_links(connection, str(item["ref"]), _next_day(updated)) if updated else 0
         if newer:
             item["new_links"] = newer
@@ -267,7 +254,7 @@ def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now:
 
 
 def home(stores: list[Store], now: datetime | None = None, *, counted: bool = True) -> dict[str, object]:
-    """What needs attention now: active projects, recent actions and notes, activity and the coming week."""
+    """What needs attention now: current project notes, recent actions and notes, activity and the coming week."""
     now = now or datetime.now(UTC)
     stamp = timestamp(now.isoformat())
     day, week = (timestamp((now - timedelta(days=days)).isoformat()) for days in (1, 7))
@@ -276,7 +263,8 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
     def build(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
         projects, _ = index.listing(
             connection,
-            "i.kind='note' AND i.type='project' AND i.status IN ('active','blocked')",
+            "i.kind='note' AND i.type='project' AND i.status IN ('','draft','stable') "
+            "AND i.path NOT GLOB '*/index.md' AND i.path NOT GLOB '*/log.md'",
             {},
             "time DESC,i.ref",
             LISTING,
@@ -306,9 +294,7 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
             alerts = attention(store, now)
         except Error, OSError, UnicodeError:
             alerts = []
-            issues.append(
-                {"brain": _name, "error": "operational status is unavailable; check the user registry and bf status"}
-            )
+            issues.append({"brain": _name, "error": "operational status is unavailable; run bf status"})
         return {
             "problems": issues,
             "projects": projects,
@@ -494,6 +480,62 @@ def memories(
     return {**reply, **extra}
 
 
+def tags(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict[str, object]:
+    """Enumerate local tag identities, with exact note counts and bounded cross-brain pagination."""
+
+    def build(_store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+        rows = connection.execute("SELECT target,count(*) AS total FROM tags GROUP BY target ORDER BY target")
+
+        def items() -> Iterator[dict[str, object]]:
+            for target, total in rows:
+                yield {"brain": name, "tag": links.tag(target), "ref": target, "uri": target, "total": total}
+
+        total = connection.execute("SELECT count(DISTINCT target) FROM tags").fetchone()[0]
+        return {"rows": items(), "total": total}
+
+    with ExitStack() as stack:
+        parts, extra = _brains(stores, build, counted=counted, stack=stack)
+        streams = [cast("Iterator[dict[str, object]]", part["rows"]) for _, part in parts]
+        try:
+            merged = heapq.merge(*streams, key=lambda item: str(item["uri"]))
+            items = list(islice(islice(merged, offset, None), LISTING))
+        except sqlite3.DatabaseError as error:
+            raise Error("the search cache is unavailable; run bf build") from error
+        total = sum(cast("int", part["total"]) for _, part in parts)
+    return {
+        "page": "tags",
+        "items": items,
+        "total": total,
+        **extra,
+        **({"next_offset": offset + len(items)} if offset + len(items) < total else {}),
+    }
+
+
+def tagged(stores: list[Store], name: str, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
+    """List only explicit frontmatter membership, not prose, aliases or ordinary links to a tag."""
+    try:
+        tag_name(name)
+    except ValueError as error:
+        raise Error("invalid tag label; use a ref returned by bf read tags") from error
+    targets = []
+    for store in stores:
+        with suppress(Error, OSError, UnicodeError):
+            targets.append(links.address(load(store).name, f"tags/{name}"))
+    reply = _listing(
+        stores,
+        "i.id IN (SELECT item FROM tags WHERE target IN (SELECT value FROM json_each(:targets)))",
+        {"targets": json.dumps(targets)},
+        "time DESC,i.ref DESC",
+        _time_key,
+        LISTING,
+        offset,
+    )
+    if counted:
+        for store in stores:
+            usage.note(store, "read", 1)
+    return {"page": f"tags/{name}", **reply}
+
+
 def page(
     stores: list[Store], path: str, now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object] | None:
@@ -505,6 +547,10 @@ def page(
     if found := period(path, now):
         return timeline(stores, path, found, offset=offset, counted=counted)
     parts = tuple(path.rstrip("/").split("/"))
+    if parts[0] == "tags":
+        if len(parts) == 1:
+            return tags(stores, offset=offset, counted=counted)
+        return tagged(stores, path.removeprefix("tags/"), offset=offset, counted=counted)
     if parts[0] == "memories":
         relative("/".join(parts))
         return memories(stores, parts, now, offset=offset, counted=counted)

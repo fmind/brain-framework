@@ -73,10 +73,10 @@ def render(repo: str, page: dict, project: dict | None) -> list[str]:
     if groups:
         counts = ", ".join(f"{g.get('relation', 'links')} {g['total']}" for g in groups)
         lines.append(f"- Linked evidence: {counts}.")
-        items = [i for g in groups for i in g.get("items", []) if not i.get("external")]
+        items = [i for g in groups for i in g.get("items", []) if i.get("kind") == "note"]
         newest = sorted(items, key=lambda i: str(i.get("time", "")), reverse=True)[:NEWEST]
         lines.extend(f"  - {day(i.get('time'))} {plain(i.get('title', ''))} (`{i['ref']}`)" for i in newest)
-    lines.append(f"Read more with `bf read {ref or repo}`; external items are counted, not quoted.")
+    lines.append(f"Read more with `bf read {ref or repo}`; collected records are counted, not quoted.")
     return lines
 
 
@@ -88,8 +88,13 @@ def main(argv: list[str]) -> int:
         return 0
     project = None
     if str(page.get("ref", "")).startswith("projects/"):
-        listing = read("projects", brain) or {}
-        project = next((p for p in listing.get("items", []) if p.get("ref") == page["ref"]), None)
+        listing = read("projects", brain)
+        if not listing or listing.get("problems") or listing.get("stale"):
+            return 0
+        project = next(
+            (p for p in listing.get("items", []) if (p.get("brain"), p.get("ref")) == (page.get("brain"), page["ref"])),
+            None,
+        )
     sys.stdout.write("\n".join(render(repo, page, project)) + "\n")
     return 0
 

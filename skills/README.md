@@ -2,29 +2,35 @@
 
 Markdown packages that teach agents to use Brain Framework. They are distributed from this repository, separately from the Python package.
 
-| Skill                               | Use                                                                                   |
-| ----------------------------------- | ------------------------------------------------------------------------------------- |
-| [bf-setup](bf-setup/SKILL.md)       | Set up a useful brain, verify agent access and connect the first selected sources.    |
-| [bf-scan](bf-scan/SKILL.md)         | Discover useful sources from approved bookmarks, tools and project folders.           |
-| [bf-use](bf-use/SKILL.md)           | Read pages, search and read notes and records from any repository.                    |
-| [bf-learn](bf-learn/SKILL.md)       | Keep notes current, retain decision evidence and prepare knowledge for another brain. |
-| [bf-action](bf-action/SKILL.md)     | Start, resume or close one action (one session of work) when the user asks for it.    |
-| [bf-maintain](bf-maintain/SKILL.md) | Fix failing sensors and routines, schedule updates, backfill and add retrieval cases. |
+| Skill                               | Example request                                                       |
+| ----------------------------------- | --------------------------------------------------------------------- |
+| [bf-setup](bf-setup/SKILL.md)       | “Set up `~/brain` and verify that you can find our project decision.” |
+| [bf-scan](bf-scan/SKILL.md)         | “Suggest useful sources; propose an inspection scope first.”          |
+| [bf-use](bf-use/SKILL.md)           | “Why did we choose a single product page? Read and cite the source.”  |
+| [bf-learn](bf-learn/SKILL.md)       | “Save this decision and its reason in the owning project.”            |
+| [bf-action](bf-action/SKILL.md)     | “Resume the website review from its last verified state.”             |
+| [bf-maintain](bf-maintain/SKILL.md) | “Diagnose why the local-documents source is stale.”                   |
 
 ## Install
 
-For guided onboarding, install `bf-setup` with `bf-use`; add `bf-scan` for optional source discovery and `bf-maintain` to implement selected integrations. For an existing brain, start with `bf-use`; add `bf-learn` to maintain notes after work, `bf-action` to resume work by name and `bf-maintain` for brain operations. From a reviewed checkout of the release you use, copy each complete folder, including templates, into a skill directory your host discovers. For a host that reads `~/.agents/skills/`, a first installation is:
+Start with `bf-use`. Add `bf-setup` for onboarding, `bf-learn` for note updates or another skill when its task is needed. The package and `bf init` do not install skills.
+
+Copy complete folders from a reviewed source archive matching `bf --version`. For a host that discovers `~/.agents/skills/`, run this from that archive for a first installation, when the destination does not exist:
 
 ```bash
 mkdir -p ~/.agents/skills
 cp -R skills/bf-use ~/.agents/skills/bf-use
 ```
 
-Run this from the Brain Framework checkout only when that destination does not exist. Each `SKILL.md` names the release it came from in `metadata.version`; compare it with `bf --version` after upgrading either one. For an existing installation, compare the folders and merge changes deliberately; preserve local customizations. Copy complete folders, including `references/` and `scripts/`. The Python package and `bf init` do not install skills.
+Keep each folder's `references/`, `scripts/` and templates. `metadata.version` records the source release; compare it with `bf --version` after upgrading. For an existing installation, review and merge changes instead of overwriting customizations.
 
 Host discovery paths differ. A brain's `skills/` can hold versioned workflow packages, but placing files there alone does not make a host load them. Use the host's configured discovery directory or a host-supported link, then start a new session and confirm `bf-use` is available.
 
-Ask the agent to search the intended brain, read one returned ref and cite it. This verifies the route from the host to your knowledge. Use `--brain PATH` for a work root; its direct `bf.yaml` brain references are also in scope; default selection otherwise depends on `BF_BRAIN`, the current directory and your registered brains. See the [agent walkthrough](../docs/docs/getting-started.md#give-agents-access) and [MCP alternative](../docs/docs/mcp.md).
+Start a fresh host session after installation. With the [first decision](../docs/docs/getting-started.md) saved, ask:
+
+> Use `bf-use` with `~/brain`. Find why we chose a single product page, read the source and cite its ref.
+
+The agent should read `projects/new-website.md#decision` and report the saved reason: visitors need a clear explanation before signing up. A skill appearing in the host proves discovery; this search and read checks access to the intended brain. See the [agent walkthrough](../docs/docs/agents.md) or [MCP alternative](../docs/docs/mcp.md).
 
 For development of Brain Framework itself, use the repository-local [bf-contribute](../.agents/skills/bf-contribute/SKILL.md) skill.
 
@@ -38,6 +44,15 @@ Discovery does not enable sensors, authenticate accounts or save an inventory. S
 
 ## Decision workflows
 
-`bf-action` adds a small working context, decisions with expected outcomes, conditional intentions and explicit unknowns ([context](bf-action/references/context.md), [decisions](bf-action/references/decisions.md)). `bf-learn` adds selected evidence captures, belief revision and bounded dependency review ([evidence](bf-learn/references/evidence.md)), procedures learned from outcomes ([consolidation](bf-learn/references/consolidate.md)) and reviewed transfer to another brain ([sharing](bf-learn/references/share.md)). Agents load a guide only when the task needs it; the default working packet is at most 300 words, six refs and 4 KiB, and dependency review stops after two hops or ten distinct dependents.
+Choose the guide that matches the next task:
 
-`bf-learn/scripts/evidence.py` captures an exact `bf read` reply or compares a retained capture with a new read. It uses the standard library only, reads stdin, prints JSON, runs no model and never opens a brain or runs a provider. Captures stay with the action; they are not general record versioning. See [agent workflows](https://fmind.github.io/brain-framework/docs/agents/) and the [example brain](../examples/brain/README.md#review-a-decision), which demonstrates these workflows with fictional evidence.
+| Task                     | Guide                                               | Result to retain                                      |
+| ------------------------ | --------------------------------------------------- | ----------------------------------------------------- |
+| Resume a session         | [Working context](bf-action/references/context.md)  | Last verified state, constraints and next step.       |
+| Review a choice          | [Decisions](bf-action/references/decisions.md)      | Expected versus observed outcome, including unknowns. |
+| Review current knowledge | [Periodic review](bf-learn/references/review.md)    | Updated project conclusions and unresolved questions. |
+| Keep a source revision   | [Evidence](bf-learn/references/evidence.md)         | A selected exact-read capture and its original ref.   |
+| Reuse a lesson           | [Consolidation](bf-learn/references/consolidate.md) | A draft procedure with evidence and limits.           |
+| Share selected knowledge | [Sharing](bf-learn/references/share.md)             | Reviewed notes suitable for the destination audience. |
+
+Load guides only when needed. Reviews, evidence capture and sharing do not require an action folder. Use `bf-action` when the user asks to track a session. The [example brain](../examples/brain/README.md#review-a-decision) demonstrates these workflows with fictional evidence.

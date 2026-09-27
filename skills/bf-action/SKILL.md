@@ -9,7 +9,7 @@ metadata:
 
 # bf-action
 
-An action is one session of work: `actions/YYYY-MM-DD_slug/ACTION.md` with `inputs/` and `outputs/`. The user calls it explicitly to start it or to resume it later; nothing starts or closes an action automatically. Routines declared in `bf.yaml` also write actions for review.
+An action is one session of work: an OKF note at `actions/YYYY-MM-DD_slug/ACTION.md` with `inputs/` and `outputs/`. The user calls it explicitly to start it or to resume it later; nothing starts or closes an action automatically. Routines declared in `bf.yaml` also write actions for review. Use `type: action` and `status: draft|stable|deprecated`; status describes the note's maturity, while its tasks and body describe work progress.
 
 ## Resume
 
@@ -28,7 +28,7 @@ Use the [decision guide](references/decisions.md) for a consequential choice, a 
 ## Before the session ends
 
 1. Tick finished TODO items and record decisions with their reasons and evidence refs.
-1. Refresh Context only when its facts change. Either write the exact next step under `## Resume` and keep `status: active`, or fill `## Outcome`, compare any prediction with observed evidence, set `status: done` and update the owning project note (`bf-learn`). Keep intentions and unknowns that outlive the action in that project. Set `updated: YYYY-MM-DD`.
+1. Refresh Context only when its facts change. Write the exact next step or blocker under `## Resume`. When work is finished, fill `## Outcome`, compare any prediction with observed evidence and update the owning project note (`bf-learn`). Set `status: stable` only when the note is reviewed and ready to use; finishing work alone is not verification. Keep intentions and unknowns that outlive the action in that project. Set `updated: YYYY-MM-DD`.
 1. Run `bf validate --brain NAME` and fix problems introduced by the edit. Show the diff; commit only when the user's standing instructions allow it.
 
-`bf validate` checks that action folders are named `YYYY-MM-DD_slug` and contain `ACTION.md`. Keep private inputs out of a shared brain: action Markdown is searchable by everyone who reads the brain.
+`bf validate` checks that action folders are named `YYYY-MM-DD_slug` and contain an OKF `ACTION.md`: nonempty `type`, lifecycle status, structured `sources` with a `resource`, and real `verified` events with `by` and `at` when supplied. Inputs and outputs can remain ordinary Markdown. Keep private inputs out of a shared brain: action Markdown is searchable by everyone who reads the brain.

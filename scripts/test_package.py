@@ -93,13 +93,9 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                 ("search", "welcome"),
                 ("read", "concepts/welcome.md"),
                 ("status", "--check"),
+                ("eval",),
             ]:
                 run(bf, *arguments, cwd=brain, env=env)
-            (brain / "evals").mkdir(exist_ok=True)
-            (brain / "evals/retrieval.yaml").write_text(
-                "version: 5\ncases:\n  - name: installed-welcome\n    query: welcome\n    expect: [concepts/welcome.md]\n"
-            )
-            run(bf, "eval", cwd=brain, env=env)
 
 
 if __name__ == "__main__":

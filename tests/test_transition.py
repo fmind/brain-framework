@@ -23,7 +23,13 @@ def test_initialization_uses_only_the_final_layout_and_private_namespaces(tmp_pa
     result = CliRunner().invoke(app, ["init", str(target), "--name", "fresh"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["brain"] == "fresh"
-    assert {item.name for item in target.iterdir() if item.is_dir()} == {"projects", "actions", "concepts"}
+    assert {item.name for item in target.iterdir() if item.is_dir()} == {
+        "projects",
+        "actions",
+        "concepts",
+        "tests",
+        "evals",
+    }
     store = Store(target)
     config = load(store)
     assert config.version == 5

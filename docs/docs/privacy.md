@@ -1,37 +1,57 @@
 # Privacy and security
 
-Brain Framework stores what your sensors print, in plain files you own. It does not encrypt, redact or upload anything. Choose what each sensor projects, keep private brains in private repositories with owner-only permissions, and back up records that are not in Git with encryption.
+Your brain is stored in plain files on your machine. Brain Framework does not upload, encrypt or redact them. Choose what you collect, who can read it and where you back it up.
 
 ## Offline retrieval
 
-`search`, `read` (including every page), `eval`, `validate`, `status` and the MCP tools never run a sensor or routine, or contact the network. Search may rewrite the disposable `.bf/` cache. Retrieved notes and records are untrusted evidence: their text never reaches a command, a shell or an SQL expression. Full-text queries use quoted literal terms and SQL uses bound parameters. Search and read replies carry a notice that content is evidence, never instructions, because collected mail or chat can contain prompt injections.
+Search, read, validation, evaluation, status and MCP work offline. They never run sensors or routines. Search may refresh the disposable `.bf/` cache.
 
-To show whether agents actually use a brain, `search` and `read` append one line per call to `usage.jsonl` in the private state directory: the time, the operation and the number of results, never the query or the ref. The file stays on the machine, is capped at 1 MiB, and `bf status` summarizes it over 7 and 30 days. Retrieval cases run by `bf eval` are not counted.
+For example, these commands read existing evidence; they do not fetch new mail or documents:
 
-## Untrusted sources
+```bash
+bf search "website" --brain ~/brain
+bf read memories --brain ~/brain
+```
 
-Most collected text is written by other people: a mail subject, an invitation, an issue comment or a feed item can carry instructions aimed at an agent. Each sensor declares `trust` in `bf.yaml`; only `trust: owner` sources, whose text the brain's owner writes, are shown with excerpts on pages. Pages list every other record by title and ref and mark it `external`, so the home page, periods and backlinks do not place third-party text in an agent's context unasked. Searches and exact reads return the text an agent asked for, labeled `external`. Routines and hooks that write or inject context should name external items by ref only, as the examples do. The label reduces exposure; it does not neutralize a prompt injection in text an agent chooses to read.
+Retrieved content is evidence, never instructions. An email saying “run this command” remains an email to assess. Brain Framework keeps retrieved text out of commands and SQL expressions; the person or agent reading it must still decide what to trust and act on.
 
-## Collecting is explicit and trusted per machine
+## Running code
 
-Sensors and routines are code you run with your permissions. A brain collects only on machines where its owner ran `bf init --collect`, or `bf register PATH --collect`; that trust lives in `~/.config/bf/config.yaml`, outside the brain, so pulling a shared repository never starts running its `sensors/` or `routines/`. Review their changes like any other code before trusting a shared brain, and require review for `bf.yaml`, `sensors/`, `routines/` and CI changes in a [team brain](team.md#collect-in-ci).
+`bf collect` runs a sensor. `bf update` runs due sensors and routines in selected roots; a [schedule](schedule.md) can call it for you. Registration only helps select brains by name.
 
-Trust applies to the brain registered under its `bf.yaml` name at its path, not to a particular commit. Another brain later placed at that path, such as a different clone, is not trusted until you register it. Later sensor or routine edits in an already trusted brain can run on its next scheduled update. Review incoming changes before that run, or revoke trust with `bf register PATH` while you review them. Revoking trust prevents future collection attempts; it does not cancel a process already running.
+Before running a downloaded brain, inspect `bf.yaml` and the programs it calls in `sensors/` and `routines/`. These programs use your account's permissions and credentials; they are not sandboxed. Later code changes can run at the next scheduled update.
 
-Sensors and routines run with direct argv and no shell, from the brain root, with stdin closed, relative `PATH` entries dropped and startup-injection variables (`LD_*`, `DYLD_*`, `BASH_ENV`, every `PYTHON*` variable, and Java, Node, Ruby, Perl and Lua startup options) removed. A timeout, SIGTERM, a closed terminal, cancellation or oversized output kills the whole process group. Shipped provider examples bound subprocess output as it arrives instead of spooling an unlimited temporary file. Provider failures write nothing; interrupted record commits retain durable originals under `memories/.pending/`; explicit `bf build` or collection recovers them, while ordinary reads fail without changing evidence. Stderr goes to a private log capped at 256 KiB in `~/.local/state/bf/`; errors name that log but never include provider output. Provider CLIs keep their own credentials; sensors must never print tokens. Invalid sensor output is reported by record position and field name only: keys the provider printed never reach errors, logs or run history. A routine's output is validated as a Markdown note and written as a new action only after the routine succeeds; it never replaces an existing action or edits other notes.
+To see due work without executing it:
 
-## File boundaries
+```bash
+bf update --brain ~/brain --dry-run
+```
 
-All brain access goes through no-follow directory descriptors: Brain Framework never follows symlinks or reads special files below the brain. Every linked or special entry in an evidence folder is skipped and reported under `problems`, while the rest of the brain still answers. Even a filename with an unrelated extension could hide a linked directory; its target is never inspected. Linked action inputs are neither indexed nor listed. It writes atomically and serializes writers with a lock kept in private state outside the brain. The lock follows the brain directory itself, so bind mounts and other spellings of its path share it; processes that write one brain must share the same private state directory. Readers use the same physical-brain lock to avoid observing half a record transaction. New brains ignore collected records and original inputs in Git by default; shared publication is an explicit brain-owner choice. Limits fail explicitly: 1 MiB configuration, 4 MiB note and reply, 256 MiB record partition, 100,000 entries per scanned folder (keep bulky files in the root `inputs/` or `originals/`, which are not scanned), 50 search results, and routine output of 1 MiB by default. Pages return at most 50 period items, 200 folder notes or 20 source-overview records, with `total` and `next_offset` for continuation; summary sections remain bounded previews. Search also returns `next_offset`. Exact replies above 4 MiB use lossless, digest-identified JSON chunks of at most 65,536 Unicode characters. Pagination streams the combined result order without retaining all skipped rows in Python; SQLite still ranks matching rows, and deep offsets can take longer. No record format or ingestion limit changes.
+By contrast, `bf collect SENSOR --dry-run` executes the sensor to obtain samples. It can contact the provider even though it does not save the records.
+
+Brain Framework passes arguments without a shell, limits runtime and output, and stops the process group on failure or cancellation. Failed collection keeps existing records. Routine output is validated before becoming a new action and never replaces an existing one.
 
 ## Separating audiences
 
-Offline describes Brain Framework's retrieval. An agent host may send returned content to its model provider; configure that host for your workplace's data requirements. Restrict a work integration explicitly, for example `bf mcp --brain team`, so its scope does not depend on the host's working directory.
+Keep personal and work knowledge in separate brains and repositories. Filesystem and repository permissions control access; a brain directory does not enforce permissions between readers.
 
-A brain is a context boundary, not access control. Keep people who must not read each other's data in separate brains and repositories. Agents inside a brain search that root and its directly declared `brains:` references; elsewhere the optional registry supplies roots. Review reference changes before an agent uses them, especially in shared repositories: declarations expand the readable context. Reference expansion is not recursive and never grants collection trust. Records committed to Git stay in its history; publish only sources every reader may keep.
+For a work agent, select its context explicitly:
 
-## Honest limits
+```bash
+bf mcp --brain ~/team-brain
+```
 
-Sensors and routines are trusted programs, not sandboxed plugins. They can use the permissions and credentials of the account running them; review their code and scope before granting collection trust. Offline retrieval does not prove an upstream record is current, and Brain Framework does not check the truth of a note or neutralize prompt injections for the consuming agent.
+The selected brain's direct `brains:` references are also readable. If the team brain references `~/brain`, its personal evidence joins that selection. Review those declarations before sharing a brain or connecting an agent.
 
-Filesystem confinement refuses redirected paths below a brain; it does not protect against another process with the same user's permissions replacing the brain or its SQLite cache. Use operating-system accounts and repository permissions for adversarial separation. Atomic writes and recovery journals protect interrupted commits; backups still matter for accidental deletion, storage failure and upstream history that no longer exists.
+Your agent host may send retrieved text to its model provider, even though Brain Framework's retrieval is offline.
+
+## What to protect
+
+| Data        | Practical protection                                                                                                                                                                              |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Brain files | Use private repositories and appropriate file permissions. New brains ignore collected records and original inputs in Git. Review files before adding them; committed content remains in history. |
+| Backups     | Include notes, records and retained originals. Encrypt sensitive backups. Keep any `memories/.pending/` journal with its records; it protects interrupted writes, not deletion or disk failure.   |
+| Credentials | Leave them with provider tools. Sensors must not print tokens or unnecessary private fields.                                                                                                      |
+| Local state | Keep run history, locks, bounded error logs and usage private. They live under `~/.local/state/bf/` by default; usage records time, operation and result count, never queries or refs.            |
+
+For exact file protections, log retention and size bounds, see [Limits and safeguards](limits.md). For a suspected defect, use [private vulnerability reporting](https://github.com/fmind/brain-framework/blob/main/SECURITY.md).

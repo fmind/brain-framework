@@ -1,3 +1,4 @@
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
 name: Security
 # Push CI scans only recent history. This scheduled counterpart scans the complete repository.
 on:

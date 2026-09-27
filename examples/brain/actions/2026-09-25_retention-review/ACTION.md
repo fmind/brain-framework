@@ -1,6 +1,6 @@
 ---
 type: action
-status: active
+status: draft
 updated: 2026-09-25
 summary: Review a fictional retention decision after its supporting policy changes.
 ---
@@ -26,4 +26,4 @@ The dependency and supersession links are ready to inspect. Next: read the proje
 
 ## Outcome
 
-The initial prediction is missed in the fictional scenario: replacement loses the previous body. The new expectation is pending: a selected local capture should preserve it. Storage cost and a held-out procedure check remain unknown; the action is still active.
+The initial prediction is missed in the fictional scenario: replacement loses the previous body. The new expectation is pending: a selected local capture should preserve it. Storage cost and a held-out procedure check remain unknown; the unchecked tasks above remain open.

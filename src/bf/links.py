@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
-from bf.models import NAME, Config, Error, clean
+from bf.models import NAME, Config, Error, clean, tag_name
 
 
 @dataclass(frozen=True)
@@ -77,6 +77,20 @@ def identity(value: str) -> str:
 def target(value: str) -> str:
     parsed = parse(value)
     return parsed.identity if parsed else value
+
+
+def tag(value: str) -> str | None:
+    """A brain-qualified tag is an exact membership scope, never an alias or word query."""
+    parsed = parse(value)
+    if parsed is None or not parsed.path.startswith("tags/"):
+        return None
+    try:
+        name = tag_name(parsed.path.removeprefix("tags/"))
+        if parsed.fragment or parsed.relation:
+            raise ValueError
+    except ValueError:
+        raise Error("use a tag address without a section or relationship: bf://brain/tags/label") from None
+    return name
 
 
 @dataclass(frozen=True)

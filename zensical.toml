@@ -14,21 +14,33 @@ extra_javascript = ["javascripts/accessibility.js"]
 nav = [
   { "Overview" = "docs/index.md" },
   { "Getting started" = "docs/getting-started.md" },
-  { "Understand Brain Framework" = [
-    { "Brain layout and knowledge" = "docs/brain.md" },
-    { "Sensors" = "docs/sensors.md" },
+  { "Core concepts" = "docs/concepts.md" },
+  { "Glossary" = "docs/glossary.md" },
+  { "Use your brain" = [
+    { "Files and notes" = "docs/brain.md" },
     { "Search and read" = "docs/search.md" },
-    { "Team brains" = "docs/team.md" },
+    { "Linking knowledge" = "docs/links.md" },
+    { "Check your brain" = "docs/checks.md" },
   ] },
-  { "Reference" = [
-    { "Command reference" = "docs/commands.md" },
-    { "Configuration schema" = "docs/schema.md" },
+  { "Maintain your brain" = [
+    { "Sensors" = "docs/sensors.md" },
+    { "Routines" = "docs/routines.md" },
+    { "Schedule updates" = "docs/schedule.md" },
+    { "Team brains" = "docs/team.md" },
   ] },
   { "Connect agents" = [
     { "Agent workflows" = "docs/agents.md" },
     { "MCP server" = "docs/mcp.md" },
   ] },
-  { "Trust and legal" = [
+  { "Reference" = [
+    { "Commands" = "docs/commands.md" },
+    { "Configuration" = "docs/configuration.md" },
+    { "Schema and links" = "docs/schema.md" },
+    { "Retrieval contract" = "docs/retrieval.md" },
+    { "Versions and upgrades" = "docs/upgrades.md" },
+    { "Limits and safeguards" = "docs/limits.md" },
+  ] },
+  { "Privacy and legal" = [
     { "Privacy and security" = "docs/privacy.md" },
     { "Third-party notices" = "third-party-notices.md" },
   ] },
@@ -42,7 +54,6 @@ favicon = "assets/brain-framework.svg"
 font = false
 features = [
   "content.code.copy",
-  "content.code.select",
   "navigation.footer",
   "navigation.instant",
   "navigation.path",
@@ -60,7 +71,6 @@ name = "Brain Framework on GitHub"
 attr_list = {}
 md_in_html = {}
 toc.permalink = true
-pymdownx.highlight.anchor_linenums = true
 pymdownx.highlight.line_spans = "__span"
 pymdownx.highlight.pygments_lang_class = true
 pymdownx.inlinehilite = {}

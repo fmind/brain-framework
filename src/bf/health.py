@@ -9,36 +9,25 @@ from typing import cast
 
 from bf import index, usage
 from bf.collect import ROUTINES, log_path, state
-from bf.config import load, may_collect
+from bf.config import load
 from bf.models import Error, Program
 from bf.storage import Store
 
 
-def _freshness(program: Program, success: str, now: datetime, trusted: bool) -> str:
-    """Scheduled programs are fresh within twice their refresh; freshness is unknown where they may not run."""
+def _freshness(program: Program, success: str, now: datetime) -> str:
+    """Scheduled programs are fresh within twice their refresh, based on local run history."""
     if not program.refresh:
         return "manual"
-    if not (trusted or success):
-        return "unknown"
     if not success:
         return "never"
     return "stale" if datetime.fromisoformat(success) < now - timedelta(seconds=2 * program.refresh) else "fresh"
 
 
 def source_health(
-    store: Store, names: Iterable[str] = (), *, now: datetime | None = None, trusted: bool | None = None
+    store: Store, names: Iterable[str] = (), *, now: datetime | None = None
 ) -> dict[str, dict[str, object]]:
-    """Describe active, disabled and historical sources without running them or exposing logs.
-
-    `trusted` defaults to this machine's collection trust, so every reply reports the same freshness.
-    """
+    """Describe active, disabled and historical sources without running them or exposing logs."""
     now = now or datetime.now(UTC)
-    if trusted is None:
-        try:
-            trusted = may_collect(store)
-        except Error, OSError, UnicodeError:
-            # An unreadable registry grants nothing: freshness stays unknown and the read still answers.
-            trusted = False
     config, history = load(store), state(store)
     result: dict[str, dict[str, object]] = {}
     for name in sorted({*config.sensors, *names}):
@@ -51,8 +40,6 @@ def source_health(
         }
         if success:
             item["last_collected"] = success
-        # Historical sources have no reviewed declaration left: their text is external.
-        item["trust"] = settings.trust if settings is not None else "external"
         if settings is not None:
             item["mode"] = settings.mode
         if (settings is None or settings.mode == "window") and entry.get("start") and entry.get("end"):
@@ -60,12 +47,12 @@ def source_health(
         if entry.get("error"):
             item["failed"] = True
         if settings is not None and settings.enabled:
-            item["freshness"] = _freshness(settings, success, now, trusted)
+            item["freshness"] = _freshness(settings, success, now)
         result[name] = item
     return result
 
 
-def routine_health(store: Store, *, now: datetime | None = None, trusted: bool = False) -> dict[str, dict[str, object]]:
+def routine_health(store: Store, *, now: datetime | None = None) -> dict[str, dict[str, object]]:
     """Each configured routine's last run, error, latest action and freshness."""
     now = now or datetime.now(UTC)
     config, history = load(store), state(store, ROUTINES)
@@ -75,7 +62,7 @@ def routine_health(store: Store, *, now: datetime | None = None, trusted: bool =
         success = str(entry.get("success", ""))
         item: dict[str, object] = {"enabled": settings.enabled, "freshness": "unknown"}
         if settings.enabled:
-            item["freshness"] = _freshness(settings, success, now, trusted)
+            item["freshness"] = _freshness(settings, success, now)
         for key in ("run", "success", "error", "action"):
             if entry.get(key):
                 item[key] = entry[key]
@@ -88,12 +75,9 @@ def routine_health(store: Store, *, now: datetime | None = None, trusted: bool =
 def attention(store: Store, now: datetime | None = None) -> list[dict[str, object]]:
     """Scheduled sensors and routines this machine runs that failed or have not succeeded recently."""
     now = now or datetime.now(UTC)
-    trusted = may_collect(store)
-    if not trusted:
-        return []
     config = load(store)
     result: list[dict[str, object]] = []
-    for name, health in source_health(store, now=now, trusted=True).items():
+    for name, health in source_health(store, now=now).items():
         settings = config.sensors.get(name)
         if (
             settings
@@ -104,7 +88,7 @@ def attention(store: Store, now: datetime | None = None) -> list[dict[str, objec
             result.append(
                 {"sensor": name, "freshness": health["freshness"], **({"failed": True} if health.get("failed") else {})}
             )
-    for name, health in routine_health(store, now=now, trusted=True).items():
+    for name, health in routine_health(store, now=now).items():
         settings = config.routines[name]
         if settings.enabled and settings.refresh and (health.get("error") or health["freshness"] in {"never", "stale"}):
             result.append(
@@ -119,7 +103,7 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
     brains, healthy = [], True
     for store in stores:
         try:
-            config, history, summary, trusted = load(store), state(store), index.status(store), may_collect(store)
+            config, history, summary = load(store), state(store), index.status(store)
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
             if len(stores) == 1:
                 if isinstance(error, sqlite3.DatabaseError):
@@ -131,7 +115,7 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             healthy = False
             continue
         counts = cast("dict[str, dict[str, object]]", summary.pop("sources"))
-        coverage = source_health(store, counts, now=now, trusted=trusted)
+        coverage = source_health(store, counts, now=now)
         sources: dict[str, dict[str, object]] = {}
         for name in sorted({*config.sensors, *counts}):
             settings = config.sensors.get(name)
@@ -148,18 +132,18 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
                 entry["configured"] = False
             else:
                 entry["enabled"] = settings.enabled
-                if settings.enabled and settings.refresh and trusted:
+                if settings.enabled and settings.refresh:
                     entry["stale"] = coverage[name]["freshness"] in {"never", "stale"}
                     healthy &= not entry["stale"]
                 if entry.get("error"):
                     entry["log"] = str(log_path(store, name))
                     # Like routines, only a scheduled sensor this machine runs fails the check.
-                    healthy &= not (settings.enabled and settings.refresh and trusted)
+                    healthy &= not (settings.enabled and settings.refresh)
             sources[name] = {key: value for key, value in entry.items() if value != ""}
-        routines = routine_health(store, now=now, trusted=trusted)
+        routines = routine_health(store, now=now)
         for name, entry in routines.items():
             settings = config.routines[name]
-            if settings.enabled and settings.refresh and trusted:
+            if settings.enabled and settings.refresh:
                 entry["stale"] = entry["freshness"] in {"never", "stale"}
                 healthy &= not entry["stale"] and not entry.get("error")
         healthy &= not summary["problems"] and summary["index"] == "ready"
@@ -167,7 +151,6 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             {
                 "brain": config.name,
                 "path": str(store.root),
-                "collect": trusted,
                 **summary,
                 "sources": sources,
                 **({"routines": routines} if routines else {}),

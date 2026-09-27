@@ -128,7 +128,7 @@ def user_config() -> UserConfig:
     return _registry()[0]
 
 
-def register(store: Store, *, collect: bool) -> dict[str, object]:
+def register(store: Store) -> dict[str, object]:
     """Add or update this brain in the user registry, keyed by its configured name."""
     name = load(store).name
     path = user_path()
@@ -143,14 +143,14 @@ def register(store: Store, *, collect: bool) -> dict[str, object]:
         existing = registry.brains.get(name)
         if existing and Path(existing.path).expanduser().resolve() != store.root:
             raise Error(f"another brain is already registered as {name}; rename one of them in bf.yaml")
-        registry.brains[name] = Registration(path=str(store.root), collect=collect)
+        registry.brains[name] = Registration(path=str(store.root))
         document = {"brains": {key: value.model_dump() for key, value in sorted(registry.brains.items())}}
         registry_store.write(
             path.name,
             # Keep the owner's leading comments; inline comments do not survive the rewrite.
             ((header or _HEADER) + yaml.safe_dump(document, sort_keys=True)).encode(),
         )
-    return {"brain": name, "path": str(store.root), "collect": collect, "config": str(path)}
+    return {"brain": name, "path": str(store.root), "config": str(path)}
 
 
 def _reference(store: Store, name: str, path: str) -> Store:
@@ -242,14 +242,3 @@ def one(value: str = "") -> Store:
     if len(stores) != 1:
         raise Error("several brains are registered; pass --brain NAME")
     return stores[0]
-
-
-def may_collect(store: Store) -> bool:
-    """Trust names a brain at a path: another brain later placed at that path, such as a different
-    clone, is not trusted until its owner registers it."""
-    names = {
-        name
-        for name, entry in user_config().brains.items()
-        if entry.collect and Path(entry.path).expanduser().resolve() == store.root
-    }
-    return bool(names) and load(store).name in names

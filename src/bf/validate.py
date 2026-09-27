@@ -1,4 +1,4 @@
-"""Offline checks of the whole brain: notes, OKF concept structure, links and record partitions."""
+"""Offline checks of the whole brain: notes, OKF structure, links and record partitions."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from datetime import date
 
 from bf import links, ontology, records
 from bf.config import load
-from bf.markdown import Note, authored, broken, note, scheme, validate_concept
+from bf.markdown import Note, authored, broken, note, scheme, validate_okf
 from bf.models import AUTHORED, MAX_NOTE, Error
 from bf.storage import Store, relative
 
@@ -81,13 +81,14 @@ def _validate(store: Store) -> dict[str, object]:
             for claim in ontology.note_claims(parsed_note, config):
                 addresses.update(v for v in (claim.subject, claim.target) if links.parse(v))
             notes.append(parsed_note)
-            if name.startswith("concepts/"):
-                validate_concept(name, data)
+            if name.startswith(("projects/", "concepts/")) or re.fullmatch(r"actions/[^/]+/ACTION\.md", name):
+                validate_okf(name, data)
         except (Error, UnicodeError) as error:
             problems.append(str(error))
         except OSError:
             problems.append(f"{name}: inaccessible file; check permissions")
     slugs = {n.path: n.slugs for n in notes}
+    tag_targets = {ontology.qualify(config, f"tags/{tag}") for n in notes for tag in n.knowledge.tags}
 
     def exists(name: str) -> bool:
         try:
@@ -116,6 +117,8 @@ def _validate(store: Store) -> dict[str, object]:
     for value, parsed in ((v, p) for v in sorted(addresses) if (p := links.parse(v)) is not None):
         if parsed.brain != config.name:
             unresolved.add(value)
+            continue
+        if value in tag_targets:
             continue
         owners = aliases.get(links.address(parsed.brain, parsed.path), set())
         paths = owners or {parsed.path}

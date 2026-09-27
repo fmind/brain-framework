@@ -1,13 +1,15 @@
 ---
 type: action
-status: active
+status: draft
 updated: 2026-01-01
-summary: One sentence on the requested outcome.
+description: One sentence on the requested outcome.
 ---
 
 # Action title
 
 The requested outcome, its scope and constraints. Link the owning project relatively: `[Project](../../projects/NAME.md)`.
+
+Keep work progress in the tasks and Resume below. `status` describes this note's maturity: `draft`, `stable` or `deprecated`. Add `sources` mappings with a `resource` for actual supporting evidence; add `verified` only after a real check.
 
 ## Context {#context}
 

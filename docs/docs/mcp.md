@@ -1,27 +1,68 @@
-# MCP server
+# Model Context Protocol (MCP) server
 
-Agents that can run commands should use the CLI through the `bf-use` skill. For hosts that prefer tools, `bf mcp` serves the same services over stdio:
+<span id="mcp-server"></span>
 
-```bash
-bf mcp                 # enclosing root and its direct references
-bf mcp --brain ~/brain  # explicit root and its direct references
-```
+Connect an agent host so it can find a decision and read its source. `bf mcp` provides the same retrieval as the terminal through two tools: `search` and `read`. The host starts and stops the process over stdio; no separate daemon, network port or Brain Framework account is needed.
 
-It exposes two read-only tools:
-
-- `read(ref, brain, offset)` returns the same JSON as `bf read`: the home page when `ref` is empty, another [page](search.md#pages), a note, a section, a record or an identity with its backlinks.
-- `search(query, scope, limit, offset)` returns the same JSON as `bf search`.
-
-Each parameter is described in the tool schema, which bounds `limit` to 1–50; arguments outside the schema fail before retrieval runs. Text and structured results carry the same value. Follow `next_offset` using the same arguments plus `offset`; search and listings count items, while oversized exact replies count characters in their JSON `chunk`. Concatenate chunks only when their `sha256` matches, verify the digest and parse the assembled JSON. Restart after evidence changes. See [retrieval](search.md) for bounds, source coverage and examples. Errors hide brain paths. There is no collection, routine, write or execution tool; retrieval may refresh the disposable cache and record private usage counts.
+Agents that can run commands can instead use the CLI through the [bf-use skill](agents.md#install-the-skills).
 
 ## Connect a host
 
-In your host's MCP settings, create a stdio server with command `bf` and arguments `mcp`, `--brain`, `/home/me/knowledge` (the intended brain's absolute path; a registered name also works, but the host's working directory decides which enclosing brain a bare name can match). Use the full executable path from `command -v bf` if the host does not inherit your shell's PATH. The host starts and stops the process; you do not need a separate daemon or network port.
+Complete [Getting started](getting-started.md), including the New website decision. Confirm the intended brain works before connecting it:
 
-Selected roots are fixed when the server starts; their direct `brains:` declarations are reread for each request. Restart after changing root selection or updating Brain Framework. Search and read cover those roots and direct references; the `brain` argument on `read` disambiguates a returned ref, and cannot open a brain outside that selection.
+```bash
+command -v bf
+bf read projects/new-website.md#decision --brain ~/brain
+```
 
-Confirm that the host lists exactly `search` and `read`. After the [getting-started walkthrough](getting-started.md), ask it why you keep original evidence and check that it reads `projects/archive.md#decision`. A working terminal command alone does not prove the host is connected.
+The reply should contain the reason for starting with a single product page. Use the absolute executable path reported by `command -v bf` and the absolute brain path in your host settings. This avoids depending on the host's working directory or PATH.
 
-Retrieved content is untrusted evidence: the host decides what to do with it. Its model provider may receive returned text. Choose an explicit team brain for work integrations and follow the [security model](privacy.md#separating-audiences).
+### Codex CLI example
 
-Both tools share the [BF link contract](schema.md#bf-links). Read accepts BF addresses, including Markdown fragments, and returns backlinks grouped by relationship with bounded claim explanations and portable `uri` values; search accepts an identity `scope`. Links do not expand the server's selected brains or run providers.
+With Codex CLI installed, add a server named `brain` to your user configuration. If that name already exists, inspect it with `codex mcp get brain` and choose another name to preserve it.
+
+```bash
+codex mcp add brain -- "$(command -v bf)" mcp --brain "$HOME/brain"
+codex mcp get brain
+```
+
+The saved entry in `~/.codex/config.toml` has this shape, with your actual absolute paths:
+
+```toml
+# https://developers.openai.com/codex/mcp
+[mcp_servers.brain]
+command = "/home/me/.local/bin/bf"
+args = ["mcp", "--brain", "/home/me/brain"]
+```
+
+Restart the Codex session. Run `/mcp` and confirm that `brain` is connected and offers `search` and `read`. The registration command alone does not establish that the server starts successfully. See the [official Codex MCP guide](https://developers.openai.com/codex/mcp) for host configuration details.
+
+Ask: **“Use the brain MCP tools to find why we chose a single product page. Read the matching source and cite its ref.”** In the host's tool history, check for these two calls (the host may display a prefix on each tool name):
+
+| Tool     | Example arguments                                           | Expected result                                                        |
+| -------- | ----------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `search` | `{"query":"visitors clear explanation","scope":"projects"}` | A match with `ref: projects/new-website.md#decision`.                  |
+| `read`   | `{"ref":"projects/new-website.md#decision"}`                | The saved reason: visitors need a clear explanation before signing up. |
+
+The agent's answer should cite that ref. A plausible answer without the exact read does not verify the connection.
+
+To remove only this connection later, run `codex mcp remove brain`, then restart the session. This does not delete the brain.
+
+### Other hosts
+
+Create a stdio server with the same executable and argument array in your host's MCP settings. Follow its configuration documentation, restart it, then repeat the connection and evidence checks above. Brain Framework's two tools and acceptance question stay the same.
+
+## If the connection fails
+
+| Symptom                     | Check                                                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Executable not found        | Use the absolute `bf` path and confirm that the host can access it.                                                    |
+| Brain unavailable           | Read the decision in the terminal using the same absolute brain path.                                                  |
+| No tools or old behavior    | Restart the host after changing configuration or reinstalling Brain Framework.                                         |
+| Empty or incomplete results | Inspect `problems`, `stale` and source coverage; see [retrieval guidance](search.md#incomplete-answers-and-freshness). |
+
+## What the host can read
+
+Search and read cover the selected roots and their direct `brains:` references. Review those references as part of the intended audience. Retrieved content is untrusted evidence, and the host's model provider may receive it. Use an explicit team brain for work; see [privacy](privacy.md#separating-audiences).
+
+There is no collection, routine, write or execution tool. Retrieval can refresh the disposable cache and record private usage counts. For tool parameters, root selection, pagination and large replies, see the [MCP reference](retrieval.md#mcp-tool-contract).

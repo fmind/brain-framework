@@ -1,150 +1,160 @@
 # Sensors
 
-A sensor is an executable collector that gathers records from a source. It can be any executable that prints one JSON array of [records](brain.md#records) on stdout. It owns provider access, pagination and projection; the provider's CLI owns credentials. Brain Framework runs it, validates the whole array and its [schema mappings](schema.md#shared-fields-and-sensor-mappings), and upserts the records. A failure, a timeout, invalid output or excessive output writes nothing.
+A sensor turns a selected source into searchable evidence. This walkthrough collects one fictional product brief for the New website project, then links it to the decision it supports. No provider credentials are needed.
 
-```json
-[{
-  "id": "decision-42",
-  "title": "Keep historical evidence",
-  "text": "The team selected durable local files because providers delete content.",
-  "time": "2026-09-01T12:00:00Z",
-  "url": "https://mail.example.com/decision-42",
-  "links": ["repo:github.com/team/archive", "person:email/owner@example.com"]
-}]
+The script prints one JSON array of [records](brain.md#records); Brain Framework validates and saves them by id. A sensor must fail if collection is incomplete: Brain Framework cannot detect pages the script silently omitted.
+
+## Your first sensor
+
+Complete [Getting started](getting-started.md), then work inside `~/brain`. Create a dedicated input directory:
+
+```bash
+mkdir -p sensors inputs/website-demo
 ```
 
-Declare sensors in `bf.yaml`. The executable is a bare command on PATH or a `sensors/` path; arguments are passed directly, never through a shell. The placeholders `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}` are replaced once.
+Save this text as `inputs/website-demo/brief.txt`:
+
+```text
+The fictional New website brief asks for a clear product explanation before visitors sign up.
+```
+
+Save the [local documents sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/local-documents.py) as `sensors/local-documents.py` and review it with your agent. The package does not install example sensors. This script scans only the directory passed to it and bounds file sizes and output.
+
+## Configure a sensor
+
+Add the following to your existing `bf.yaml`. Keep its `version`, `name`, schema and other settings. If `sensors:` already exists, add only the `local-documents` entry beneath it; do not create a duplicate YAML key.
 
 ```yaml
-# https://fmind.github.io/brain-framework/
-version: 5
-name: brain
+# https://fmind.github.io/brain-framework/docs/sensors/
 sensors:
-  git-commits:
-    command: [sensors/git-history.py, "{{home}}", "{{start}}", "{{end}}"]
-    refresh: 3600
-  drive-folders:
-    command: [sensors/google-drive-folders.py]
+  local-documents:
+    command:
+      - uv
+      - run
+      - --no-project
+      - --python
+      - "3.14"
+      - sensors/local-documents.py
+      - website-demo
+      - "{{brain}}/inputs/website-demo"
     mode: snapshot
-    refresh: 86400
+    refresh: 0
 ```
 
-| Setting     | Default    | Meaning                                                                                     |
-| ----------- | ---------- | ------------------------------------------------------------------------------------------- |
-| `command`   | required   | Direct argv.                                                                                |
-| `fields`    | `{}`       | Explicit schema-field mappings using JSON Pointer paths or literal values.                  |
-| `enabled`   | `true`     | Disabled sensors never run; their records stay searchable.                                  |
-| `mode`      | `window`   | `window` upserts what the sensor returns; `snapshot` replaces the source's whole catalog.   |
-| `trust`     | `external` | `owner` for text you write yourself (your commits, notes, documents); `external` otherwise. |
-| `refresh`   | `0`        | Seconds between automatic runs; `0` keeps the sensor manual.                                |
-| `lookback`  | `86400`    | Seconds covered by a first run, or by every snapshot run.                                   |
-| `overlap`   | `300`      | Seconds re-read before the last window's end, for late arrivals.                            |
-| `timeout`   | `300`      | Seconds before the process group is killed.                                                 |
-| `max_bytes` | 64 MiB     | Maximum stdout size.                                                                        |
+`website-demo` is the stable label used in record ids. The final argument selects exactly the demo directory. `uv` supplies the interpreter independently of the host's `python3`; it must be on PATH and may obtain Python if it is not already installed. The text-file collection itself needs no provider or network access. `refresh: 0` keeps this sensor manual.
 
-Sensors run from the brain root with your environment minus loader-injection variables and relative `PATH` entries, stdin closed, and stderr captured to a private per-sensor log of at most 256 KiB under `~/.local/state/bf/`. Errors name the log, never its content. The [example sensors](https://github.com/fmind/brain-framework/tree/main/examples/sensors) show local Git history, Google Calendar, a complete Drive folder snapshot and scoped local documents; copy them into `sensors/` and adapt them with tests.
+Review the script and selected input directory before executing it. Collection runs with your account permissions; registration is not required.
+
+## Collect and read
+
+```bash
+bf collect local-documents --dry-run
+bf collect local-documents
+bf search "product explanation" --scope memories/local-documents
+bf read local-documents:website-demo/brief.txt
+bf validate
+```
+
+The preview executes the script without saving its output. The real collection stores one record in `memories/local-documents/snapshot.jsonl`. Search returns `ref: local-documents:website-demo/brief.txt`; the exact read includes these selected record fields:
+
+```json
+{
+  "id": "website-demo/brief.txt",
+  "title": "brief.txt",
+  "text": "The fictional New website brief asks for a clear product explanation before visitors sign up.\n"
+}
+```
+
+Link the record from `projects/new-website.md`, beneath the decision:
+
+```markdown
+Evidence: [Product brief](local-documents:website-demo/brief.txt).
+```
+
+Run `bf validate` to check that the link resolves. If you edit the input file and collect again, the same id updates the saved record; the project link continues to work.
+
+## Sensor settings
+
+The executable is a command on PATH or a `sensors/` executable. Arguments pass directly, without a shell. The placeholders `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}` are replaced once. Directly executed Python examples need an executable bit and a suitable `python3`; the walkthrough uses `uv` instead.
+
+| Setting     | Default  | Meaning                                                         |
+| ----------- | -------- | --------------------------------------------------------------- |
+| `command`   | required | Executable and arguments.                                       |
+| `fields`    | `{}`     | [Schema mappings](schema.md#shared-fields-and-sensor-mappings). |
+| `enabled`   | `true`   | Disabled sensors keep their existing records searchable.        |
+| `mode`      | `window` | Update returned items, or replace a complete `snapshot`.        |
+| `refresh`   | `0`      | Seconds between automatic runs; zero keeps the sensor manual.   |
+| `lookback`  | `86400`  | Seconds covered by the first run, or each snapshot run.         |
+| `overlap`   | `300`    | Seconds re-read before the previous window's end.               |
+| `timeout`   | `300`    | Maximum runtime in seconds.                                     |
+| `max_bytes` | 64 MiB   | Maximum stdout size.                                            |
 
 ## Any source you can script
 
-The sensor interface is open-ended. A source with a CLI, API, database query or readable export can be connected by a script that prints the record array above. Use Python or another language; Brain Framework needs the output contract, not a provider-specific plugin.
+A CLI, API, database query or readable export can become a sensor. The script owns authentication, pagination, rate limits and field selection. Prefer provider CLIs for credentials; never print secrets.
 
-For example, a custom sensor can fetch [GitHub issues and pull requests](https://docs.github.com/en/rest/issues/issues), [Jira work items](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/) or [Airtable records](https://support.airtable.com/articles/6292134965-getting-started-with-airtable-s-web-api), select the fields worth remembering and preserve each item's stable id and source URL. These are possible integrations, not bundled connectors. The four reviewed examples cover local Git history, local documents, Google Calendar and Drive folders.
+For example, a feedback sensor could emit this fictional record linking an observation to the same project:
 
-Your script owns provider authentication, pagination, rate limits and the scope of collection. Prefer an authenticated provider CLI where available; keep credentials out of the brain and emitted records. Finish all pages before printing, and fail without output if collection is incomplete. Test with a fake provider, review the code and grant machine trust before running it. Once collected, the records can be searched and read offline.
+```json
+[{
+  "id": "feedback-42",
+  "title": "New website feedback",
+  "text": "Visitors asked what the product does before opening the signup form.",
+  "time": "2026-09-27T12:00:00Z",
+  "url": "https://example.com/feedback/42",
+  "links": ["bf://brain/projects/new-website.md"]
+}]
+```
+
+Finish all source pages before printing the array, and fail if any page is missing. Test that failure with a fake provider so partial evidence cannot appear to be a successful collection.
+
+The four [reviewed examples](https://github.com/fmind/brain-framework/tree/main/examples/sensors) cover local documents, local Git history, Google Calendar and Drive folders. Provider integrations need their CLI, authentication and a deliberately selected scope. Keep your copied sensor under review and test it with a fake provider before scheduling it.
 
 ## Collect and update
 
-Review the sensor code, then explicitly grant machine collection trust. New brains and referenced brains have no implicit execution permission.
+After reviewing the configured programs, preview due work and run an update:
 
 ```bash
-bf register . --collect
-bf collect git-commits --since 30d --dry-run   # run and show three samples, write nothing
-bf collect git-commits --since 30d             # backfill a month
-bf update --dry-run                            # which sensors are due, and their windows
-bf update                                      # run them all, then refresh search
+bf update --dry-run  # list due work; execute nothing
+bf update           # run due sensors, then routines
+bf status
 ```
 
-`update` follows the [brain selection rules](commands.md): it runs due sensors, then due [routines](#routines), in the selected brains that are trusted on this machine. A sensor is due when it is enabled, its `refresh` is nonzero, and that interval has elapsed since its last success. A window sensor resumes from its last collected window minus `overlap`, catching up at most 30 days after a long pause; upserts make repeated items harmless. A failed sensor stays due and never blocks the others; the command exits 1 when any failed. Run state lives in `~/.local/state/bf/`, so losing it means the next run uses `lookback` and previously recorded coverage is no longer available. A CI job keeps it between runs or uses a longer `lookback`; see [team brains](team.md#collect-in-ci).
+The demo sensor is not due because its `refresh` is zero. Set a nonzero interval only when you want it included in updates.
 
-Runs of the same sensor are serialized. Other sensors can collect concurrently; record commits and run-state updates serialize briefly. `status` separates indexed totals from `last_run` counts (added, updated, unchanged and removed), and reports disabled and historical evidence separately from enabled sources. A manual backfill does not claim coverage across an uncollected gap: one that ends before the recorded coverage keeps that coverage, the resume point and freshness unchanged, and one that touches it extends the coverage backwards without counting as a fresh success. Coverage never extends past the run itself: a backfill with a future `--until` covers only up to the time it ran.
+A sensor is due when it is enabled, `refresh` is nonzero and that interval has elapsed since its last success. Updates follow the [brain selection rules](commands.md) and never execute referenced brains. Failures leave the sensor due, allow other programs to continue and make the command exit 1.
 
-## Routines
+Window sensors resume from their previous window minus `overlap`, catching up at most 30 days. Run state stays in `~/.local/state/bf/`; without it, the next run uses `lookback`. A [CI collector](team.md#collect-in-ci) should retain that state or use a longer lookback.
 
-A routine is a deterministic program whose output people review: a weekly review, a meeting preparation, a digest of selected feeds. Declare it under `routines:` in `bf.yaml`. Its name is the slug of the actions it writes (lowercase letters and digits separated by single hyphens) and must differ from every sensor name.
+### Backfills and coverage
 
-```yaml
-# https://fmind.github.io/brain-framework/
-routines:
-  weekly-review:
-    command: [routines/weekly-review.py, "{{brain}}", "{{end}}"]
-    refresh: 604800
-```
+`bf status` separates indexed totals from `last_run` counts: added, updated, unchanged and removed. Backfilling an older window does not claim a fresh collection or fill a gap between windows. A window touching existing coverage extends it; a future `--until` never claims coverage beyond the run time.
 
-| Setting     | Default  | Meaning                                                                                  |
-| ----------- | -------- | ---------------------------------------------------------------------------------------- |
-| `command`   | required | Direct argv: a bare command on PATH or a `routines/` path, with the sensor placeholders. |
-| `enabled`   | `true`   | Disabled routines never run.                                                             |
-| `refresh`   | `0`      | Seconds between runs; `0` declares the routine without scheduling it.                    |
-| `lookback`  | `86400`  | Seconds covered by the first run; later runs start where the last reviewed window ended. |
-| `timeout`   | `300`    | Seconds before the process group is killed.                                              |
-| `max_bytes` | 1 MiB    | Maximum stdout size, at most 4 MiB.                                                      |
-
-`bf update` runs due routines after the sensors of each brain trusted on this machine, with the same process boundary: no shell, the brain root as working directory, loader-injection variables removed, stdin closed, a timeout and an output cap that kill the process group, and stderr in a private log of at most 256 KiB. `{{start}}` is the end of the last run that wrote an action or found nothing to review, or `lookback` before now on the first run, and `{{end}}` is now. A run skipped because today's action already exists keeps its window open, so the next action covers it.
-
-The routine prints one Markdown note, or nothing. Brain Framework validates it as an authored note before writing, then writes it to `actions/YYYY-MM-DD_NAME/ACTION.md` for the local date of the run. An existing folder for that day is never replaced, so a routine writes at most one action per day and never overwrites a person's edits: a later run the same day reports `skipped`. Empty output records a successful run without an action. A failure, a timeout, invalid Markdown or oversized output writes nothing, keeps the routine due, and is reported by `update`, `bf status` and the home page's `attention`.
-
-Routines read the brain as an agent does, through `bf read` and `bf search` with literal argv. They never edit notes or contact providers, and Brain Framework runs no model: people and their agents review the action and update the owning notes. Copy an [example routine](https://github.com/fmind/brain-framework/tree/main/examples/routines) into `routines/` and test it with a fake `bf`. Preview a routine by running its script directly; `bf update --dry-run` shows which routines are due. Run state lives in `~/.local/state/bf/`; `bf status` reports each routine's last run, success, error, log and latest action.
+Runs of the same sensor serialize. Different sensors may run concurrently; record commits and state updates lock briefly. See [process safeguards](limits.md#processes-and-logs) for timeouts, logs and cancellation.
 
 ## Define the scope before adding a sensor
 
-Keep each sensor's contract beside its code: selected account/folders/channels, stable identity, event and modification time, projected fields, size limits, deletion behavior, trust and fake-provider tests. Declare `trust: owner` only for text the brain's owner writes, such as local Git history or your own documents; mail, chat, invitations, issues, feeds and shared catalogs stay `external`, the default. Pages show external records by title and ref without excerpts, searches and exact reads label them `external`, and sources no longer declared count as external. Prefer an explicit folder, repository or channel list over whole-account ingestion. Preserve source URLs and explicit identities so teammates can verify evidence.
+Keep these choices beside the script: accounts and folders, stable ids, event and modification times, selected fields, size limits, deletion behavior and fake-provider tests.
 
-Use snapshots for bounded current catalogs (contacts, folders, a rolling future agenda, selected local documents). Use windows for history (commits, messages, meetings), with a documented reconciliation horizon for mutable records. Window collection does not remove disappeared items; a snapshot does. An empty snapshot never replaces a non-empty catalog, because a wrong account or an unmounted folder also looks empty: the run fails and keeps the records. Delete `memories/SOURCE/` to clear a source deliberately. A past-event feed cannot answer tomorrow's agenda: collect a separate future snapshot. Mark truncated content with `attributes.partial`, retain upstream modification time as `attributes.updated`, and let Brain Framework stamp `attributes.observed`.
+| Mode       | Use for                                                                              | What disappears from stored records?              |
+| ---------- | ------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| `window`   | History: commits, messages, meetings.                                                | Nothing automatically; returned ids are updated.  |
+| `snapshot` | A bounded current catalog: folders, contacts, selected documents or a future agenda. | Items absent from a successful complete snapshot. |
 
-Start with records that answer recurring questions. Add richer mail bodies, comments, document text or curated feeds only when useful, with explicit scope. Reuse provider CLIs and native file formats; keep model inference, crawling, scheduling and credential storage outside sensors and the core.
-
-## Schedule it
-
-Run `bf update` from a native timer. On Linux, create these two files; this example explicitly targets a registered brain named `brain`. Replace that name and the executable path if needed (`command -v bf` shows your installation):
-
-```ini
-# https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html
-# ~/.config/systemd/user/bf-update.service
-[Unit]
-Description=Collect due Brain Framework sensors
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/bf update --brain brain
-TimeoutStartSec=45min
-```
-
-```ini
-# https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html
-# ~/.config/systemd/user/bf-update.timer
-[Unit]
-Description=Check for due Brain Framework sensors every 15 minutes
-
-[Timer]
-OnCalendar=*:0/15
-Persistent=true
-RandomizedDelaySec=1min
-
-[Install]
-WantedBy=timers.target
-```
-
-Run `systemctl --user daemon-reload`, enable it with `systemctl --user enable --now bf-update.timer`, and read runs with `journalctl --user -u bf-update`. On macOS, a launchd agent with `StartInterval` 900 checks for due sensors every 15 minutes. Give the job the PATH its sensors need (`gh`, `gws`, `git`). `bf status --check` exits 1 when a scheduled sensor has not succeeded within twice its `refresh`, which suits a monitoring check.
-
-Check `systemctl --user list-timers bf-update.timer` for the next trigger and `systemctl --user show bf-update.service -p Result -p ExecMainStatus` after a run, then `bf status --check --brain brain` for source health. Enabling a timer alone does not prove collection succeeded. Disable future runs with `systemctl --user disable --now bf-update.timer`; stop an active collection separately with `systemctl --user stop bf-update.service`.
-
-Choose a timer interval comfortably shorter than the smallest nonzero `refresh`. An hourly timer with random delay can run just before an hourly sensor is due and skip it until the following hour. A 15-minute check avoids that extra hour of delay; it still collects only due sensors. `Persistent=true` coalesces missed calendar triggers when the user manager returns; it does not keep a sleeping laptop running. Cache and provider failures make `update` exit 1.
+An empty snapshot cannot replace a non-empty catalog: a wrong account or missing folder could also look empty. Clear `memories/SOURCE/` only as a deliberate deletion. For mutable window sources, document how far back revisions are re-read.
 
 ## Good records
 
-- Put the facts someone will ask about in `title` and `text`: subject, outcome, people, rationale. `attributes` are for exact reads; map shared facts into searchable `fields` through the schema.
-- Keep `id` stable across edits so a changed item replaces its line.
-- Use event time, never collection time, for `time`.
-- Link explicit identities only: `person:email/<lowercase address>`, `repo:github.com/<owner>/<name>`, provider URLs. Never infer relationships from similar names.
-- Skip noise at the source: trash, promotions, bots, test runs. A smaller, relevant corpus answers better.
-- Fail before printing anything when pagination is incomplete or the provider errors, and test the sensor with a fake provider.
+- Keep ids stable across edits and source URLs available for verification.
+- Put searchable facts in `title` and `text`; use `attributes` for exact-read details.
+- Use event time for `time`, upstream modification time for `attributes.updated`, and `attributes.partial: true` for deliberately incomplete text. Brain Framework supplies `attributes.observed`.
+- Link explicit identities; do not infer relationships from similar names.
+- Skip noise such as trash, promotions, bots and test runs.
+
+## Routines
+
+Prepare review actions with the [routine guide](routines.md).
+
+## Schedule it
+
+Run updates automatically with [Schedule updates](schedule.md).

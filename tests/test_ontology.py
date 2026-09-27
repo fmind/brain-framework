@@ -73,7 +73,7 @@ def ingest(brain: Store, values: list[dict]) -> dict:
 
 def test_roles_replacement_aliases_and_cache_rebuild(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
-    brain.write("projects/alice.md", b"---\naliases: [person:alice, account:alice]\n---\n# Alice\n")
+    brain.write("projects/alice.md", b"---\ntype: person\naliases: [person:alice, account:alice]\n---\n# Alice\n")
     first = {"id": "one", "title": "Planning", "attributes": {"from": "person:alice", "to": ["person:bob"]}}
     second = {"id": "two", "title": "Reply", "attributes": {"from": "person:bob", "to": ["person:alice"]}}
     assert ingest(brain, [first, second])["added"] == 2

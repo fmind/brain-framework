@@ -4,7 +4,6 @@ name: example
 sensors:
   demo:
     command: [sensors/demo.py, "{{start}}", "{{end}}"]
-    trust: owner
     refresh: 3600
     fields:
       kind: { value: event }

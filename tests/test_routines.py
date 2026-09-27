@@ -1,4 +1,4 @@
-"""Routines are trusted, deterministic programs whose Markdown becomes the day's action; failures write nothing."""
+"""Routines are deterministic programs whose Markdown becomes the day's action; failures write nothing."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from typer.testing import CliRunner
 from bf import pages
 from bf.cli import app
 from bf.collect import ROUTINES, Runner, due_routines, log_path, routine, state
-from bf.config import register
 from bf.health import attention, routine_health
 from bf.models import Config, Error, Program
 from bf.retrieve import read
@@ -36,7 +35,7 @@ routines:
     enabled: false
     refresh: 60
 """
-ACTION = b"---\nstatus: active\n---\n# Digest\n\nSee [offline](../../projects/offline.md).\n"
+ACTION = b"---\ntype: action\nstatus: draft\n---\n# Digest\n\nSee [offline](../../projects/offline.md).\n"
 FOLDER = f"actions/{NOW.astimezone().date().isoformat()}_digest"
 
 
@@ -114,10 +113,15 @@ def test_empty_output_means_nothing_to_review(configured: Store) -> None:
     ("output", "message"),
     [
         (b"---\nstatus: nope\n---\n# Bad\n", "invalid frontmatter"),
+        (b"# Missing metadata\n", "nonempty type"),
+        (b"---\ntype: action\nstatus: active\n---\n# Bad\n", "OKF status"),
+        (b"---\ntype: action\nsources: [https://example.com]\n---\n# Bad\n", "sources require mappings"),
+        (b"---\ntype: action\nverified: [{by: human:owner}]\n---\n# Bad\n", "require by and at"),
         (b"---\nunclosed\n", "unclosed frontmatter"),
         (b"\xff\xfe", "UTF-8"),
         (b"# Bad\n\n[x](bf://fixture/projects/offline.md?rel=undeclared)\n", "declare an identity relationship"),
         (b"---\nentity: bf://other/people/x\n---\n# Foreign\n", "own brain namespace"),
+        (b"---\naliases: [bf://other/people/x]\n---\n# Foreign\n", "own brain namespace"),
     ],
 )
 def test_invalid_output_writes_nothing_and_records_the_error(configured: Store, output: bytes, message: str) -> None:
@@ -129,7 +133,7 @@ def test_invalid_output_writes_nothing_and_records_the_error(configured: Store, 
     assert "success" not in state(configured, ROUTINES)["digest"]
 
 
-def test_routines_require_trust_and_valid_windows(configured: Store, tmp_path: Path) -> None:
+def test_routines_require_enabled_programs_and_valid_windows(configured: Store, tmp_path: Path) -> None:
     for name, start, end, message in [
         ("absent", START, END, "unknown or disabled"),
         ("paused", START, END, "unknown or disabled"),
@@ -140,14 +144,10 @@ def test_routines_require_trust_and_valid_windows(configured: Store, tmp_path: P
             routine(configured, name, start=start, end=end, runner=printing(ACTION))
     clone = tmp_path / "clone"
     clone.mkdir()
-    untrusted = Store(clone)
-    untrusted.write("bf.yaml", CONFIG.replace(b"name: fixture", b"name: clone"))
-    with pytest.raises(Error, match="may not run routines"):
-        routine(untrusted, "digest", start=START, end=END, runner=printing(ACTION))
-    register(untrusted, collect=False)
-    assert update([untrusted], now=NOW)["brains"] == [
-        {"brain": "clone", "skipped": "not trusted to collect on this machine"}
-    ]
+
+    shared = Store(clone)
+    shared.write("bf.yaml", CONFIG.replace(b"name: fixture", b"name: clone"))
+    assert routine(shared, "digest", start=START, end=END, runner=printing(ACTION))["action"]
 
 
 def test_due_routines_cover_the_time_since_their_last_reviewed_window(configured: Store) -> None:
@@ -207,7 +207,7 @@ def test_update_runs_routines_after_sensors_and_isolates_failures(configured: St
 def test_status_and_home_report_failing_routines(configured: Store) -> None:
     with pytest.raises(Error):
         routine(configured, "digest", start=START, end=END, runner=printing(b"\xff"), clock=lambda: NOW)
-    health = routine_health(configured, now=NOW, trusted=True)
+    health = routine_health(configured, now=NOW)
     assert health["digest"]["freshness"] == "never"
     assert health["digest"]["log"] == str(log_path(configured, "digest"))
     assert health["manual"] == {"enabled": True, "freshness": "manual"}
@@ -224,7 +224,7 @@ def test_routine_executables_run_from_the_brain_root(configured: Store, monkeypa
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     configured.write(
         "routines/digest.py",
-        b'#!/bin/sh\nprintf -- \'---\\nstatus: active\\n---\\n# Digest %s\\n\' "$(basename "$PWD")"\n',
+        b'#!/bin/sh\nprintf -- \'---\\ntype: action\\nstatus: draft\\n---\\n# Digest %s\\n\' "$(basename "$PWD")"\n',
     )
     (configured.root / "routines/digest.py").chmod(0o700)
     result = update([configured], now=NOW)

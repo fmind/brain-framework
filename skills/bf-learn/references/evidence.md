@@ -4,23 +4,23 @@ Use when a consequential decision must remain explainable after its sources chan
 
 ## Retain a revision
 
-Read the exact note section or record through `bf read`. Record its original ref, when it became known, when the claim applies (if stated), and any dispute in a dated decision note in an existing action's `outputs/`. Keep these dates distinct; the capture time is when this local copy was made, not necessarily when the underlying event happened.
+Read the exact note section or record through `bf read`. Record its original ref, when it became known, when the claim applies (if stated), and any dispute in a dated decision note. Use an existing action's `outputs/` and `inputs/` for the note and captures when that action owns the work. Without an action, keep the dated note under `projects/` and captures under `assets/`, linked from the owning project. Reuse existing locations and choose unused filenames; never create an action merely to retain evidence. Keep these dates distinct; the capture time is when this local copy was made, not necessarily when the underlying event happened.
 
 The standard-library [evidence helper](../scripts/evidence.py) runs with Python 3.11 or later, consumes JSON on stdin and never opens a brain, invokes a command, or contacts a network. `capture` accepts one exact read and retains its text or record, source metadata, timestamp and content digest. It excludes backlinks and other context. It refuses pages and incomplete reads. Partial or non-fresh records retain explicit limitations. This is a local observation, not proof of authorship, truth or live provider state.
 
-From Bash, with the brain, exact ref, helper path and an unused destination under the authorized action's `inputs/`. The subshell keeps the options local, creates the capture owner-only, never replaces an earlier capture and removes only a capture it failed to write:
+From Bash, with the brain, exact ref, helper path and an unused destination in the chosen capture directory. The subshell keeps the options local, creates the capture owner-only, never replaces an earlier capture and removes only a capture it failed to write:
 
 ```bash
 (
   set -o pipefail -o noclobber
   umask 077
-  test ! -e "$new_capture" || { echo "keep the existing capture" >&2; exit 1; }
+  exec 3> "$new_capture" || exit 1
   bf read "$evidence_ref" --brain "$brain_path" |
-    python3 "$evidence_helper" capture > "$new_capture" || { rm -f -- "$new_capture"; exit 1; }
+    python3 "$evidence_helper" capture >&3 || { rm -f -- "$new_capture"; exit 1; }
 )
 ```
 
-Captures may contain private or external text: keep the same audience and backup protection as the original. Action inputs are not universally Git-ignored; inspect the brain's ignore rules before committing. Their JSON is not indexed, but anyone with filesystem access can still read it. Cite the original ref and the relative capture file from the decision note. A record upsert or deletion cannot reconstruct an uncaptured past revision.
+Captures may contain private or external text: keep the same audience and backup protection as the original. Neither action inputs nor assets are universally Git-ignored; inspect the brain's ignore rules before committing. Their JSON is not indexed, but anyone with filesystem access can still read it. Use an approved private location outside a shared brain when its audience is too broad. Cite the original ref and the relative capture file from the decision note when both belong in that brain; keep private paths out of shared notes. A record upsert or deletion cannot reconstruct an uncaptured past revision.
 
 To compare, supply the saved capture followed by a new exact read as two JSON documents:
 

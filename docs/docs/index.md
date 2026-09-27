@@ -2,48 +2,57 @@
 
 # Brain Framework 🧠
 
+Keep decisions, evidence and next steps in an ordinary folder. You and your agents can search it, read the source and continue work in a later session.
+
 **🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.**
 
-Brain Framework helps you and your AI agents turn scattered information into connected knowledge and informed action. Gather evidence from your tools, normalize it into shared records, connect it to projects and concepts, then retrieve the context to decide what to do next. Your brain lives in plain files you own and stays useful across sessions, editors and agent hosts.
+## See what a brain gives you
 
-**Your knowledge, under your control.** Keep your brain in plain files on your own machine or infrastructure. Choose what your sensors collect, inspect and edit what is stored, and search it offline without an account or model provider. You decide where to store it and whom to share it with.
+In the [getting-started example](getting-started.md), you save a New website project note, then ask why the team chose a single product page:
 
-Connecting a cloud AI agent may send retrieved content to its provider. Brain Framework's retrieval stays local; your agent's privacy depends on how you configure it. See [privacy and security](privacy.md) for the boundaries.
+```bash
+bf search "visitors clear explanation" --brain ~/brain
+bf read projects/new-website.md#decision --brain ~/brain
+```
 
-Markdown notes hold decisions and reusable knowledge; JSON Lines records hold what optional sensors gathered from selected sources. Explicit links and identities form a knowledge graph with evidence for each relationship. Brain Framework retrieves this context offline and returns readable refs to the original files. You or your agent use it to perform authorized work, record outcomes and update the notes.
+The read returns the saved reason:
 
-Start with one decision worth remembering. Search it, read its source, and keep the note current as the project changes. Sensors are optional: a shared repository of useful notes is already a working knowledge brain.
+> Start with a single product page because visitors need a clear explanation before signing up.
 
-## A brain for your work
+Run `bf read projects --brain ~/brain` to find its next task: **Draft the product page.** Your agent can use the same commands, cite the decision and help with the work you authorize.
 
-Sensors act like senses, bringing in selected observations and extracting them into a common record format. Schema mappings normalize provider fields into a shared vocabulary. Memories retain that evidence; concepts hold the reusable knowledge you and your agents distill from it. Projects give work a focus, actions hold its context and next step, and routines prepare repeatable reviews.
+## Follow the work from evidence to outcome
 
-**Gather → normalize → organize and connect → act → learn.** For example, find a release decision, read its linked evidence and dependencies, use that context to carry out an authorized checklist, then record the outcome and update the lesson for next time. You and your agents supply judgment; Brain Framework keeps the evidence and working context accessible.
+**Gather → normalize → organize and connect → act → learn.**
 
-## A knowledge graph you can inspect
+| Step                 | In the website example                                          |
+| -------------------- | --------------------------------------------------------------- |
+| Gather               | A sensor reads a selected product brief.                        |
+| Normalize            | BF saves it as a record with a stable ref.                      |
+| Organize and connect | The project links its decision to that record.                  |
+| Act                  | You review the page; an action keeps the checks and next step.  |
+| Learn                | You update the project and retain a useful lesson as a concept. |
 
-Ordinary Markdown links connect notes and sources. BF addresses such as `bf://knowledge/projects/archive.md#decision` name knowledge across brains; a declared `?rel=depends-on` role expresses a typed relationship. Sensor mappings add relationships from collected records. Backlinks and claims preserve the section or record behind every connection. The graph is rebuilt from files, and aliases require explicit declarations. See [links and schema](schema.md#bf-links).
+Start with the note. Add sensors when you need evidence from other tools, and routines when a review is worth repeating. People and agents judge the evidence; BF does not generate answers or learn automatically from conversations.
 
-## Connect the tools you already use
+## Choose a guide
 
-Sensors make integrations open-ended: a script can turn data from a CLI, API or file export into searchable memories. Bring in GitHub issues, Jira work items, Airtable records or evidence from your own systems by writing a sensor. The repository provides four examples to adapt: local Git history, local documents, Google Calendar and Drive folders. See [sensors](sensors.md#any-source-you-can-script) for the contract and integration boundaries.
+| You want to…                             | Start here                                                                                |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Try it now                               | [Getting started](getting-started.md): create `~/brain`, save a decision and retrieve it. |
+| Understand the vocabulary                | [Core concepts](concepts.md), then the [glossary](glossary.md) for individual terms.      |
+| Write projects, concepts and actions     | [Files and notes](brain.md): copyable OKF Markdown examples.                              |
+| Find something or see what changed       | [Search and read](search.md).                                                             |
+| Connect a decision to its evidence       | [Linking knowledge](links.md).                                                            |
+| Keep important answers findable          | [Check your brain](checks.md): questions and expected refs.                               |
+| Bring in selected documents or tool data | [Sensors](sensors.md), starting with one local file.                                      |
+| Prepare a recurring review               | [Routines](routines.md), then [Schedule updates](schedule.md).                            |
+| Work with agents or teammates            | [Agent workflows](agents.md), [MCP setup](mcp.md) or [Team brains](team.md).              |
 
-## Small parts, ordinary tools
+## Know the boundaries
 
-Follow the Unix philosophy: keep knowledge in files and compose focused utilities. Use your editor for notes, Git for review, provider CLIs for authentication and a native timer for collection. Sensors print JSON records, routines print Markdown actions, and CLI commands return JSON for scripts and agents. Brain Framework contributes one command, a rebuildable SQLite cache, browsable pages and two read-only MCP tools. It requires no model, hosted database or background server. Search matches words and explicit identities, optionally within a folder, a period or an identity; it does not generate answers or automatically learn from conversations.
+BF runs on Linux and macOS. It stores Markdown notes and JSON Lines records; a disposable SQLite cache makes them searchable. Retrieval works offline without an account or model. Search matches words and explicit identities, without embeddings.
 
-These docs describe Brain Framework 13.0.0. Read the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md) for release changes. Check `bf --version` and follow the [installation guide](getting-started.md) to update an older copy.
+You choose what to collect and who can read the files. Sensors run only through collection commands or your schedules. A cloud agent may send the evidence it reads to its model provider. Read [Privacy and security](privacy.md) before connecting private sources or sharing a brain.
 
-## Start with the question you need to answer
-
-| You want to…                               | Start here                                                                                                    |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| Remember why a decision was made           | [Write and retrieve your first decision](getting-started.md#save-a-decision).                                 |
-| Give a teammate enough context to continue | [Set up a team brain](team.md) and [check its answers](getting-started.md#check-the-answers-your-team-needs). |
-| See what needs attention or changed        | [Read the home page, a period or a source](search.md#pages).                                                  |
-| Find a decision or an exact source         | [Search by words or identity](search.md#search).                                                              |
-| Bring recurring evidence into the brain    | [Add a scoped sensor](sensors.md).                                                                            |
-| Let an agent use the same knowledge        | [Install a workflow skill](getting-started.md#give-agents-access) or connect the [MCP tools](mcp.md).         |
-| Resume work and keep decisions explainable | [Follow the agent workflows](agents.md) for actions, evidence captures and dependency review.                 |
-
-The [brain layout](brain.md), [command reference](commands.md), [configuration schema](schema.md) and [security model](privacy.md) cover the details when you need them.
+For exact options and limits, use [Commands](commands.md), [Configuration](configuration.md) and the [Retrieval contract](retrieval.md).

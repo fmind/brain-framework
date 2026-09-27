@@ -1,30 +1,42 @@
 # Team brains
 
-A team brain is a private Git repository that a team reads together: project notes, decisions, concepts and actions, plus records from sources every member may see. Teammates clone and search it; at most one scheduled job collects its records. Keep personal mail, chat and laptop history in each person's own brain.
+A team brain is a private Git repository containing knowledge every teammate may read and keep. One person records a decision; another pulls the repository and finds its reason with `bf search`. Use at most one scheduled collection job, and keep personal mail, chat and laptop history in each person's own brain.
 
 ## Create it
 
-Create an empty private repository, clone it, and initialize the brain inside the clone. Choose a distinctive name: brain names must be unique within a search context, and many people already use `brain` or `knowledge` for a personal brain.
+Create an empty private repository, clone it, and initialize the brain inside the clone. Choose a distinctive name: brain names must be unique within a search context, and many people already use `brain` for a personal brain.
 
 ```bash
-git clone git@github.com:example-org/team-knowledge.git
-bf init team-knowledge --name team-knowledge --no-collect
-cd team-knowledge
-git add -A && git commit -m "feat: create the team brain" && git push
+git clone git@github.com:example-org/team-brain.git ~/team-brain
+bf init ~/team-brain --name team-brain
+cd ~/team-brain
 ```
 
-Initialization defaults to no registration or collection trust, so your laptop never runs the team's sensors. Start with one project note and a few [retrieval cases](getting-started.md#check-the-answers-your-team-needs) before adding any sensor.
+Replace `example-org` with your organization. Add one project note and a few [retrieval cases](checks.md#retrieval-cases) before adding sensors. For a fictional trial, save the [New website decision](getting-started.md#save-a-decision) in this brain, then check and share it:
+
+```bash
+bf validate
+bf eval
+git add -A
+git commit -m "feat: create the team brain"
+git push
+```
+
+Validation should return `"valid":true`; the starter evaluation returns `"score":"3/3"` until you add your own cases. Creating or reading a brain runs no sensors or routines. Run updates only on the designated collecting machine.
 
 ## Join it
 
 ```bash
-git clone git@github.com:example-org/team-knowledge.git ~/team-knowledge
-bf search "release process" --brain ~/team-knowledge
+git clone git@github.com:example-org/team-brain.git ~/team-brain
+bf search "visitors clear explanation" --brain ~/team-brain
+bf read projects/new-website.md#decision --brain ~/team-brain
 ```
 
-Add `brains: {team-knowledge: {path: ../team-knowledge}}` to a sibling personal brain to include the team in its read context. If discovery reports a conflicting name, inspect the declarations before changing names: `bf.yaml` names are stable BF link namespaces. If you rename your own brain, update its BF addresses and incoming declarations explicitly; the shared name stays the same for everyone. Registration without `--collect` never runs sensors.
+If the team saved the sample above, the read returns the same product-page decision. After teammates publish changes, run `git -C ~/team-brain pull` to retrieve them; Brain Framework then refreshes its search cache as needed.
 
-For work, select the team root explicitly: pass `--brain ~/team-knowledge`, set `BF_BRAIN` to its absolute path, and connect hosts with `bf mcp --brain ~/team-knowledge`. Its direct references are also readable. Declare a personal brain in a work context only if its content may reach your work hosts and their model providers; see [separating audiences](privacy.md#separating-audiences).
+To include team notes when searching your personal brain, add a [direct reference](configuration.md#related-brains) in `~/brain/bf.yaml`. Keep the team name stable across clones; it is the namespace in shared links.
+
+For work, select only the intended root with `--brain ~/team-brain`, or set `BF_BRAIN` to its absolute path. Connect an agent host with `bf mcp --brain ~/team-brain`. Direct references are also readable, so review them as part of the work host's [audience](privacy.md#separating-audiences).
 
 Use the same Brain Framework release across the team and its collection job. Within a major version, the brain format (`bf.yaml`, `evals/retrieval.yaml` and the folder layout) stays compatible; a new major version documents manual upgrade steps in its release notes. Upgrade together, then run `bf validate` and `bf eval`.
 
@@ -39,9 +51,16 @@ New brains keep `memories/` out of Git. To publish reviewed sources, replace the
 !/memories/github-issues/
 ```
 
-This scheduled GitHub Actions workflow runs due sensors once a day, then commits the records they wrote. It restores private run state so window sensors resume where the previous successful run ended; without it, set each window sensor's `lookback` to at least twice the schedule interval. A failed sensor fails the job, and nothing from that run is published.
+This GitHub Actions template checks for due work once a day, then commits collected records. Before enabling it:
+
+1. Replace `VERSION` with your team's Brain Framework release and `github-issues` with your reviewed source name.
+1. Configure `TEAM_BRAIN_READ_TOKEN` with read-only access to the selected sources.
+1. Review every configured sensor and routine: `bf update` can run both.
+
+The cache retains private run state so window sensors can resume after their previous success. Without retained state, set each window sensor's `lookback` to at least twice the schedule interval. A failed sensor or routine fails the job, so its publish step does not run.
 
 ```yaml
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
 # .github/workflows/collect.yml
 name: Collect
 on:
@@ -58,7 +77,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      BRAIN_FRAMEWORK: brain-framework==13.0.0
+      BRAIN_FRAMEWORK: "brain-framework==VERSION"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -73,7 +92,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.TEAM_BRAIN_READ_TOKEN }} # Read-only access to the collected repositories.
         run: |
-          uvx --python 3.14 --from "$BRAIN_FRAMEWORK" bf register . --collect
           uvx --python 3.14 --from "$BRAIN_FRAMEWORK" bf update --brain .
       - name: Publish memories
         env:
@@ -87,21 +105,33 @@ jobs:
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${GITHUB_REF_NAME}"
 ```
 
-`bf update` also runs the brain's due [routines](sensors.md#routines) after its sensors. Their actions stay in the job's checkout unless the commit step also adds `actions/`; publish them only when every member should review them.
+`bf update` also runs the brain's due [routines](routines.md) after its sensors. Their actions stay in the job's checkout unless the commit step also adds `actions/`; publish them only when every member should review them.
 
 The collection job runs whatever sensor and routine code is on its branch, with its provider token. Give that token read-only access to the selected sources, and require a reviewed pull request for changes to `bf.yaml`, `sensors/`, `routines/` and `.github/`, for example with a `CODEOWNERS` file. If branch rules also require pull requests for `memories/`, allow only this workflow to bypass them, or make its last step open a pull request.
 
-## Keep it trustworthy
+## Keep it useful
 
 - Records committed to Git remain in its history; removing one later means rewriting history in every clone. Check your organization's data-protection and retention rules before publishing a source.
 - Collected records are evidence, not verified knowledge. Promote what matters into project notes and concepts through normal review, with links teammates can follow.
 - Add each question the team repeatedly asks to `evals/retrieval.yaml`, and run `bf validate` and `bf eval` in pull requests so broken links and lost answers fail before merge.
-- Check `bf status --brain ~/team-knowledge` on a teammate's machine: run state stays with the collection job, so freshness there reads `unknown`; the latest record times still show what was collected.
+- Check `bf status --brain ~/team-brain` on a teammate's machine: run state stays with the collection job. A clone does not establish collection health: an enabled scheduled source reports `never` before local success. The latest record times still show the saved evidence.
 
 ## Share from a personal brain
 
-For a selected transfer from a personal brain, use the `bf-learn` sharing guide to prepare a reviewable candidate and a manifest containing only destination paths and audience-accessible evidence. Keep private provenance mappings in the source action's inputs. Validate and evaluate a disposable destination without source-brain references; inspect unresolved foreign links and private identifiers separately, since link validation is not a privacy check. Future transfers compare the prior shared version, new candidate and destination edits before replacing anything. See [decision workflows](agents.md#decision-workflows).
+For example, you may want to share a product-page lesson while keeping personal meeting notes private. Prepare a copy containing only the lesson and evidence the team can access; keep private source mappings outside it.
+
+Use the [`bf-learn` sharing guide](https://github.com/fmind/brain-framework/blob/main/skills/bf-learn/references/share.md) to prepare and review that copy. Validate and evaluate it in a disposable destination without personal-brain references, then inspect its text, metadata and unresolved links for private information. `bf validate` checks structure and links; it cannot establish privacy.
+
+When refreshing shared knowledge later, compare the previous shared version, your new copy and the team's current edits. Preserve the team's changes instead of replacing the note wholesale. See [decision workflows](agents.md#decision-workflows).
 
 ## Shared links
 
-Use `bf://team-knowledge/...` for portable references and retain the same `bf.yaml` name in every clone. Declare relationship meanings before authoring typed links. Promote only reviewed, shareable identities and evidence; a link into a personal brain does not make that evidence available to teammates. Validation reports foreign destinations under `unresolved`; read them explicitly within the permitted selection when needed. See [BF links](schema.md#bf-links).
+Use the shared brain name in portable references:
+
+```markdown
+[Product-page decision](bf://team-brain/projects/new-website.md#decision)
+```
+
+This link identifies the same note whether the clone lives in `~/team-brain` or `~/brains/work`. Every clone must retain `name: team-brain` in `bf.yaml`.
+
+Declare relationship meanings before authoring typed links. Share only reviewed identities and evidence: a link into a personal brain does not make that evidence available to teammates. Validation reports foreign destinations under `unresolved`; read them explicitly within the permitted selection when needed. See [BF links](schema.md#bf-links).

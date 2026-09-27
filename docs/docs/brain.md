@@ -1,75 +1,188 @@
-# Brain layout and knowledge
+# Files and notes
 
-A brain is an ordinary directory, normally a Git repository. `bf init PATH` creates it in a new, empty or freshly cloned directory without global registration. Its name defaults to the directory name; `--name NAME` chooses another stable namespace. Only explicit `--collect` registers it with collection trust. It creates `projects/`, `concepts/` and `actions/`; `--full` also creates every optional versioned folder below.
+<span id="brain-layout-and-knowledge"></span>
 
-```text
-bf.yaml                                   # name, shared schema and sensor mappings
-AGENTS.md                                 # instructions for agents working in the brain
-projects/<project>.md                     # one note per project
-concepts/index.md, concepts/<concept>.md  # reusable OKF v0.2 knowledge
-actions/YYYY-MM-DD_slug/ACTION.md         # one session of work, with inputs/ and outputs/
-memories/<source>/<YYYY-MM>.jsonl         # collected items
-assets/                                   # logos, images, audio and other media that notes link to
-sensors/                                  # executable collectors declared in bf.yaml
-routines/                                 # deterministic programs declared in bf.yaml, and other upkeep code
-settings/, tests/                         # maintenance settings and technical tests
-evals/*.yaml                              # retrieval acceptance suites
-skills/                                   # workflow packages for agents
-inputs/, originals/, logs/                # unversioned: imports to process, retained originals, routine logs
-.bf/                                      # disposable search cache
-```
+Keep a project's current state in `projects/`, reusable knowledge in `concepts/` and a session's stopping point in `actions/`. This page builds on the [New website walkthrough](getting-started.md) with complete examples you can adapt.
 
-Only Markdown under `projects/`, `concepts/` and `actions/` and JSON Lines under `memories/` are searchable. This includes Markdown in action inputs and outputs: keep them within the brain's intended audience. Everything else is ordinary brain code, configuration and media. `.bf/` is safe to delete while Brain Framework is idle.
-
-Create the other folders when you need them. `assets/` holds versioned media shared by several notes, such as a logo; link each file from the notes that use it (`[logo](../assets/logo.svg)`) so `bf validate` catches a missing one. Files produced by one action belong in its `outputs/` instead. Keep large media out of Git history, for example with Git LFS. New brains ignore root `inputs/` (raw imports waiting to be processed), `originals/` (source files kept as provenance after processing) and `logs/` in Git; back up `inputs/` and `originals/` with `memories/`.
+A brain is an ordinary directory, usually a private Git repository. Work inside it or select it with `--brain PATH`. You write notes with your editor or agent; sensors own collected records.
 
 ## Notes
 
-A note is Markdown with optional YAML frontmatter. Brain Framework reads a few fields and leaves the rest as data.
+Projects, concepts and each action's `ACTION.md` use [Open Knowledge Format (OKF) v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md): Markdown with YAML metadata between `---` lines, called frontmatter. They need a nonempty `type`. `bf validate` checks their structure.
+
+For example, expand `projects/new-website.md` to include its current state and tags:
 
 ```markdown
 ---
 type: project
-status: active
-updated: 2026-09-22
-tags: [retention]
-aliases: [repo:github.com/team/archive]
-summary: Keep original evidence so decisions stay explainable.
+status: draft
+updated: 2026-09-27
+tags: [website, product]
+aliases: [repo:github.com/team/new-website]
+summary: Launch a product website that helps visitors understand the product.
 ---
 
-# Archive
+# New website
 
-What this project is for, in two sentences.
+Explain the product and give interested visitors a way to sign up.
 
 ## Now
 
-The current state, in a short paragraph.
+The initial decision is recorded; implementation has not started.
 
-## Decisions
+## Decision
 
-- 2026-09-10: keep originals, because providers delete content ([meeting](meetings:retention-1)).
+Start with a single product page because visitors need a clear explanation before signing up.
 
 ## Next actions
 
-- [ ] Publish the retention guide.
+- [ ] Draft the product page.
 ```
 
-| Field                      | Effect                                                                                                                                                                                                                      |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `title`                    | Result title; otherwise the first H1, then the file name.                                                                                                                                                                   |
-| `type`                     | Shown in results and pages; defaults to `project`, `action` or `concept` from the folder.                                                                                                                                   |
-| `status`                   | One of `draft`, `active`, `paused`, `blocked`, `done`, `stable`, `deprecated`, `archived`. The `projects` page lists closed work (`done`, `deprecated`, `archived`) last; searches rank deprecated and archived notes last. |
-| `updated`                  | `YYYY-MM-DD`; places the note on pages at local midnight of the reading machine. A note without it appears in no period and its project is due for review.                                                                  |
-| `summary`, `description`   | The note's lead in results.                                                                                                                                                                                                 |
-| `tags`, `aliases`, `links` | Searchable; `aliases` are exact identities that resolve to the note; `links` add explicit relations.                                                                                                                        |
+| Field                      | Effect                                                                                               |
+| -------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `title`                    | Result title; otherwise the first H1, then the file name.                                            |
+| `type`                     | Required for projects, concepts and `ACTION.md`; typically `project`, `concept` or `action`.         |
+| `status`                   | `draft`, `stable` or `deprecated`; omitted means stable. Describes document maturity.                |
+| `updated`                  | `YYYY-MM-DD`; used for period pages and project review reminders.                                    |
+| `summary`, `description`   | The note's lead in results.                                                                          |
+| `tags`, `aliases`, `links` | Searchable; `aliases` are exact identities that resolve to the note; `links` add explicit relations. |
 
-Keep notes current rather than cumulative. `bf read projects` and the home page mark active or blocked project notes with `review` when their `updated` date is missing or more than 14 days old, or when items dated after it link to them (`new_links`), as a reminder rather than a failure. Task list items (`- [ ]`, `- [x]`) are counted as `tasks` and the first open one is shown as `next`. Git holds history, so replace outdated text instead of appending history sections. Each H2 or deeper section is its own search passage, and `path#section` reads exactly that section. Markdown links between notes, to brain files and to records (`[meeting](meetings:retention-1)`) are checked by `bf validate`.
+Use `draft` while reviewing an idea, `stable` for reviewed knowledge and `deprecated` when it is no longer current. Put work progress in task lists:
 
-`concepts/` follows [OKF v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md): each concept declares a `type`; lifecycle is `draft`, `stable` or `deprecated`; `sources` are mappings with a `resource`; `verified` events carry `by` and `at`. `concepts/index.md` may only declare `okf_version`, and an optional `concepts/log.md` groups changes under ISO date headings. `bf validate` checks this structure; it does not verify claims.
+```bash
+bf read projects
+bf read projects/new-website.md#decision
+```
+
+The project listing shows `"next":"Draft the product page."`; the second command returns only the Decision section. H2 and deeper headings become separately searchable passages.
+
+Task list items (`- [ ]`, `- [x]`) are counted as `tasks`; the first open one becomes `next`. Keep the note's current state up to date. If you use Git, let it retain old versions instead of appending history sections.
+
+The home and projects pages mark draft or stable projects for `review` when `updated` is missing, more than 14 days old or earlier than incoming linked evidence (`new_links`). Future-dated notes wait until their date; deprecated projects appear last. A note date means local midnight on the reading machine, and an undated note appears in no period. See [page behavior](retrieval.md#pages).
+
+In OKF metadata, `sources` entries need a nonempty `resource`, and `verified` events need `by` and `at`. Other metadata remains available as data. Markdown links and source resources can point to notes, brain files or records; `bf validate` checks local targets. See the [concept example](#concepts) for a source link.
+
+Two filenames have special roles in `projects/` and `concepts/`: `index.md` lists a directory's notes, and optional `log.md` groups changes under ISO date headings without frontmatter. A folder-root index permits only `okf_version` in its frontmatter; nested indexes permit none. Loose action helpers and action inputs or outputs may remain ordinary Markdown.
+
+## Tags
+
+Add `tags: [website, product]` to group notes across folders. Reuse labels from `bf read tags` and prefer a few lowercase, hyphenated words.
+
+```bash
+bf read tags
+bf read bf://brain/tags/website
+bf search "product page" --scope bf://brain/tags/website
+```
+
+With the sample note above, the `website` page includes New website. The scoped search considers only notes carrying that exact tag, while an unscoped search for `website` can also match prose. Tags need no concept note. Use your brain's configured name in BF addresses; see [tag rules](schema.md#tag-rules) for limits and pagination.
+
+## Concepts
+
+A concept captures knowledge beyond one project's current state. Create `concepts/explain-before-signup.md` after the [New website decision](getting-started.md#save-a-decision):
+
+```markdown
+---
+type: concept
+status: draft
+updated: 2026-09-27
+sources:
+  - resource: ../projects/new-website.md#decision
+---
+
+# Explain before asking for signup
+
+Explain who a product helps and what it does before asking visitors to sign up.
+
+## Use it
+
+When reviewing a signup page, read only the text above the form. Can you say who the product helps and what it does?
+
+## Limits
+
+This is a hypothesis from the New website project. Check it with visitors before treating it as a reusable lesson.
+```
+
+Add `[Explain before asking for signup](explain-before-signup.md)` to `concepts/index.md` so it is easy to browse. A concept remains searchable even without an index entry.
+
+```bash
+bf search "explain signup" --scope concepts
+bf read concepts/explain-before-signup.md
+bf validate
+```
+
+The search finds the concept, and the exact read retains both its advice and its Limits section. Reading `projects/new-website.md` also shows a backlink from the concept's `sources` metadata.
+
+Keep the source and limits when you revise the lesson. Promote it to `stable` only after review supports doing so; validation checks the [metadata structure](#notes), not whether the advice is true.
+
+## Actions
+
+An action is one session of work. After drafting the product page for the New website project, create `actions/2026-09-27_website-review/ACTION.md` (use the session's date in the folder and metadata):
+
+```markdown
+---
+type: action
+status: draft
+updated: 2026-09-27
+summary: Review whether the product page explains the product before signup.
+sources:
+  - resource: ../../projects/new-website.md#decision
+---
+
+# Website review
+
+## Objective
+
+Review the product page for the [New website project](../../projects/new-website.md#decision).
+
+## Tasks
+
+- [ ] Check whether visitors can explain the product before signing up.
+
+## Resume
+
+The project decision is saved. Next: read the product page draft and check whether it explains the product before the signup form.
+
+## Outcome
+
+Pending review.
+```
+
+```bash
+bf read actions
+bf read actions/2026-09-27_website-review/ACTION.md#resume
+bf validate
+```
+
+The first command lists the session; the second returns its saved stopping point. After the review, replace Outcome and Resume with what actually happened. For example, this fictional outcome records a gap without claiming a visitor test:
+
+```markdown
+## Outcome
+
+The draft describes the product but does not name its intended audience. We have not tested it with visitors yet.
+
+## Resume
+
+Next: describe who the product helps, then test the explanation with a visitor.
+```
+
+Check tasks only when completed, and update the project's next task and `updated` date separately. Set `status: stable` after reviewing the note as a reliable account; that status alone does not mean its work is complete.
+
+Keep reusable advice in a concept, session evidence in the action's `inputs/`, and its deliverables in `outputs/`. Link only files that exist. The [action template](https://github.com/fmind/brain-framework/blob/main/skills/bf-action/templates/action.md) adds working-context and decision sections for longer sessions.
+
+Action folders require a real `YYYY-MM-DD` date, an underscore, a lowercase hyphenated slug and an `ACTION.md` with [valid OKF metadata](#notes). Objective, Tasks, Resume and Outcome are useful headings, not required schema fields. Loose files such as `actions/README.md` are allowed.
+
+`bf read actions` lists actions newest first with open tasks. Reading an action folder returns `ACTION.md`, its file list, linked projects and backlinks. Markdown in its inputs and outputs is also searchable: keep it within the brain's intended audience.
 
 ## Records
 
-A record is one source item. Sensors print them; Brain Framework stores one JSON object per line in the partition of the record's month (`undated.jsonl` without a time, `snapshot.jsonl` for snapshot sources).
+A record preserves one source item. For example, the [sensor walkthrough](sensors.md#your-first-sensor) collects `brief.txt` and returns the ref `local-documents:website-demo/brief.txt`:
+
+```bash
+bf read local-documents:website-demo/brief.txt
+```
+
+That read returns the saved brief and its source details. You can cite it in the project with `[Product brief](local-documents:website-demo/brief.txt)`.
 
 | Field        | Meaning                                                                                  |
 | ------------ | ---------------------------------------------------------------------------------------- |
@@ -83,71 +196,53 @@ A record is one source item. Sensors print them; Brain Framework stores one JSON
 | `fields`     | Normalized schema values; searchable, with typed relationship edges.                     |
 | `attributes` | Structured details kept for exact reads, not searched.                                   |
 
-Collecting the same id again replaces its line, moving it if its month changed; each id appears once per source. If both revisions declare `attributes.updated`, an older revision cannot overwrite a newer one, unless the stored revision claims a modification after it was first observed, which reveals an unreliable clock. History lives in Git or in your backups, not in duplicate records.
+Sensors print records; BF stores one JSON object per line in the record's month partition (`undated.jsonl` without a time, `snapshot.jsonl` for snapshot sources). Collecting an existing id updates that record. Put searchable facts in `title` and `text`, and additional exact-read details in `attributes`.
 
-If files already contain duplicate IDs, collection stops before changing that source. Run `bf validate`, preserve the conflicting revisions and reconcile them deliberately; collection never chooses which conflicting evidence to discard.
+For revision rules, timestamps and recovery, see the [record reference](schema.md#record-revisions-and-provenance) and [file safeguards](limits.md#files).
 
-Three reserved attributes describe evidence quality: `updated` is the upstream modification timestamp, `observed` is when Brain Framework first collected this revision, and `partial: true` marks intentionally incomplete content. Timestamps require a timezone. `time` keeps its event meaning; period pages list items modified in the period under `changed` using `updated`, falling back to event time when unavailable. Collection preserves `observed` when content has not changed. Other attributes remain provider-specific.
+## Directory reference
 
-Record writes use a recoverable transaction under `memories/.pending/`. It holds originals only while a write is incomplete. After an interruption, `bf build` or the next collection restores them; ordinary reads fail with a message to run `bf build` and never change evidence. Keep this directory with the records when backing up a stopped brain, and never delete it as cache. A live backup must hold the same brain writer lock while copying files.
+`bf init PATH` creates `projects/`, `concepts/`, `actions/`, `tests/` and a runnable `evals/retrieval.yaml`. Technical tests belong in `tests/`; retrieval cases belong in `evals/`. `--full` adds optional folders such as sensors, routines and assets. Create other folders as you need them:
+
+```text
+bf.yaml                                   # name, shared schema and sensor mappings
+AGENTS.md                                 # instructions for agents working in the brain
+projects/<project>.md                     # OKF project notes with OKF lifecycle statuses
+concepts/index.md, concepts/<concept>.md  # reusable OKF v0.2 knowledge
+actions/YYYY-MM-DD_slug/ACTION.md         # OKF session note, with inputs/ and outputs/
+memories/<source>/<YYYY-MM>.jsonl         # collected items
+assets/                                   # logos, images, audio and other media that notes link to
+sensors/                                  # executable collectors declared in bf.yaml
+routines/                                 # deterministic programs declared in bf.yaml, and other upkeep code
+settings/, tests/                         # maintenance settings and technical tests
+evals/*.yaml                              # retrieval acceptance suites
+skills/                                   # workflow packages for agents
+inputs/, originals/, logs/                # unversioned: imports to process, retained originals, routine logs
+.bf/                                      # disposable search cache
+```
+
+Only Markdown under `projects/`, `concepts/` and `actions/` and JSON Lines under `memories/` are searchable. This includes Markdown in action inputs and outputs: keep them within the brain's intended audience. Everything else is ordinary brain code, configuration and media. `.bf/` is safe to delete while Brain Framework is idle.
+
+Use `assets/` for media shared by several notes: `[logo](../assets/logo.svg)` lets validation catch a missing file. A single action's deliverables belong in its `outputs/`. Keep large media out of Git history, for example with Git LFS.
+
+New brains ignore root `inputs/` (raw imports), `originals/` (retained source files) and `logs/` in Git. Back up `inputs/` and `originals/` with `memories/`; ignoring them does not make them disposable.
 
 ## Personal and team brains
 
-Separate brains by who may read them. A directory is a context boundary, not an access-control system: use separate repositories and filesystem permissions for different audiences.
-
-- **Personal brain**: private repository, laptop sensors (mail, calendar, Git, shell, browser, agent sessions), registered with `--collect`. Keep bulky or sensitive `memories/` out of the Git remote and back them up encrypted instead.
-- **Team brain**: shared repository of projects, decisions, concepts and actions, plus records of team-scoped sources (organization issues and pull requests, shared meeting notes), created with a distinctive name and `--no-collect`. One CI job collects and commits reviewed sources, so no laptop runs shared sensor code. [Team brains](team.md) covers creation, joining, CI collection and review.
+Separate brains by audience. Keep personal records in a private brain; share reviewed project notes and team evidence in a [team brain](team.md).
 
 ### Related brains
 
-A brain declares its own read context in `bf.yaml`; no global configuration is required:
-
-```yaml
-# https://fmind.github.io/brain-framework/docs/schema/
-version: 5
-name: personal
-brains:
-  team:
-    path: ../team
-```
-
-The key must match the target's `bf.yaml` name. Paths resolve relative to the declaring brain root, independently of the working directory; absolute paths and `~` are also supported. Prefer relative paths and agree on repository layout across machines. Use `bf://team/projects/platform.md#decision` in notes.
-
-Search, read and retrieval evaluations include the root and its direct references only. References are bounded to 32 per brain; they never recurse, download repositories or run sensors or routines. Missing, inaccessible, invalid and mismatched references appear under `problems`; other results remain available. Multiple directories claiming the same name are excluded and reported. Repeated physical directories are searched once. An incomplete empty answer does not prove absence.
-
-`--brain NAME` can select the enclosing brain or one of its declared names; `--brain PATH` works from anywhere. Selection chooses a new root, so its own direct references define that request's scope. Maintenance commands act on the selected root, not its references. `bf validate` still validates local evidence; foreign BF targets remain `unresolved` until explicitly read.
+Declare direct `brains:` paths in `bf.yaml` to include related knowledge in retrieval. References do not run programs or expand recursively. See [Brain selection](configuration.md#related-brains).
 
 ### Optional machine registration
 
-`bf register PATH` is optional for discovery outside a brain. Running sensors and routines requires explicit machine trust (`bf register PATH --collect` or `bf init PATH --collect`), stored separately from shared references. Registered brains live in `~/.config/bf/config.yaml`:
-
-```yaml
-# https://fmind.github.io/brain-framework/
-brains:
-  brain:
-    path: /home/me/brain
-    collect: true
-  team:
-    path: /home/me/team-knowledge
-    collect: false
-```
-
-Commands select `--brain NAME|PATH`, then `BF_BRAIN`, then the brain containing the working directory, then every registered brain. Search/read expand direct declarations of those roots; elsewhere the optional registry supplies roots. Promote personal knowledge to the team by writing a summary in the team brain and linking to what others can read.
-
-`XDG_CONFIG_HOME` overrides `~/.config` for the registry; `XDG_STATE_HOME` overrides `~/.local/state` for private run history, locks and usage, kept in `bf/<sha256 of the brain path>/`. Registered paths must be absolute or start with `~`. The writer lock follows the brain directory itself, so bind mounts and other spellings of its path share it; every process that writes one brain must use the same state directory. Any command that opens a brain creates that folder, so delete the folders of brains you remove; the state is disposable. Registration serializes updates and writes the registry atomically with owner-only file permissions; it keeps the file's leading comment lines but not other comments. Names are unique per machine: registering a second brain under a taken name fails, so choose distinctive names before sharing links. If renaming is unavoidable, update affected BF addresses explicitly and rename the brain's key in the registry, since collection trust names the brain; do not give clones of one shared brain different names. Automatic selection skips registered directories absent from this machine; selecting an absent brain explicitly fails. Use `--brain NAME` when a particular brain must be present for your answer.
-
-Running `bf register PATH` again without `--collect` revokes collection trust while keeping the brain searchable. To stop selecting it automatically, remove its entry from the registry; the files remain in place. Set `enabled: false` to stop a single sensor while keeping its existing records searchable.
-
-## Actions
-
-An action is one session of work: `actions/YYYY-MM-DD_slug/ACTION.md` with its objective, TODO list, decisions, a Resume section with the exact next step, an Outcome once done, and links to its `inputs/` and `outputs/`. People start and resume actions explicitly, for example through the `bf-action` skill: `bf read actions` lists them newest first with their open tasks, and `bf read actions/YYYY-MM-DD_slug` returns ACTION.md with the action's files, the projects it links to and the notes that link to it. Action Markdown is searchable. `bf validate` reports an action folder whose name is not a valid date, an underscore and a lowercase hyphenated slug, or that lacks `ACTION.md`; loose files such as `actions/README.md` are allowed. Update the owning project note when an action changes its state.
+Use `bf register PATH` to select a brain by name from elsewhere. Registration is optional and stores names and paths. See [Configuration](configuration.md#optional-machine-registration).
 
 ## Routines
 
-A routine is a deterministic program declared under `routines:` in `bf.yaml`, usually a script in `routines/`. `bf update` runs each due routine after the brain's sensors, with the same collection trust, direct argv, timeout, output bound and private log. Its standard output is Markdown that becomes that day's action, `actions/YYYY-MM-DD_NAME/ACTION.md`, for people and agents to review; empty output means there is nothing to review. See [routines](sensors.md#routines).
-
-Technical checks belong in `tests/`; retrieval suites belong in `evals/`. See [retrieval cases](search.md#retrieval-cases).
+The `routines/` folder holds [maintenance scripts](routines.md). Those registered in `bf.yaml` prepare review actions through `bf update`; run other upkeep scripts directly or through a scheduler. Technical tests belong in `tests/`; [retrieval cases](checks.md#retrieval-cases) belong in `evals/`.
 
 ## Decision workflows
 
-The `bf-action` and `bf-learn` skills add optional workflows over these files: a small working context in each action, decisions with expected outcomes, conditional intentions, explicit unknowns, retained evidence captures, bounded dependency review and reviewed knowledge transfer. They change neither `bf.yaml` nor the retrieval suite format. See [agent workflows](agents.md#decision-workflows).
+Use `bf-action` to keep a session resumable and `bf-learn` to update knowledge after reviewing its outcome. For example: record the expected effect of the website change, compare it with visitor feedback, then revise the project and concept. These optional [agent workflows](agents.md#decision-workflows) use the existing file formats.

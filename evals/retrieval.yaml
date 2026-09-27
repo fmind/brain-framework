@@ -1,0 +1,73 @@
+# https://fmind.github.io/brain-framework/docs/checks/
+version: 5
+cases:
+  - name: why-atlas-uses-sqlite
+    query: Why does Atlas use SQLite for offline retrieval?
+    limit: 3
+    expect: [projects/atlas.md#decision]
+    text: [queries must work without network access]
+  - name: atlas-budget-first-result
+    query: What is the Atlas launch budget?
+    limit: 1
+    expect: [projects/atlas.md#budget]
+    forbid: [projects/zephyr.md]
+    text: [4200 credits]
+  - name: read-the-budget-answer
+    read: projects/atlas.md#budget
+    expect: [projects/atlas.md#budget]
+    text: [The Atlas launch budget is 4200 credits.]
+  - name: why-retain-originals
+    query: Why keep original evidence?
+    scope: concepts
+    limit: 3
+    expect: [concepts/retention.md]
+    text: [upstream providers can delete old content]
+  - name: find-the-next-action
+    query: cold-cache retrieval latency
+    scope: projects
+    limit: 1
+    expect: [projects/atlas.md#next-actions]
+    text: [Measure cold-cache retrieval latency]
+  - name: find-the-supporting-record
+    query: deciding constraint
+    scope: memories/meetings
+    limit: 1
+    expect: ["meetings:offline"]
+    forbid: ["meetings:zephyr"]
+    text: [Network-independent retrieval]
+  - name: read-the-supporting-record
+    read: meetings:offline
+    expect: ["meetings:offline"]
+    text: [The review selected SQLite for local queries.]
+  - name: explicit-repository-identity
+    query: repo:example/atlas
+    limit: 5
+    expect: [projects/atlas.md, "meetings:offline"]
+    forbid: [projects/zephyr.md, "meetings:zephyr"]
+  - name: fixed-day-scope
+    query: review
+    scope: "2026-09-12"
+    limit: 5
+    expect: ["meetings:offline"]
+    forbid: ["meetings:zephyr"]
+  - name: exact-tag-membership
+    read: bf://retrieval-eval/tags/atlas
+    expect: [projects/atlas.md]
+    forbid: [projects/zephyr.md, concepts/retention.md, "meetings:offline"]
+  - name: budget-within-atlas-tag
+    query: launch budget
+    scope: bf://retrieval-eval/tags/atlas
+    limit: 3
+    expect: [projects/atlas.md#budget]
+    forbid: [projects/zephyr.md]
+    text: [4200 credits]
+  - name: absent-topic
+    query: bfabsentevidence9c4f2a7d
+    empty: true
+  - name: scope-excludes-other-project
+    query: Zephyr
+    scope: bf://retrieval-eval/tags/atlas
+    empty: true
+  - name: missing-exact-ref
+    read: projects/nonexistent.md
+    empty: true

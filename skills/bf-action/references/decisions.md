@@ -6,6 +6,16 @@ Use the sections that the action needs; omit empty sections. Work remains one us
 
 Before a consequential choice, record the chosen option, the useful alternative, the assumption that distinguishes them, evidence refs, an observable expected outcome and a review date or event. Write the expectation before observing the outcome. Do not invent a measurement or numerical confidence.
 
+For example, before testing a website draft:
+
+```markdown
+## Decision {#decision}
+
+Lead with a product explanation, then offer signup. The alternative is a signup-first page. We expect new visitors to describe what the product does without opening the form; see the [project rationale](../../projects/new-website.md#decision).
+
+Review after the next usability session. Outcome: unknown until the session notes are available.
+```
+
 At review, compare the expectation with an observed result and its evidence. Mark it met, missed or unknown, recording circumstances that changed. Distinguish delivery from impact: a shipped change is not proof it achieved its purpose. Retain a failed prediction; correct the current project conclusion and link the lesson. One outcome does not establish causation. When reviewing a similar decision, inspect both the earlier conditions and its result before reusing it.
 
 For decisions whose old rationale matters, keep a small dated decision note under the action's `outputs/`, with supporting captures in `inputs/`. Correct a mistake explicitly or create a successor with a `supersedes` link; do not silently rewrite the earlier prediction as hindsight. Current project notes still stay short and current. Follow `bf-learn` for evidence capture and claim revision.

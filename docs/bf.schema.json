@@ -95,8 +95,7 @@
         "mode": { "default": "window", "enum": ["window", "snapshot"], "title": "Mode", "type": "string" },
         "overlap": { "default": 300, "maximum": 31536000, "minimum": 0, "title": "Overlap", "type": "integer" },
         "refresh": { "default": 0, "maximum": 31536000, "minimum": 0, "title": "Refresh", "type": "integer" },
-        "timeout": { "default": 300, "maximum": 3600, "minimum": 1, "title": "Timeout", "type": "integer" },
-        "trust": { "default": "external", "enum": ["owner", "external"], "title": "Trust", "type": "string" }
+        "timeout": { "default": 300, "maximum": 3600, "minimum": 1, "title": "Timeout", "type": "integer" }
       },
       "required": ["command"],
       "title": "Sensor",

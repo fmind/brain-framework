@@ -8,6 +8,7 @@
 /.ruff_cache/
 /.venv/
 /dist/
+/evals/.bf/
 /htmlcov/
 /site/
 __pycache__/

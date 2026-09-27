@@ -1,0 +1,9 @@
+# https://fmind.github.io/brain-framework/docs/configuration/
+version: 5
+name: retrieval-eval
+schema:
+  repository:
+    description: Repository explicitly discussed by this fictional record.
+    type: identity
+    cardinality: many
+    relation: true

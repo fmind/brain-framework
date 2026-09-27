@@ -1,4 +1,4 @@
-"""Brain-local discovery is portable, bounded and independent of collection trust."""
+"""Brain-local discovery is portable, bounded and independent of registration."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from mcp.types import CallToolResult
 from typer.testing import CliRunner
 
 from bf.cli import app
-from bf.config import load, may_collect, one, register, related, select, user_path
+from bf.config import load, one, register, related, select, user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
 from bf.models import Error, Query
@@ -118,10 +118,9 @@ def test_missing_read_cannot_prove_absence_with_an_unavailable_brain(tmp_path: P
 def test_absolute_and_home_paths_and_no_collection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     first = make(tmp_path / "first", "first", {"second": "~/second", "third": str(tmp_path / "third")})
-    second = make(tmp_path / "second", "second")
+    make(tmp_path / "second", "second")
     make(tmp_path / "third", "third")
     assert len(cast(dict, search([first], Query(text="durable")))["items"]) == 3
-    assert not may_collect(second)
     monkeypatch.chdir(first.root)
     # Mutation services select only roots, regardless of configured references.
     report = cast(dict, update(select(), dry_run=True))
@@ -192,13 +191,13 @@ def test_registry_paths_are_absolute_and_names_win_over_local_directories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registered = make(tmp_path / "registered", "shared")
-    register(registered, collect=True)
+    register(registered)
     # A same-named directory below the working directory does not replace the registered brain.
     (tmp_path / "work").mkdir()
     make(tmp_path / "work" / "shared", "shared")
     monkeypatch.chdir(tmp_path / "work")
     assert [store.root for store in select("shared")] == [registered.root]
-    # A relative registry path would resolve against the working directory and could trust another clone.
-    user_path().write_text("brains:\n  shared:\n    path: shared\n    collect: true\n")
+    # A relative registry path would resolve against the working directory and could select another clone.
+    user_path().write_text("brains:\n  shared:\n    path: shared\n")
     with pytest.raises(Error, match="absolute"):
-        may_collect(registered)
+        select("shared")

@@ -31,11 +31,16 @@ run_auto_install = false
 [tasks.all]
 alias = "a"
 description = "Format, check, test, and build the project"
-run = ["mise run format", "mise run check", "mise run test", "mise run build"]
+run = ["mise run format", "mise run check", "mise run test", "mise run eval", "mise run build"]
 
 [tasks.benchmark]
 description = "Observe build and retrieval latency over a deterministic 20k-record corpus"
 run = "uv run python scripts/benchmark_scale.py"
+
+[tasks.eval]
+description = "Evaluate retrieval against a fixed fictional corpus without models or providers"
+env.TZ = "UTC"
+run = ["uv run bf validate --brain ./evals", "uv run bf eval --brain ./evals --path retrieval.yaml"]
 
 [tasks.build]
 alias = "b"

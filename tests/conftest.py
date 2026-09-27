@@ -111,7 +111,7 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 PROJECT = b"""---
 type: project
-status: active
+status: draft
 updated: 2026-09-01
 tags: [retention]
 aliases: ["repo:example/project"]
@@ -139,7 +139,7 @@ def records_file(store: Store, source: str, month: str, records: list[Record]) -
 
 @pytest.fixture
 def brain(tmp_path: Path) -> Store:
-    """A registered, collect-trusted brain with one project note, one concept and two records."""
+    """A registered brain with one project note, one concept and two records."""
     root = tmp_path / "brain"
     root.mkdir()
     store = Store(root)
@@ -165,5 +165,5 @@ def brain(tmp_path: Path) -> Store:
             Record(id="lunch", title="Lunch plans", text="Meet for lunch on Tuesday.", time="2026-08-30T12:00:00Z"),
         ],
     )
-    register(store, collect=True)
+    register(store)
     return store

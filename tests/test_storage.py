@@ -18,7 +18,7 @@ import pytest
 from pydantic import ValidationError
 
 from bf import config
-from bf.config import load, may_collect, one, register, select, user_config, user_path, yaml_object
+from bf.config import load, one, register, select, user_config, user_path, yaml_object
 from bf.markdown import note
 from bf.models import Config, Error, Knowledge, Query, Record, Sensor, UserConfig, decode, moment, timestamp
 from bf.storage import BusyError, Store, collecting, lock_file, reader, relative, state_store, writer
@@ -331,17 +331,13 @@ def test_configuration_is_strict_and_version_5(brain: Store) -> None:
         load(brain)
 
 
-def test_registry_selection_and_collection_trust(brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    assert may_collect(brain)
-    assert user_config().brains["fixture"].collect
+def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert user_path().read_text().startswith("# https://fmind.github.io/brain-framework/")
     other = tmp_path / "team"
     other.mkdir()
     team = Store(other)
     team.write("bf.yaml", b"version: 5\nname: team\n")
-    assert not may_collect(team)
-    register(team, collect=False)
-    assert not may_collect(team)
+    register(team)
     assert [s.root for s in select()] == [brain.root, team.root]
     assert one("team").root == team.root
     assert one(str(other)).root == team.root
@@ -359,10 +355,10 @@ def test_registry_selection_and_collection_trust(brain: Store, tmp_path: Path, m
     clone.mkdir()
     Store(clone).write("bf.yaml", b"version: 5\nname: team\n")
     with pytest.raises(Error, match="already registered as team"):
-        register(Store(clone), collect=False)
+        register(Store(clone))
     brain.write("bf.yaml", b"version: 5\nname: renamed\n")
     with pytest.raises(Error, match="already registered as fixture"):
-        register(brain, collect=True)
+        register(brain)
     monkeypatch.chdir(tmp_path)
     user_path().write_text(f"brains:\n  fixture:\n    path: {brain.root}\n  gone:\n    path: {tmp_path / 'gone'}\n")
     assert [s.root for s in select()] == [brain.root]
@@ -376,25 +372,14 @@ def test_registry_selection_and_collection_trust(brain: Store, tmp_path: Path, m
         user_config()
 
 
-def test_collection_trust_names_the_brain_at_its_path(brain: Store) -> None:
-    assert may_collect(brain)
-    # Another brain placed at a trusted path, such as a different clone, is not trusted.
-    brain.write("bf.yaml", b"version: 5\nname: other\n")
-    assert not may_collect(brain)
-    with pytest.raises(Error, match="already registered as fixture"):
-        register(brain, collect=True)
-    brain.write("bf.yaml", b"version: 5\nname: fixture\n")
-    assert may_collect(brain)
-
-
 def test_registration_keeps_the_owner_header(brain: Store) -> None:
     header = "# Machine-local registry; use bf register.\n# Second line\n"
     user_path().write_text(header + user_path().read_text().split("\n", 1)[1] + "# trailing note\n")
-    register(brain, collect=False)
+    register(brain)
     written = user_path().read_text()
     assert written.startswith(header + "brains:\n")
     assert "trailing note" not in written
-    assert not user_config().brains["fixture"].collect
+    assert user_config().brains["fixture"].model_dump() == {"path": str(brain.root)}
 
 
 def test_nothing_selected_is_actionable(tmp_path: Path) -> None:
@@ -422,7 +407,7 @@ def test_concurrent_registrations_keep_every_brain(tmp_path: Path, monkeypatch: 
 
     def enroll(store: Store) -> None:
         start.wait(timeout=10)
-        register(store, collect=False)
+        register(store)
 
     monkeypatch.setattr(config, "user_config", slow_read)
     with ThreadPoolExecutor(max_workers=len(stores)) as executor:

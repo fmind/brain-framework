@@ -55,7 +55,7 @@ def server(stores: list[Store]) -> MCPServer:
             str,
             Field(
                 description="Optional bound: a folder (projects, memories/gmail), a period (today, 7d, 2026-09, "
-                "2026-09-25) or an identity."
+                "2026-09-25), an identity or an exact tag (bf://NAME/tags/LABEL)."
             ),
         ] = "",
         limit: Annotated[
@@ -76,7 +76,7 @@ def server(stores: list[Store]) -> MCPServer:
             Field(
                 max_length=8192,
                 description="Empty for the home page; a page (projects, concepts, actions, memories, memories/SOURCE, "
-                "today, 7d, 2026-09); a note path, path#section, source:id record, identity or bf:// address.",
+                "tags, tags/LABEL, today, 7d, 2026-09); a note path, path#section, source:id record, identity or bf:// address.",
             ),
         ] = "",
         brain: Annotated[
