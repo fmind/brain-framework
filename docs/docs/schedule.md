@@ -26,6 +26,7 @@ Description=Update Brain Framework
 
 [Service]
 Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/bf update --brain %h/brain
 TimeoutStartSec=45min
 ```
