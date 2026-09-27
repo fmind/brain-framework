@@ -32,7 +32,7 @@ app = typer.Typer(
     no_args_is_help=True,
     invoke_without_command=True,
     add_completion=False,
-    help="Owned knowledge for people and their agents: Markdown notes, collected records, offline search.",
+    help="🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.",
 )
 BrainOption = Annotated[
     str,

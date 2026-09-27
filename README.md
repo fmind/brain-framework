@@ -9,15 +9,13 @@
 
 # Brain Framework 🧠
 
-**Connect information from your tools into one brain for you and your AI agents.**
+**🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.**
 
 [![CI](https://github.com/fmind/brain-framework/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fmind/brain-framework/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/brain-framework?color=174EA6)](https://pypi.org/project/brain-framework/) [![Python](https://img.shields.io/pypi/pyversions/brain-framework)](https://pypi.org/project/brain-framework/) [![License: MIT](https://img.shields.io/badge/license-MIT-174EA6)](https://github.com/fmind/brain-framework/blob/main/LICENSE)
 
 Brain Framework (BF) is an information hub for people working across tools. Like a nervous system, it brings selected signals into a shared context: the information you handle, the work happening in your systems, your decisions and what to do next. That **brain is an ordinary folder of Markdown notes and collected records** you own.
 
 Collect useful evidence once and reuse it across questions and sessions. Map different sources into a common schema so your agent can reason across them. Add a source with a small script using its CLI, API or files, without waiting for a BF-specific provider integration. Agents perform authorized work through your tools, then retain verified outcomes and next steps in the brain.
-
-🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.
 
 [Try it](https://github.com/fmind/brain-framework#try-it) · [Advanced demo](https://fmind.github.io/brain-framework/docs/context-hub/) · [Connect an agent](https://github.com/fmind/brain-framework#agents) · [Documentation](https://fmind.github.io/brain-framework/)
 

@@ -2,7 +2,7 @@
 [project]
 site_name = "Brain Framework"
 site_url = "https://fmind.github.io/brain-framework/"
-site_description = "Centralize information from your tools in a file-based brain for people and AI agents."
+site_description = "🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies."
 site_author = "Médéric Hurier"
 copyright = "Copyright &copy; 2026 Médéric Hurier (Fmind)."
 docs_dir = "docs"

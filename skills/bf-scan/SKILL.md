@@ -4,7 +4,7 @@ description: Discover useful Brain Framework sources from user-approved bookmark
 license: MIT
 compatibility: Requires Brain Framework 13 (the bf command) on Linux or macOS; the optional inventory helper needs Python 3.11 or later.
 metadata:
-  version: "13.0.0"
+  version: "13.0.1"
 ---
 
 # bf-scan

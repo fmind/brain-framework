@@ -2,9 +2,9 @@
 
 # Brain Framework 🧠
 
-Centralize selected information and work context from your tools in an ordinary folder. Collect it once, map it into a shared schema and let you and your agents reason across sources before making more tool calls. Add sources with small scripts using the CLIs, APIs or files already available to you.
-
 **🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.**
+
+Centralize selected information and work context from your tools in an ordinary folder. Collect it once, map it into a shared schema and let you and your agents reason across sources before making more tool calls. Add sources with small scripts using the CLIs, APIs or files already available to you.
 
 ## See what a brain gives you
 

@@ -1,8 +1,8 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "13.0.0"
-description = "Centralize information from your tools in a file-based brain for people and AI agents."
+version = "13.0.1"
+description = "🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"

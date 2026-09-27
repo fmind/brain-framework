@@ -4,7 +4,7 @@ description: Start or resume one Brain Framework action, a folder that holds one
 license: MIT
 compatibility: Requires Brain Framework 13 (the bf command) on Linux or macOS.
 metadata:
-  version: "13.0.0"
+  version: "13.0.1"
 ---
 
 # bf-action

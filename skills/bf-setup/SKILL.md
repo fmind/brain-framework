@@ -4,7 +4,7 @@ description: Set up a new or existing Brain Framework brain around the user's re
 license: MIT
 compatibility: Requires Brain Framework 13 (the bf command) on Linux or macOS.
 metadata:
-  version: "13.0.0"
+  version: "13.0.1"
 ---
 
 # bf-setup

@@ -4,11 +4,15 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
-## [v13.0.0](https://github.com/fmind/brain-framework/releases/tag/v13.0.0) - 2026-09-27
+## [v13.0.1](https://github.com/fmind/brain-framework/releases/tag/v13.0.1) - 2026-09-27
+
+First published 13.0.x release. The v13.0.0 tag stopped before publication because its CI task runner could not parse the quiet-task setting; the tag remains unchanged. CI and scheduled security checks now pin mise 2026.9.15.
 
 Brain Framework 13 adds continuous collection, independent record files, complete retrieval and practical workflows from evidence to decisions. **Before upgrading from 12, follow the [manual upgrade procedure](https://fmind.github.io/brain-framework/docs/upgrades/#from-12-to-13)** on a backed-up copy with collection stopped.
 
 ### Changed
+
+- Use the same product description in package metadata, CLI help, the README and documentation: 🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.
 
 - **Breaking storage change:** `bf.yaml` uses format 6. Each source record lives at `memories/SOURCE/SHA256_ID.json`, replacing monthly JSONL catalogs. Record IDs and `source:id` refs stay stable; source pages replace the `partitions` inventory with paginated records. Retrieval evaluation files remain format 5.
 - **Breaking execution change:** remove machine collection permissions and sensor content-trust settings. Registration stores names and paths only; explicit collection/update/watch commands run enabled programs in selected roots, never referenced brains. Remove obsolete registry `collect` fields, sensor `trust` fields and `--collect` options. Retrieved content remains untrusted evidence.
@@ -43,6 +47,10 @@ Brain Framework 13 adds continuous collection, independent record files, complet
 - Keep starter absent-evidence evaluations stable as notes grow. A malformed optional registry no longer prevents operations on an explicitly selected brain path.
 - Retry failed scheduled programs on the next cycle even when an earlier success is still within its refresh interval. The watch display shows these retries as immediately due.
 - Remove empty code-line links from the documentation's keyboard navigation and accessibility tree.
+
+## [v13.0.0](https://github.com/fmind/brain-framework/tree/v13.0.0) - 2026-09-27
+
+Unpublished tag. See v13.0.1 for the full release notes and corrected CI toolchain.
 
 ## [v12.0.2](https://github.com/fmind/brain-framework/releases/tag/v12.0.2) - 2026-09-25
 

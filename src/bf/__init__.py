@@ -1,8 +1,8 @@
-"""Brain Framework: plain-file brains for people and their agents."""
+"""🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies."""
 
 import os
 
-__version__ = "13.0.0"
+__version__ = "13.0.1"
 
 
 def main() -> None:
