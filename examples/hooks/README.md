@@ -46,6 +46,8 @@ Claude Code adds a `SessionStart` hook's standard output to the session context.
 
 Hosts without hooks can run the same script from their session instructions. Start a session in a repository that a project note names in its `aliases` (`repo:github.com/owner/name`) and check that the context appears; `bf status` then counts its reads under `usage`.
 
+For an existing action, the [bf-action handoff guide](../../skills/bf-action/references/handoff.md) adds a size checker and an optional Claude Code check after compaction or resume. It reports Context/Resume refs and counts without inserting their text or saving a transcript; refresh the action through the agent before planned compaction.
+
 ## Contract
 
 `tests/test_adapters_hooks.py` checks every example with fake `git` and `bf` executables.

@@ -17,6 +17,7 @@ PROJECT = {
     "type": "project",
     "status": "draft",
     "time": "2026-09-01T00:00:00.000000Z",
+    "modified": "2026-09-01T00:00:00.000000Z",
     "next": "Document the retention policy.",
     "new_links": 3,
     "review": True,
@@ -31,10 +32,14 @@ EVENT = {
 }
 
 
-def pages(provider: Provider, home: dict, week: dict) -> None:
+EMPTY_TASKS = {"page": "tasks", "total": 0, "summary": {"open": 0, "done": 0, "notes": 0}, "items": []}
+
+
+def pages(provider: Provider, home: dict, week: dict, tasks: dict | None = None) -> None:
     provider.install(
         "bf",
         [
+            {"match": ["read", "tasks"], "stdout": tasks if tasks is not None else EMPTY_TASKS},
             {"match": ["read", "projects", "--brain"], "stdout": {"items": home.get("projects", [])}},
             {"match": ["read", "7d", "--brain"], "stdout": week},
             {"match": ["read", "--brain"], "stdout": home},
@@ -50,7 +55,7 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
     text = result.stdout
-    assert "- [ ] [Archive draft](bf://brain/projects/archive.md) (draft, updated 2026-09-01, 3 newer" in text
+    assert "- [ ] [Archive draft](bf://brain/projects/archive.md) (draft, edited 2026-09-01, 3 newer" in text
     assert "Next: Document the retention policy." in text
     assert "projects/done.md" not in text
     assert "12 dated items; records by source: mail 8" in text
@@ -63,16 +68,17 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     parsed = note(path, text.encode())
     assert (parsed.knowledge.type, parsed.knowledge.status, parsed.knowledge.updated) == ("action", "draft", day)
     assert parsed.targets == ["bf://brain/projects/archive.md"]
-    assert parsed.tasks == [
+    assert [(task.done, task.text) for task in parsed.tasks] == [
         (
             False,
-            "Archive draft (draft, updated 2026-09-01, 3 newer linked items). Next: Document the retention policy.",
+            "Archive draft (draft, edited 2026-09-01, 3 newer linked items). Next: Document the retention policy.",
         )
     ]
     assert provider.calls("bf") == [
         ["read", "--brain", "/brains/main"],
         ["read", "7d", "--brain", "/brains/main"],
         ["read", "projects", "--brain", "/brains/main"],
+        ["read", "tasks", "--brain", "/brains/main"],
     ]
 
 
@@ -117,6 +123,7 @@ def test_weekly_review_includes_projects_beyond_the_home_summary(provider: Provi
         "bf",
         [
             {"match": ["read", "7d"], "stdout": {"total": 0}},
+            {"match": ["read", "tasks"], "stdout": EMPTY_TASKS},
             {"match": ["read", "projects", "--offset", "200"], "stdout": {"items": [PROJECT]}},
             {
                 "match": ["read", "projects"],
@@ -144,4 +151,34 @@ def test_weekly_review_rejects_incomplete_project_continuation(provider: Provide
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 1
     assert not result.stdout
+    assert "incomplete" in result.stderr
+
+
+def test_weekly_review_summarizes_open_work_without_duplicating_tasks(provider: Provider) -> None:
+    tasks = {
+        "page": "tasks",
+        "total": 51,
+        "summary": {"open": 51, "done": 8, "notes": 12},
+        "next_offset": 50,
+        "items": [{"text": f"Task {n}", "uri": "bf://brain/projects/work.md#next", "line": n + 10} for n in range(50)],
+    }
+    pages(provider, {"projects": []}, {"total": 0}, tasks)
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert result.returncode == 0, result.stderr
+    assert "51 open tasks; 8 completed across 12 notes" in result.stdout
+    assert "Task 9" in result.stdout
+    assert "Task 10" not in result.stdout
+    assert "Showing 10 of 51 open tasks" in result.stdout
+    assert "open tasks in their owning notes" in result.stdout
+    assert "`bf://brain/projects/work.md#next`, line 10" in result.stdout
+    parsed = note("actions/2026-09-25_weekly-review/ACTION.md", result.stdout.encode())
+    assert parsed.tasks == []
+    assert parsed.targets == []
+
+
+def test_weekly_review_rejects_incomplete_task_counts(provider: Provider) -> None:
+    pages(provider, {"projects": [PROJECT]}, {"total": 1}, {**EMPTY_TASKS, "stale": ["brain"]})
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert result.returncode == 1
+    assert result.stdout == ""
     assert "incomplete" in result.stderr

@@ -28,7 +28,7 @@ def make(root: Path, name: str, references: dict[str, str] | None = None) -> Sto
         "bf.yaml",
         yaml.safe_dump(
             {
-                "version": 5,
+                "version": 6,
                 "name": name,
                 "brains": {key: {"path": value} for key, value in (references or {}).items()},
             }
@@ -56,7 +56,10 @@ def test_direct_scope_without_global_config(tmp_path: Path, monkeypatch: pytest.
     found = cast(dict, search(select(), Query(text="durable")))
     assert {item["brain"] for item in found["items"]} == {"first", "second"}
     assert "problems" not in found
-    second.write("memories/demo/undated.jsonl", b'{"id":"one","title":"Record evidence","text":"durable record"}\n')
+    second.write(
+        "memories/demo/7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed.json",
+        b'{"id":"one","title":"Record evidence","text":"durable record"}\n',
+    )
     record_results = cast(dict, search(select(), Query(text="durable", prefix="memories/demo")))
     assert len(record_results["items"]) == 1
     assert "problems" not in record_results
@@ -151,7 +154,7 @@ def test_init_never_writes_global_config_by_default(tmp_path: Path, monkeypatch:
 )
 def test_reference_schema_rejects_invalid_declarations(tmp_path: Path, references: dict) -> None:
     store = make(tmp_path / "first", "first")
-    store.write("bf.yaml", yaml.safe_dump({"version": 5, "name": "first", "brains": references}).encode())
+    store.write("bf.yaml", yaml.safe_dump({"version": 6, "name": "first", "brains": references}).encode())
     with pytest.raises(Error, match=r"invalid bf\.yaml"):
         load(store)
 
@@ -178,7 +181,7 @@ def test_mcp_and_evaluations_share_local_scope(tmp_path: Path) -> None:
         assert result.structured_content is not None
         assert "second durable answer" in result.structured_content["text"]
         # A long-running host rereads direct declarations at request time.
-        second.write("bf.yaml", b"version: 5\nname: changed\n")
+        second.write("bf.yaml", b"version: 6\nname: changed\n")
         result = await mcp.call_tool("search", {"query": "durable"})
         assert isinstance(result, CallToolResult)
         assert result.structured_content is not None

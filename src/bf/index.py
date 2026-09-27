@@ -18,7 +18,7 @@ from bf.markdown import LEAD, authored, note
 from bf.models import AUTHORED, MAX_NOTE, Error, Query, Record, digest, encode, moment
 from bf.storage import BusyError, Store, reader, writer
 
-SCHEMA = 21
+SCHEMA = 23
 CACHE = ".bf/index.sqlite"
 _DDL = """
 CREATE TABLE ontology(signature TEXT NOT NULL);
@@ -32,7 +32,9 @@ CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT N
                    status TEXT NOT NULL, lead TEXT NOT NULL, url TEXT NOT NULL,
                    updated TEXT NOT NULL, observed TEXT NOT NULL, partial INTEGER NOT NULL,
                    tasks_open INTEGER NOT NULL, tasks_done INTEGER NOT NULL, next TEXT NOT NULL,
-                   weight INTEGER NOT NULL);
+                   weight INTEGER NOT NULL, review_after INTEGER NOT NULL, review_due TEXT NOT NULL);
+CREATE TABLE tasks(item INTEGER NOT NULL, line INTEGER NOT NULL, fragment TEXT NOT NULL,
+                   text TEXT NOT NULL, done INTEGER NOT NULL, PRIMARY KEY(item,line)) WITHOUT ROWID;
 CREATE TABLE passages(id INTEGER PRIMARY KEY, item INTEGER NOT NULL, fragment TEXT NOT NULL, title TEXT NOT NULL);
 CREATE VIRTUAL TABLE search USING fts5(title, text, names, tokenize='porter unicode61 remove_diacritics 2');
 CREATE TABLE names(name TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY(name, item)) WITHOUT ROWID;
@@ -51,6 +53,7 @@ _INDEXES = (
     # The expression must stay identical to the record branch of MODIFIED for SQLite to use it.
     "CREATE INDEX items_kind_modified ON items(kind,coalesce(nullif(updated,''),time))",
     "CREATE INDEX passages_item ON passages(item)",
+    "CREATE INDEX tasks_done ON tasks(done,item,line)",
     "CREATE INDEX names_item ON names(item)",
     "CREATE INDEX links_target ON links(target)",
     "CREATE INDEX tags_target ON tags(target)",
@@ -87,7 +90,7 @@ def distilled(path: str) -> bool:
 
 
 def inputs(store: Store) -> dict[str, tuple[int, int, int, int]]:
-    """Authored notes and record partitions with their file fingerprints.
+    """Authored notes and record files with their file fingerprints.
 
     Every symlink or special entry stays an input so its exclusion is reported. A link can hide
     a whole directory regardless of its filename; never inspect its target to guess its contents.
@@ -100,7 +103,7 @@ def inputs(store: Store) -> dict[str, tuple[int, int, int, int]]:
             {
                 name: info
                 for name, info in scanned.items()
-                if (name.endswith(".jsonl") if directory == "memories" else authored(name))
+                if (name.endswith((".json", ".jsonl")) if directory == "memories" else authored(name))
             }
         )
         found.update(skipped)
@@ -136,9 +139,10 @@ def _open(store: Store) -> sqlite3.Connection | None:
                 "SELECT path,size,mtime,ctime,inode,error FROM files LIMIT 0",
                 (
                     "SELECT ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-                    "tasks_open,tasks_done,next,weight FROM items LIMIT 0"
+                    "tasks_open,tasks_done,next,weight,review_after,review_due FROM items LIMIT 0"
                 ),
                 "SELECT id,item,fragment,title FROM passages LIMIT 0",
+                "SELECT item,line,fragment,text,done FROM tasks LIMIT 0",
                 "SELECT name,item FROM names LIMIT 0",
                 "SELECT item,target FROM links LIMIT 0",
                 "SELECT item,target FROM tags LIMIT 0",
@@ -190,7 +194,7 @@ def _drop(connection: sqlite3.Connection, path: str) -> None:
     owned = "item IN (SELECT id FROM items WHERE path=:path)"
     values = {"path": path}
     connection.execute(f"DELETE FROM search WHERE rowid IN (SELECT id FROM passages WHERE {owned})", values)  # noqa: S608 - fixed SQL
-    for table in ("passages", "names", "links", "edges", "tags"):
+    for table in ("passages", "names", "links", "edges", "tags", "tasks"):
         connection.execute(f"DELETE FROM {table} WHERE {owned}", values)  # noqa: S608 - fixed table names
     connection.execute("DELETE FROM items WHERE path=?", (path,))
     connection.execute("DELETE FROM files WHERE path=?", (path,))
@@ -231,7 +235,18 @@ class _Rows:
         self.taken.add(ref)
         item = self.item
         self.item += 1
-        self.items.append({"id": item, "tasks_open": 0, "tasks_done": 0, "next": "", "weight": 1, **values})
+        self.items.append(
+            {
+                "id": item,
+                "tasks_open": 0,
+                "tasks_done": 0,
+                "next": "",
+                "weight": 1,
+                "review_after": 0,
+                "review_due": "",
+                **values,
+            }
+        )
         # `heading` is what ranks; `title` is what readers see, such as "Note — Section".
         for fragment, title, heading, text, extra in passages:
             self.passages.append((self.passage, item, fragment, title))
@@ -245,8 +260,8 @@ class _Rows:
     def write(self, connection: sqlite3.Connection) -> None:
         connection.executemany(
             "INSERT INTO items(id,ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-            "tasks_open,tasks_done,next,weight) VALUES(:id,:ref,:path,:kind,:source,:title,:time,:type,:status,"
-            ":lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight)",
+            "tasks_open,tasks_done,next,weight,review_after,review_due) VALUES(:id,:ref,:path,:kind,:source,:title,:time,:type,:status,"
+            ":lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,:review_after,:review_due)",
             self.items,
         )
         connection.executemany("INSERT INTO passages(id,item,fragment,title) VALUES(?,?,?,?)", self.passages)
@@ -259,8 +274,8 @@ class _Rows:
 def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]:
     """Insert one file; parse failures raise, while duplicate record ids are skipped and reported."""
     config = load(store)
-    # Validate skipped entries before interpreting their extension as a partition.
-    if not authored(path) and not path.endswith(".jsonl"):
+    # Validate skipped entries before interpreting their extension as a record file.
+    if not authored(path) and not path.endswith((".json", ".jsonl")):
         store.read(path, 0)
     if authored(path):
         projection = note(path, store.read(path, MAX_NOTE))
@@ -284,9 +299,11 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
                 "observed": "",
                 "partial": 0,
                 "weight": 2 if distilled(path) else 1,
-                "tasks_open": sum(not done for done, _ in projection.tasks),
-                "tasks_done": sum(done for done, _ in projection.tasks),
-                "next": next((text for done, text in projection.tasks if not done), ""),
+                "tasks_open": sum(not task.done for task in projection.tasks),
+                "tasks_done": sum(task.done for task in projection.tasks),
+                "next": next((task.text for task in projection.tasks if not task.done), ""),
+                "review_after": knowledge.review_after or 0,
+                "review_due": knowledge.review_due,
             },
             [
                 (p.fragment, p.title, p.heading, p.text, projection.title if p.fragment else metadata)
@@ -303,6 +320,10 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]
             edges,
         )
         rows.write(connection)
+        connection.executemany(
+            "INSERT INTO tasks SELECT id,?,?,?,? FROM items WHERE ref=?",
+            [(task.line, task.fragment, task.text, int(task.done), path) for task in projection.tasks],
+        )
         connection.executemany(
             "INSERT INTO tags(item,target) SELECT id,? FROM items WHERE ref=?",
             [(ontology.qualify(config, f"tags/{tag}"), path) for tag in knowledge.tags],
@@ -384,7 +405,7 @@ def _refresh(store: Store, *, full: bool, wait: float) -> dict[str, object]:
             changed = sorted(path for path, info in current.items() if known.get(path) != info)
             removed = sorted(known.keys() - current.keys())
             if changed or removed:
-                # A duplicate can disappear because another partition changed; its own bytes need not change.
+                # A duplicate can disappear because another file changed; its own bytes need not change.
                 retry = {row[0] for row in connection.execute("SELECT path FROM files WHERE error!=''")}
                 changed = sorted(set(changed) | (retry & current.keys()))
             with connection:
@@ -767,17 +788,6 @@ def activity(connection: sqlite3.Connection, since: str, until: str) -> list[tup
             "SELECT source,count(*) FROM items WHERE kind='record' AND time!='' AND time>=? AND time<? "
             "GROUP BY source ORDER BY count(*) DESC,source",
             (since, until),
-        )
-    ]
-
-
-def partitions(connection: sqlite3.Connection, source: str) -> list[tuple[str, int]]:
-    """Indexed partition files of one source with their record counts, newest first."""
-    return [
-        (row[0], row[1])
-        for row in connection.execute(
-            "SELECT path,count(*) FROM items WHERE kind='record' AND source=? GROUP BY path ORDER BY path DESC LIMIT 400",
-            (source,),
         )
     ]
 

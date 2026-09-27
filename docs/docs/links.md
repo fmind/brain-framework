@@ -42,6 +42,51 @@ bf read actions/2026-09-27_website-review/ACTION.md
 
 Look for a claim with the website-review action as its subject, `depends-on` as its role, the project decision as its target and the Objective section as its origin. This makes the meaning and its source inspectable; it does not prove the dependency or infer further ones.
 
+### Choose the right role
+
+New brains declare these roles in `bf.yaml`:
+
+| Role         | Use when the source explicitly says…                    | Link from the subject's note                                             |
+| ------------ | ------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `author`     | Who created it.                                         | `[Author](bf://brain/people/alice?rel=author)`                           |
+| `owner`      | Who is responsible for it.                              | `[Owner](bf://brain/people/alice?rel=owner)`                             |
+| `depends-on` | What it needs to operate or remain valid.               | `[Decision](bf://brain/projects/new-website.md?rel=depends-on#decision)` |
+| `related-to` | There is a connection with no more specific known role. | `[Related project](bf://brain/projects/new-website.md?rel=related-to)`   |
+
+The Alice examples require the [person note](link-reference.md#bf-links). Use an ordinary Markdown link when you only need a citation.
+
+### Declare your own role
+
+For a review action that explicitly verifies the website, add `verifies` alongside the existing fields under `schema:` in `bf.yaml`:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/schema/
+schema:
+  verifies:
+    description: The subject records a check of the target against stated criteria.
+    type: identity
+    cardinality: many
+    relation: true
+```
+
+Add this to the action's Results section after recording the actual check:
+
+```markdown
+[Checked project](bf://brain/projects/new-website.md?rel=verifies)
+```
+
+```bash
+bf validate
+bf read projects/new-website.md
+```
+
+The project read groups the incoming link under `verifies`; its origin points to the action's Results section. The relationship records your assertion, not an automatic certification.
+
+- Write the link in the note making the claim; its entity (or file) is the subject.
+- The address after `bf://` identifies the target; `?rel=` names the meaning.
+- Keep supporting observations in the same section so readers can inspect them.
+- Reverse or chained relationships are never inferred.
+
 ## Give a subject a stable identity
 
 A file address is enough for most notes. When several sources use different identifiers for the same subject, an explicit entity and aliases can connect them. For example, add these fields to the New website project's existing frontmatter:
@@ -69,4 +114,4 @@ Use `## Decision {#decision}` when the section address must survive a heading re
 
 To read a link into another brain, include that brain in your [selection](configuration.md#related-brains). A BF address never downloads a brain or expands access by itself.
 
-The [schema and link reference](schema.md#bf-links) defines address syntax, aliases, roles and cross-brain resolution. Use it when building integrations or diagnosing invalid links.
+The [link reference](link-reference.md#bf-links) defines address syntax, aliases, roles and cross-brain resolution. Use it when building integrations or diagnosing invalid links.

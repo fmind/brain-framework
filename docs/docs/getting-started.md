@@ -1,6 +1,8 @@
 # Getting started
 
-By the end of this walkthrough, you can ask why a project made a decision, find the reason and read its source. You can follow the steps yourself or ask your agent to carry them out. Brain Framework runs on Linux and macOS.
+By the end, you will have a project decision, one collected source record and a schema mapping. You can search them and read the evidence. You can follow the steps yourself or ask your agent to carry them out. Brain Framework runs on Linux and macOS.
+
+All examples run inside your brain directory. No provider account or model is needed.
 
 ## Install and create a brain
 
@@ -11,7 +13,7 @@ uv tool install brain-framework
 bf --version
 ```
 
-If `bf` is not on PATH, run `uv tool update-shell` and open a new shell. See [Versions and upgrades](upgrades.md) when updating an existing installation.
+If `bf` is not on PATH, run `uv tool update-shell` and open a new shell. See [Install and update](upgrades.md) when updating an existing installation.
 
 Create your personal brain in `~/brain`, the recommended starting location. Skip initialization if you already created it from the README:
 
@@ -34,13 +36,7 @@ The folder is yours to choose. These are alternatives, not additional required b
 
 `bf init` requires a path; `~/brain` is a recommendation, not an automatic selection. The name defaults to the last directory component. It lives in `bf.yaml` and appears in addresses such as `bf://brain/projects/new-website.md`; keep it stable when moving or sharing the folder.
 
-The remaining examples run inside `~/brain` and use the name `brain`. Substitute your path and name if you chose differently. From elsewhere, select the folder explicitly:
-
-```bash
-bf read --brain ~/brain
-```
-
-You can also [register it by name](configuration.md#optional-machine-registration).
+The remaining examples run inside `~/brain` and use the name `brain`. Substitute your path and name if you chose differently. BF discovers the enclosing brain automatically; [selection options](configuration.md#select-a-brain) are only needed when working elsewhere or choosing a different brain.
 
 ## Save a decision
 
@@ -117,16 +113,91 @@ The projects page includes `"next":"Draft the product page."`. On this fresh bra
 
 Edit the project as work changes. Search notices edits automatically; refresh `updated` when you change the note's meaning.
 
+## Collect your first source
+
+A sensor is a small program that prints JSON records. This one reads a fictional local brief. It uses `python3` and needs no dependencies or network access.
+
+```bash
+mkdir -p inputs sensors
+```
+
+Save `inputs/brief.txt`:
+
+```text
+Visitors need a clear product explanation before signing up.
+```
+
+Save `sensors/brief.py`:
+
+```python
+import json
+from pathlib import Path
+
+text = Path("inputs/brief.txt").read_text(encoding="utf-8")
+print(json.dumps([{"id": "website-brief", "title": "Product brief", "text": text}]))
+```
+
+In `bf.yaml`, replace `sensors: {}` with:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/sensors/
+sensors:
+  brief:
+    command: [python3, sensors/brief.py]
+    refresh: 0
+    fields:
+      kind: { value: document }
+```
+
+Merge this into the existing `schema:` mapping, keeping the starter roles alongside `kind`. Do not create a second `schema:` key:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/schema/
+schema:
+  kind:
+    description: Common kind of source item.
+    type: string
+    cardinality: one
+    examples: [document]
+```
+
+- **Sensor:** reads the selected file and emits its stable id, title and text.
+- **Schema:** declares that `kind` is a required string for this mapping.
+- **Mapping:** adds `kind: document` to each record from `brief`.
+- **`refresh: 0`:** keeps collection manual.
+
+```bash
+bf collect brief
+bf search "product explanation" --scope memories/brief
+bf read brief:website-brief
+```
+
+Collection reports `"records":1`. Search returns `brief:website-brief`; its exact read includes these record fields:
+
+```json
+{
+  "id": "website-brief",
+  "text": "Visitors need a clear product explanation before signing up.\n",
+  "fields": { "kind": "document" }
+}
+```
+
+Add a source link beneath the project's Decision section:
+
+```markdown
+Evidence: [Product brief](brief:website-brief).
+```
+
+```bash
+bf validate
+bf eval
+```
+
+Validation now reports one record and `"valid":true`; the starter evaluation still passes. Edit the input and collect again to update the same record without changing its ref. For imports beyond this tiny example, use the reviewed, bounded adapters in [Sensors](sensors.md).
+
 ## Choose your next step
 
-<span id="check-the-answers-your-team-needs"></span>
-<span id="give-agents-access"></span>
-<span id="connect-your-knowledge"></span>
-<span id="join-a-team-brain"></span>
-<span id="try-the-example"></span>
-<span id="update-brain-framework"></span>
-<span id="upgrade-from-brain-framework-12"></span>
-<span id="upgrade-from-brain-framework-11"></span>
+Before adding more data, choose a recurring question, its authoritative sources and the person who will keep its project note current. For shared work, follow [Team setup](team.md).
 
 | You want to…                                        | Continue with…                                                                                         |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
@@ -137,6 +208,10 @@ Edit the project as work changes. Search notices edits automatically; refresh `u
 | Collect a selected local document                   | [Your first sensor](sensors.md#your-first-sensor).                                                     |
 | Share knowledge with teammates                      | [Team brains](team.md).                                                                                |
 | Explore a complete fictional workflow               | The [runnable example brain](https://github.com/fmind/brain-framework/tree/main/examples/brain).       |
-| Update an existing installation                     | [Versions and upgrades](upgrades.md).                                                                  |
+| Update an existing installation                     | [Install and update](upgrades.md).                                                                     |
 
 For guided setup, install `bf-setup` using the [skill installation guide](agents.md#install-the-skills).
+
+## Keep information refreshed
+
+After adding and reviewing your [sensors](sensors.md), start `bf watch`. This is the primary refresh mode: it runs due programs, shows local status and reports new failures and recovery. Defaults work without a preferences file; use `bf status --watch` to observe without execution. Optional `bf schedule` generates native timer files for unattended checks. See [Watch and schedule updates](schedule.md) for the runnable offline demo, selection and platform limits.

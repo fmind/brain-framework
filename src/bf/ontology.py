@@ -62,8 +62,8 @@ def validate(record: Record, config: Config) -> None:
             for target in value if isinstance(value, list) else [value]:
                 links.identity(str(target))
     for alias in record.aliases:
-        if links.tag(alias) is not None:
-            raise Error("tag addresses are computed pages and cannot be aliases")
+        if links.computed(alias):
+            raise Error("tag and task addresses are computed pages and cannot be aliases")
         if parsed := links.parse(alias):
             links.identity(alias)
             if parsed.brain != config.name:
@@ -97,8 +97,10 @@ def note_claims(note: Note, config: Config) -> list[links.Claim]:
     for alias in note.knowledge.aliases:
         if (parsed := links.parse(alias)) and parsed.brain != config.name:
             raise Error(f"{note.path}: BF aliases must belong to their own brain namespace")
-    if any(links.tag(value) is not None for value in [subject, *note.knowledge.aliases]):
-        raise Error("tag addresses are computed pages and cannot be entities or aliases; link to the tag instead")
+    if any(links.computed(value) for value in [subject, *note.knowledge.aliases]):
+        raise Error(
+            "tag and task addresses are computed pages and cannot be entities or aliases; link to the page instead"
+        )
     result = [links.Claim(subject, "tagged-with", qualify(config, f"tags/{tag}"), file) for tag in note.knowledge.tags]
     for value, fragment in note.contexts:
         origin = qualify(config, note.path, fragment)

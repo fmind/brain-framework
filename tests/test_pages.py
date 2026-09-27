@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -11,7 +12,7 @@ from pydantic import ValidationError
 
 from bf import pages, usage
 from bf.config import register
-from bf.markdown import note
+from bf.markdown import Task, note
 from bf.models import Config, Error, Query, Record
 from bf.retrieve import read, search
 from bf.storage import Store
@@ -26,7 +27,7 @@ def refs(reply: dict[str, object], key: str = "items") -> list[str]:
 
 def populate(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 5\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n    refresh: 3600\n"
+        "bf.yaml", b"version: 6\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n    refresh: 3600\n"
     )
     brain.write(
         "projects/fresh.md",
@@ -56,6 +57,9 @@ def populate(brain: Store) -> None:
 
 def test_home_lists_what_needs_attention(brain: Store) -> None:
     populate(brain)
+    for name, day in (("offline", 1), ("fresh", 24)):
+        instant = datetime(2026, 9, day, tzinfo=UTC).timestamp()
+        os.utime(brain.root / f"projects/{name}.md", (instant, instant))
     home = pages.home([brain], NOW)
     projects = {str(p["ref"]): p for p in cast("list[dict[str, object]]", home["projects"])}
     assert list(projects) == ["projects/offline.md", "projects/fresh.md"]  # due for review first
@@ -181,7 +185,7 @@ def test_memories_pages_browse_sources_partitions_and_periods(brain: Store) -> N
         ("meetings", "memories/meetings", 2, "historical"),
     ]
     source = read([brain], "memories/meetings")
-    assert source["partitions"] == [{"brain": "fixture", "ref": "memories/meetings/2026-08.jsonl", "records": 2}]
+    assert cast("list[dict[str, object]]", source["sources"])[0]["records"] == 2
     assert refs(source) == ["meetings:decision-1", "meetings:lunch"]
     assert cast("list[dict[str, object]]", source["sources"])[0]["records"] == 2
     assert refs(read([brain], "memories/mail")) == ["mail:tomorrow", "mail:today", "mail:followup"]
@@ -189,13 +193,15 @@ def test_memories_pages_browse_sources_partitions_and_periods(brain: Store) -> N
     assert refs(month) == ["meetings:decision-1", "meetings:lunch"]
     assert (month["previous"], month["next"]) == ("memories/meetings/2026-07", "memories/meetings/2026-09")
     # A partition file lists exactly its records (UTC months), matching its count on the source page.
-    partition = read([brain], "memories/meetings/2026-08.jsonl")
-    assert (refs(partition), partition["total"]) == (["meetings:decision-1", "meetings:lunch"], 2)
+    partition = read([brain], "memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json")
+    assert (refs(partition), partition["total"]) == (["meetings:decision-1"], 1)
     assert "previous" not in partition
-    assert pages.scope("memories/meetings/2026-08.jsonl") == {"prefix": "memories/meetings/2026-08.jsonl"}
+    assert pages.scope("memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json") == {
+        "prefix": "memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json"
+    }
     assert set(pages.scope("memories/meetings/2026-08")) == {"prefix", "since", "until"}
     assert refs(read([brain], "memories/meetings/2026-08-30")) == ["meetings:lunch"]
-    assert refs(read([brain], "memories/catalog/snapshot")) == ["catalog:a"]
+    assert refs(read([brain], "memories/catalog/undated")) == ["catalog:a"]
     assert refs(read([brain], "memories/meetings/undated")) == []
     for missing in ("memories/absent", "memories/Bad", "memories/meetings/latest", "memories/a/b/c"):
         with pytest.raises(Error):
@@ -225,7 +231,7 @@ def test_pages_combine_selected_brains_and_count_reads(brain: Store, tmp_path: P
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 5\nname: team\n")
+    team.write("bf.yaml", b"version: 6\nname: team\n")
     team.write("projects/shared.md", b"---\ntype: project\nstatus: stable\nupdated: 2026-09-20\n---\n# Shared\n")
     team.write("projects/cite.md", b"# Cite\n\nSee [offline](bf://fixture/projects/offline.md).\n")
     register(team)
@@ -272,7 +278,7 @@ def test_retrieval_cases_read_pages_and_treat_missing_ones_as_empty(brain: Store
 def test_records_have_excerpts_without_trust_labels(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 5\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n  git:\n    command: [git-cli]\n",
+        b"version: 6\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n  git:\n    command: [git-cli]\n",
     )
     records_file(
         brain,
@@ -303,13 +309,19 @@ def test_tasks_come_from_task_list_items_only() -> None:
         "projects/x.md",
         b"# X\n\n- [ ] Open [link](y.md)\n- [X] Done\n- plain item\n\n```\n- [ ] in code\n```\n\n1. [ ] Numbered\n",
     )
-    assert parsed.tasks == [(False, "Open link"), (True, "Done"), (False, "Numbered")]
+    assert parsed.tasks == [
+        Task(False, "Open link", "x", 3),
+        Task(True, "Done", "x", 4),
+        Task(False, "Numbered", "x", 11),
+    ]
 
 
 @pytest.mark.parametrize("status", ["", "draft", "stable", "deprecated"])
 def test_home_and_review_use_okf_project_status(brain: Store, status: str) -> None:
     metadata = "type: project\n" + (f"status: {status}\n" if status else "")
     brain.write("projects/new.md", f"---\n{metadata}---\n# New project\n".encode())
+    instant = datetime(2026, 9, 1, tzinfo=UTC).timestamp()
+    os.utime(brain.root / "projects/new.md", (instant, instant))
     brain.write("projects/index.md", b"# Projects\n")
     brain.write("projects/log.md", b"# Changes\n")
     home = pages.home([brain], NOW)

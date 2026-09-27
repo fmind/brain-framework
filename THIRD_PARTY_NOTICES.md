@@ -507,15 +507,15 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## httpcore2 2.12.0
+## httpcore2 2.13.1
 
 Source: <https://github.com/pydantic/httpx2/blob/main/src/httpcore2>
 
 License: `BSD-3-Clause`
 
-Evidence: `httpcore2-2.12.0.dist-info/licenses/LICENSE.md`
+Evidence: `httpcore2-2.13.1.dist-info/licenses/LICENSE.md`
 
-### httpcore2-2.12.0.dist-info/licenses/LICENSE.md
+### httpcore2-2.13.1.dist-info/licenses/LICENSE.md
 
 ```text
 Copyright © 2026 to present Pydantic Services Inc. and individual contributors.
@@ -548,15 +548,15 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## httpx2 2.12.0
+## httpx2 2.13.1
 
 Source: <https://github.com/pydantic/httpx2>
 
 License: `BSD-3-Clause`
 
-Evidence: `httpx2-2.12.0.dist-info/licenses/LICENSE.md`
+Evidence: `httpx2-2.13.1.dist-info/licenses/LICENSE.md`
 
-### httpx2-2.12.0.dist-info/licenses/LICENSE.md
+### httpx2-2.13.1.dist-info/licenses/LICENSE.md
 
 ```text
 Copyright © 2026 to present Pydantic Services Inc. and individual contributors.
@@ -574,15 +574,15 @@ Redistribution and use in source and binary forms, with or without modification,
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## idna 3.19
+## idna 3.20
 
 Source: <https://github.com/kjd/idna>
 
 License: `BSD-3-Clause`
 
-Evidence: `idna-3.19.dist-info/licenses/LICENSE.md`
+Evidence: `idna-3.20.dist-info/licenses/LICENSE.md`
 
-### idna-3.19.dist-info/licenses/LICENSE.md
+### idna-3.20.dist-info/licenses/LICENSE.md
 
 ```text
 BSD 3-Clause License
@@ -745,15 +745,15 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## mcp 2.1.1
+## mcp 2.2.0
 
 Source: <https://github.com/modelcontextprotocol/python-sdk>
 
 License: `MIT`
 
-Evidence: `mcp-2.1.1.dist-info/licenses/LICENSE`
+Evidence: `mcp-2.2.0.dist-info/licenses/LICENSE`
 
-### mcp-2.1.1.dist-info/licenses/LICENSE
+### mcp-2.2.0.dist-info/licenses/LICENSE
 
 ```text
 MIT License
@@ -779,15 +779,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## mcp-types 2.1.1
+## mcp-types 2.2.0
 
 Source: <https://github.com/modelcontextprotocol/python-sdk>
 
 License: `MIT`
 
-Evidence: `mcp_types-2.1.1.dist-info/licenses/LICENSE`
+Evidence: `mcp_types-2.2.0.dist-info/licenses/LICENSE`
 
-### mcp_types-2.1.1.dist-info/licenses/LICENSE
+### mcp_types-2.2.0.dist-info/licenses/LICENSE
 
 ```text
 MIT License
@@ -872,15 +872,15 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
 ```
 
-## opentelemetry-api 1.44.0
+## opentelemetry-api 1.45.0
 
 Source: <https://github.com/open-telemetry/opentelemetry-python>
 
 License: `Apache-2.0`
 
-Evidence: `opentelemetry_api-1.44.0.dist-info/licenses/LICENSE`
+Evidence: `opentelemetry_api-1.45.0.dist-info/licenses/LICENSE`
 
-### opentelemetry_api-1.44.0.dist-info/licenses/LICENSE
+### opentelemetry_api-1.45.0.dist-info/licenses/LICENSE
 
 ```text
                                  Apache License
@@ -1232,15 +1232,15 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## pyjwt 2.13.0
+## pyjwt 2.15.0
 
 Source: <https://github.com/jpadilla/pyjwt>
 
 License: `MIT`
 
-Evidence: `pyjwt-2.13.0.dist-info/licenses/LICENSE`
+Evidence: `pyjwt-2.15.0.dist-info/licenses/LICENSE`
 
-### pyjwt-2.13.0.dist-info/licenses/LICENSE
+### pyjwt-2.15.0.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -1675,15 +1675,15 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## starlette 1.6.0
+## starlette 1.7.0
 
 Source: <https://github.com/Kludex/starlette>
 
 License: `BSD-3-Clause`
 
-Evidence: `starlette-1.6.0.dist-info/licenses/LICENSE.md`
+Evidence: `starlette-1.7.0.dist-info/licenses/LICENSE.md`
 
-### starlette-1.6.0.dist-info/licenses/LICENSE.md
+### starlette-1.7.0.dist-info/licenses/LICENSE.md
 
 ```text
 Copyright © 2018, [Encode OSS Ltd](https://www.encode.io/).
@@ -2146,15 +2146,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## uvicorn 0.52.4
+## uvicorn 0.54.0
 
 Source: <https://github.com/Kludex/uvicorn>
 
 License: `BSD-3-Clause`
 
-Evidence: `uvicorn-0.52.4.dist-info/licenses/LICENSE.md`
+Evidence: `uvicorn-0.54.0.dist-info/licenses/LICENSE.md`
 
-### uvicorn-0.52.4.dist-info/licenses/LICENSE.md
+### uvicorn-0.54.0.dist-info/licenses/LICENSE.md
 
 ```text
 Copyright © 2017-present, [Encode OSS Ltd](https://www.encode.io/).

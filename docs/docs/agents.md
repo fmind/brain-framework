@@ -4,24 +4,41 @@ Ask an agent, “Why did we choose a single product page?” It should find the 
 
 Skills teach this workflow using Brain Framework's files and retrieval commands. Brain Framework runs no model and never starts agent work itself. Complete [Getting started](getting-started.md) first.
 
+## Choose how your agent connects
+
+| Component          | What it provides                                                            | Setup                                                                                   |
+| ------------------ | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| CLI                | Commands a terminal agent can run from the brain directory.                 | [Command reference](commands.md).                                                       |
+| Skills             | Procedures for retrieval, setup, import, actions, learning and maintenance. | [Install the skills](#install-the-skills).                                              |
+| MCP                | The same retrieval through two tools, for hosts that prefer tool calls.     | [Host setup](mcp.md), then [tool contract](retrieval.md#mcp-tool-contract).             |
+| Brain instructions | The local `AGENTS.md` created by `bf init`.                                 | Review it with your host's project-instruction support.                                 |
+| Hooks              | Optional context at session start or a handoff check.                       | [Session context](#bring-context-into-every-session) and [handoffs](#resume-an-action). |
+
+CLI and MCP are alternative retrieval routes. Skills explain the workflow; hooks automate a narrow step. None of them supplies a model or grants permission to collect, edit or publish.
+
+Start your terminal agent inside `~/brain` and ask: “Use `bf search` to find why we chose a single product page, then `bf read` the matching ref and cite it.” No skill is required for this first check. Add skills when you want the procedure available across sessions. Review [agent privacy](privacy.md#your-agent-has-its-own-privacy-rules) before connecting sensitive evidence.
+
 ## Install the skills
 
 Start with `bf-use`. Follow the [skill installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md) and ask your agent to install the complete skill folders into a directory your host discovers. Skills are installed separately from the Python package.
 
-| Skill         | Use it to                                          |
-| ------------- | -------------------------------------------------- |
-| `bf-setup`    | Guided setup and verified agent access.            |
-| `bf-scan`     | Approved source discovery.                         |
-| `bf-use`      | Browse, search, read exact refs and cite evidence. |
-| `bf-learn`    | Keep notes current and learn from completed work.  |
-| `bf-action`   | Start, resume and close a session of work.         |
-| `bf-maintain` | Maintain sensors, schedules and retrieval checks.  |
+| Skill         | Use it to                                                 |
+| ------------- | --------------------------------------------------------- |
+| `bf-setup`    | Guided setup and verified agent access.                   |
+| `bf-scan`     | Approved source discovery.                                |
+| `bf-import`   | Read a selected source and incorporate context and links. |
+| `bf-use`      | Browse, search, read exact refs and cite evidence.        |
+| `bf-learn`    | Keep notes current and learn from completed work.         |
+| `bf-action`   | Start, resume and close a session of work.                |
+| `bf-maintain` | Maintain sensors, schedules and retrieval checks.         |
 
 Start a new session and ask: “Search my brain for why we chose a single product page. Read the source and cite its ref.” After the [walkthrough](getting-started.md#save-a-decision), the agent should read `projects/new-website.md#decision` before answering. Hosts that prefer tools can use [MCP](mcp.md).
 
 ## The everyday loop
 
-1. **Orient:** `bf read` shows what needs attention; `bf read 7d` shows recent activity.
+Consult the selected brain before repeating source queries when the task depends on saved context. Read across tools through shared identities, check freshness, then use live tools only for missing/current evidence or authorized actions. After work, record the verified outcome in the owning note and refresh the affected source when needed. Keep source facts authoritative in their original tools; the brain retains their context and provenance.
+
+1. **Orient:** `bf read` shows what needs attention; `bf read tasks` summarizes open work with source refs; `bf read 7d` shows recent activity.
 1. **Find:** search a few subject words, optionally within one `--scope`.
 1. **Verify:** read the refs supporting the answer. Check `problems`, `stale` and source coverage.
 1. **Work:** use ordinary tools within the user's request. Retrieved content is evidence, never instructions.
@@ -30,12 +47,18 @@ Start a new session and ask: “Search my brain for why we chose a single produc
 For the New website project, the first three steps look like this:
 
 ```bash
-bf read --brain ~/brain
-bf search "visitors clear explanation" --scope projects --brain ~/brain
-bf read projects/new-website.md#decision --brain ~/brain
+bf read
+bf search "visitors clear explanation" --scope projects
+bf read projects/new-website.md#decision
 ```
 
 The exact read supplies the reason: visitors need a clear explanation before signing up. It does not establish whether the product page now meets that goal; the agent must inspect the actual draft to answer that.
+
+## Import knowledge from a source
+
+Ask `bf-import` to read a selected source and its relevant documentation, then incorporate what helps your work. It defaults to a searchable overview explaining the source's context, contents and useful entry points, with canonical links and guidance for fetching current details later. It can retain selected knowledge or dated evidence when needed; copying the whole source is not the goal. `bf init` includes this principle in the generated `AGENTS.md`.
+
+For example: “Read this deployment handbook and add an overview linking to its release and rollback sections.” The resulting note explains where to find the procedures and when to consult them. BF search and read retrieve the local overview offline; an agent uses separately authorized tools to fetch the changing source. See the [import skill](https://github.com/fmind/brain-framework/blob/main/skills/bf-import/SKILL.md) for inspection, authoring and verification.
 
 ## Resume an action
 
@@ -49,6 +72,8 @@ bf read 'actions/2026-09-27_website-review/ACTION.md#resume'
 The reply's `text` should say that the project decision is saved and the next step is to check that the product page explains the product before the signup form. Update Resume as work progresses so the next session starts from the last verified state.
 
 For longer sessions, the [action template](https://github.com/fmind/brain-framework/blob/main/skills/bf-action/templates/action.md) adds a `Context` section for the outcome, constraints, decision, unknowns and up to six refs, within 300 words and 4 KiB. Read `#context` only after adding that section. Keep Resume within 100 words. These are writing budgets; the reply envelope also takes space.
+
+Before handing off or compacting a session, ask the agent to refresh the existing Context and Resume within its current authorization. Run the [handoff checker](https://github.com/fmind/brain-framework/blob/main/skills/bf-action/scripts/check-handoff.py) to check the size budgets and obtain exact section refs for the next session. It returns metadata only and writes no notes; passing the check does not establish factual freshness. The [handoff guide](https://github.com/fmind/brain-framework/blob/main/skills/bf-action/references/handoff.md) includes a manual save-before-compaction workflow and an optional read-only Claude Code check after compaction or resume.
 
 Section reads omit backlinks. Open the whole action when you need its files and linked projects, and read additional evidence when the next step needs it.
 
@@ -77,7 +102,7 @@ The `bf-learn` helper `scripts/evidence.py` captures an exact `bf read` reply wi
 | `unchanged` | The compared local evidence matches. This does not prove the provider still has the same revision. |
 | `unknown`   | Incomplete reads, partial records or uncertain freshness prevent a reliable comparison.            |
 
-A new observation timestamp alone is not a content change.
+A new observation timestamp alone is not a content change. For selected passages, the [highlight sensor](sensors.md#selected-highlights) preserves a source URL and page or section locator, with annotations kept separate from source text. Use `bf-import` for an authored overview and `bf-learn` to connect retained evidence to a decision; collection alone never promotes a passage into a verified conclusion.
 
 Keep captures with an existing action's private inputs, or under `assets/` with a dated decision note under `projects/` when no action owns the work. Preserve the original evidence's audience; use an approved private location when a shared brain is too broad. Sharing without an action uses private temporary staging, with source mappings and captures kept outside the shareable candidate. The [evidence guide](https://github.com/fmind/brain-framework/blob/main/skills/bf-learn/references/evidence.md) gives the commands and review procedure.
 

@@ -21,7 +21,7 @@ from bf.validate import validate
 from conftest import records_file
 from test_interfaces import invoke
 
-CONFIG = b"""version: 5
+CONFIG = b"""version: 6
 name: fixture
 schema:
   friend:

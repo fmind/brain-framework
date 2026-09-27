@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "highlights": [
+    {
+      "id": "brief-clarity",
+      "title": "New website brief",
+      "selection": "Visitors need a clear product explanation before signing up.",
+      "annotation": "Review whether our first page explains who the product helps.",
+      "source_url": "https://example.com/website-brief",
+      "locator": { "page": 2, "section": "Audience" },
+      "captured_at": "2026-09-27T12:00:00Z",
+      "source_date": "2026-09-25"
+    }
+  ]
+}

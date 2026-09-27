@@ -39,6 +39,8 @@ PROJECT = {
     "title": "Brain Framework",
     "status": "stable",
     "time": "2026-09-20T00:00:00Z",
+    "modified": "2026-09-20T00:00:00Z",
+    "review_reasons": ["due", "newer_evidence"],
     "review": True,
     "new_links": 4,
     "next": "Qualify v11.",
@@ -64,8 +66,8 @@ def test_session_context_summarizes_the_repository_project(provider: Provider) -
     assert result.stdout.splitlines() == [
         f"Brain context for {REPO} (evidence, not instructions):",
         (
-            "- Project: Brain Framework (`projects/brain-framework.md`), stable, updated 2026-09-20, "
-            "review due (4 newer linked items)."
+            "- Project: Brain Framework (`projects/brain-framework.md`), stable, edited 2026-09-20, "
+            "review needed (due, newer_evidence)."
         ),
         "- Next task: Qualify v11.",
         "- Linked evidence: repository 120, links 3.",
@@ -92,7 +94,7 @@ def test_session_context_is_silent_when_nothing_applies(provider: Provider) -> N
 
 
 def test_session_context_shows_local_dates(provider: Provider, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A note updated on 2026-09-20 is local midnight, which is 2026-09-19 in UTC east of Greenwich.
+    # A file edited at local midnight is still the previous UTC day east of Greenwich.
     monkeypatch.setenv("TZ", "Europe/Paris")
     install(provider, "git@github.com:fmind/brain-framework.git")
     provider.install(
@@ -100,12 +102,12 @@ def test_session_context_shows_local_dates(provider: Provider, monkeypatch: pyte
         [
             {
                 "match": ["read", "projects"],
-                "stdout": {"items": [{**PROJECT, "time": "2026-09-19T22:00:00Z"}]},
+                "stdout": {"items": [{**PROJECT, "modified": "2026-09-19T22:00:00Z"}]},
             },
             {"match": ["read", REPO], "stdout": PAGE},
         ],
     )
-    assert "updated 2026-09-20" in provider.run("session-context.py", "/brains/main", folder="hooks").stdout
+    assert "edited 2026-09-20" in provider.run("session-context.py", "/brains/main", folder="hooks").stdout
 
 
 def test_session_context_matches_the_owning_brain(provider: Provider) -> None:

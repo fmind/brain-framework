@@ -65,7 +65,7 @@ def test_tag_counts_refresh_deduplicate_and_rebuild(brain: Store) -> None:
 def test_tag_pages_paginate_without_merging_brain_identities(brain: Store, tmp_path: Path) -> None:
     (tmp_path / "team").mkdir()
     other = Store(tmp_path / "team")
-    other.write("bf.yaml", b"version: 5\nname: team\n")
+    other.write("bf.yaml", b"version: 6\nname: team\n")
     for store in (brain, other):
         for n in range(110):
             store.write(f"projects/tagged-{n:03}.md", f"---\ntags: [retention, tag-{n:03}]\n---\n# Evidence\n".encode())

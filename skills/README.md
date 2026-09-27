@@ -2,16 +2,19 @@
 
 Markdown packages that teach agents to use Brain Framework. They are distributed from this repository, separately from the Python package.
 
-| Skill                               | Example request                                                       |
-| ----------------------------------- | --------------------------------------------------------------------- |
-| [bf-setup](bf-setup/SKILL.md)       | “Set up `~/brain` and verify that you can find our project decision.” |
-| [bf-scan](bf-scan/SKILL.md)         | “Suggest useful sources; propose an inspection scope first.”          |
-| [bf-use](bf-use/SKILL.md)           | “Why did we choose a single product page? Read and cite the source.”  |
-| [bf-learn](bf-learn/SKILL.md)       | “Save this decision and its reason in the owning project.”            |
-| [bf-action](bf-action/SKILL.md)     | “Resume the website review from its last verified state.”             |
-| [bf-maintain](bf-maintain/SKILL.md) | “Diagnose why the local-documents source is stale.”                   |
+| Skill                               | Example request                                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------ |
+| [bf-setup](bf-setup/SKILL.md)       | “Set up `~/brain` and verify that you can find our project decision.”                            |
+| [bf-scan](bf-scan/SKILL.md)         | “Suggest useful sources; propose an inspection scope first.”                                     |
+| [bf-import](bf-import/SKILL.md)     | Read a selected source and its documentation; incorporate context, links and selected knowledge. |
+| [bf-use](bf-use/SKILL.md)           | “Why did we choose a single product page? Read and cite the source.”                             |
+| [bf-learn](bf-learn/SKILL.md)       | “Save this decision and its reason in the owning project.”                                       |
+| [bf-action](bf-action/SKILL.md)     | “Resume the website review from its last verified state.”                                        |
+| [bf-maintain](bf-maintain/SKILL.md) | “Diagnose why the local-documents source is stale.”                                              |
 
 ## Install
+
+For a first terminal-agent task, use the explicit prompt in the [four-tool walkthrough](../docs/docs/context-hub.md#give-a-terminal-agent-the-same-context). The agent needs CLI and file access; a skill installation is optional for that task. Install skills when you want these procedures discovered across sessions.
 
 Start with `bf-use`. Add `bf-setup` for onboarding, `bf-learn` for note updates or another skill when its task is needed. The package and `bf init` do not install skills.
 
@@ -41,6 +44,10 @@ Ask `bf-setup`: "Help me set up a brain for this project and verify that my agen
 Ask `bf-scan`: "Help me find useful sources; propose an inspection scope before reading my bookmarks or project folders." Agree on specific inputs and what the agent may receive. It distinguishes observed tools or links from unverified account access, compares existing coverage and recommends connections for recurring questions. Its optional standard-library helper supports Python 3.11+, selected Chromium JSON or Netscape HTML bookmark exports, and named executable availability checks. It returns bounded host counts or availability, never full bookmark URLs or executable paths; hostnames can still be sensitive.
 
 Discovery does not enable sensors, authenticate accounts or save an inventory. Selected integrations pass to `bf-maintain` for disabled configuration, fake-provider tests and authorized live execution. Install companions as needed; the skills are independent folders, and sibling links do not install or activate another skill. Neither `bf-setup` nor `bf-scan` is a new `bf` subcommand.
+
+## Import a selected source
+
+Ask `bf-import`: "Read this project's handbook and its documentation, then add an overview and links to my brain so an agent can fetch current details later." Install it alongside `bf-use` when incorporating an identified source. It reads relevant content before choosing an overview with canonical links, a durable synthesis or selected evidence retained for a specific need. Knowledge changes, so a full copy is not the default. It preserves inspection limits and access requirements, then validates the note and checks retrieval. Recurring collection belongs to `bf-maintain`; `bf-import` is a skill, not a CLI subcommand.
 
 ## Decision workflows
 

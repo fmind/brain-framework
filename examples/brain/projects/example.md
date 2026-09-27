@@ -4,6 +4,7 @@ tags: [retention, evidence]
 entity: bf://example/projects/example
 status: stable
 updated: 2026-09-19
+review_after: 7
 aliases: ["repo:example/project"]
 ---
 

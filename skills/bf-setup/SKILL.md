@@ -9,7 +9,7 @@ metadata:
 
 # bf-setup
 
-Help the user reach a useful answer with evidence. Start from their work: what do they repeatedly need to remember, find or explain, and is this a personal or team brain? Reuse answers and authorization already given. Choose a small pilot: one project and a few real questions. A sensor is useful only when those questions need evidence the notes do not contain.
+Help the user centralize context for a recurring question across tools. Start from the last time they reconstructed that context: which sources, what action followed, and what their current workaround costs. Reuse answers and authorization already given. Choose one project and a few real questions; identify the authoritative sources, audience and note owner. For a team introduction, use the [pilot guide](https://fmind.github.io/brain-framework/docs/pilot/) to compare independent use and maintenance effort. A sensor is useful only when those questions need its evidence.
 
 ## Establish the brain
 
@@ -30,6 +30,8 @@ bf eval --brain PATH
 
 ## Connect the agent
 
+For a terminal agent, verify a first explicit CLI task before requiring skill installation. The [four-tool walkthrough](https://fmind.github.io/brain-framework/docs/context-hub/#give-a-terminal-agent-the-same-context) supplies a prompt and expected reads over fictional evidence. Then repeat with a real pilot question and inspect the host's tool history. Demo success does not establish work-account access or user value.
+
 Follow the [skill installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md) for the user's host. Install complete folders from a reviewed, matching release; preserve installed customizations. `bf-use` provides retrieval, `bf-learn` maintains notes, and `bf-action` tracks a session when requested. If the host uses MCP instead, follow the [MCP guide](https://fmind.github.io/brain-framework/docs/mcp/). Host setup is optional when the user wants a CLI-only brain.
 
 Explain the relevant data boundary before connecting a cloud agent: its provider can receive the notes and records it reads, even though BF retrieval runs offline. Keep the selected audience explicit. Do not alter unrelated host settings.
@@ -40,10 +42,14 @@ Verify from a fresh host session: ask the agent a pilot question, have it search
 
 Offer [bf-scan](../bf-scan/SKILL.md) when the user wants help discovering sources; skip it when the useful sources are already known or discovery is declined. Obtain its scoped inspection approval before reading personal inventories. Discovery can also be run later on an established brain.
 
-Choose the smallest useful set of candidates. Hand sensor implementation, fake-provider tests, authorized live previews and scheduling to [bf-maintain](../bf-maintain/SKILL.md). Install that companion if needed; do not invent a second maintenance procedure. The [sensor guide](https://fmind.github.io/brain-framework/docs/sensors/) describes the contract when the companion is unavailable. A source found during discovery is not approval to authenticate, collect or schedule it. Add a deterministic routine only for a recurring review the user needs.
+Choose the smallest useful set of candidates. Prefer `bf watch` for ongoing refresh and visible status, with optional `settings/watch.yaml` preferences; native scheduling remains opt-in. Hand sensor implementation, fake-provider tests, authorized live previews and scheduling to [bf-maintain](../bf-maintain/SKILL.md). Install that companion if needed; do not invent a second maintenance procedure. The [sensor guide](https://fmind.github.io/brain-framework/docs/sensors/) describes the contract when the companion is unavailable. A source found during discovery is not approval to authenticate, collect or schedule it. Add a deterministic routine only for a recurring review the user needs.
 
-For each selected source, establish a question, account/folder/repository scope, fields to retain, freshness need and retrieval case. Prepare and test disabled configuration before requesting any still-missing live execution authority. Reuse authority already supplied, and verify that collected evidence answers the question after an authorized run.
+For each selected source, establish a question, account/folder/repository scope, fields to retain, freshness need and retrieval case. Configure common fields and explicit identities across tools: ingestion applies the mappings automatically, without inferring an ontology or merging similar names. Prepare and test disabled configuration before requesting any still-missing live execution authority. Reuse authority already supplied, and verify that collected evidence answers the question after an authorized run.
 
 ## Finish with evidence
 
+For a pilot, retain the agreed questions, source owners, comparison conditions and next review in its existing project note. Leave unmeasured outcomes unknown. Check whether another person can recover the evidence and maintain a useful update; count setup, capture and support effort as well as task benefits. User outreach, identifiable feedback collection and publication need their own authority.
+
 Report the brain location, questions answered with refs, validation/evaluation results and observed host access. Distinguish sources proposed, configured, successfully collected and scheduled with an observed run. Name pending access or unanswered questions and the next concrete step. A useful notes-only brain is a valid outcome; do not add integrations to fill a checklist. Keep reviewed setup decisions in the existing project note when authorized, without storing raw discovery inventories.
+
+For the first collection, follow the [Getting started sensor and schema example](https://fmind.github.io/brain-framework/docs/getting-started/#collect-your-first-source) inside the selected brain. It uses a fictional local file, a manual sensor and one shared field. Verify the stored record, mapped field and source link before adding live providers.

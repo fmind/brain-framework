@@ -2,7 +2,7 @@
 [project]
 name = "brain-framework"
 version = "13.0.0"
-description = "A file-based brain for people and AI agents: gather information, connect knowledge and act with context."
+description = "Centralize information from your tools in a file-based brain for people and AI agents."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
@@ -33,6 +33,7 @@ dependencies = [
   "mcp>=2.1.1,<3",
   "pydantic>=2.13.5,<3",
   "pyyaml>=6.0.3,<7",
+  "rich>=15.0.0,<16",
   "typer>=0.27.2,<1",
 ]
 

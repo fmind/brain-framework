@@ -42,8 +42,11 @@ def test_problems_are_collected_not_fail_fast(brain: Store) -> None:
         b"[up](../../outside.md) [cited](meetings:absent) [web](https://example.com) [self](#links)\n",
     )
     brain.write("projects/bad.md", b"---\nstatus: current\n---\n# Bad\n")
-    brain.write("memories/meetings/2026-07.jsonl", b'{"id":"lunch","title":"Moved","time":"2026-08-01T00:00:00Z"}\n')
-    brain.write("memories/other/2026-09.jsonl", b"{broken\n")
+    brain.write(
+        "memories/meetings/8810ad581e59f2bc3928b261707a71308f7e139eb04820366dc4d5c18d980225.json",
+        b'{"id":"lunch","title":"Moved","time":"2026-08-01T00:00:00Z"}\n',
+    )
+    brain.write("memories/other/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json", b"{broken\n")
     result = validate(brain)
     assert not result["valid"]
     problems = "\n".join(cast("list[str]", result["problems"]))
@@ -53,9 +56,8 @@ def test_problems_are_collected_not_fail_fast(brain: Store) -> None:
         "projects/links.md: link leaves the brain: ../../outside.md",
         "projects/links.md: missing record meetings:absent",
         "projects/bad.md: invalid frontmatter: status",
-        "duplicate id 'lunch' in source meetings",
-        "2026-07.jsonl: record 'lunch' belongs in 2026-08.jsonl",
-        "memories/other/2026-09.jsonl:1: invalid JSON document",
+        "record id does not match its SHA-256 filename",
+        "memories/other/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json: invalid JSON document",
     ]:
         assert expected in problems
     assert "decision" not in problems

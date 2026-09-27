@@ -2,7 +2,7 @@
 [project]
 site_name = "Brain Framework"
 site_url = "https://fmind.github.io/brain-framework/"
-site_description = "A file-based brain for people and AI agents: gather information, connect knowledge and act with context."
+site_description = "Centralize information from your tools in a file-based brain for people and AI agents."
 site_author = "Médéric Hurier"
 copyright = "Copyright &copy; 2026 Médéric Hurier (Fmind)."
 docs_dir = "docs"
@@ -26,18 +26,23 @@ nav = [
     { "Sensors" = "docs/sensors.md" },
     { "Routines" = "docs/routines.md" },
     { "Schedule updates" = "docs/schedule.md" },
-    { "Team brains" = "docs/team.md" },
   ] },
+  { "Team setup" = "docs/team.md" },
   { "Connect agents" = [
     { "Agent workflows" = "docs/agents.md" },
     { "MCP server" = "docs/mcp.md" },
   ] },
+  { "Advanced" = [
+    { "Connect context across tools" = "docs/context-hub.md" },
+    { "Evaluate a team pilot" = "docs/pilot.md" },
+  ] },
   { "Reference" = [
     { "Commands" = "docs/commands.md" },
     { "Configuration" = "docs/configuration.md" },
-    { "Schema and links" = "docs/schema.md" },
+    { "Record schema" = "docs/schema.md" },
+    { "Link syntax" = "docs/link-reference.md" },
     { "Retrieval contract" = "docs/retrieval.md" },
-    { "Versions and upgrades" = "docs/upgrades.md" },
+    { "Install and update" = "docs/upgrades.md" },
     { "Limits and safeguards" = "docs/limits.md" },
   ] },
   { "Privacy and legal" = [

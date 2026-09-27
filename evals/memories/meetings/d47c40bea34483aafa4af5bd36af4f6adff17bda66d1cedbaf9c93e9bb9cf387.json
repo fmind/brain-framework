@@ -1,0 +1,7 @@
+{
+  "fields": { "repository": ["repo:example/zephyr"] },
+  "id": "zephyr",
+  "text": "The review selected a hosted dashboard for the campaign.",
+  "time": "2026-09-13T10:00:00Z",
+  "title": "Zephyr campaign review"
+}

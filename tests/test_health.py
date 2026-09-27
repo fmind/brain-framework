@@ -21,7 +21,7 @@ from bf.storage import Store, state_store
 def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 5\nname: fixture\nsensors:\n"
+        b"version: 6\nname: fixture\nsensors:\n"
         b"  current:\n    command: [echo]\n    refresh: 3600\n"
         b"  missing:\n    command: [echo]\n    refresh: 3600\n"
         b"  paused:\n    command: [echo]\n    enabled: false\n"
@@ -58,8 +58,15 @@ def test_init_quotes_yaml_names_and_keeps_private_evidence_out_of_git(tmp_path) 
 
 
 def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 5\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
-    brain.write("memories/current/undated.jsonl", b'{"id":"a","title":"First"}\n{"id":"b","title":"Second"}\n')
+    brain.write("bf.yaml", b"version: 6\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
+    brain.write(
+        "memories/current/ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb.json",
+        b'{"id":"a","title":"First"}\n',
+    )
+    brain.write(
+        "memories/current/3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d.json",
+        b'{"id":"b","title":"Second"}\n',
+    )
     state_store(brain.root).write("sensors.json", encode({"current": {"records": 1, "unchanged": 1}}))
     result = CliRunner().invoke(app, ["status", "--brain", str(brain.root)])
     assert result.exit_code == 0, result.output
@@ -72,7 +79,7 @@ def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store)
 def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failures_are_inactive(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 5\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
+        b"version: 6\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
     )
     state_store(brain.root).write(
         "sensors.json",
@@ -87,7 +94,7 @@ def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failure
 
 def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 5\nname: fixture\nsensors:\n  meetings:\n    command: [echo]\n    refresh: 3600\n"
+        "bf.yaml", b"version: 6\nname: fixture\nsensors:\n  meetings:\n    command: [echo]\n    refresh: 3600\n"
     )
     record = cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])
     found = cast("list[dict[str, object]]", search([brain], Query(text="offline retrieval"))["sources"])
@@ -103,9 +110,9 @@ def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) ->
 def test_status_reports_a_broken_brain_and_still_reports_the_others(tmp_path: Path) -> None:
     (tmp_path / "other").mkdir()
     other = Store(tmp_path / "other")
-    other.write("bf.yaml", b"version: 5\nname: other\n")
+    other.write("bf.yaml", b"version: 6\nname: other\n")
     register(other)
-    other.write("bf.yaml", b"version: 5\nname: [broken\n")
+    other.write("bf.yaml", b"version: 6\nname: [broken\n")
     result = CliRunner().invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     brains = json.loads(result.stdout)["brains"]

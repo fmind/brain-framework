@@ -38,9 +38,11 @@ def test_update_reports_skipped_evidence_as_failure(brain: Store) -> None:
 
 
 def test_missing_record_in_corrupt_source_is_not_proven_absent(brain: Store) -> None:
-    brain.write("memories/meetings/2026-09.jsonl", b"broken partition\n")
+    brain.write(
+        "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json", b"broken partition\n"
+    )
     assert records.find(brain, "meetings", "decision-1") is not None
-    with pytest.raises(Error, match="unreadable partitions"):
+    with pytest.raises(Error, match="invalid JSON document"):
         records.find(brain, "meetings", "possibly-in-broken-file")
     assert records.find(brain, "other", "absent") is None
 

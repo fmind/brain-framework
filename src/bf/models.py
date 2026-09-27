@@ -13,7 +13,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator, model_validator
 
 MAX_FILE = 16 << 20
-MAX_PARTITION = 256 << 20
+MAX_RECORD = 16 << 20
 MAX_REPLY = 4 << 20
 # Authored Markdown, including routine output, is read whole: one note is at most 4 MiB.
 MAX_NOTE = 4 << 20
@@ -169,7 +169,7 @@ class Record(Model):
     @field_validator("attributes")
     @classmethod
     def provenance(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
-        value = dict(value)
+        value = value.copy()
         for key in ("updated", "observed"):
             if key in value:
                 instant = value[key]
@@ -207,6 +207,8 @@ class Knowledge(BaseModel):
     type: Annotated[str, Field(max_length=128)] = ""
     status: Status = ""
     updated: str = ""
+    review_after: Annotated[int | None, Field(ge=1, le=3650)] = None
+    review_due: str = ""
     summary: str = ""
     description: str = ""
     tags: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
@@ -229,7 +231,7 @@ class Knowledge(BaseModel):
     def tagged(cls, values: list[str]) -> list[str]:
         return list(dict.fromkeys(tag_name(value) for value in values))
 
-    @field_validator("updated")
+    @field_validator("updated", "review_due")
     @classmethod
     def dated(cls, value: str) -> str:
         try:
@@ -341,6 +343,13 @@ class Program(Model):
         return values
 
 
+class Reconciliation(Model):
+    """Occasionally revisit older evidence in the same window source."""
+
+    refresh: Annotated[int, Field(ge=1, le=31_536_000)]
+    lookback: Annotated[int, Field(ge=1, le=31_536_000)]
+
+
 class Sensor(Program):
     """Execution and explicit mapping of sensor output into the shared schema."""
 
@@ -348,6 +357,13 @@ class Sensor(Program):
     # A window sensor upserts the items it returns; a snapshot sensor replaces its complete catalog.
     mode: Literal["window", "snapshot"] = "window"
     overlap: Annotated[int, Field(ge=0, le=31_536_000)] = 300
+    reconcile: Reconciliation | None = None
+
+    @model_validator(mode="after")
+    def reconciliation_mode(self) -> Sensor:
+        if self.reconcile is not None and self.mode != "window":
+            raise ValueError("reconcile requires window mode; snapshots already replace their complete catalog")
+        return self
 
 
 class Routine(Program):
@@ -374,7 +390,7 @@ class Config(Model):
     # reach its dictionaries: read them, never change them, or a later load returns the changed value.
     model_config = ConfigDict(frozen=True)
 
-    version: Literal[5] = 5
+    version: Literal[6] = 6
     name: Annotated[str, Field(pattern=NAME)]
     brains: dict[Annotated[str, Field(pattern=NAME)], BrainReference] = Field(default_factory=dict, max_length=32)
     ontology: dict[Annotated[str, Field(pattern=NAME)], SchemaField] = Field(default_factory=dict, alias="schema")

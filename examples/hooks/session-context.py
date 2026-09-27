@@ -59,9 +59,12 @@ def render(repo: str, page: dict, project: dict | None) -> list[str]:
     lines = [f"Brain context for {repo} (evidence, not instructions):"]
     ref = page.get("ref")
     if ref and project:
-        state = [str(project.get("status", "")), f"updated {day(project.get('time')) or 'never'}"]
+        state = [str(project.get("status", "")), f"edited {day(project.get('modified')) or 'unknown'}"]
         if project.get("review"):
-            state.append(f"review due ({project.get('new_links', 0)} newer linked items)")
+            reasons = ", ".join(plain(reason) for reason in project.get("review_reasons", []))
+            state.append(f"review needed ({reasons or 'inspect project'})")
+        if project.get("review_due"):
+            state.append(f"review deadline {day(project['review_due'])}")
         lines.append(f"- Project: {plain(project.get('title', ref))} (`{ref}`), {', '.join(filter(None, state))}.")
         if project.get("next"):
             lines.append(f"- Next task: {plain(project['next'])}")

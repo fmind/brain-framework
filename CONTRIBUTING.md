@@ -2,6 +2,19 @@
 
 Start with [AGENTS.md](AGENTS.md) and [bf-contribute](.agents/skills/bf-contribute/SKILL.md). Keep changes small, preserve offline retrieval and file-based knowledge, and use synthetic evidence. Discuss changes that enlarge the product before implementing them.
 
+## Start from a useful outcome
+
+You can contribute without extending the core:
+
+- **A missed question:** provide a small fictional brain, the question, expected refs and observed result. Preserve the difficulty, such as evidence split across tools or conflicting statuses; leave private records out.
+- **An onboarding obstacle:** describe the exact step, BF version, operating system, terminal-agent host and assistance needed. A simpler explanation or command may be the whole fix.
+- **A source adapter:** name the recurring question it answers, selected scope, shared-field mappings and fake-provider tests for complete success and failure. Keep provider access in the existing sensor pattern.
+- **An experience report:** share a useful outcome or why you stopped using BF through the [usage form](https://github.com/fmind/brain-framework/issues/new?template=usage.yml). Include repeated use and maintenance effort when observed; label estimates.
+
+The [team pilot](docs/docs/pilot.md) compares the current workflow, the same curated files accessed directly and BF retrieval. Present task counts, failures, versions and measurement limits with any claimed improvement. A passing fixture, installation, download or star is not adoption evidence. Keep support in repository issues until actual needs justify another channel.
+
+For a public demonstration, start with the [four-tool example](examples/context-hub/README.md): run collection, show the shared project relationships, read all four sources and explain the unresolved launch blocker. It is a reproducible fictional demonstration, not a customer case study. Publish real pilot results only with the relevant permission and privacy review.
+
 ## Set up and check a change
 
 From the checkout:

@@ -5,11 +5,13 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
+import bf.collect as collector
 from bf import pages
 from bf.cli import app
 from bf.collect import ROUTINES, Runner, due_routines, log_path, routine, state
@@ -22,7 +24,7 @@ from bf.update import update
 NOW = datetime(2026, 9, 25, 8, tzinfo=UTC)
 START = "2026-09-24T08:00:00.000000Z"
 END = "2026-09-25T08:00:00.000000Z"
-CONFIG = b"""version: 5
+CONFIG = b"""version: 6
 name: fixture
 routines:
   digest:
@@ -36,7 +38,7 @@ routines:
     refresh: 60
 """
 ACTION = b"---\ntype: action\nstatus: draft\n---\n# Digest\n\nSee [offline](../../projects/offline.md).\n"
-FOLDER = f"actions/{NOW.astimezone().date().isoformat()}_digest"
+FOLDER = f"actions/{NOW.astimezone().date().isoformat()}_digest-00000000000000000000000000000001"
 
 
 @pytest.fixture
@@ -233,3 +235,8 @@ def test_routine_executables_run_from_the_brain_root(configured: Store, monkeypa
     configured.write("bf.yaml", CONFIG.replace(b"routines/digest.py", b"routines/../bf.yaml"))
     with pytest.raises(Error):
         routine(configured, "digest", start=START, end=END, clock=lambda: NOW + timedelta(days=1))
+
+
+@pytest.fixture(autouse=True)
+def fixed_action_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=1))

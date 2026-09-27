@@ -88,7 +88,11 @@ def test_scopes_bound_searches_to_a_folder_a_period_or_a_source(brain: Store) ->
     assert refs(brain, "offline", **scope("2026-08")) == ["meetings:decision-1"]
     assert refs(brain, "offline", **scope("2026-09-01")) == ["projects/offline.md"]
     assert refs(brain, "lunch", **scope("memories/meetings/2026-08-30")) == ["meetings:lunch"]
-    assert refs(brain, "lunch", **scope("memories/meetings/2026-08.jsonl")) == ["meetings:lunch"]
+    assert refs(
+        brain,
+        "lunch",
+        **scope("memories/meetings/f3bb79e48a7a8af1d028f6acb7fa34b0c7f75da596fc205907d2a708fe28ebef.json"),
+    ) == ["meetings:lunch"]
     assert refs(brain, "lunch", **scope("memories/meetings/undated")) == []
     assert refs(brain, "offline", **scope("repo:example/project")) == ["meetings:decision-1"]
     assert refs(brain, "evidence", limit=1) == ["concepts/evidence.md"]
@@ -118,20 +122,20 @@ def test_cache_follows_edits_additions_removals_and_touches(brain: Store) -> Non
     assert refs(brain, "hafniums") == []
     result = index.refresh(brain)
     assert result["changed"] == 0
-    assert index.refresh(brain, full=True)["changed"] == 3
+    assert index.refresh(brain, full=True)["changed"] == 4
 
 
 def test_invalid_files_are_skipped_and_reported(brain: Store) -> None:
     brain.write("projects/broken.md", b"---\nstatus: current\n---\n# Broken\n")
-    brain.write("memories/bad/2026-09.jsonl", b'{"id":"x"}\n')
+    brain.write("memories/bad/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json", b'{"id":"x"}\n')
     records_file(brain, "dupes", "2026-09", [Record(id="a", title="A", time="2026-09-01T00:00:00Z")])
-    records_file(brain, "dupes", "2026-08", [Record(id="a", title="A", time="2026-08-01T00:00:00Z")])
+    brain.write("memories/dupes/" + "0" * 64 + ".json", b'{"id":"a","title":"A"}\n')
     assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
     problems = index.status(brain)["problems"]
     assert isinstance(problems, list)
     assert len(problems) == 3
     assert any(p.startswith("projects/broken.md: invalid frontmatter: status") for p in problems)
-    assert any("duplicate reference dupes:a" in p for p in problems)
+    assert any("record id does not match" in p for p in problems)
 
 
 def test_links_and_special_files_are_reported_without_hiding_the_brain(brain: Store, tmp_path: Path) -> None:
@@ -164,7 +168,7 @@ def test_links_and_special_files_are_reported_without_hiding_the_brain(brain: St
     )
     # The cache names the partition, and a skipped partition keeps an absent record from looking absent.
     assert cast(dict, read([brain], "meetings:decision-1")["record"])["id"] == "decision-1"
-    with pytest.raises(Error, match="unreadable partitions"):
+    with pytest.raises(Error, match="unreadable records"):
         read([brain], "meetings:missing")
     report = validate(brain)
     assert not report["valid"]
@@ -281,7 +285,7 @@ def test_concurrent_first_search_waits_for_a_complete_cache(
             assert waits == [120]  # Incomplete generations cannot be served as stale evidence.
         finally:
             release_ingest.set()
-        assert build.result(timeout=10)["files"] == 3
+        assert build.result(timeout=10)["files"] == 4
         reply = result.result(timeout=10)
     assert "stale" not in reply
     assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])][:2] == [
@@ -330,7 +334,7 @@ def test_several_brains_interleave_and_reads_name_their_brain(brain: Store, tmp_
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 5\nname: team\n")
+    team.write("bf.yaml", b"version: 6\nname: team\n")
     team.write("projects/offline.md", b"# Team offline\n\nThe team keeps offline retrieval too.\n")
     register(team)
     stores = [brain, team]
@@ -362,7 +366,7 @@ def test_exact_reads(brain: Store) -> None:
     section = read([brain], "projects/offline.md#next-actions")
     assert section["text"] == "## Next actions\n\n- Publish the retention guide.\n"
     record = read([brain], "meetings:decision-1")
-    assert record["path"] == "memories/meetings/2026-08.jsonl"
+    assert record["path"] == "memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json"
     assert cast("dict[str, object]", record["record"])["text"] == "The team chose offline retrieval."
     assert read([brain], "meeting:decision-1")["ref"] == "meetings:decision-1"
     assert read([brain], "repo:example/project")["ref"] == "projects/offline.md"
@@ -430,11 +434,13 @@ def test_malformed_link_does_not_block_other_notes(brain: Store) -> None:
     assert "invalid link" in str(index.status(brain)["problems"])
 
 
-def test_removing_a_duplicate_retries_its_other_partition(brain: Store) -> None:
-    for month in ("2026-08", "2026-09"):
-        records_file(brain, "duplicates", month, [Record(id="same", title="Needle", time=f"{month}-01T00:00:00Z")])
+def test_removing_a_misnamed_record_clears_its_problem(brain: Store) -> None:
+    records_file(brain, "duplicates", "2026-08", [Record(id="same", title="Needle")])
+    wrong = "memories/duplicates/" + "0" * 64 + ".json"
+    brain.write(wrong, b'{"id":"same","title":"Needle"}\n')
     assert refs(brain, "needle") == ["duplicates:same"]
-    brain.delete("memories/duplicates/2026-08.jsonl")
+    assert index.status(brain)["problems"]
+    brain.delete(wrong)
     assert refs(brain, "needle") == ["duplicates:same"]
     assert index.status(brain)["problems"] == []
 
@@ -453,11 +459,20 @@ def test_direct_record_read_survives_unavailable_cache(brain: Store, monkeypatch
         raise Error("cache unavailable")
 
     monkeypatch.setattr(index, "fresh", unavailable)
-    brain.write("memories/meetings/2026-09.jsonl", b"malformed unrelated newer partition\n")
+    brain.write(
+        "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json",
+        b"malformed unrelated newer partition\n",
+    )
     assert read([brain], "meetings:decision-1")["ref"] == "meetings:decision-1"
 
 
-@pytest.mark.parametrize("hint", ["memories/other/2026-09.jsonl", "memories/meetings/2026-09.jsonl"])
+@pytest.mark.parametrize(
+    "hint",
+    [
+        "memories/other/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json",
+        "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json",
+    ],
+)
 def test_record_cache_hint_cannot_change_the_requested_source(brain: Store, hint: str) -> None:
     records_file(
         brain,
@@ -465,12 +480,15 @@ def test_record_cache_hint_cannot_change_the_requested_source(brain: Store, hint
         "2026-09",
         [Record(id="decision-1", title="Evidence from another source", time="2026-09-01T00:00:00Z")],
     )
-    brain.write("memories/meetings/2026-09.jsonl", b"malformed unrelated newer partition\n")
+    brain.write(
+        "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json",
+        b"malformed unrelated newer partition\n",
+    )
     index.refresh(brain)
     with closing(sqlite3.connect(brain.root / index.CACHE)) as connection, connection:
         connection.execute("UPDATE items SET path=? WHERE ref=?", (hint, "meetings:decision-1"))
     reply = read([brain], "meetings:decision-1")
-    assert reply["path"] == "memories/meetings/2026-08.jsonl"
+    assert reply["path"] == "memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json"
     assert cast("dict[str, object]", reply["record"])["title"] == "Preserve durable evidence"
 
 
@@ -529,7 +547,7 @@ def test_changed_since_uses_modification_time_without_changing_event_time(brain:
 def test_searches_report_collection_coverage_of_their_sources(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 5\nname: fixture\nsensors:\n  meetings:\n    command: [true-command]\n    refresh: 3600\n  disabled:\n    command: [true-command]\n    enabled: false\n",
+        b"version: 6\nname: fixture\nsensors:\n  meetings:\n    command: [true-command]\n    refresh: 3600\n  disabled:\n    command: [true-command]\n    enabled: false\n",
     )
     for source in ("disabled", "historical"):
         records_file(brain, source, "undated", [Record(id="x", title="Offline retrieval")])
@@ -614,7 +632,7 @@ def test_recent_identity_keeps_owners_ahead_of_newer_relations_across_brains(bra
     folder = tmp_path / "shared"
     folder.mkdir()
     team = Store(folder)
-    team.write("bf.yaml", b"version: 5\nname: team\n")
+    team.write("bf.yaml", b"version: 6\nname: team\n")
     team.write("projects/owner.md", b'---\nupdated: 2026-08-01\naliases: ["repo:example/project"]\n---\n# Owner\n')
     result = search([team, brain], Query(text="repo:example/project"))["items"]
     assert isinstance(result, list)
@@ -638,7 +656,7 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
     broken = tmp_path / "broken"
     broken.mkdir()
     other = Store(broken)
-    other.write("bf.yaml", b"version: 5\nname: interrupted\n")
+    other.write("bf.yaml", b"version: 6\nname: interrupted\n")
     other.write("memories/.pending/0.before", b"preserve this original")
     reply = search([brain, other], Query(text="offline retrieval"), counted=False)
     assert isinstance(reply["items"], list)
@@ -655,7 +673,7 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
     # Exact reads cannot silently assume a broken brain contains no competing identity.
     with pytest.raises(Error):
         read([brain, other], "meetings:lunch")
-    other.write("bf.yaml", b"version: 5\nname: [invalid]\n")
+    other.write("bf.yaml", b"version: 6\nname: [invalid]\n")
     assert search([brain, other], Query(text="offline"), counted=False)["items"]
     with pytest.raises(Error, match=r"invalid bf\.yaml"):
         search([other, other], Query(text="offline"), counted=False)
@@ -698,7 +716,7 @@ def test_search_waits_if_a_rebuild_replaces_the_checked_generation(
         finally:
             reopen.set()
             finish.set()
-        assert rebuild.result(timeout=10)["files"] == 3
+        assert rebuild.result(timeout=10)["files"] == 4
         reply = query.result(timeout=10)
     assert isinstance(reply["items"], list)
     assert reply["items"][0]["ref"] == "projects/offline.md"
@@ -791,7 +809,7 @@ def test_a_known_identity_ignores_other_brains_words(brain: Store, tmp_path: Pat
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 5\nname: team\n")
+    team.write("bf.yaml", b"version: 6\nname: team\n")
     team.write("projects/words.md", b"# Repo example project\n\nOnly words, no link.\n")
     reply = search([brain, team], Query(text="repo:example/project"))
     assert "identity" not in reply

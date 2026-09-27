@@ -1,9 +1,10 @@
 # Configuration and brain selection
 
-Most commands need only a brain directory. After [Getting started](getting-started.md), this works from anywhere:
+Most commands discover the brain from your working directory:
 
 ```bash
-bf read projects/new-website.md#decision --brain ~/brain
+cd ~/brain
+bf read projects/new-website.md#decision
 ```
 
 The reply contains the saved reason for choosing a single product page. You do not need a global configuration file or registration.
@@ -45,8 +46,8 @@ brains:
 The key must match the destination's `bf.yaml` name. Relative paths resolve from the declaring brain; absolute paths and `~` also work. Up to 32 direct references are allowed. References never recurse, download repositories or run programs.
 
 ```bash
-bf read projects --brain ~/brain
-bf update --dry-run --brain ~/brain
+bf read projects
+bf update --dry-run
 ```
 
 The first command lists projects from both brains. The second previews only your personal brain's due programs; it executes nothing.

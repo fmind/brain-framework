@@ -26,7 +26,7 @@ from bf.update import update
 START = "2026-09-01T00:00:00.000000Z"
 END = "2026-09-02T00:00:00.000000Z"
 NOW = datetime(2026, 9, 2, tzinfo=UTC)
-CONFIG = b"""version: 5
+CONFIG = b"""version: 6
 name: fixture
 sensors:
   sample:
@@ -56,22 +56,39 @@ def configured(brain: Store) -> Store:
 
 
 def test_collect_dry_run_then_upsert(configured: Store) -> None:
+    output = emit({"id": "x", "title": "Decision", "text": "Keep evidence", "time": "2026-09-01T10:00:00Z"})
+
     def fake(argv: list[str], source: Program, store: Store, log: Path) -> bytes:
         assert argv[1:] == [START, END, str(configured.root), str(Path.home())]
         assert source.refresh == 3600
         assert store.root == configured.root
         assert log == log_path(configured, "sample")
-        return emit({"id": "x", "title": "Decision", "text": "Keep evidence", "time": "2026-09-01T10:00:00Z"})
+        return output
 
     preview = collect(configured, "sample", start=START, end=END, runner=fake, dry_run=True)
     samples = cast("list[dict[str, object]]", preview["samples"])
-    assert preview == {"records": 1, "samples": samples, "sensor": "sample"}
+    assert preview["records"] == 1
+    assert preview["sensor"] == "sample"
+    assert preview["requested_start"] == START
+    assert preview["requested_end"] == END
+    assert preview["output_bytes"] == len(output)
+    assert isinstance(preview["elapsed_seconds"], float)
+    assert preview["elapsed_seconds"] >= 0
+    assert preview["reconcile"] is False
     assert samples[0]["id"] == "x"
-    assert records.partitions(configured, "sample") == []
+    assert records.files(configured, "sample") == []
     assert state(configured) == {}
     result = collect(configured, "sample", start=START, end=END, runner=fake, clock=lambda: NOW)
-    assert result == {"sensor": "sample", "records": 1, "added": 1, "updated": 0, "unchanged": 0, "removed": 0}
-    assert records.partitions(configured, "sample") == ["memories/sample/2026-09.jsonl"]
+    assert {key: result[key] for key in ("sensor", "records", "added", "updated", "unchanged", "removed")} == {
+        "sensor": "sample",
+        "records": 1,
+        "added": 1,
+        "updated": 0,
+        "unchanged": 0,
+        "removed": 0,
+    }
+    assert result["output_bytes"] == preview["output_bytes"]
+    assert records.files(configured, "sample") == [records.path("sample", "x")]
     assert state(configured)["sample"] == {
         "run": NOW.isoformat(),
         "success": NOW.isoformat(),
@@ -95,7 +112,7 @@ def test_invalid_output_writes_nothing_and_is_remembered(configured: Store, outp
     with pytest.raises(Error, match=match) as failure:
         collect(configured, "sample", start=START, end=END, runner=lambda *_: output)
     assert str(log_path(configured, "sample")) in str(failure.value)
-    assert records.partitions(configured, "sample") == []
+    assert records.files(configured, "sample") == []
     assert match.split()[0] in str(state(configured)["sample"]["error"])
 
 
@@ -129,16 +146,16 @@ def test_collection_requires_a_known_enabled_source_and_a_window(configured: Sto
 
 def test_due_windows_resume_with_overlap_and_catch_up_at_most_30_days(configured: Store) -> None:
     assert due(configured, NOW) == [
-        ("folders", "2026-09-01T00:00:00.000000Z", "2026-09-02T00:00:00.000000Z"),
-        ("sample", "2026-09-01T00:00:00.000000Z", "2026-09-02T00:00:00.000000Z"),
+        ("folders", "2026-09-01T00:00:00.000000Z", "2026-09-02T00:00:00.000000Z", False),
+        ("sample", "2026-09-01T00:00:00.000000Z", "2026-09-02T00:00:00.000000Z", False),
     ]
     collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]", clock=lambda: NOW)
     collect(configured, "folders", start=START, end=END, runner=lambda *_: b"[]", clock=lambda: NOW)
     assert due(configured, NOW + timedelta(minutes=30)) == []
     later = NOW + timedelta(hours=2)
-    assert due(configured, later) == [("sample", "2026-09-01T23:55:00.000000Z", "2026-09-02T02:00:00.000000Z")]
+    assert due(configured, later) == [("sample", "2026-09-01T23:55:00.000000Z", "2026-09-02T02:00:00.000000Z", False)]
     far = NOW + timedelta(days=90)
-    windows = {name: start for name, start, _ in due(configured, far)}
+    windows = {name: start for name, start, *_ in due(configured, far)}
     assert windows == {"folders": "2026-11-30T00:00:00.000000Z", "sample": "2026-11-01T00:00:00.000000Z"}
 
 
@@ -219,7 +236,7 @@ def test_placeholders_are_expanded_once(configured: Store, monkeypatch: pytest.M
 def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 5\nname: fixture\nsensors:\n"
+        b"version: 6\nname: fixture\nsensors:\n"
         b"  a-missing:\n    command: [sensors/missing.py]\n    refresh: 3600\n"
         b'  b-good:\n    command: [echo, "[]"]\n    refresh: 3600\n',
     )
@@ -257,7 +274,7 @@ def test_an_empty_snapshot_never_erases_an_existing_catalog(configured: Store) -
     assert records.find(configured, "folders", "one") is not None
     assert "snapshot returned no records" in str(state(configured)["folders"]["error"])
     # A first empty catalog is a valid answer.
-    configured.delete("memories/folders/snapshot.jsonl")
+    configured.delete("memories/folders/7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed.json")
     assert collect(configured, "folders", start=START, end=END, runner=lambda *_: b"[]")["records"] == 0
 
 
@@ -321,7 +338,7 @@ def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_pat
         "bf.yaml",
         json.dumps(
             {
-                "version": 5,
+                "version": 6,
                 "name": "fixture",
                 "sensors": {"sample": {"command": ["sensors/wait.sh", str(marker)]}},
             }
@@ -365,7 +382,7 @@ def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_pat
                 timeout=5,
             ).stdout.strip()
             assert not status or status.startswith("Z"), f"collector process {pid} survived"
-        assert records.partitions(configured, "sample") == []
+        assert records.files(configured, "sample") == []
     finally:
         if pids:
             with suppress(ProcessLookupError):
@@ -418,8 +435,9 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
             "folders",
             timestamp((NOW + timedelta(days=1) - timedelta(days=1)).isoformat()),
             timestamp((NOW + timedelta(days=1)).isoformat()),
+            False,
         ),
-        ("sample", "2026-09-01T23:55:00.000000Z", timestamp((NOW + timedelta(days=1)).isoformat())),
+        ("sample", "2026-09-01T23:55:00.000000Z", timestamp((NOW + timedelta(days=1)).isoformat()), False),
     ]
     # A newer, disjoint window becomes the coverage and the latest success.
     newer = datetime(2026, 9, 11, 1, tzinfo=UTC)

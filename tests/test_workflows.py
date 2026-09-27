@@ -163,7 +163,7 @@ def test_capture_identity_and_integrity_are_required() -> None:
 def test_real_reads_keep_history_after_replacement_and_explain_direct_impact(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 5\nname: fixture\nschema:\n  depends-on:\n    description: Needs review when evidence changes.\n"
+        b"version: 6\nname: fixture\nschema:\n  depends-on:\n    description: Needs review when evidence changes.\n"
         b"    type: identity\n    cardinality: many\n    relation: true\n",
     )
     brain.write("projects/policy.md", b"# Policy\n\n## Retention {#retention}\n\nKeep one version.\n")

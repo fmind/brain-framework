@@ -2,13 +2,13 @@
 
 Standalone, deterministic routines. Copy the ones you need into a brain's `routines/`, declare them in `bf.yaml`, and adapt and test them there; they then belong to the brain. The Python package neither bundles nor installs them.
 
-| Routine            | Arguments   | Action                                                                                                                                                                          |
-| ------------------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `weekly-review.py` | `BRAIN END` | Projects due for review across the paginated project listing, with their next task, the last seven days' activity by source, changed notes, recent actions and the coming week. |
+| Routine            | Arguments   | Action                                                                                                                                                                                 |
+| ------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `weekly-review.py` | `BRAIN END` | Projects due for review across the paginated project listing, a counted open-task preview, the last seven days' activity by source, changed notes, recent actions and the coming week. |
 
 ```yaml
 # https://fmind.github.io/brain-framework/
-version: 5
+version: 6
 name: brain
 routines:
   weekly-review:
@@ -42,4 +42,5 @@ bf read actions --brain ~/brain
 - Link only notes needing review, using returned `uri` values: links from a dated action count as newer evidence for their targets. Name other notes and collected records by ref; do not copy record titles into authored context.
 - A failed or incomplete page (`problems`, `stale`) exits nonzero with nothing on stdout and one generic sentence on stderr; Brain Framework then writes nothing and retries at the next due run.
 - Project review follows every `next_offset`, up to 100 pages (20,000 projects). A stalled continuation or exceeded limit fails before writing; the home page alone cannot establish that all projects are current. Other home-page sections remain previews.
+- Task counts cover the eligible note selection; up to ten open tasks are previewed with source refs and lines. Plain bullets and code-span refs avoid duplicating tasks or triggering new-evidence reminders. Follow `bf read tasks` continuations for the complete list.
 - A routine never edits notes: people and agents read its action and update the owning notes.

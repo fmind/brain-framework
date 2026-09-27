@@ -76,7 +76,7 @@ bf read concepts/selected-evidence.md
 | Unknown         | `projects/example.md#unknown`                                   | The storage-cost question names the observation that would resolve it.                     |
 | Draft procedure | `concepts/selected-evidence.md`                                 | It stays draft until tried on a separate case.                                             |
 
-These reads expose the evidence; an agent or person performs the review.
+These reads expose the evidence; an agent or person performs the review. The example project uses `review_after: 7`: its reminder becomes due seven days after the local file edit, independently of its authored timeline date. Add an explicit `review_due` date when a deadline must survive copying or a Git checkout. `bf read tasks` lists the open project, concept and canonical-action checkboxes with source sections and full-selection counts; it excludes action attachments and deprecated notes.
 
 ### Retain and compare the policy
 

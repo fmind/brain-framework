@@ -120,7 +120,22 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
         for name in sorted({*config.sensors, *counts}):
             settings = config.sensors.get(name)
             run = history.get(name, {})
-            counters = {key: run[key] for key in ("records", "added", "updated", "unchanged", "removed") if key in run}
+            counters = {
+                key: run[key]
+                for key in (
+                    "records",
+                    "added",
+                    "updated",
+                    "unchanged",
+                    "removed",
+                    "requested_start",
+                    "requested_end",
+                    "reconcile",
+                    "elapsed_seconds",
+                    "output_bytes",
+                )
+                if key in run
+            }
             entry: dict[str, object] = {
                 **{key: value for key, value in run.items() if key not in counters},
                 **counts.get(name, {"records": 0}),

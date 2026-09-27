@@ -6,7 +6,7 @@ import heapq
 import re
 import sqlite3
 from collections.abc import Iterator
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack
 from itertools import islice, zip_longest
 from typing import cast
 
@@ -310,10 +310,9 @@ def _read(store: Store, ref: str) -> dict[str, object] | None:
             return None
         text = section(path, data, fragment) if fragment else data.decode("utf-8")
         return {"brain": name, "ref": ref, "text": text}
-    located, aliases, cache_error = None, [], None
+    aliases, cache_error = [], None
     try:
         with index.database(store) as (connection, _state):
-            located = connection.execute("SELECT path FROM items WHERE ref=?", (ref,)).fetchone()
             aliases = connection.execute(
                 "SELECT i.ref FROM names n JOIN items i ON i.id=n.item WHERE n.name=? ORDER BY i.ref LIMIT 2",
                 (ref,),
@@ -323,20 +322,7 @@ def _read(store: Store, ref: str) -> dict[str, object] | None:
         cache_error = error
     source, separator, record_id = ref.partition(":")
     if separator:
-        # The cache only locates the partition; the answer always comes from the record file itself.
-        found = None
-        if located:
-            hint = str(located["path"])
-            parts: tuple[str, ...] = ()
-            with suppress(Error):
-                parts = relative(hint)
-            if len(parts) == 3 and parts[:2] == ("memories", source) and parts[2].endswith(".jsonl"):
-                # Journal checks run before suppression; only an unusable cache hint is ignored.
-                with records.reading(store), suppress(Error, OSError, UnicodeError):
-                    hinted = next((r for r in records.load(store, hint) if r.id == record_id), None)
-                    if hinted:
-                        found = hint, hinted
-        found = found or records.find(store, source, record_id)
+        found = records.find(store, source, record_id)
         if found:
             collection = source_health(store, [source])[source]
             return {

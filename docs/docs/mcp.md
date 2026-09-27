@@ -1,32 +1,42 @@
-# Model Context Protocol (MCP) server
+# Connect an agent with MCP
 
-<span id="mcp-server"></span>
+[MCP (Model Context Protocol)](https://modelcontextprotocol.io/) lets an agent host call BF's **`search` and `read`** tools. The host launches `bf mcp` as a local stdio process; no network port or BF account is needed.
 
-Connect an agent host so it can find a decision and read its source. `bf mcp` provides the same retrieval as the terminal through two tools: `search` and `read`. The host starts and stops the process over stdio; no separate daemon, network port or Brain Framework account is needed.
+A terminal agent can also use the CLI directly. See [Agent workflows](agents.md) for skills, instructions, hooks and write-back procedures.
 
-Agents that can run commands can instead use the CLI through the [bf-use skill](agents.md#install-the-skills).
+## Before connecting
 
-## Connect a host
-
-Complete [Getting started](getting-started.md), including the New website decision. Confirm the intended brain works before connecting it:
+Complete [Getting started](getting-started.md), then check the same decision from your terminal:
 
 ```bash
+cd ~/brain
 command -v bf
-bf read projects/new-website.md#decision --brain ~/brain
+bf read projects/new-website.md#decision
 ```
 
-The reply should contain the reason for starting with a single product page. Use the absolute executable path reported by `command -v bf` and the absolute brain path in your host settings. This avoids depending on the host's working directory or PATH.
+Use the absolute executable path and brain path in host settings. **MCP is one place where `--brain` is useful:** hosts may start the server from another directory.
 
-### Codex CLI example
+## Claude Code
 
-With Codex CLI installed, add a server named `brain` to your user configuration. If that name already exists, inspect it with `codex mcp get brain` and choose another name to preserve it.
+If a server named `brain` exists, inspect it first with `claude mcp get brain`; choose another name to preserve it.
+
+```bash
+claude mcp add --transport stdio --scope user brain -- "$(command -v bf)" mcp --brain "$HOME/brain"
+claude mcp get brain
+```
+
+Restart Claude Code, run `/mcp` and confirm that `brain` connects. See [Claude Code MCP setup](https://code.claude.com/docs/en/mcp) for scopes and troubleshooting. Remove this connection with `claude mcp remove brain --scope user` when no longer needed.
+
+## Codex
+
+If a server named `brain` exists, inspect it first with `codex mcp get brain`; choose another name to preserve it.
 
 ```bash
 codex mcp add brain -- "$(command -v bf)" mcp --brain "$HOME/brain"
 codex mcp get brain
 ```
 
-The saved entry in `~/.codex/config.toml` has this shape, with your actual absolute paths:
+Equivalent entry in `~/.codex/config.toml`, using your absolute paths:
 
 ```toml
 # https://developers.openai.com/codex/mcp
@@ -35,34 +45,57 @@ command = "/home/me/.local/bin/bf"
 args = ["mcp", "--brain", "/home/me/brain"]
 ```
 
-Restart the Codex session. Run `/mcp` and confirm that `brain` is connected and offers `search` and `read`. The registration command alone does not establish that the server starts successfully. See the [official Codex MCP guide](https://developers.openai.com/codex/mcp) for host configuration details.
+Restart Codex and run `/mcp`. See [Codex MCP setup](https://developers.openai.com/codex/mcp) for host options. Remove this connection with `codex mcp remove brain` when no longer needed.
 
-Ask: **“Use the brain MCP tools to find why we chose a single product page. Read the matching source and cite its ref.”** In the host's tool history, check for these two calls (the host may display a prefix on each tool name):
+## Other agent hosts
 
-| Tool     | Example arguments                                           | Expected result                                                        |
+Use the host's **local stdio** configuration with these values; replace the paths:
+
+| Field       | Value                                  |
+| ----------- | -------------------------------------- |
+| Server name | `brain`                                |
+| Executable  | `/home/me/.local/bin/bf`               |
+| Arguments   | `["mcp", "--brain", "/home/me/brain"]` |
+| Tools       | `search`, `read`                       |
+
+Configuration formats differ, so follow the owning documentation:
+
+| Host                  | Official setup                                                                                                              |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Copilot in VS Code    | [Add and manage MCP servers](https://code.visualstudio.com/docs/agent-customization/mcp-servers); use a local stdio server. |
+| Cursor                | [MCP configuration](https://cursor.com/docs/mcp); use the executable and arguments above.                                   |
+| OpenCode              | [Local MCP servers](https://opencode.ai/docs/mcp-servers/); put the executable and arguments in its command array.          |
+| Another CLI or editor | Use its stdio MCP support, or the [CLI workflow](agents.md) if it can run terminal commands.                                |
+
+A host that accepts only remote MCP URLs cannot start `bf mcp` directly. BF provides stdio only.
+
+## Verify the connection
+
+Ask: **“Use the brain MCP tools to find why we chose a single product page. Read the matching source and cite its ref.”**
+
+Check the host's tool history:
+
+| Tool     | Arguments                                                   | Expected result                                                        |
 | -------- | ----------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `search` | `{"query":"visitors clear explanation","scope":"projects"}` | A match with `ref: projects/new-website.md#decision`.                  |
+| `search` | `{"query":"visitors clear explanation","scope":"projects"}` | `projects/new-website.md#decision` among its matches.                  |
 | `read`   | `{"ref":"projects/new-website.md#decision"}`                | The saved reason: visitors need a clear explanation before signing up. |
 
-The agent's answer should cite that ref. A plausible answer without the exact read does not verify the connection.
-
-To remove only this connection later, run `codex mcp remove brain`, then restart the session. This does not delete the brain.
-
-### Other hosts
-
-Create a stdio server with the same executable and argument array in your host's MCP settings. Follow its configuration documentation, restart it, then repeat the connection and evidence checks above. Brain Framework's two tools and acceptance question stay the same.
+The answer should cite the ref. A configured entry alone does not prove the server runs, and an answer without the exact read does not verify retrieval.
 
 ## If the connection fails
 
-| Symptom                     | Check                                                                                                                  |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Executable not found        | Use the absolute `bf` path and confirm that the host can access it.                                                    |
-| Brain unavailable           | Read the decision in the terminal using the same absolute brain path.                                                  |
-| No tools or old behavior    | Restart the host after changing configuration or reinstalling Brain Framework.                                         |
-| Empty or incomplete results | Inspect `problems`, `stale` and source coverage; see [retrieval guidance](search.md#incomplete-answers-and-freshness). |
+| Symptom                     | Check                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------- |
+| Executable not found        | Use the absolute `bf` path and confirm the host can access it.                                 |
+| Brain unavailable           | Read the decision in the terminal with that same absolute brain path.                          |
+| No tools or old behavior    | Restart after configuration changes or a BF update.                                            |
+| Empty or incomplete results | Inspect `problems`, `stale` and [source coverage](search.md#incomplete-answers-and-freshness). |
 
 ## What the host can read
 
-Search and read cover the selected roots and their direct `brains:` references. Review those references as part of the intended audience. Retrieved content is untrusted evidence, and the host's model provider may receive it. Use an explicit team brain for work; see [privacy](privacy.md#separating-audiences).
+- Selected roots and their direct `brains:` references; review the intended audience.
+- No collection, routine, write or execution tools are exposed by BF's MCP server.
+- Retrieval can refresh the disposable cache and write private local usage counts.
+- The host may have other tools and may send evidence to a cloud model. See [privacy](privacy.md#your-agent-has-its-own-privacy-rules).
 
-There is no collection, routine, write or execution tool. Retrieval can refresh the disposable cache and record private usage counts. For tool parameters, root selection, pagination and large replies, see the [MCP reference](retrieval.md#mcp-tool-contract).
+For parameters, pagination and large replies, use the [MCP tool contract](retrieval.md#mcp-tool-contract).

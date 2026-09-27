@@ -15,6 +15,7 @@ from pydantic import TypeAdapter
 
 from bf.config import register
 from bf.models import Record, encode
+from bf.records import path as record_path
 from bf.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -131,10 +132,9 @@ Provider retention cannot guarantee historical evidence, so the team keeps durab
 """
 
 
-def records_file(store: Store, source: str, month: str, records: list[Record]) -> None:
-    store.write(
-        f"memories/{source}/{month}.jsonl", b"".join(encode(r.model_dump(exclude_defaults=True)) for r in records)
-    )
+def records_file(store: Store, source: str, _month: str, records: list[Record]) -> None:
+    for record in records:
+        store.write(record_path(source, record.id), encode(record.model_dump(exclude_defaults=True)))
 
 
 @pytest.fixture
@@ -143,7 +143,7 @@ def brain(tmp_path: Path) -> Store:
     root = tmp_path / "brain"
     root.mkdir()
     store = Store(root)
-    store.write("bf.yaml", b"version: 5\nname: fixture\nsensors: {}\n")
+    store.write("bf.yaml", b"version: 6\nname: fixture\nsensors: {}\n")
     store.write("projects/offline.md", PROJECT)
     store.write(
         "concepts/evidence.md",

@@ -1,4 +1,4 @@
-"""Offline checks of the whole brain: notes, OKF structure, links and record partitions."""
+"""Offline checks of the whole brain: notes, OKF structure, links and record files."""
 
 from __future__ import annotations
 
@@ -48,9 +48,9 @@ def _validate(store: Store) -> dict[str, object]:
     count = 0
     # Linked and special files are never followed; the check reports those that would hold evidence.
     skipped: dict[str, tuple[int, int, int, int]] = {}
-    for name in records.partitions(store, skipped=skipped):
+    for name in records.files(store, skipped=skipped):
         try:
-            source, key = records.source_of(name), name.rsplit("/", 1)[1].removesuffix(".jsonl")
+            source = records.source_of(name)
             seen = ids.setdefault(source, set())
             for record in records.load(store, name):
                 ontology.validate(record, config)
@@ -62,8 +62,6 @@ def _validate(store: Store) -> dict[str, object]:
                 seen.add(record.id)
                 for alias in [ontology.qualify(config, f"{source}:{record.id}"), *record.aliases]:
                     aliases.setdefault(links.target(alias), set()).add(f"{source}:{record.id}")
-                if key not in {records.SNAPSHOT, records.partition(record)}:
-                    problems.append(f"{name}: record {record.id!r} belongs in {records.partition(record)}.jsonl")
         except Error as error:
             problems.append(str(error))
         except OSError:
@@ -118,7 +116,7 @@ def _validate(store: Store) -> dict[str, object]:
         if parsed.brain != config.name:
             unresolved.add(value)
             continue
-        if value in tag_targets:
+        if value in tag_targets or parsed.path == "tasks":
             continue
         owners = aliases.get(links.address(parsed.brain, parsed.path), set())
         paths = owners or {parsed.path}

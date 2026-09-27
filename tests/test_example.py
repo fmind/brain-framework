@@ -37,9 +37,9 @@ def test_example_collects_searches_and_resumes(tmp_path: Path) -> None:
     found = invoke("search", "keep originals", "--scope", "actions")
     assert found["items"][0]["ref"] == "actions/2026-09-19_retention/outputs/answer.md"
     assert invoke("validate")["valid"]
-    partitions = sorted((brain / "memories/demo").glob("*.jsonl"))
+    partitions = sorted((brain / "memories/demo").glob("*.json"))
     assert invoke("update")["brains"][0]["sensors"] == []
-    assert sorted((brain / "memories/demo").glob("*.jsonl")) == partitions
+    assert sorted((brain / "memories/demo").glob("*.json")) == partitions
     assert (action / "inputs/request.txt").is_file()
 
 

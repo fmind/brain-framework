@@ -22,12 +22,12 @@ from bf.markdown import authored, note, reference, split_ref
 from bf.models import AUTHORED, NAME, Error, NotFoundError, tag_name, timestamp
 from bf.storage import Store, relative
 
-# Draft or stable projects whose note is older than this are marked for review; a reminder, never a failure.
+# The automatic reminder interval for project files; modification time is not evidence of verification.
 REVIEW_DAYS = 14
 SECTION = 20
 PAGE = 50
 LISTING = 200
-BROWSE = ["projects", "concepts", "actions", "memories", "tags", "today", "7d"]
+BROWSE = ["projects", "concepts", "actions", "tasks", "memories", "tags", "today", "7d"]
 _SCOPE = "scope accepts a folder (projects, memories/gmail), a period (today, 7d, 2026-09, 2026-09-25) or an identity"
 _MISSING = "page not found; read projects, concepts, actions or memories to browse the brain"
 _BELOW = "(i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')"
@@ -103,10 +103,9 @@ def scope(value: str, now: datetime | None = None) -> Scope:
     if parts[0] not in (*AUTHORED, "memories"):
         raise Error(_SCOPE)
     if parts[0] == "memories" and len(parts) == 3:
-        # A partition file groups records by UTC month; a bare period uses local days.
-        if not parts[2].endswith(".jsonl") and (found := period(parts[2], now)):
+        if not parts[2].endswith(".json") and (found := period(parts[2], now)):
             return {"prefix": "/".join(parts[:2]), "since": found.since, "until": found.until}
-        return {"prefix": f"memories/{parts[1]}/{parts[2].removesuffix('.jsonl')}.jsonl"}
+        return {"prefix": path}
     return {"prefix": path}
 
 
@@ -228,29 +227,55 @@ def _time_key(item: dict[str, object]) -> tuple[str, str]:
     return str(item.get("time", "")), str(item["ref"])
 
 
-def _next_day(instant: str) -> str:
-    return _midnight(datetime.fromisoformat(instant).astimezone().date() + timedelta(days=1))
-
-
 def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now: datetime) -> None:
-    """Mark current project notes whose note is old or has newer linked evidence than its `updated` date."""
-    cutoff = timestamp((now - timedelta(days=REVIEW_DAYS)).isoformat())
+    """Derive reminders from local edits and explicit deadlines, without asserting a semantic review."""
+    rows = {
+        row["ref"]: row
+        for row in connection.execute(
+            "SELECT i.ref,i.review_after,i.review_due,f.mtime FROM items i JOIN files f ON f.path=i.path "
+            "WHERE i.ref IN (SELECT value FROM json_each(?))",
+            (json.dumps([item["ref"] for item in items]),),
+        )
+    }
+    stamp = timestamp(now.isoformat())
     for item in items:
+        row = rows.get(item["ref"])
         if (
-            item.get("type") != "project"
+            row is None
             or item.get("status", "") not in {"", "draft", "stable"}
             or str(item["ref"]).rsplit("/", 1)[-1] in {"index.md", "log.md"}
+            or not (item.get("type") == "project" or row["review_after"] or row["review_due"])
         ):
             continue
-        updated = str(item.get("time", ""))
-        # Future-dated notes are not due for review; avoid advancing dates at the calendar limit.
-        if updated > timestamp(now.isoformat()):
-            continue
-        newer = index.newer_links(connection, str(item["ref"]), _next_day(updated)) if updated else 0
+        reasons = []
+        modified = ""
+        due = ""
+        try:
+            instant = datetime.fromtimestamp(row["mtime"] / 1_000_000_000, UTC)
+            modified = timestamp(instant.isoformat())
+            item["modified"] = modified
+            if modified > stamp:
+                # A future clock cannot establish an age. Surface it instead of postponing forever.
+                reasons.append("future_modified")
+            if not row["review_due"]:
+                due = timestamp((instant + timedelta(days=row["review_after"] or REVIEW_DAYS)).isoformat())
+        except ValueError, OverflowError, OSError:
+            reasons.append("unknown_modified")
+        if row["review_due"]:
+            due = _midnight(date.fromisoformat(row["review_due"]))
+        item["review_source"] = "review_due" if row["review_due"] else "modified"
+        if due:
+            item["review_due"] = due
+            if due <= stamp:
+                reasons.append("due")
+        # Incoming evidence keeps its event-date semantics; copying another note is not new evidence.
+        newer = index.newer_links(connection, str(item["ref"]), modified) if modified else 0
         if newer:
             item["new_links"] = newer
-        if not updated or updated < cutoff or newer:
+            reasons.append("newer_evidence")
+        if reasons:
             item["review"] = True
+            item["review_reasons"] = reasons
 
 
 def home(stores: list[Store], now: datetime | None = None, *, counted: bool = True) -> dict[str, object]:
@@ -400,7 +425,7 @@ def folder(
 def memories(
     stores: list[Store], parts: tuple[str, ...], now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
-    """Sources with their coverage, one source with its partitions, or one source's records in a period."""
+    """Sources with their coverage, one source with its records, or one source's records in a period."""
     now = now or datetime.now(UTC)
     if len(parts) == 1:
         if offset:
@@ -430,7 +455,6 @@ def memories(
             health = source_health(store, [source], now=now)[source]
             return {
                 "sources": [{"source": source, **counts.get(source, {"records": 0}), **health}],
-                "partitions": [{"ref": path, "records": count} for path, count in index.partitions(connection, source)],
             }
 
         found, extra = _brains(stores, page, counted=counted)
@@ -439,7 +463,6 @@ def memories(
         return {
             "page": "/".join(parts),
             "sources": _gather(found, "sources"),
-            "partitions": [{"brain": name, **p} for name, part in found for p in cast("list", part["partitions"])],
             **_listing(
                 stores,
                 "i.kind='record' AND i.source=:source",
@@ -451,14 +474,15 @@ def memories(
             ),
             **extra,
         }
-    name = parts[2].removesuffix(".jsonl")
-    window = None if parts[2].endswith(".jsonl") else period(name, now)
+    name = parts[2]
+    window = None if parts[2].endswith(".json") else period(name, now)
     if window:
         where = "i.kind='record' AND i.source=:source AND i.time!='' AND i.time>=:since AND i.time<:until"
         params = {"source": source, "since": window.since, "until": window.until}
-    elif name in {"snapshot", "undated"} or re.fullmatch(r"\d{4}-\d{2}", name):
-        # A partition file, as listed on the source page: its records match its count exactly.
-        where, params = "i.kind='record' AND i.path=:path", {"path": f"memories/{source}/{name}.jsonl"}
+    elif name == "undated":
+        where, params = "i.kind='record' AND i.source=:source AND i.time=''", {"source": source}
+    elif re.fullmatch(r"[0-9a-f]{64}\.json", name):
+        where, params = "i.kind='record' AND i.path=:path", {"path": f"memories/{source}/{name}"}
     else:
         raise NotFoundError(_MISSING)
 
@@ -478,6 +502,66 @@ def memories(
     if window and window.previous:
         reply.update(previous=f"memories/{source}/{window.previous}", next=f"memories/{source}/{window.next}")
     return {**reply, **extra}
+
+
+def tasks(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict[str, object]:
+    """Open checkboxes in current canonical notes, with source lines and complete aggregate counts."""
+    # Working attachments can quote source checkboxes: only authored entry notes join the task queue.
+    eligible = (
+        "i.kind='note' AND i.status NOT IN ('deprecated','archived','done') AND "
+        "(substr(i.path,1,9) IN ('projects/','concepts/') OR (" + index.ACTION + "))"
+    )
+
+    def build(_store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+        # Keep counts and rows in the same read snapshot while cache writers continue in WAL mode.
+        connection.execute("BEGIN")
+        summary = connection.execute(
+            "SELECT coalesce(sum(t.done=0),0),coalesce(sum(t.done=1),0),count(DISTINCT t.item) "  # noqa: S608 - fixed SQL
+            f"FROM tasks t JOIN items i ON i.id=t.item WHERE {eligible}"
+        ).fetchone()
+        rows = connection.execute(
+            "SELECT i.ref,i.title,t.line,t.fragment,t.text FROM tasks t JOIN items i ON i.id=t.item "  # noqa: S608 - fixed SQL
+            f"WHERE t.done=0 AND {eligible} ORDER BY i.ref,t.line"
+        )
+
+        def items() -> Iterator[dict[str, object]]:
+            for ref, title, line, fragment, text in rows:
+                yield label(
+                    name,
+                    {
+                        "ref": ref + ("#" + fragment if fragment else ""),
+                        "note": ref,
+                        "title": title,
+                        "line": line,
+                        "text": text,
+                    },
+                )
+
+        return {"rows": items(), "summary": dict(zip(("open", "done", "notes"), summary, strict=True))}
+
+    with ExitStack() as stack:
+        parts, extra = _brains(stores, build, counted=counted, stack=stack)
+        streams = [cast("Iterator[dict[str, object]]", part["rows"]) for _, part in parts]
+        try:
+            merged = heapq.merge(
+                *streams, key=lambda item: (str(item["note"]), int(cast("int", item["line"])), str(item["brain"]))
+            )
+            items = list(islice(islice(merged, offset, None), PAGE))
+        except sqlite3.DatabaseError as error:
+            raise Error("the search cache is unavailable; run bf build") from error
+        summary = {
+            key: sum(cast("dict[str, int]", part["summary"])[key] for _, part in parts)
+            for key in ("open", "done", "notes")
+        }
+    total = summary["open"]
+    return {
+        "page": "tasks",
+        "items": items,
+        "total": total,
+        "summary": summary,
+        **extra,
+        **({"next_offset": offset + len(items)} if offset + len(items) < total else {}),
+    }
 
 
 def tags(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict[str, object]:
@@ -547,6 +631,8 @@ def page(
     if found := period(path, now):
         return timeline(stores, path, found, offset=offset, counted=counted)
     parts = tuple(path.rstrip("/").split("/"))
+    if parts == ("tasks",):
+        return tasks(stores, offset=offset, counted=counted)
     if parts[0] == "tags":
         if len(parts) == 1:
             return tags(stores, offset=offset, counted=counted)

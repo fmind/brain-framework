@@ -4,7 +4,7 @@
 
 Keep a project's current state in `projects/`, reusable knowledge in `concepts/` and a session's stopping point in `actions/`. This page builds on the [New website walkthrough](getting-started.md) with complete examples you can adapt.
 
-A brain is an ordinary directory, usually a private Git repository. Work inside it or select it with `--brain PATH`. You write notes with your editor or agent; sensors own collected records.
+A brain is an ordinary directory, usually a private Git repository. Run commands from inside it. You write notes with your editor or agent; sensors own collected records.
 
 ## Notes
 
@@ -39,14 +39,16 @@ Start with a single product page because visitors need a clear explanation befor
 - [ ] Draft the product page.
 ```
 
-| Field                      | Effect                                                                                               |
-| -------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `title`                    | Result title; otherwise the first H1, then the file name.                                            |
-| `type`                     | Required for projects, concepts and `ACTION.md`; typically `project`, `concept` or `action`.         |
-| `status`                   | `draft`, `stable` or `deprecated`; omitted means stable. Describes document maturity.                |
-| `updated`                  | `YYYY-MM-DD`; used for period pages and project review reminders.                                    |
-| `summary`, `description`   | The note's lead in results.                                                                          |
-| `tags`, `aliases`, `links` | Searchable; `aliases` are exact identities that resolve to the note; `links` add explicit relations. |
+| Field                      | Effect                                                                                                                                                      |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `title`                    | Result title; otherwise the first H1, then the file name.                                                                                                   |
+| `type`                     | Required for projects, concepts and `ACTION.md`; typically `project`, `concept` or `action`.                                                                |
+| `status`                   | `draft`, `stable` or `deprecated`; omitted means stable. Describes document maturity.                                                                       |
+| `updated`                  | `YYYY-MM-DD`; the authored date used for period pages, independent of local file modification time.                                                         |
+| `review_after`             | Optional integer from 1 to 3650: reminder interval in days since the local file was modified. Defaults to 14 for projects; opts other notes into reminders. |
+| `review_due`               | Optional `YYYY-MM-DD`: an explicit reminder deadline at local midnight, overriding the automatic interval.                                                  |
+| `summary`, `description`   | The note's lead in results.                                                                                                                                 |
+| `tags`, `aliases`, `links` | Searchable; `aliases` are exact identities that resolve to the note; `links` add explicit relations.                                                        |
 
 Use `draft` while reviewing an idea, `stable` for reviewed knowledge and `deprecated` when it is no longer current. Put work progress in task lists:
 
@@ -59,7 +61,22 @@ The project listing shows `"next":"Draft the product page."`; the second command
 
 Task list items (`- [ ]`, `- [x]`) are counted as `tasks`; the first open one becomes `next`. Keep the note's current state up to date. If you use Git, let it retain old versions instead of appending history sections.
 
-The home and projects pages mark draft or stable projects for `review` when `updated` is missing, more than 14 days old or earlier than incoming linked evidence (`new_links`). Future-dated notes wait until their date; deprecated projects appear last. A note date means local midnight on the reading machine, and an undated note appears in no period. See [page behavior](retrieval.md#pages).
+Read `bf read tasks` for all open checkboxes in project and concept notes and canonical action entries. It includes source sections and line numbers, counts open and completed items, and supports pagination. Action inputs, outputs and loose helpers are excluded because they can contain copied source checkboxes. See [task pages](retrieval.md#tasks).
+
+### Review reminders
+
+Project reminders are automatic: their age is measured from the local file modification time, with a default interval of 14 days. Editing the file refreshes that age without requiring a manual review acknowledgment or a change to `updated`. A project also needs attention when dated incoming evidence is newer than its local modification time. Deprecated notes have no reminders. Concepts and action notes opt in by setting `review_after` or `review_due`; their folder listings expose the same signals.
+
+For example, add these fields to a project's existing frontmatter:
+
+```yaml
+review_after: 30
+review_due: 2026-10-15
+```
+
+Set `review_after: 30` for a slower reminder interval, or `review_due: 2026-10-15` for a deadline that stays due after a local edit. An explicit deadline overrides the interval; newer linked evidence can still request attention before that deadline. `review_due` dates use midnight in the reading machine's timezone.
+
+File modification time is an automatic reminder signal, **not proof of review, verification or truth**. Copying, cloning or touching a file can reset it, and a clock in the future produces an explicit reminder reason. Use an explicit `review_due` for a portable deadline. Reads do not write metadata or mark anything reviewed. `updated` continues to place notes on period pages at local midnight; an undated note appears in no period. See [reply fields and reasons](retrieval.md#ordering-and-review-signals).
 
 In OKF metadata, `sources` entries need a nonempty `resource`, and `verified` events need `by` and `at`. Other metadata remains available as data. Markdown links and source resources can point to notes, brain files or records; `bf validate` checks local targets. See the [concept example](#concepts) for a source link.
 
@@ -75,7 +92,7 @@ bf read bf://brain/tags/website
 bf search "product page" --scope bf://brain/tags/website
 ```
 
-With the sample note above, the `website` page includes New website. The scoped search considers only notes carrying that exact tag, while an unscoped search for `website` can also match prose. Tags need no concept note. Use your brain's configured name in BF addresses; see [tag rules](schema.md#tag-rules) for limits and pagination.
+With the sample note above, the `website` page includes New website. The scoped search considers only notes carrying that exact tag, while an unscoped search for `website` can also match prose. Tags need no concept note. Use your brain's configured name in BF addresses; see [tag rules](link-reference.md#tag-rules) for limits and pagination.
 
 ## Concepts
 
@@ -196,7 +213,7 @@ That read returns the saved brief and its source details. You can cite it in the
 | `fields`     | Normalized schema values; searchable, with typed relationship edges.                     |
 | `attributes` | Structured details kept for exact reads, not searched.                                   |
 
-Sensors print records; BF stores one JSON object per line in the record's month partition (`undated.jsonl` without a time, `snapshot.jsonl` for snapshot sources). Collecting an existing id updates that record. Put searchable facts in `title` and `text`, and additional exact-read details in `attributes`.
+Sensors print records; BF stores one compact JSON object per file at `memories/<source>/<sha256-id>.json`. The filename is the lowercase SHA-256 of the UTF-8 record id. It stays stable when dates change or a source switches collection mode. Collecting an existing id updates only that record; unchanged records retain their bytes. Snapshot collection removes records absent from the complete catalog, transactionally. Put searchable facts in `title` and `text`, and additional exact-read details in `attributes`.
 
 For revision rules, timestamps and recovery, see the [record reference](schema.md#record-revisions-and-provenance) and [file safeguards](limits.md#files).
 
@@ -209,8 +226,8 @@ bf.yaml                                   # name, shared schema and sensor mappi
 AGENTS.md                                 # instructions for agents working in the brain
 projects/<project>.md                     # OKF project notes with OKF lifecycle statuses
 concepts/index.md, concepts/<concept>.md  # reusable OKF v0.2 knowledge
-actions/YYYY-MM-DD_slug/ACTION.md         # OKF session note, with inputs/ and outputs/
-memories/<source>/<YYYY-MM>.jsonl         # collected items
+actions/YYYY-MM-DD_topic-UUID/ACTION.md   # independent session, with inputs/ and outputs/
+memories/<source>/<sha256-id>.json         # collected items
 assets/                                   # logos, images, audio and other media that notes link to
 sensors/                                  # executable collectors declared in bf.yaml
 routines/                                 # deterministic programs declared in bf.yaml, and other upkeep code
@@ -221,7 +238,7 @@ inputs/, originals/, logs/                # unversioned: imports to process, ret
 .bf/                                      # disposable search cache
 ```
 
-Only Markdown under `projects/`, `concepts/` and `actions/` and JSON Lines under `memories/` are searchable. This includes Markdown in action inputs and outputs: keep them within the brain's intended audience. Everything else is ordinary brain code, configuration and media. `.bf/` is safe to delete while Brain Framework is idle.
+Only Markdown under `projects/`, `concepts/` and `actions/` and JSON records under `memories/` are searchable. This includes Markdown in action inputs and outputs: keep them within the brain's intended audience. Everything else is ordinary brain code, configuration and media. `.bf/` is safe to delete while Brain Framework is idle.
 
 Use `assets/` for media shared by several notes: `[logo](../assets/logo.svg)` lets validation catch a missing file. A single action's deliverables belong in its `outputs/`. Keep large media out of Git history, for example with Git LFS.
 

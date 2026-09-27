@@ -75,7 +75,7 @@ def server(stores: list[Store]) -> MCPServer:
             str,
             Field(
                 max_length=8192,
-                description="Empty for the home page; a page (projects, concepts, actions, memories, memories/SOURCE, "
+                description="Empty for the home page; a page (projects, concepts, actions, tasks, memories, memories/SOURCE, "
                 "tags, tags/LABEL, today, 7d, 2026-09); a note path, path#section, source:id record, identity or bf:// address.",
             ),
         ] = "",

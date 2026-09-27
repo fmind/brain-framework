@@ -28,7 +28,7 @@ def corpus(brain: Store, tmp_path: Path) -> list[Store]:
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 5\nname: team\n")
+    team.write("bf.yaml", b"version: 6\nname: team\n")
     for n, store in enumerate([brain, team]):
         records_file(
             store,
@@ -48,7 +48,7 @@ def corpus(brain: Store, tmp_path: Path) -> list[Store]:
     return [brain, team]
 
 
-@pytest.mark.parametrize("ref", ["2026-09-26", "memories/mail", "memories/mail/2026-09.jsonl"])
+@pytest.mark.parametrize("ref", ["2026-09-26", "memories/mail", "memories/mail/2026-09"])
 def test_pages_visit_every_record_across_brains(brain: Store, tmp_path: Path, ref: str) -> None:
     stores = corpus(brain, tmp_path)
     offset = 0
@@ -99,7 +99,7 @@ def test_authored_folder_continuation(brain: Store) -> None:
 
 
 def test_empty_search_describes_failed_and_never_collected_sources(brain: Store) -> None:
-    brain.write("bf.yaml", b'version: 5\nname: fixture\nsensors:\n  mail:\n    command: ["fake"]\n    refresh: 3600\n')
+    brain.write("bf.yaml", b'version: 6\nname: fixture\nsensors:\n  mail:\n    command: ["fake"]\n    refresh: 3600\n')
 
     def failed(*_args: object) -> bytes:
         raise Error("synthetic failure")
@@ -236,7 +236,7 @@ def test_linked_transaction_directory_still_blocks_reads(brain: Store, tmp_path:
 def test_claim_preview_reports_truncation(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 5\nname: fixture\nschema:\n  depends-on:\n    description: Needs context.\n"
+        b"version: 6\nname: fixture\nschema:\n  depends-on:\n    description: Needs context.\n"
         b"    type: identity\n    cardinality: many\n    relation: true\n",
     )
     links = "\n".join(f"[Evidence {n}](bf://fixture/concepts/target-{n}?rel=depends-on)" for n in range(51))

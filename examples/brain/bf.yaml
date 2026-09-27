@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/
-version: 5
+version: 6
 name: example
 sensors:
   demo:

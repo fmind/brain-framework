@@ -2,6 +2,12 @@
 
 Use when a consequential decision must remain explainable after its sources change, or when reviewing an explicit dependency. Capture only the selected evidence needed for that decision, not the whole brain.
 
+## Triage a selected passage
+
+Read the exact highlight record, its source URL and page or section before promoting it into a project or concept. In the highlights sensor, `text` is the selected source passage; `attributes.annotation` is separate interpretation, `time` is the supplied capture time and `attributes.source_date` is the source's stated date. Neither collection nor an annotation establishes truth or authority. Check enough surrounding context to support the intended claim; if the original is unavailable, retain that limitation.
+
+Choose one outcome: link the useful passage from an existing decision or lesson; retain it as unreviewed evidence with the unresolved question; or exclude it from the selected export during an authorized cleanup. Keep the conclusion in the owning note, cite the highlight ref and distinguish quotation from interpretation. Before a replacement or cleanup would remove a revision supporting a decision, retain the selected evidence as described below. Do not duplicate a full document merely to triage one passage.
+
 ## Retain a revision
 
 Read the exact note section or record through `bf read`. Record its original ref, when it became known, when the claim applies (if stated), and any dispute in a dated decision note. Use an existing action's `outputs/` and `inputs/` for the note and captures when that action owns the work. Without an action, keep the dated note under `projects/` and captures under `assets/`, linked from the owning project. Reuse existing locations and choose unused filenames; never create an action merely to retain evidence. Keep these dates distinct; the capture time is when this local copy was made, not necessarily when the underlying event happened.

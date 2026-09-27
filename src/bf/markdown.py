@@ -36,6 +36,14 @@ class Heading:
     end: int
 
 
+@dataclass(frozen=True)
+class Task:
+    done: bool
+    text: str
+    fragment: str
+    line: int
+
+
 @dataclass
 class Markdown:
     text: str
@@ -44,8 +52,8 @@ class Markdown:
     headings: list[Heading]
     links: list[str]
     contexts: list[tuple[str, str]]
-    # Task list items in document order: (done, text).
-    tasks: list[tuple[bool, str]] = field(default_factory=list)
+    # Task list items in document order, with their containing section and source line.
+    tasks: list[Task] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -66,7 +74,7 @@ class Note:
     slugs: set[str] = field(default_factory=set)
     targets: list[str] = field(default_factory=list)
     contexts: list[tuple[str, str]] = field(default_factory=list)
-    tasks: list[tuple[bool, str]] = field(default_factory=list)
+    tasks: list[Task] = field(default_factory=list)
 
     @property
     def links(self) -> list[str]:
@@ -96,6 +104,9 @@ def parse(path: str, data: bytes) -> Markdown:
     except UnicodeError as error:
         raise Error(f"{path}: note is not UTF-8") from error
     source_lines = lines(text)
+    for number, value in enumerate(source_lines, 1):
+        if re.match(r"^(?:<{7,}|>{7,}|\|{7,})(?: |$)", value.rstrip("\r\n")):
+            raise Error(f"{path}:{number}: unresolved merge conflict marker; reconcile both revisions")
     offset = 0
     attributes: dict[str, object] = {}
     if source_lines and source_lines[0].rstrip("\r\n") == "---":
@@ -111,11 +122,16 @@ def parse(path: str, data: bytes) -> Markdown:
     headings: list[Heading] = []
     links: list[str] = []
     contexts: list[tuple[str, str]] = []
-    tasks: list[tuple[bool, str]] = []
+    tasks: list[Task] = []
     used: set[str] = set()
     explicit: set[str] = set()
     fragment = ""
+    quoted = 0
     for i, token in enumerate(tokens):
+        if token.type == "blockquote_open":
+            quoted += 1
+        elif token.type == "blockquote_close":
+            quoted -= 1
         if token.type == "heading_open" and token.map is not None:
             inline = tokens[i + 1]
             title = "".join(
@@ -140,14 +156,16 @@ def parse(path: str, data: bytes) -> Markdown:
             used.add(slug)
             headings.append(Heading(slug, title, int(token.tag[1:]), token.map[0] + offset, token.map[1] + offset))
             fragment = slug
-        # A task is a list item whose paragraph starts with [ ] or [x]; code blocks never produce one.
+        # A task is an unquoted list paragraph starting with [ ] or [x]; code blocks never produce one.
         if (
             token.type == "inline"
+            and not quoted
+            and token.map is not None
             and i >= 2
             and (tokens[i - 1].type, tokens[i - 2].type) == ("paragraph_open", "list_item_open")
             and (task := _TASK.match(token.content.split("\n", 1)[0]))
         ):
-            tasks.append((task[1] != " ", _plain(task[2])[:LEAD]))
+            tasks.append(Task(task[1] != " ", _plain(task[2])[:LEAD], fragment, token.map[0] + offset + 1))
         for child in token.children or []:
             if child.type == "link_open":
                 target = str(child.attrGet("href"))

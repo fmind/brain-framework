@@ -44,7 +44,7 @@ bf read actions
 bf validate
 ```
 
-If there are projects due for review or dated items from the last seven days, the update reply names the new `actions/YYYY-MM-DD_weekly-review/ACTION.md`. Read that returned path to see the review tasks; the date is the day you ran it. If there is nothing to review, the routine succeeds without creating an action. An immediate second update leaves existing work intact.
+If there are projects due for review, open tasks or dated items from the last seven days, the update reply names the new `actions/YYYY-MM-DD_weekly-review/ACTION.md`. Read that returned path to see the review tasks; the date is the day you ran it. If there is nothing to review, the routine succeeds without creating an action. An immediate second update leaves existing work intact.
 
 To preview the Markdown without saving an action, run the script directly with your review timestamp:
 
@@ -52,15 +52,17 @@ To preview the Markdown without saving an action, run the script directly with y
 uv run --no-project --python 3.14 routines/weekly-review.py ~/brain 2026-09-27T12:00:00Z
 ```
 
-The timestamp sets the note's date; the example reads the brain's current home and last-seven-days pages. It does not recreate the brain as it was on a past date.
+The action includes open/completed task counts across notes and a preview of up to ten open tasks with their source sections and lines. Follow `bf read tasks` continuations for the complete list. Summarized tasks use plain bullets, so generating a review does not duplicate their checkboxes or add graph claims. The counts exclude deprecated notes and action attachments; incomplete task replies stop the routine before it writes.
+
+The timestamp sets the note's date; the example reads the brain's current home, project, task and last-seven-days pages. It does not recreate the brain as it was on a past date.
 
 A successful routine produces one of three outcomes:
 
-| Output or existing state             | Result                                                                  |
-| ------------------------------------ | ----------------------------------------------------------------------- |
-| Valid OKF Markdown                   | A new `actions/YYYY-MM-DD_NAME/ACTION.md`, using the local date.        |
-| Empty output                         | Success with no action.                                                 |
-| Today's action folder already exists | Skipped; existing work stays intact and the review window remains open. |
+| Output or existing state                 | Result                                                                  |
+| ---------------------------------------- | ----------------------------------------------------------------------- |
+| Valid OKF Markdown                       | A new `actions/YYYY-MM-DD_NAME-UUID/ACTION.md`, using the local date.   |
+| Empty output                             | Success with no action.                                                 |
+| This clone already wrote an action today | Skipped; existing work stays intact and the review window remains open. |
 
 Failures, invalid OKF metadata or Markdown, and excessive output create no action. The routine remains due, and the failure appears in `bf status` and the home page's `attention`.
 
@@ -97,3 +99,5 @@ Every nonempty output needs a nonempty `type`. Optional `status` must be `draft`
 Test the script with a fake `bf`. It runs with the same [process safeguards](limits.md#processes-and-logs) as a sensor. `bf status` reports its last run, success, error, log and latest action.
 
 To run updates automatically, see [Schedule updates](schedule.md).
+
+Routine action folders include a fresh UUID hex suffix. Independent clones create distinct sessions; this avoids filename conflicts but does not deduplicate overlapping reviews. Use one scheduler for a shared routine when only one team review is wanted. A clone remembers its last action in private run state and never replaces it.

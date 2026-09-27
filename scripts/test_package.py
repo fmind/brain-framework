@@ -72,7 +72,9 @@ def main() -> None:
 from importlib.metadata import distribution
 from pathlib import Path
 import bf
+from bf.watch import Dashboard
 
+assert Dashboard("package-smoke").render(80, 24)
 installed = distribution("brain-framework")
 assert installed.metadata["Name"] == "brain-framework"
 assert installed.version == bf.__version__
@@ -84,14 +86,22 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             )
             bf = str(venv / "bin/bf")
             brain = home / "brain"
+            run(bf, "watch", "--help", cwd=home, env=env)
+            run(bf, "schedule", "--help", cwd=home, env=env)
             run(bf, "--version", cwd=home, env=env)
             run(bf, "init", str(brain), cwd=home, env=env)
             if (home / "config/bf/config.yaml").exists():
                 raise SystemExit("init unexpectedly registered the smoke-test brain")
+            (brain / "projects/package.md").write_text(
+                "---\ntype: project\nstatus: draft\nreview_after: 7\n---\n# Package check\n\n"
+                "## Next\n\n- [ ] Inspect the installed task page.\n"
+            )
             for arguments in [
                 ("validate",),
                 ("search", "welcome"),
                 ("read", "concepts/welcome.md"),
+                ("read", "projects"),
+                ("read", "tasks"),
                 ("status", "--check"),
                 ("eval",),
             ]:

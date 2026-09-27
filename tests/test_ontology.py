@@ -26,7 +26,7 @@ def search(stores: list[Store], query: Query) -> dict:
     return cast(dict, retrieve_search(stores, query))
 
 
-CONFIG = b"""version: 5
+CONFIG = b"""version: 6
 name: fixture
 schema:
   sender:
@@ -106,7 +106,7 @@ def test_invalid_batch_writes_nothing_and_does_not_leak(brain: Store) -> None:
     with pytest.raises(Error, match="schema field sender") as caught:
         ingest(brain, [good, bad])
     assert "PRIVATE-SECRET" not in str(caught.value)
-    assert records.partitions(brain, "mail") == []
+    assert records.files(brain, "mail") == []
     with pytest.raises(Error, match="required mapped value"):
         ingest(brain, [{"id": "one", "title": "Missing"}])
     with pytest.raises(Error, match="not precomputed"):
@@ -147,7 +147,8 @@ def test_config_contracts_and_pointer_escaping() -> None:
         SchemaField(description="Wrong", type="integer", examples=[True])
     field = SchemaField(description="Many", type="string", cardinality="many")
     assert field.normalize(["a", "a", "b"]) == ["a", "b"]
-    for invalid in ["a", ["a"] * 1001, [1]]:
+    invalid_values: list[JsonValue] = ["a", ["a"] * 1001, [1]]
+    for invalid in invalid_values:
         with pytest.raises(ValueError, match=r"expected|requires|exceeds|nonempty"):
             field.normalize(invalid)
     for invalid in [{}, {"path": None}, {"path": "/x", "value": 1}, {"path": "x"}, {"path": "/~2"}, {"value": None}]:
@@ -175,7 +176,9 @@ def test_schema_change_invalidates_cache_and_bad_partition_is_reported(brain: St
     with pytest.raises(Error, match="not found"):
         read([brain], "person:alice")
     record = Record(id="bad", title="Invalid", fields={"undeclared": "x"})
-    brain.write("memories/bad/undated.jsonl", records.line(record))
+    brain.write(
+        "memories/bad/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json", records.line(record)
+    )
     reply = search([brain], Query(text="offline"))
     assert reply["items"]
     assert reply["problems"]

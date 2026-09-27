@@ -264,7 +264,7 @@ def writer(store: Store, wait: float = 0) -> Iterator[None]:
 
 @contextmanager
 def reader(store: Store, wait: float = 120) -> Iterator[None]:
-    """Keep record partitions stable during one exact read; readers can run concurrently."""
+    """Keep record files stable during one exact read; readers can run concurrently."""
     with _lock(store, "write.lock", wait, shared=True):
         yield
 

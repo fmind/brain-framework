@@ -1,6 +1,6 @@
 # Search and read
 
-Use `bf search` to find evidence and `bf read` to open it. Both work offline and notice file edits automatically. Run commands inside your brain, or select it with `--brain ~/brain`.
+Use `bf search` to find evidence and `bf read` to open it. Both work offline and notice file edits automatically. Run commands inside your brain directory.
 
 ## Search
 
@@ -31,13 +31,20 @@ Use pages when you want to browse rather than search for words:
 | ------------------ | ------------------------------------------------------------------ |
 | `bf read`          | See projects needing attention, recent work and collection alerts. |
 | `bf read projects` | Find a project's current state and first open task.                |
+| `bf read tasks`    | Summarize open tasks and read the section owning each one.         |
 | `bf read actions`  | Find a session to resume.                                          |
 | `bf read 7d`       | Browse the last seven days of saved activity.                      |
 | `bf read memories` | Inspect sources, counts and collection coverage.                   |
 
-For the New website project, `bf read projects` shows `"next":"Draft the product page."`. A project's `review: true` flag is a reminder to review its note, not a validation failure.
+For the New website project, `bf read projects` shows `"next":"Draft the product page."`. A project's `review: true` flag is a reminder, with `review_reasons` explaining the deadline or newer evidence. File modification time supplies the default age signal; an explicit `review_due` sets a deadline. Neither means the note was verified. See [review reminders](brain.md#review-reminders).
 
 Recent-activity pages use note dates and record timestamps. They do not fetch anything from a provider. See the [page reference](retrieval.md#pages) for all available pages and their time rules.
+
+## Summarize open tasks
+
+`bf read tasks` returns open checkboxes from project notes, concepts and action `ACTION.md` notes, with full-selection counts in `summary` and a paginated `items` list. Each item has a source section `ref`, owning `note`, source `line` and a short `text` preview. Read that ref before acting. Deprecated notes and action attachments are excluded.
+
+For the first-decision walkthrough, the list contains “Draft the product page.” Checking it off removes it from the open list and increases `summary.done`. Follow `next_offset` for the complete list; `problems` or `stale` also qualify the summary. A task is recorded work, not authorization to perform it. See [task-page details](retrieval.md#tasks).
 
 ## Browse tags
 

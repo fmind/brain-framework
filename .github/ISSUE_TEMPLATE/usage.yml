@@ -1,0 +1,27 @@
+# https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-issue-forms
+name: Usage experience
+description: Share a useful outcome, an onboarding obstacle, or a reason you stopped using BF.
+title: "usage: "
+body:
+  - type: markdown
+    attributes:
+      value: Share only information you may publish. Replace private questions and records with fictional examples; omit tokens, account identifiers and logs containing work data.
+  - type: textarea
+    id: task
+    attributes:
+      label: What were you trying to do?
+      description: Describe the recurring question, tools involved and your previous way of doing it.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What actually happened?
+      description: Include the useful result or obstacle, any assistance needed, and whether you used BF again. A decision to stop using it is useful feedback too.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Reproduction or measurements, if available
+      description: Give BF version, operating system and agent host. Use a small fictional brain for retrieval misses. For comparisons include task counts, failures, baseline and setup or upkeep effort; estimates are welcome when labeled.

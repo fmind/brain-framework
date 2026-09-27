@@ -1,4 +1,4 @@
-"""Records live in monthly JSON Lines partitions: one line per source item, upserted by id."""
+"""Records live in independent JSON files keyed by the SHA-256 of their source item id."""
 
 from __future__ import annotations
 
@@ -7,23 +7,20 @@ import re
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from datetime import date
 from typing import Annotated, Literal
 
 from pydantic import Field, ValidationError
 
-from bf.models import MAX_PARTITION, NAME, Error, Model, Record, decode, encode, explain
+from bf.models import MAX_FILES, MAX_RECORD, NAME, Error, Model, Record, decode, digest, encode, explain
 from bf.storage import Store, reader
 
-SNAPSHOT = "snapshot"
-UNDATED = "undated"
 _PENDING = "memories/.pending"
 _MANIFEST = _PENDING + "/manifest.json"
-_MANIFEST_LIMIT = 1 << 20
+_MANIFEST_LIMIT = 16 << 20
 
 
 class _Change(Model):
-    name: Annotated[str, Field(pattern=r"^(?:[0-9]{4}-[0-9]{2}|snapshot|undated)\.jsonl$")]
+    name: Annotated[str, Field(pattern=r"^[0-9a-f]{64}\.json$")]
     existed: bool
 
 
@@ -31,7 +28,7 @@ class _Journal(Model):
     version: Literal[1] = 1
     source: Annotated[str, Field(pattern=NAME)]
     complete: bool = False
-    changes: Annotated[list[_Change], Field(max_length=10_000)]
+    changes: Annotated[list[_Change], Field(max_length=MAX_FILES)]
 
 
 def _pending(store: Store) -> bool:
@@ -64,7 +61,7 @@ def recover(store: Store) -> None:
     """Roll back an interrupted commit, under the caller's exclusive brain writer lock.
 
     Originals and the manifest are durable evidence under memories/, never disposable state.
-    A completion marker means all partitions were committed (or restored) and only cleanup remains.
+    A completion marker means all records were committed (or restored) and only cleanup remains.
     """
     if not _pending(store):
         return
@@ -84,11 +81,11 @@ def recover(store: Store) -> None:
         # Check all backups before restoring any source file.
         for number, change in enumerate(journal.changes):
             if change.existed:
-                store.read(f"{_PENDING}/{number}.before", MAX_PARTITION)
+                store.read(f"{_PENDING}/{number}.before", MAX_RECORD)
         for number, change in enumerate(journal.changes):
             target = f"memories/{journal.source}/{change.name}"
             if change.existed:
-                store.write(target, store.read(f"{_PENDING}/{number}.before", MAX_PARTITION))
+                store.write(target, store.read(f"{_PENDING}/{number}.before", MAX_RECORD))
             else:
                 with suppress(FileNotFoundError):
                     store.delete(target)
@@ -105,7 +102,7 @@ def require_ready(store: Store) -> None:
 
 @contextmanager
 def reading(store: Store) -> Iterator[None]:
-    """Read a consistent set of partitions without changing durable evidence."""
+    """Read a consistent set of records without changing durable evidence."""
     with reader(store):
         require_ready(store)
         yield
@@ -129,7 +126,7 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
     try:
         for number, (name, change) in enumerate(zip(replacements, changes, strict=True)):
             if change.existed:
-                store.write(f"{_PENDING}/{number}.before", store.read(name, MAX_PARTITION))
+                store.write(f"{_PENDING}/{number}.before", store.read(name, MAX_RECORD))
         store.write(_MANIFEST, manifest)
         for name, data in replacements.items():
             if data is None:
@@ -149,99 +146,75 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
         _clear(store)
 
 
-def partition(record: Record) -> str:
-    return record.time[:7] if record.time else UNDATED
-
-
-def path(source: str, name: str) -> str:
-    return f"memories/{source}/{name}.jsonl"
+def path(source: str, record_id: str) -> str:
+    """Stable identity, independent of event time, provider ordering and collection mode."""
+    return f"memories/{source}/{digest(record_id.encode())}.json"
 
 
 def line(record: Record) -> bytes:
     return encode(record.model_dump(exclude_defaults=True))
 
 
-def partitions(
-    store: Store, source: str = "", *, skipped: dict[str, tuple[int, int, int, int]] | None = None
-) -> list[str]:
-    """Record partitions of one source, or of every source; other files under memories/ are ignored.
-
-    With `skipped`, symlinks and special files are collected there instead of failing the listing.
-    """
+def files(store: Store, source: str = "", *, skipped: dict[str, tuple[int, int, int, int]] | None = None) -> list[str]:
+    """Include obsolete JSONL files so an unconverted brain fails visibly instead of losing evidence."""
     directory = f"memories/{source}" if source else "memories"
-    return [name for name in store.files(directory, skipped=skipped) if name.endswith(".jsonl")]
-
-
-def parse(name: str, data: bytes) -> Iterator[Record]:
-    for number, raw in enumerate(data.splitlines(), 1):
-        if not raw.strip():
-            continue
-        try:
-            yield Record.model_validate(decode(raw))
-        except ValidationError as error:
-            known = {*Record.model_fields, "[key]"}
-            raise Error(f"{name}:{number}: invalid record: {explain(error, known)}") from error
-        except Error as error:
-            raise Error(f"{name}:{number}: {error}") from error
+    return [
+        name
+        for name in store.files(directory, skipped=skipped)
+        if name.endswith((".json", ".jsonl")) and not name.startswith(_PENDING + "/")
+    ]
 
 
 def load(store: Store, name: str) -> list[Record]:
-    source_of(name)
-    return list(parse(name, store.read(name, MAX_PARTITION)))
+    source = source_of(name)
+    try:
+        record = Record.model_validate(decode(store.read(name, MAX_RECORD)))
+    except ValidationError as error:
+        raise Error(f"{name}: invalid record: {explain(error, {*Record.model_fields, '[key]'})}") from error
+    except Error as error:
+        raise Error(f"{name}: {error}") from error
+    if path(source, record.id) != name:
+        raise Error(f"{name}: record id does not match its SHA-256 filename; run bf validate and reconcile it")
+    return [record]
 
 
 def source_of(name: str) -> str:
     parts = name.split("/")
-    if len(parts) != 3 or parts[0] != "memories" or not re.fullmatch(NAME, parts[1]):
-        raise Error(f"{name}: expected memories/<source>/<YYYY-MM|undated|snapshot>.jsonl")
-    filename = parts[2]
-    if filename not in {"undated.jsonl", "snapshot.jsonl"}:
-        try:
-            if not re.fullmatch(r"[0-9]{4}-[0-9]{2}\.jsonl", filename):
-                raise ValueError
-            date.fromisoformat(filename.removesuffix(".jsonl") + "-01")
-        except ValueError:
-            raise Error(f"{name}: expected a YYYY-MM, undated or snapshot JSON Lines partition") from None
+    if name.endswith(".jsonl"):
+        raise Error(f"{name}: obsolete JSON Lines storage; follow the manual upgrade before collecting")
+    if (
+        len(parts) != 3
+        or parts[0] != "memories"
+        or not re.fullmatch(NAME, parts[1])
+        or not re.fullmatch(r"[0-9a-f]{64}\.json", parts[2])
+    ):
+        raise Error(f"{name}: expected memories/<source>/<sha256-id>.json")
     return parts[1]
 
 
 def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool) -> dict[str, int]:
-    """Window sources add or replace items by id; snapshot sources replace their complete catalog.
-
-    Each id appears once per source, in the partition of its event month, so a rescheduled
-    event moves between partitions instead of leaving a stale copy behind.
-    """
+    """Update independent record files; snapshot removal and all replacements remain transactional."""
     recover(store)
     if not re.fullmatch(NAME, source):
         raise Error("invalid record source")
-    if not incoming and not snapshot:
-        return {"added": 0, "updated": 0, "unchanged": 0, "removed": 0}
-    existing: dict[str, dict[str, Record]] = {}
-    located: dict[str, str] = {}
-    for name in partitions(store, source):
-        key = name.rsplit("/", 1)[1].removesuffix(".jsonl")
-        partition_records: dict[str, Record] = {}
-        for record in load(store, name):
-            if record.id in located:
-                raise Error(f"source {source} contains duplicate record ids; run bf validate and reconcile them")
-            located[record.id] = key
-            partition_records[record.id] = record
-        existing[key] = partition_records
-    before = {key: dict(records) for key, records in existing.items()}
+    wanted = {record.id for record in incoming}
+    if len(wanted) != len(incoming):
+        raise Error("duplicate incoming record ids; reconcile them before collecting")
+    existing: dict[str, Record] = {}
+    for name in files(store, source):
+        record = load(store, name)[0]
+        existing[record.id] = record
     counts = {"added": 0, "updated": 0, "unchanged": 0, "removed": 0}
+    replacements: dict[str, bytes | None] = {}
     if snapshot:
-        wanted = {r.id for r in incoming}
-        counts["removed"] = len(located.keys() - wanted)
-        existing = {SNAPSHOT: {}}
+        for record_id in existing.keys() - wanted:
+            replacements[path(source, record_id)] = None
+            counts["removed"] += 1
     for record in incoming:
-        key = SNAPSHOT if snapshot else partition(record)
-        previous = before.get(located.get(record.id, ""), {}).get(record.id)
-        # Historical backfills must not replace a known newer upstream revision. A revision claiming
-        # to be modified after it was first observed has an unreliable clock and cannot block others.
+        previous = existing.get(record.id)
         reliable = previous and not (previous.observed and previous.updated > previous.observed)
         if reliable and previous.updated and record.updated and previous.updated > record.updated:
             record = previous
-            key = SNAPSHOT if snapshot else partition(record)
         if previous is None:
             counts["added"] += 1
         elif previous.model_dump(exclude={"attributes": {"observed"}}) == record.model_dump(
@@ -252,47 +225,39 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
                 record = previous
         else:
             counts["updated"] += 1
-        if not snapshot and located.get(record.id, key) != key:
-            existing[located[record.id]].pop(record.id)
-        existing.setdefault(key, {})[record.id] = record
-    replacements: dict[str, bytes | None] = {}
-    for key in sorted(before.keys() | existing.keys()):
-        records = existing.get(key, {})
-        if records == before.get(key, {}):
-            continue
-        if records:
-            ordered = sorted(records.values(), key=lambda r: (r.time, r.id))
-            data = b"".join(line(r) for r in ordered)
-            if len(data) > MAX_PARTITION:
-                raise Error(f"{path(source, key)}: record partition exceeds its {MAX_PARTITION}-byte limit")
-            replacements[path(source, key)] = data
-        else:
-            replacements[path(source, key)] = None
+        if record != previous:
+            data = line(record)
+            if len(data) > MAX_RECORD:
+                raise Error(f"{path(source, record.id)}: record exceeds its {MAX_RECORD}-byte limit")
+            replacements[path(source, record.id)] = data
     _commit(store, source, replacements)
     return counts
 
 
 def find(store: Store, source: str, record_id: str) -> tuple[str, Record] | None:
-    """Scan one source directly: exact record reads never depend on the derived index."""
-    skipped: dict[str, tuple[int, int, int, int]] = {}
-    if not re.fullmatch(NAME, source) or not (partitions(store, source, skipped=skipped) or skipped):
-        # An alias or an absent source has nothing to read, and never waits for a writer.
+    """Exact identities resolve directly, without depending on cache hints or scanning other records."""
+    if not re.fullmatch(NAME, source):
         return None
+    try:
+        with store.parent(f"memories/{source}") as (parent, leaf):
+            info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode):
+                raise Error(f"source {source} is unreadable; run bf validate")
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise Error(f"source {source} is unreadable; run bf validate") from error
     with reading(store):
-        skipped.clear()
-        names = partitions(store, source, skipped=skipped)
-        # A linked or special partition is never read: it is unreadable evidence, never an absence.
-        unreadable = bool(skipped)
-        for name in sorted(names, reverse=True):
-            try:
-                items = load(store, name)
-            except Error, OSError, UnicodeError:
-                # Match indexing's file boundary: one malformed partition must not hide other evidence.
-                unreadable = True
-                continue
-            for record in items:
-                if record.id == record_id:
-                    return name, record
-    if unreadable:
-        raise Error(f"source {source} has unreadable partitions; run bf validate before concluding a record is absent")
-    return None
+        name = path(source, record_id)
+        try:
+            return name, load(store, name)[0]
+        except FileNotFoundError:
+            # Do not turn malformed or unconverted evidence into proof of absence.
+            skipped: dict[str, tuple[int, int, int, int]] = {}
+            for other in files(store, source, skipped=skipped):
+                load(store, other)
+            if skipped:
+                raise Error(
+                    f"source {source} has unreadable records; run bf validate before concluding a record is absent"
+                ) from None
+            return None

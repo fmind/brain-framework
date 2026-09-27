@@ -1,0 +1,22 @@
+# https://fmind.github.io/brain-framework/docs/schedule/
+version: 6
+name: watch-demo
+sensors:
+  calendar:
+    command: [python3, sensors/demo.py, calendar]
+    mode: snapshot
+    refresh: 30
+  git:
+    command: [python3, sensors/demo.py, git]
+    mode: snapshot
+    refresh: 60
+  unavailable:
+    command: [python3, sensors/demo.py, unavailable]
+    refresh: 60
+  manual:
+    command: [python3, sensors/demo.py, calendar]
+    refresh: 0
+  disabled:
+    command: [python3, sensors/demo.py, calendar]
+    enabled: false
+    refresh: 60

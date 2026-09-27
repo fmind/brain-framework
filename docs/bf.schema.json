@@ -23,6 +23,17 @@
       "title": "Mapping",
       "type": "object"
     },
+    "Reconciliation": {
+      "additionalProperties": false,
+      "description": "Occasionally revisit older evidence in the same window source.",
+      "properties": {
+        "lookback": { "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" },
+        "refresh": { "maximum": 31536000, "minimum": 1, "title": "Refresh", "type": "integer" }
+      },
+      "required": ["refresh", "lookback"],
+      "title": "Reconciliation",
+      "type": "object"
+    },
     "Routine": {
       "additionalProperties": false,
       "description": "A deterministic program whose Markdown output becomes the day's action for review.",
@@ -94,6 +105,7 @@
         },
         "mode": { "default": "window", "enum": ["window", "snapshot"], "title": "Mode", "type": "string" },
         "overlap": { "default": 300, "maximum": 31536000, "minimum": 0, "title": "Overlap", "type": "integer" },
+        "reconcile": { "anyOf": [{ "$ref": "#/$defs/Reconciliation" }, { "type": "null" }], "default": null },
         "refresh": { "default": 0, "maximum": 31536000, "minimum": 0, "title": "Refresh", "type": "integer" },
         "timeout": { "default": 300, "maximum": 3600, "minimum": 1, "title": "Timeout", "type": "integer" }
       },
@@ -128,7 +140,7 @@
       "title": "Sensors",
       "type": "object"
     },
-    "version": { "const": 5, "default": 5, "title": "Version", "type": "integer" }
+    "version": { "const": 6, "default": 6, "title": "Version", "type": "integer" }
   },
   "required": ["name"],
   "title": "Config",

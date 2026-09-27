@@ -320,13 +320,13 @@ def test_relative_moments_resolve_deterministically() -> None:
             moment(bad, now)
 
 
-def test_configuration_is_strict_and_version_5(brain: Store) -> None:
+def test_configuration_is_strict_and_version_6(brain: Store) -> None:
     assert load(brain).name == "fixture"
-    for old in (b"version: 1\nid: x\nname: old\n", b"version: 4\nname: fixture\n"):
+    for old in (b"version: 1\nid: x\nname: old\n", b"version: 4\nname: fixture\n", b"version: 5\nname: fixture\n"):
         brain.write("bf.yaml", old)
         with pytest.raises(Error, match="version"):
             load(brain)
-    brain.write("bf.yaml", b"version: 5\nname: fixture\nunknown: 1\n")
+    brain.write("bf.yaml", b"version: 6\nname: fixture\nunknown: 1\n")
     with pytest.raises(Error, match="unknown"):
         load(brain)
 
@@ -336,7 +336,7 @@ def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.Mo
     other = tmp_path / "team"
     other.mkdir()
     team = Store(other)
-    team.write("bf.yaml", b"version: 5\nname: team\n")
+    team.write("bf.yaml", b"version: 6\nname: team\n")
     register(team)
     assert [s.root for s in select()] == [brain.root, team.root]
     assert one("team").root == team.root
@@ -353,10 +353,10 @@ def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.Mo
     assert [s.root for s in select()] == [brain.root]
     clone = tmp_path / "clone"
     clone.mkdir()
-    Store(clone).write("bf.yaml", b"version: 5\nname: team\n")
+    Store(clone).write("bf.yaml", b"version: 6\nname: team\n")
     with pytest.raises(Error, match="already registered as team"):
         register(Store(clone))
-    brain.write("bf.yaml", b"version: 5\nname: renamed\n")
+    brain.write("bf.yaml", b"version: 6\nname: renamed\n")
     with pytest.raises(Error, match="already registered as fixture"):
         register(brain)
     monkeypatch.chdir(tmp_path)
@@ -394,7 +394,7 @@ def test_concurrent_registrations_keep_every_brain(tmp_path: Path, monkeypatch: 
         root = tmp_path / f"brain-{number}"
         root.mkdir()
         store = Store(root)
-        store.write("bf.yaml", f"version: 5\nname: brain-{number}\n".encode())
+        store.write("bf.yaml", f"version: 6\nname: brain-{number}\n".encode())
         stores.append(store)
     original = config.user_config
     start = Barrier(len(stores))

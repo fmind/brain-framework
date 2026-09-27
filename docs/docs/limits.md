@@ -4,20 +4,13 @@ Use this reference to understand a skipped file, a partial reply or a stopped pr
 
 ## Files
 
-Brain access rejects symlinks and special files below the root. Skipped entries appear under `problems`; their targets are never inspected. This includes linked action inputs and entries with unrelated extensions that could hide directories. For example, a symlink in `actions/.../inputs/` is reported and skipped, even when it points to a readable local file.
+| If you see…                                     | What to do                                                                |
+| ----------------------------------------------- | ------------------------------------------------------------------------- |
+| A skipped symlink or special file in `problems` | Use a regular file inside the brain. BF never follows the skipped target. |
+| An interrupted record transaction               | Keep `memories/.pending/`, then run `bf build` and `bf validate`.         |
+| A busy writer or stale cache                    | Let the writer finish, then repeat the read.                              |
 
-Writes are atomic. Readers and writers share a lock by physical brain identity, including bind mounts and alternate paths. Processes accessing one brain must use the same private state directory.
-
-Interrupted record writes retain originals in `memories/.pending/`. If a read reports an interrupted transaction, preserve that directory and recover before reading again:
-
-```bash
-bf build --brain ~/brain
-bf validate --brain ~/brain
-```
-
-`build` recovers the transaction and rebuilds the cache; collection can also recover it. Ordinary reads request recovery without changing evidence. Keep `memories/.pending/` with the records in backups. Back up an idle brain, or hold its writer lock during a live copy.
-
-These protections do not defend against another process with your account's permissions replacing the brain or cache. Use separate operating-system accounts for adversarial separation.
+Writes are atomic, and processes using the same physical brain share a lock. Use the same [state directory](configuration.md#local-state) for those processes. Back up an idle brain, including any pending journal. These protections are not a sandbox against other programs running as your account.
 
 ## Size bounds
 
@@ -26,7 +19,7 @@ These protections do not defend against another process with your account's perm
 | Configuration              | 1 MiB                                         |
 | Authored note              | 4 MiB                                         |
 | Ordinary retrieval reply   | 4 MiB; larger exact reads use chunks          |
-| Record partition           | 256 MiB                                       |
+| Record file                | 16 MiB                                        |
 | Entries per scanned folder | 100,000                                       |
 | Search results per page    | 50                                            |
 | Period listing             | 50 items per page                             |
@@ -36,6 +29,8 @@ These protections do not defend against another process with your account's perm
 | Sensor stdout              | 64 MiB by default; configurable up to 256 MiB |
 | Routine stdout             | 1 MiB by default; configurable up to 4 MiB    |
 
+Each record consumes one filesystem entry. The 100,000-entry limit applies to the entire recursive traversal of `memories/`, across sources, including directories and ignored extensions. Allow room for source directories when sizing a corpus.
+
 Keep bulky imports in root `inputs/` or `originals/`, which are not scanned. Link an authored note to the retained file and record the useful conclusion in the note.
 
 Page sizes do not limit the whole result set. For example, a period with 51 items needs a second request after its first 50. Follow the returned `next_offset`; listings also report `total`. Summary sections remain bounded previews. Large exact reads use lossless JSON chunks with a digest; see [continuations](retrieval.md#continuations).
@@ -44,7 +39,20 @@ Pagination retains only the requested page in Python, but SQLite still ranks mat
 
 ## Processes and logs
 
-Sensors and routines run from the brain root with stdin closed and direct arguments. Relative `PATH` entries and startup-injection variables are removed: `LD_*`, `DYLD_*`, `BASH_ENV`, all `PYTHON*` variables, and Java, Node, Ruby, Perl and Lua startup options.
+Sensors and routines run from the brain root with stdin closed and direct arguments, without a shell.
+
+### Why remove environment variables?
+
+Some inherited variables can load code **before your sensor starts**. For example, `BASH_ENV` tells Bash to read a startup script, and `PYTHONPATH` can replace the modules a Python sensor imports. BF removes these so a sensor starts from its declared command.
+
+| Removed                                                     | Reason                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `LD_*`, `DYLD_*`, `GCONV_PATH`                              | Can inject loader libraries or conversion modules.              |
+| `BASH_ENV`, `ENV`, `BASH_FUNC_*`                            | Can supply shell startup code or imported functions.            |
+| `PYTHON*`, Java/Node/Ruby/Perl startup options, `LUA_INIT*` | Can alter interpreter startup or module loading.                |
+| Relative or empty `PATH` entries                            | Could select an unexpected executable from the brain directory. |
+
+Other variables, including ordinary provider credentials and absolute `PATH` entries, remain available. If a sensor needs dependencies, use an explicit runtime such as `uv run --no-project sensors/example.py`; do not depend on inherited interpreter startup settings.
 
 Timeout, SIGTERM, a closed terminal, cancellation or excessive output kills the process group. The shipped provider examples also bound subprocess output while reading it. For example, a sensor that exceeds its configured output limit fails collection; its partial stdout does not replace the stored records.
 

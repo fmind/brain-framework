@@ -1,0 +1,7 @@
+{
+  "fields": { "repository": ["repo:example/atlas"] },
+  "id": "offline",
+  "text": "The review selected SQLite for local queries. Network-independent retrieval was the deciding constraint.",
+  "time": "2026-09-12T10:00:00Z",
+  "title": "Atlas architecture review"
+}

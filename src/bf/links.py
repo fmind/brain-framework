@@ -43,6 +43,8 @@ def parse(value: str) -> Address | None:
         clean(path)
         if fragment:
             clean(fragment)
+            if path == "tasks":
+                raise ValueError
         source, separator, record_id = path.partition(":")
         record = bool(separator and re.fullmatch(NAME, source) and record_id)
         # A source:id is an opaque lookup key, never a filesystem path. Existing ids can contain URLs.
@@ -91,6 +93,11 @@ def tag(value: str) -> str | None:
     except ValueError:
         raise Error("use a tag address without a section or relationship: bf://brain/tags/label") from None
     return name
+
+
+def computed(value: str) -> bool:
+    """Identities owned by tag membership or the task queue cannot be claimed by a note or record."""
+    return tag(value) is not None or ((parsed := parse(value)) is not None and parsed.path == "tasks")
 
 
 @dataclass(frozen=True)

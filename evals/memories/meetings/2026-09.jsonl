@@ -1,2 +1,0 @@
-{"id":"offline","title":"Atlas architecture review","text":"The review selected SQLite for local queries. Network-independent retrieval was the deciding constraint.","time":"2026-09-12T10:00:00Z","fields":{"repository":["repo:example/atlas"]}}
-{"id":"zephyr","title":"Zephyr campaign review","text":"The review selected a hosted dashboard for the campaign.","time":"2026-09-13T10:00:00Z","fields":{"repository":["repo:example/zephyr"]}}

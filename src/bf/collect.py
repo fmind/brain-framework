@@ -14,6 +14,7 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, Protocol
+from uuid import uuid4
 
 from pydantic import Field, TypeAdapter, ValidationError, field_validator
 
@@ -57,9 +58,15 @@ class _Run(Model):
     updated: int = Field(default=0, ge=0)
     unchanged: int = Field(default=0, ge=0)
     removed: int = Field(default=0, ge=0)
+    requested_start: str = ""
+    requested_end: str = ""
+    reconciled: str = ""
+    reconcile: bool = False
+    elapsed_seconds: float = Field(default=0.0, ge=0)
+    output_bytes: int = Field(default=0, ge=0)
     action: str = ""
 
-    @field_validator("run", "success", "start", "end")
+    @field_validator("run", "success", "start", "end", "requested_start", "requested_end", "reconciled")
     @classmethod
     def instant(cls, value: str) -> str:
         if value:
@@ -234,6 +241,7 @@ def collect(
     start: str,
     end: str,
     dry_run: bool = False,
+    reconcile: bool = False,
     runner: Runner = run,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
@@ -243,9 +251,16 @@ def collect(
     sensor = config.sensors.get(name)
     if sensor is None or not sensor.enabled:
         raise Error(f"sensor {name} is unknown or disabled")
+    if reconcile and sensor.reconcile is None:
+        raise Error("reconciliation requires the sensor's reconcile setting")
     argv = _argv(store, sensor, start, end)
     with collecting(store, name):
         started = clock()
+        measured = time.monotonic()
+        if reconcile and sensor.reconcile is not None:
+            horizon = timestamp((started - timedelta(seconds=sensor.reconcile.lookback)).isoformat())
+            if start > horizon or end < timestamp(started.isoformat()):
+                raise Error("reconciliation must cover its lookback through the current run")
         committed = False
         try:
             raw = runner(argv, sensor, store, log_path(store, name))
@@ -263,11 +278,22 @@ def collect(
                 record.model_copy(update={"attributes": {**record.attributes, "observed": observed}})
                 for record in incoming
             ]
-            result: dict[str, object] = {"sensor": name, "records": len(incoming)}
+            result: dict[str, object] = {
+                "sensor": name,
+                "records": len(incoming),
+                "requested_start": start,
+                "requested_end": end,
+                "reconcile": reconcile,
+                "output_bytes": len(raw),
+            }
             if dry_run:
-                return {**result, "samples": [r.model_dump(exclude_defaults=True) for r in incoming[:3]]}
+                return {
+                    **result,
+                    "elapsed_seconds": round(time.monotonic() - measured, 6),
+                    "samples": [r.model_dump(exclude_defaults=True) for r in incoming[:3]],
+                }
             with writer(store, wait=120):
-                if sensor.mode == "snapshot" and not incoming and records.partitions(store, name):
+                if sensor.mode == "snapshot" and not incoming and records.files(store, name):
                     # A wrong account or an unmounted folder also looks empty: never erase a catalog silently.
                     raise Error(
                         f"snapshot returned no records; kept the existing catalog. Check the sensor's scope, "
@@ -275,6 +301,7 @@ def collect(
                     )
                 result.update(records.upsert(store, name, incoming, snapshot=sensor.mode == "snapshot"))
                 committed = True
+                result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
                 coverage, latest = _coverage(state(store).get(name, {}), start, end, observed)
                 _remember(
                     store,
@@ -284,6 +311,7 @@ def collect(
                     **coverage,
                     error="",
                     **({"success": started.isoformat()} if latest else {}),
+                    **({"reconciled": started.isoformat()} if reconcile and latest else {}),
                     **{key: value for key, value in result.items() if key != "sensor"},
                 )
         except (Error, OSError, UnicodeError) as error:
@@ -316,7 +344,7 @@ def routine(
     """Run one routine over [start, end); its Markdown becomes today's action, written only after success.
 
     Empty output means there is nothing to review. An existing action folder is never overwritten,
-    so a routine writes at most one action per local day and never replaces a person's edits.
+    so a routine writes at most one action per local day in this clone and never replaces a person's edits.
     """
     start, end = _window(start, end)
     program = load(store).routines.get(name)
@@ -324,7 +352,8 @@ def routine(
         raise Error(f"routine {name} is unknown or disabled")
     with collecting(store, name):
         started = clock()
-        folder = f"actions/{started.astimezone().date().isoformat()}_{name}"
+        day = started.astimezone().date().isoformat()
+        folder = f"actions/{day}_{name}-{uuid4().hex}"
         path = f"{folder}/ACTION.md"
         try:
             raw = runner(_argv(store, program, start, end), program, store, log_path(store, name))
@@ -341,7 +370,11 @@ def routine(
             if dry_run:
                 return {**result, **({"text": text} if text.strip() else {})}
             with writer(store, wait=120):
-                if text.strip() and store.files(folder):
+                previous = str(state(store, ROUTINES).get(name, {}).get("action", ""))
+                already_ran = previous.startswith(f"actions/{day}_{name}-") and bool(
+                    store.files(previous.rsplit("/", 1)[0])
+                )
+                if text.strip() and (already_ran or store.files(folder)):
                     del result["action"]
                     result["skipped"] = "an action for this routine already exists today"
                 elif text.strip():
@@ -369,10 +402,10 @@ def routine(
 
 
 def _due(program: Program, last: dict[str, object], now: datetime) -> bool:
-    """Enabled, scheduled, and its refresh interval has elapsed since the last success."""
+    """Enabled, scheduled, and failed or its refresh interval has elapsed since the last success."""
     success = str(last.get("success", ""))
     elapsed = not success or now >= datetime.fromisoformat(success) + timedelta(seconds=program.refresh)
-    return program.enabled and bool(program.refresh) and elapsed
+    return program.enabled and bool(program.refresh) and (bool(last.get("error")) or elapsed)
 
 
 def due_routines(store: Store, now: datetime) -> list[tuple[str, str, str]]:
@@ -390,7 +423,7 @@ def due_routines(store: Store, now: datetime) -> list[tuple[str, str, str]]:
     return windows
 
 
-def due(store: Store, now: datetime) -> list[tuple[str, str, str]]:
+def due(store: Store, now: datetime) -> list[tuple[str, str, str, bool]]:
     """Due sensors, with the window each should collect."""
     config, history = load(store), state(store)
     windows = []
@@ -405,5 +438,12 @@ def due(store: Store, now: datetime) -> list[tuple[str, str, str]]:
             resumed = datetime.fromisoformat(str(last["end"])) - timedelta(seconds=sensor.overlap)
             if resumed < now:
                 start = max(resumed, now - timedelta(days=30))
-        windows.append((name, timestamp(start.isoformat()), timestamp(now.isoformat())))
+        reconciliation = sensor.reconcile
+        reconciled = str(last.get("reconciled", ""))
+        revisit = reconciliation is not None and (
+            not reconciled or now >= datetime.fromisoformat(reconciled) + timedelta(seconds=reconciliation.refresh)
+        )
+        if revisit and reconciliation is not None:
+            start = min(start, now - timedelta(seconds=reconciliation.lookback))
+        windows.append((name, timestamp(start.isoformat()), timestamp(now.isoformat()), revisit))
     return windows

@@ -1,0 +1,36 @@
+# https://fmind.github.io/brain-framework/docs/checks/
+version: 5
+cases:
+  - name: shared-project-connects-four-tools
+    read: project:new-website
+    expect: [workspace:brief, jira:review, github:implementation, gcloud:deployment]
+  - name: brief-fields-normalized
+    read: workspace:brief
+    text: [project:new-website, brief]
+  - name: issue-fields-normalized
+    read: jira:review
+    text: [project:new-website, issue]
+  - name: implementation-fields-normalized
+    read: github:implementation
+    text: [project:new-website, demo-42, pull-request]
+  - name: deployment-fields-normalized
+    read: gcloud:deployment
+    text: [project:new-website, demo-42, deployment, not a public launch]
+  - name: recover-the-reason
+    query: visitors clear explanation
+    scope: project:new-website
+    expect: [workspace:brief]
+  - name: find-remaining-work
+    query: keyboard navigation
+    scope: memories/jira
+    expect: [jira:review]
+    text: [Accessibility review is still open]
+  - name: read-the-decision
+    read: projects/new-website.md#decision
+    text: [visitors need a clear explanation]
+  - name: retain-the-next-action
+    read: projects/new-website.md#next-actions
+    text: [Run the keyboard navigation check]
+  - name: no-invented-evidence
+    query: bfabsentevidence9c4f2a7d
+    empty: true

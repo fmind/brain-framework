@@ -7,14 +7,14 @@ body:
     id: problem
     attributes:
       label: Problem
-      description: What is currently difficult, and for whom?
+      description: Describe the last concrete occurrence, for whom, how often it happens, and the current workaround. Use fictional replacements for private work.
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
       label: Proposed solution
-      description: The smallest useful change, and what it would let a brain reach that it cannot today.
+      description: The smallest useful change, the observable outcome, and how you would compare it with the current workflow or the same notes read directly.
     validations:
       required: true
   - type: checkboxes

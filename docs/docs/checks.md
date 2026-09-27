@@ -1,6 +1,6 @@
 # Check your brain
 
-Check that files are valid, useful evidence is findable and collection is healthy. Run these inside your brain, or add `--brain ~/brain`:
+Check that files are valid, useful evidence is findable and collection is healthy. Run these inside your brain:
 
 | Command             | What it establishes                                              |
 | ------------------- | ---------------------------------------------------------------- |

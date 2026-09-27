@@ -57,7 +57,7 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
     assert invoke("search", "evidence", "--scope", tag)["items"][0]["ref"].startswith("projects/offline.md")
     exact = invoke("read", "meetings:decision-1")
     assert exact["record"]["title"] == "Preserve durable evidence"
-    assert invoke("build", "--brain", "fixture")["changed"] == 3
+    assert invoke("build", "--brain", "fixture")["changed"] == 4
     status = invoke("status", "--brain", "fixture", "--check")
     assert status["healthy"]
     assert status["brains"][0]["sources"]["meetings"] == {
@@ -77,7 +77,7 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
     assert failed["cases"][0]["returned"] == ["meetings:lunch"]
     other = tmp_path / "clone"
     other.mkdir()
-    (other / "bf.yaml").write_text("version: 5\nname: clone\n")
+    (other / "bf.yaml").write_text("version: 6\nname: clone\n")
     assert invoke("register", str(other))["brain"] == "clone"
     assert invoke("update", "--brain", "clone", "--dry-run")["brains"][0]["sensors"] == []
     brain.write("projects/bad.md", b"# Bad [x](missing.md)\n")
@@ -86,17 +86,17 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
 
 
 def test_status_check_fails_on_stale_sources(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 5\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n")
+    brain.write("bf.yaml", b"version: 6\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n")
     report = invoke("status", "--brain", "fixture", "--check", code=1)
     assert report["brains"][0]["sources"]["mail"]["stale"] is True
-    brain.write("bf.yaml", b"version: 5\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n")
+    brain.write("bf.yaml", b"version: 6\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n")
     assert invoke("collect", "mail", "--brain", "fixture", "--since", "2d", code=1) == {}
     # A failed manual sensor is reported with its log, but only scheduled programs fail the check.
     entry = invoke("status", "--brain", "fixture", "--check", code=0)["brains"][0]["sources"]["mail"]
     assert "status 3" in entry["error"]
     assert entry["log"].endswith("mail.log")
     brain.write(
-        "bf.yaml", b"version: 5\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n    refresh: 60\n"
+        "bf.yaml", b"version: 6\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n    refresh: 60\n"
     )
     assert invoke("status", "--brain", "fixture", "--check", code=1)["healthy"] is False
 
@@ -230,7 +230,7 @@ def text(result: object) -> str:
 def test_typed_tag_links_validate_and_read_through_cli_and_mcp(brain: Store, tag: str) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 5\nname: fixture\nschema:\n  depends-on:\n"
+        b"version: 6\nname: fixture\nschema:\n  depends-on:\n"
         b"    description: Explicit dependency.\n    type: identity\n    relation: true\n",
     )
     brain.write("projects/member.md", f"---\ntype: project\ntags: [{json.dumps(tag)}]\n---\n# Tagged\n".encode())
@@ -250,6 +250,9 @@ def test_typed_tag_links_validate_and_read_through_cli_and_mcp(brain: Store, tag
 
 
 def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None:
+    brain.write(
+        "actions/2026-09-27_work/ACTION.md", b"# Work\n\n## Next\n\n- [ ] Resume the task.\n- [x] Gather evidence.\n"
+    )
     mcp = server([brain])
 
     async def check() -> None:
@@ -278,9 +281,12 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
         scoped = await mcp.call_tool("search", {"query": "offline", "scope": "memories/meetings"})
         assert json.loads(text(scoped))["items"][0]["ref"] == "meetings:decision-1"
         tag = "bf://fixture/tags/retention"
-        for ref in ("tags", tag):
+        for ref in ("tags", tag, "tasks", "bf://fixture/tasks"):
             result = await mcp.call_tool("read", {"ref": ref})
             assert json.loads(text(result)) == invoke("read", ref, "--brain", "fixture")
+        tasks = invoke("read", "tasks", "--brain", "fixture")
+        assert tasks["summary"] == {"open": 1, "done": 1, "notes": 1}
+        assert "Resume the task." in invoke("read", tasks["items"][0]["uri"])["text"]
         result = await mcp.call_tool("search", {"query": "evidence", "scope": tag})
         assert json.loads(text(result)) == invoke("search", "evidence", "--scope", tag, "--brain", "fixture")
         exact = await mcp.call_tool("read", {"ref": "projects/offline.md#decision", "brain": "fixture"})

@@ -4,96 +4,45 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
-### Fixed
+## [v13.0.0](https://github.com/fmind/brain-framework/releases/tag/v13.0.0) - 2026-09-27
 
-- Remove unnamed, empty code-line links from the documentation's keyboard navigation and accessibility tree.
-
-- Preserve existing evidence-capture destinations in the runnable example, including dangling symlinks, when exclusive creation fails.
-- Retain OKF `sources` links on projects and actions as well as concepts; typed source links require a declared relationship and expose the note as their origin.
-- Keep provider-controlled field names out of malformed persisted-record diagnostics, matching collection error redaction.
-- Read validated typed links to tag pages through the CLI and MCP without treating their relationship as part of the tag identity.
-- Keep starter retrieval evaluations passing when ordinary notes mention topics, starters or pilots; use a single distinctive token for absent-evidence queries in the starter and examples.
-- Keep session-hook project metadata within its owning brain and suppress context when that metadata is incomplete.
-- Include older projects beyond the home-page preview in weekly reviews; incomplete project continuations fail before an action is written.
-- Keep Git history collection inside selected directories, exclude the window's end boundary, and retain in-window commits even when later commits have older dates. Reject invalid windows before invoking Git.
-- Reject authored-note aliases in another brain namespace during validation, indexing and routine output checks; stale projections rebuild automatically.
-
-### Added
-
-- Start every new brain with `tests/` for technical tests and a runnable `evals/retrieval.yaml` for deterministic retrieval checks. `bf eval` works immediately after `bf init`; extend or replace the welcome-note cases with the brain owner's questions and expected evidence.
-- Review stale projects, unresolved questions and decision outcomes through `bf-learn`; retain selected evidence and prepare knowledge transfers without requiring an action folder.
-- Evaluate retrieval separately from technical tests with a fixed fictional corpus under `evals/` and `mise run eval`, included in the full gate. Cases check expected evidence, answer fragments, ranking and scope without an LLM.
-- Browse note tags with `bf read tags`, follow brain-qualified tag pages with exact counts and pagination, and restrict search to explicit membership with `--scope bf://NAME/tags/LABEL`. Tag associations retain their originating note in the graph. Updated authoring skills and examples encourage a small reused vocabulary across projects, concepts and actions.
+Brain Framework 13 adds continuous collection, independent record files, complete retrieval and practical workflows from evidence to decisions. **Before upgrading from 12, follow the [manual upgrade procedure](https://fmind.github.io/brain-framework/docs/upgrades/#from-12-to-13)** on a backed-up copy with collection stopped.
 
 ### Changed
 
-- Rewrite the user guides around concrete tasks, shared examples and expected results. Shorten the README, explain reference contracts with tables and examples, and make contributor and adapter instructions easier to follow.
-
-- **Breaking; requires a major release:** `bf validate` enforces OKF structure for projects, concepts and canonical action `ACTION.md` notes: a nonempty `type`, structured sources and verification events, and `draft`/`stable`/`deprecated` lifecycle statuses. Project and concept folders also enforce reserved index/log rules. Routine output must pass OKF validation before an action is created. Move project and action work progress into the body or task list before upgrading; action inputs, outputs and loose helper notes can remain ordinary Markdown.
-
-- Simplify onboarding around the latest package, `~/brain`, agent-assisted setup and a product website decision. Remove development-edition notices, shorten tag guidance and distinguish maintenance scripts from configured review routines.
-
-- Recommend `~/brain` while showing alternative paths and stable brain names. Align action examples, templates and skills with OKF metadata, and make concrete examples with observable results a general contribution principle.
-
-- **Breaking; requires a major release:** note tags are now bounded labels (up to 1,000 per note, 1–128 characters each, without control characters, surrounding whitespace, slashes or dot segments). Before upgrading, rename invalid labels and replace any `bf://NAME/tags/LABEL` entity or alias with an ordinary link: these addresses now identify computed tag pages. Run `bf validate`; the disposable cache rebuilds automatically.
-
-- Teach core concepts through a shared decision example, shorten first-use setup with expected output, add concept and action authoring examples and a scoped sensor walkthrough, and separate everyday retrieval from its reference contract.
-
-- Lead the README with a runnable decision-to-evidence example and agent connection checks; explain the benefits for agent builders and link to sensor and schema walkthroughs.
-
-- **Breaking; requires a major release:** remove machine collection permissions and sensor content-trust settings. `collect` and `update` run enabled programs in selected roots without registration. Registration stores only names and paths; referenced brains are never executed implicitly.
-- Remove `collect` from init, registration and status replies, `trust` from source metadata, and `external` from retrieval and evidence-helper replies. Pages include record excerpts consistently. Hooks and review routines reference collected records without copying their text into authored context.
-- Scheduled-source freshness comes from local run history: without a successful local run it is `never`, including on a shared clone. An invalid optional registry does not affect a brain selected by path.
-- Shorten human guides, separate routines, scheduling, configuration and safeguards into focused pages, and place Reference immediately below Connect agents.
-
-### Manual upgrade
-
-Before using the next major release:
-
-1. Give project documents and each `actions/YYYY-MM-DD_slug/ACTION.md` a nonempty `type` (normally `project` or `action`). Replace work-progress statuses (`active`, `paused`, `blocked`, `done`, `archived`) with the reviewed OKF knowledge status (`draft`, `stable`, `deprecated`). Preserve work progress in the body or tasks. Check source and verification metadata with `bf validate`; update custom routines to emit OKF action frontmatter. Other action files need no conversion.
-1. Remove `trust` from every sensor in `bf.yaml` and `collect` from each entry in `~/.config/bf/config.yaml` (or its `XDG_CONFIG_HOME` location). Removed fields are rejected; there is no automatic migration.
-1. Remove `--collect` and `--no-collect` from `bf init` and `bf register` calls. Register only when name-based selection outside a brain is useful.
-1. Review timers and scripts: `bf update` outside a brain can run every registered brain. Set `--brain PATH` for the intended collector, and stop schedules you no longer want.
-1. Update CLI/MCP consumers for the removed fields and record excerpts on pages. Reinstall changed workflow skills; evidence captures no longer emit content-trust labels.
-1. Run `bf validate`, `bf eval` and `bf status --brain PATH`. Check collection freshness on the collecting machine; shared records do not include its run history.
-
-Brain and retrieval-suite version numbers remain unchanged here; package versions and installation pins are updated only during the authorized major release.
-
-## [v13.0.0](https://github.com/fmind/brain-framework/releases/tag/v13.0.0) - 2026-09-26
-
-Brain Framework 13 makes retrieval navigable through complete listings and lossless large reads, adds guided setup and source discovery, and reduces cache-build and page-read work. Brain configuration and retrieval suites remain at version 5.
+- **Breaking storage change:** `bf.yaml` uses format 6. Each source record lives at `memories/SOURCE/SHA256_ID.json`, replacing monthly JSONL catalogs. Record IDs and `source:id` refs stay stable; source pages replace the `partitions` inventory with paginated records. Retrieval evaluation files remain format 5.
+- **Breaking execution change:** remove machine collection permissions and sensor content-trust settings. Registration stores names and paths only; explicit collection/update/watch commands run enabled programs in selected roots, never referenced brains. Remove obsolete registry `collect` fields, sensor `trust` fields and `--collect` options. Retrieved content remains untrusted evidence.
+- **Breaking note contract:** projects, concepts and canonical action `ACTION.md` notes require OKF structure, a nonempty `type`, and `draft`/`stable`/`deprecated` lifecycle statuses. Work progress belongs in the body and checkboxes; attachments may remain ordinary Markdown. Routine output is validated before an action is created.
+- **Breaking reply contract:** remove `collect` from init, registration and status replies, `trust` from source metadata, and `external` from retrieval and evidence-helper replies. Pages include record excerpts consistently; hooks and routines reference collected records without copying their text into authored context.
+- Review reminders use local file modification time, optional `review_after` days or a `review_due` date. Replies explain deadlines and newer evidence without claiming a review occurred. File copies/checkouts can reset modification times; explicit deadlines remain portable.
+- Routine actions use unique session suffixes, with daily suppression local to each collecting clone. Shared brains can merge independent records and actions independently; conflicting evidence still requires review.
+- Rewrite guides around a runnable decision example, first sensors, schema mappings, team setup and expected results. Keep the README concise and expand advanced reference pages, privacy boundaries and recovery instructions.
+- Refresh compatible Python dependencies and keep task output concise while retaining diagnostics, security findings, test counts and coverage totals.
 
 ### Added
 
-- `bf-setup` guides first-use onboarding through useful notes, retrieval checks, verified agent access and selected integrations; `bf-scan` recommends sources from explicitly approved discovery and hands sensor implementation to `bf-maintain`. Its local helper summarizes bookmark hosts and checks named tool availability without executing tools, contacting services or returning full bookmark URLs.
+- `bf watch` follows collection in a full-screen terminal dashboard with keyboard navigation, pause/cancellation and last-run changes. `bf status --watch` observes without execution; `watch --json` streams snapshots. A second interactive watcher observes the active collector.
+- Brain-owned `settings/watch.yaml` controls check/display periods and generic desktop failure/recovery alerts, with optional success notifications and cooldowns.
+- `bf schedule` generates inspectable systemd, launchd or cron definitions and installation/removal commands without activating them. Repeatable `--sensor` and `--routine` options select programs for update, watch and schedule while retaining enabled/refresh rules.
+- Window sensors can use a separate `reconcile` cadence to revisit older evidence. Collection/status replies report requested windows, reconciliation, elapsed seconds, output bytes and record change counts.
+- `bf read tasks` lists open checkboxes with source sections, line locations, complete counts and pagination. Weekly reviews summarize tasks without duplicating the original checkboxes. `bf://NAME/tasks` is reserved for this computed page.
+- Browse tags, follow brain-qualified tag pages and search explicit tag membership with `--scope bf://NAME/tags/LABEL`. Tags retain their originating notes and use bounded, validated labels.
+- `bf-setup`, `bf-scan` and `bf-import` guide onboarding, explicitly scoped discovery and selected imports. New brains include technical-test and retrieval-evaluation folders with immediately runnable starter cases.
+- Action helpers create independent sessions and check Context/Resume budgets before handoff. Learning guides cover reviews, evidence retention, sharing and conflict resolution.
+- Runnable fictional context-hub, watch and two-contributor examples demonstrate integrations and collaboration. A highlights sensor imports selected passages with URLs, locators and annotations kept separate from source text.
+- Deterministic retrieval evaluations under `evals/` join the full gate without models or providers. Package checks exercise wheel and source archives outside the checkout; the manual benchmark validates every measured result.
 
 ### Fixed
 
-- Graph reads mark outgoing claim previews with `claims_truncated` when their 50-claim per-brain limit omits evidence.
-
-- Empty searches report coverage for all searched sources, including failed or never-collected sources with no matching records.
-- Symlink and special-file evidence roots are skipped and reported just like nested entries, so other evidence remains readable. A linked transaction directory still blocks reads until repaired.
-- Skipped links retain diagnostics even when their names have no evidence extension; their targets are never inspected, and validation reports them too.
-- A malformed optional user registry no longer prevents reading an explicitly selected brain's home page; operational status is reported unavailable and execution remains denied.
-- Oversized exact reads return digest-identified JSON chunks that can be reassembled without losing UTF-8 text, attributes or metadata.
-- A symlink or special file below a brain no longer stops search, read and validation for the whole brain. A linked or special note or record partition is skipped and reported under `problems`, and an exact record read in its source reports incomplete evidence instead of absence. Other linked files, such as a dataset in an action's `inputs/`, are never followed, indexed or listed; action reads report them.
-- `bf status` lists a brain whose configuration cannot load with its `error` and still reports the others; `--check` fails for it.
-- YAML errors name their file and position without quoting content, such as `bf.yaml: invalid YAML at line 3, column 1`, for brain configuration, the user registry, note frontmatter and retrieval suites.
-- Skipped-file problems in search, read and status name each file once instead of repeating its path.
-
-### Changed
-
-- **Breaking; requires a major release:** `bf validate` now enforces OKF structure for projects as well as concepts, including a nonempty `type`, structured sources and verification events, reserved index/log rules, and `draft`/`stable`/`deprecated` statuses. Home and project review pages use these statuses; action statuses are unchanged. Move project work progress into the body or task list before upgrading.
-
-- Development tasks omit command echoes, test-file progress and decorative scanner banners while retaining failures, warnings, test counts and the coverage total; `mise run report:coverage` shows saved per-file coverage on demand.
-- The README, contributor instructions and documentation overview explain the gather-to-action loop, Unix-style composition and evidence-backed knowledge graph, while keeping data ownership, collection and sharing controls, offline retrieval and cloud-agent privacy explicit.
-- **Breaking:** Consumers must follow `next_offset` to enumerate complete listings and assemble digest-matching JSON chunks for oversized exact reads. Folder pages now cap the combined selection at 200 notes. Update CLI/MCP callers and reinstall the workflow skills before upgrading; brain configuration and retrieval-suite formats remain at version 5.
-
-- Collection trust names the registered brain as well as its path. Another brain later placed at a trusted path, such as a different clone, runs no sensors or routines until it is registered; a brain renamed in `bf.yaml` stops collecting until its registry entry names it again.
-- Search and listing pages accept `--offset` and return `next_offset` for complete traversal, including across selected brains. Search also retains `more: true`. SQLite rows are merged incrementally rather than materializing skipped results.
-- MCP tool schemas describe every parameter and bound `limit` to 1–50.
-- Distributed skills name their release in `metadata.version` and the Brain Framework major they require in `compatibility`.
-- Searches and pages start faster: Markdown parsing and pydantic validators load only when a command uses them.
+- Search/listing continuations expose remaining results. Oversized exact replies return lossless JSON chunks with SHA-256 verification; outgoing graph previews mark omitted claims. Empty searches retain failed/never-collected source coverage.
+- Symlinks and special files are skipped and reported without following their targets or hiding other evidence. Incomplete exact reads fail visibly; pending recovery journals still block retrieval until repaired.
+- Invalid YAML identifies the file, line and column without quoting private content. Persisted-record diagnostics redact provider-controlled keys. Status reports a broken brain while retaining reports for other selected roots.
+- Reject unresolved Markdown merge markers and foreign-namespace note aliases during validation/indexing. Preserve source links on every canonical note type and resolve typed links to tag pages correctly.
+- Preserve existing evidence-capture destinations, including dangling symlinks. Session hooks constrain metadata to its owning brain; weekly reviews follow all project continuations and reject incomplete retrieval.
+- Keep Git history collection within selected directories and half-open time windows, including in-window commits with out-of-order dates.
+- Keep starter absent-evidence evaluations stable as notes grow. A malformed optional registry no longer prevents operations on an explicitly selected brain path.
+- Retry failed scheduled programs on the next cycle even when an earlier success is still within its refresh interval. The watch display shows these retries as immediately due.
+- Remove empty code-line links from the documentation's keyboard navigation and accessibility tree.
 
 ## [v12.0.2](https://github.com/fmind/brain-framework/releases/tag/v12.0.2) - 2026-09-25
 
