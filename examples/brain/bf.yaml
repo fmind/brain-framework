@@ -7,7 +7,7 @@ sensors:
     refresh: 3600
     fields:
       kind: { value: event }
-      repository: { path: /links }
+      repository: { path: /attributes/repository_refs }
 schema:
   depends-on:
     description: This conclusion needs review when the target evidence changes.

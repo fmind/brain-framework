@@ -25,7 +25,9 @@ python3 scripts/inventory.py bookmarks --format html < "/approved/bookmarks.html
 python3 scripts/inventory.py bookmarks --format chromium < "/approved/Bookmarks"
 ```
 
-It reads at most 4 MiB of UTF-8 input and accepts at most 20,000 bookmark/tree entries and 200 distinct hosts. Exceeded limits or malformed supported data fail with a generic diagnostic and no partial stdout; narrow the export and retry within approval. HTTP(S) URLs contribute only a lowercase ASCII hostname and a count. Titles, folders, usernames, ports, paths, queries and fragments are omitted. Other schemes and unsupported or invalid URLs are counted under `skipped_urls`; hostnames remain sensitive. The helper never fetches URLs. Review the report locally first if the agent is not authorized to receive those hostnames.
+For a synthetic export containing two links to `https://example.org/` with different paths, expect `{"hosts":[{"host":"example.org","count":2}],"skipped_urls":0}`; titles and URL paths must be absent.
+
+It reads at most 4 MiB of UTF-8 input and accepts at most 20,000 bookmark/tree entries and 200 distinct hosts. Nothing reaches stdout on failure, and the fixed diagnostic says which applies. An exceeded limit names that limit: browsers export every bookmark at once, so export a single folder where the browser allows it, or delete folders in a copy of the export, and retry within approval. Duplicate JSON keys or malformed data report an unsupported export instead. HTTP(S) URLs contribute only a lowercase ASCII hostname and a count. Titles, folders, usernames, ports, paths, queries and fragments are omitted. Other schemes and unsupported or invalid URLs are counted under `skipped_urls`; hostnames remain sensitive. The helper never fetches URLs. Review the report locally first if the agent is not authorized to receive those hostnames.
 
 Hostname counts show the selected export's contents, not usage frequency or an account inventory. Deduplicate integration recommendations across related hostnames only when evidence supports that they belong to the same service. Do not guess a registrable domain by taking the last two hostname labels.
 

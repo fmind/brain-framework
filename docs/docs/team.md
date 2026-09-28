@@ -1,3 +1,7 @@
+---
+description: Set up a private team brain, share reviewed evidence and coordinate contributors and collection.
+---
+
 # Team setup
 
 A team brain is a **private Git repository**, with a separate local clone for each teammate. BF needs no team server or hosted account. Git shares files; your repository permissions control who can read them.
@@ -17,7 +21,7 @@ Keep personal mail, chat and laptop history in personal brains. A private reposi
 
 ## Create it
 
-Create an empty **private** repository in your organization, then clone and initialize it. Replace `example-org` with your organization:
+Create an empty **private** repository in your organization, without a README, license or `.gitignore`: `bf init` accepts only a directory that is empty apart from `.git`. Then clone and initialize it, replacing `example-org` with your organization:
 
 ```bash
 git clone git@github.com:example-org/team-brain.git ~/team-brain
@@ -31,7 +35,7 @@ Save your first project decision using [Getting started](getting-started.md#save
 bf validate
 bf eval
 git status --short
-git add AGENTS.md bf.yaml .gitignore projects concepts evals
+git add AGENTS.md bf.yaml .gitignore projects concepts actions tests evals
 git diff --cached
 git commit -m "feat: create the team brain"
 git push
@@ -41,7 +45,7 @@ Validation should return `"valid":true`. Starter evaluation returns `"score":"3/
 
 ## Join it
 
-Install BF, then:
+[Install BF](getting-started.md#install-and-create-a-brain), then:
 
 ```bash
 git clone git@github.com:example-org/team-brain.git ~/team-brain
@@ -54,7 +58,14 @@ bf eval
 
 If the team saved the website example, `bf search "visitors clear explanation"` finds its decision. Use `git pull` to receive changes; BF refreshes its search cache automatically.
 
-Review `bf.yaml`, `sensors/` and `routines/` before running collection. Reading a shared brain does not execute its programs.
+To search the team brain from anywhere, optionally register it:
+
+```bash
+bf register ~/team-brain
+bf search "visitors clear explanation" --brain team-brain
+```
+
+Registration only makes the clone searchable by name. Reading a shared brain never executes its programs, and `update`, `collect`, `watch` and `schedule` act only on the brain you work in or select with `--brain` or `BF_BRAIN`, never on every registered brain. Review `bf.yaml`, `sensors/` and `routines/` first, then run them inside the clone or name it explicitly, for example `bf update --brain ~/team-brain`. See [brain selection](configuration.md#select-a-brain).
 
 ## Collect on a laptop
 
@@ -62,7 +73,7 @@ Keep provider credentials and scheduled collection on the designated owner's lap
 
 1. Add a reviewed [sensor](sensors.md) for information the whole team may retain.
 1. Test it locally, then set its `refresh` if regular updates are useful.
-1. Use `bf watch` on that laptop, or an optional [native schedule](schedule.md).
+1. Use `bf watch` on that laptop, or an optional [native schedule](schedule.md#generate-a-native-schedule). Generated files hold that laptop's paths: keep them out of the team brain's Git.
 1. Inspect the collected files before sharing them through Git.
 
 New brains ignore `memories/`. To share only a reviewed `github-issues` source, replace the `/memories/` line in `.gitignore` with:
@@ -89,7 +100,7 @@ Commit and push after review, using your team's normal process. Git history reta
 ## Contribute without overwriting each other
 
 - **Project and concept notes:** make focused edits; keep one current decision and next step in the owning note.
-- **Actions:** give independent sessions unique folders; resume existing work by its ref. The [action workflow](agents.md#resume-an-action) owns this convention.
+- **Actions:** each session gets its own folder with a fresh UUID hex suffix, as the [action folder convention](brain.md#actions) describes; resume existing work by its ref.
 - **Records:** different ids have separate files. Competing revisions of the same id still need review.
 - **Sources:** use different source names for different permission scopes. A snapshot represents its whole catalog; a partial view must not replace a shared one.
 - **Conflicts:** preserve both sides, reconcile using evidence, then validate and evaluate the merged result. Never use automatic last-writer-wins for evidence.

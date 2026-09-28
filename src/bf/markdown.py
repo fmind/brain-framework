@@ -16,12 +16,14 @@ from pydantic import ValidationError
 
 from bf import links as bf_links
 from bf.config import yaml_object
-from bf.models import AUTHORED, Error, Knowledge, explain
+from bf.models import AUTHORED, IDENTITY, MAX_ENCODED, Error, Knowledge, addressable, explain
 
 if TYPE_CHECKING:
     from markdown_it import MarkdownIt
 
 LEAD = 320
+# Record titles share this bound: a note title is copied into every listing and search row.
+MAX_TITLE = 4096
 _FOOTNOTE = re.compile(r"^\[\^([^\]\s]+)\]:", re.MULTILINE)
 _TASK = re.compile(r"\[([ xX])\]\s+(\S.*)")
 
@@ -54,6 +56,8 @@ class Markdown:
     contexts: list[tuple[str, str]]
     # Task list items in document order, with their containing section and source line.
     tasks: list[Task] = field(default_factory=list)
+    # The first body line after any frontmatter.
+    offset: int = 0
 
 
 @dataclass(frozen=True)
@@ -95,26 +99,45 @@ def _parser() -> MarkdownIt:
     """One CommonMark parser, imported on first use: a fresh cache answers searches and pages without it."""
     from markdown_it import MarkdownIt
 
-    return MarkdownIt()
+    class Parser(MarkdownIt):
+        def normalizeLink(self, url: str) -> str:  # noqa: N802 - markdown-it's hook
+            # Keep destinations as written, like frontmatter links: BF parses its own addresses and resolve()
+            # decodes relative paths once, so percent-encoding here would change identities and record refs.
+            return url
+
+    return Parser()
 
 
 def parse(path: str, data: bytes) -> Markdown:
     try:
-        text = data.decode("utf-8")
+        # A byte order mark would hide the frontmatter; removing it keeps every line number.
+        text = data.decode("utf-8").removeprefix("\ufeff")
     except UnicodeError as error:
         raise Error(f"{path}: note is not UTF-8") from error
     source_lines = lines(text)
     for number, value in enumerate(source_lines, 1):
+        # Fail closed inside code blocks too: a real conflict can land there.
         if re.match(r"^(?:<{7,}|>{7,}|\|{7,})(?: |$)", value.rstrip("\r\n")):
-            raise Error(f"{path}:{number}: unresolved merge conflict marker; reconcile both revisions")
+            raise Error(
+                f"{path}: line {number}: unresolved merge conflict marker; reconcile both revisions, "
+                "or indent a literal example by one space"
+            )
     offset = 0
     attributes: dict[str, object] = {}
     if source_lines and source_lines[0].rstrip("\r\n") == "---":
         end = next((i for i, line in enumerate(source_lines[1:], 1) if line.rstrip("\r\n") == "---"), None)
+        # Ordinary Markdown, such as a document copied from another tool, stays searchable without foreign
+        # frontmatter it cannot parse: an unclosed block is text, and an invalid one is skipped whole.
         if end is None:
-            raise Error(f"{path}: unclosed frontmatter")
-        attributes = yaml_object("".join(source_lines[1:end]).encode(), path, line=2)
-        offset = end + 1
+            if okf(path):
+                raise Error(f"{path}: unclosed frontmatter")
+        else:
+            offset = end + 1
+            try:
+                attributes = yaml_object("".join(source_lines[1:end]).encode(), path, line=2)
+            except Error:
+                if okf(path):
+                    raise
     body = "".join(source_lines[offset:])
     # OKF claim footnotes (`[^id]: [Source](ref)`) are not link reference definitions in CommonMark;
     # parse them as ordinary lines so their links are checked, on a copy with the same line numbers.
@@ -137,9 +160,15 @@ def parse(path: str, data: bytes) -> Markdown:
             title = "".join(
                 child.content for child in inline.children or [] if child.type in {"text", "code_inline", "image"}
             )
-            anchor = re.search(r"\s+\{#([A-Za-z0-9][A-Za-z0-9_.-]*)\}$", title)
+            # An anchor id holds no `{` or `#`, so only the last `{#` can start one: no regex backtracking.
+            start = title.rfind("{#")
+            anchor = (
+                re.fullmatch(r"\{#([A-Za-z0-9][A-Za-z0-9_.-]*)\}", title[start:])
+                if start > 0 and title[start - 1].isspace()
+                else None
+            )
             if anchor:
-                title = title[: anchor.start()]
+                title = title[:start].rstrip()
                 if anchor[1].endswith(".md"):
                     # `note.md#part.md` would read as a file name, not a section.
                     raise Error(f"{path}: explicit heading anchors cannot end in .md")
@@ -167,13 +196,17 @@ def parse(path: str, data: bytes) -> Markdown:
         ):
             tasks.append(Task(task[1] != " ", _plain(task[2])[:LEAD], fragment, token.map[0] + offset + 1))
         for child in token.children or []:
-            if child.type == "link_open":
-                target = str(child.attrGet("href"))
-                # Split local URL fragments before decoding: %23 is part of a filename.
-                # BF parses each component before decoding; external queries keep their original meaning.
-                links.append(target)
-                contexts.append((target, fragment))
-    return Markdown(text, body, attributes, headings, links, contexts, tasks)
+            # An embedded image is a link too, so validation catches a missing asset; inline data names no target.
+            if child.type not in {"link_open", "image"}:
+                continue
+            target = str(child.attrGet("href" if child.type == "link_open" else "src"))
+            if child.type == "image" and target.lower().startswith("data:"):
+                continue
+            # Split local URL fragments before decoding: %23 is part of a filename.
+            # BF parses each component before decoding; external queries keep their original meaning.
+            links.append(target)
+            contexts.append((target, fragment))
+    return Markdown(text, body, attributes, headings, links, contexts, tasks, offset)
 
 
 def section(path: str, data: bytes, fragment: str) -> str:
@@ -203,8 +236,11 @@ def resolve(path: str, target: str) -> tuple[str, str]:
     """
     name, _, fragment = target.partition("#")
     name, fragment = unquote(name), unquote(fragment)
-    if name.startswith("/") and path.startswith("concepts/"):
-        joined = posixpath.normpath("concepts/" + name.lstrip("/"))
+    bundle = path.split("/")[0]
+    if name.startswith("/") and bundle in {"projects", "concepts"}:
+        # OKF bundle-relative links start at the bundle root: each of these folders is one bundle.
+        # Actions and their attachments have no bundle root, so a leading `/` stays an absolute path there.
+        joined = posixpath.normpath(bundle + name)
     else:
         joined = posixpath.normpath(posixpath.join(posixpath.dirname(path), name)) if name else path
     return joined, fragment
@@ -237,24 +273,56 @@ def _sources(path: str, attributes: dict[str, object]) -> list[str]:
 
 
 def _plain(markdown: str) -> str:
-    """A compact, readable lead: drop headings markers, emphasis and link targets."""
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", markdown)
-    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+    """A compact, readable lead: drop headings markers, rules, emphasis and link targets.
+
+    Callers keep at most LEAD characters; a bounded prefix keeps the link pattern's cost independent of note size.
+    """
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", markdown[: 8 * LEAD])
+    text = re.sub(r"^#+\s*|^ {0,3}(?:-[ \t]*){3,}$", "", text, flags=re.MULTILINE)
     text = re.sub(r"[*_`]{1,3}", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
-def note(path: str, data: bytes) -> Note:
-    markdown = parse(path, data)
+# Display and lifecycle metadata, the only frontmatter ordinary Markdown contributes.
+_ORDINARY = {"title", "type", "status", "updated", "summary", "description"}
+
+
+def okf(path: str) -> bool:
+    """Projects, concepts and each action's ACTION.md are OKF notes; other authored Markdown is ordinary."""
+    return authored(path) and (path.startswith(("projects/", "concepts/")) or action_note(path))
+
+
+def _knowledge(path: str, attributes: dict[str, object]) -> Knowledge:
+    if not okf(path):
+        # Ordinary Markdown, such as a document copied into an action's inputs, declares no identity, tag, link or
+        # review date. Its other metadata applies only where valid, so foreign frontmatter stays searchable.
+        attributes = {key: value for key, value in attributes.items() if key in _ORDINARY}
+        try:
+            return Knowledge.model_validate(attributes)
+        except ValidationError as error:
+            invalid = {e["loc"][0] for e in error.errors() if e["loc"]}
+            attributes = {key: value for key, value in attributes.items() if key not in invalid}
     try:
-        knowledge = Knowledge.model_validate(markdown.attributes)
+        return Knowledge.model_validate(attributes)
     except ValidationError as error:
         raise Error(f"{path}: invalid frontmatter: " + explain(error)) from error
+
+
+def note(path: str, data: bytes) -> Note:
+    if not addressable(path):
+        # Every note has a BF address: links, backlinks and identities name it by that address.
+        raise Error(f"{path}: path exceeds {MAX_ENCODED} characters once percent-encoded in a BF address; shorten it")
+    markdown = parse(path, data)
+    knowledge = _knowledge(path, markdown.attributes)
     if not knowledge.type:
         knowledge.type = {"projects": "project", "actions": "action", "concepts": "concept"}[path.split("/")[0]]
-    title = knowledge.title or next(
-        (h.title for h in markdown.headings if h.level == 1), PurePosixPath(path).stem.replace("-", " ")
-    )
+    stem = PurePosixPath(path).stem.replace("-", " ")
+    title = knowledge.title or next((h.title for h in markdown.headings if h.level == 1), stem)
+    if not okf(path) and (len(title) > MAX_TITLE or not title.strip()):
+        # Ordinary Markdown stays searchable: an overlong or blank title gives way to the file name.
+        title = stem if stem.strip() else PurePosixPath(path).name
+    if len(title) > MAX_TITLE:
+        raise Error(f"{path}: title exceeds {MAX_TITLE} characters")
     if not title.strip():
         raise Error(f"{path}: title must be nonempty")
     # H2+ sections are separate passages, so a search can land on the answering section.
@@ -263,8 +331,8 @@ def note(path: str, data: bytes) -> Note:
     sections = [h for h in markdown.headings if h.level >= 2]
     titled = next((h for h in markdown.headings if h.level == 1 and h.title == title), None)
     hidden = range(titled.line, titled.end) if titled else range(0)
-    opening = [line for n, line in enumerate(source_lines[: sections[0].line if sections else None]) if n not in hidden]
-    introduction = parse(path, "".join(opening).encode()).body
+    opening = range(markdown.offset, sections[0].line if sections else len(source_lines))
+    introduction = "".join(source_lines[n] for n in opening if n not in hidden)
     summary = knowledge.summary or knowledge.description
     passages = [
         Passage("", title, title, "\n\n".join(part.strip() for part in (summary, introduction) if part.strip()))
@@ -278,11 +346,7 @@ def note(path: str, data: bytes) -> Note:
         lead = _plain(passages[1].text)
     # OKF provenance has the same explicit-link semantics in each authored note format.
     # Working inputs and outputs remain ordinary Markdown, even when their filename is ACTION.md.
-    sources = (
-        _sources(path, markdown.attributes)
-        if path.startswith(("projects/", "concepts/")) or re.fullmatch(r"actions/[^/]+/ACTION\.md", path)
-        else []
-    )
+    sources = _sources(path, markdown.attributes) if okf(path) else []
     targets = sorted({target for target in [*markdown.links, *knowledge.links, *sources] if target})
     for target in targets:
         reference(path, target)
@@ -305,18 +369,20 @@ def note(path: str, data: bytes) -> Note:
 
 
 def broken(note: Note, exists: Callable[[str], bool], slugs: dict[str, set[str]]) -> list[str]:
-    """Relative links must name an existing brain file and, for notes, an existing heading."""
+    """This note's relative links that name no brain file or, for notes, no heading; the caller names the note."""
     problems = []
     for target in note.targets:
         if scheme(note.path, target) or target == "#":
             continue
         name, fragment = resolve(note.path, target)
         if name == ".." or name.startswith("../"):
-            problems.append(f"{note.path}: link leaves the brain: {target}")
+            problems.append(f"link leaves the brain: {target}")
+        elif name.startswith("/"):
+            problems.append(f"absolute link; use a path relative to this file: {target}")
         elif not exists(name):
-            problems.append(f"{note.path}: broken link: {target}")
+            problems.append(f"broken link: {target}")
         elif fragment and name in slugs and fragment not in slugs[name]:
-            problems.append(f"{note.path}: missing heading: {target}")
+            problems.append(f"missing heading: {target}")
     return problems
 
 
@@ -344,6 +410,9 @@ def validate_okf(path: str, data: bytes) -> None:
         raise Error(f"{path}: OKF documents require a nonempty type in YAML frontmatter")
     if attributes.get("status", "stable") not in {"draft", "stable", "deprecated"}:
         raise Error(f"{path}: OKF status must be draft, stable or deprecated")
+    aliases = attributes.get("aliases", [])
+    if not isinstance(aliases, list) or not all(isinstance(v, str) and re.fullmatch(IDENTITY, v) for v in aliases):
+        raise Error(f"{path}: OKF aliases must be namespaced identities, such as person:email/alice@example.test")
     _sources(path, attributes)
     verified = attributes.get("verified", [])
     events = [verified] if isinstance(verified, dict) else verified
@@ -355,3 +424,19 @@ def validate_okf(path: str, data: bytes) -> None:
 
 def authored(path: str) -> bool:
     return path.split("/")[0] in AUTHORED and path.endswith(".md")
+
+
+def editor_lock(path: str) -> bool:
+    """An Emacs lock, `.#NAME`: a dangling link or small file kept beside an edited file, never a note or input."""
+    return path.rsplit("/", 1)[-1].startswith(".#")
+
+
+def action_note(path: str) -> bool:
+    """Only folders directly below actions/ hold an ACTION.md; inputs/ and outputs/ may hold other notes."""
+    parts = path.split("/")
+    return len(parts) == 3 and parts[0] == "actions" and parts[2] == "ACTION.md"
+
+
+def entry_note(path: str) -> bool:
+    """OKF notes that hold knowledge or work, not bundle indexes or update logs: they rank, remind and queue tasks."""
+    return okf(path) and path.rsplit("/", 1)[-1] not in {"index.md", "log.md"}

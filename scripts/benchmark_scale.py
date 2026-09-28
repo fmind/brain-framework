@@ -1,4 +1,8 @@
-"""Measure cache builds, incremental refreshes and searches over notes and records; never contact providers."""
+"""Time record writes, cache builds, refreshes and searches over synthetic notes and records; never contact providers.
+
+The synthetic brain lives in a temporary folder under --dir, on disk by default: record writes fsync, and a RAM-backed
+/tmp would hide that cost while holding the whole corpus in memory.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ from bf.index import refresh
 from bf.models import Query, Record
 from bf.retrieve import read, search
 from bf.storage import Store, writer
+from bf.validate import validate
 
 
 def main() -> None:
@@ -25,15 +30,21 @@ def main() -> None:
     parser.add_argument("--body-chars", type=int, default=1024)
     parser.add_argument("--notes", type=int, default=100)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--batch", type=int, default=200, help="Records added, updated and removed per write sample.")
+    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    parser.add_argument("--dir", type=Path, default=cache / "bf-benchmark", help="Parent of the temporary brain.")
     args = parser.parse_args()
     if not (
         1 <= args.records <= 100_000
         and 64 <= args.body_chars <= 4096
         and 0 <= args.notes <= 1000
         and 1 <= args.repeats <= 20
+        and 1 <= args.batch <= 10_000
     ):
-        parser.error("limits: records 1-100000, body-chars 64-4096, notes 0-1000, repeats 1-20")
-    with tempfile.TemporaryDirectory() as temporary:
+        parser.error("limits: records 1-100000, body-chars 64-4096, notes 0-1000, repeats 1-20, batch 1-10000")
+    args.batch = min(args.batch, args.records)
+    args.dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="bf-benchmark-", dir=args.dir) as temporary:
         root = Path(temporary)
         (root / "brain").mkdir()
         os.environ["XDG_STATE_HOME"] = str(root / "state")
@@ -59,6 +70,19 @@ def main() -> None:
         measurements = {}
         revision = 0
         note_revision = 0
+        # Each write sample uses its own source: add creates it, update rewrites it and remove empties it again.
+        churn = {"upsert_add": 0, "upsert_update": 0, "upsert_remove": 0}
+
+        def write_batch(name: str) -> dict[str, object]:
+            churn[name] += 1
+            source = f"churn{churn[name]}"
+            if name == "upsert_remove":
+                batch = []
+            else:
+                edit = "Revised decision." if name == "upsert_update" else "Retain evidence."
+                batch = [item.model_copy(update={"text": f"{background}\n{edit}"}) for item in items[: args.batch]]
+            with writer(store):
+                return {**records.upsert(store, source, batch, snapshot=name == "upsert_remove")}
 
         def change_note() -> dict[str, object]:
             nonlocal note_revision
@@ -70,7 +94,8 @@ def main() -> None:
             return search([store], Query(text=f"revision{note_revision}"))
 
         def check_result(name: str, result: dict[str, object]) -> None:
-            if result.get("problems") or result.get("stale"):
+            # Refresh results count skipped files; retrieval results name problems and stale evidence.
+            if result.get("problems") or result.get("stale") or result.get("skipped"):
                 raise RuntimeError(f"{name}: incomplete benchmark result")
             found = cast("list[dict[str, object]]", result.get("items", []))
             refs = {item["ref"] for item in found}
@@ -99,6 +124,9 @@ def main() -> None:
                 valid = result.get("changed") == 1
             elif name == "unchanged_record":
                 valid = result == {"added": 0, "updated": 0, "unchanged": 1, "removed": 0}
+            elif name.startswith("upsert_"):
+                change = {"upsert_add": "added", "upsert_update": "updated", "upsert_remove": "removed"}[name]
+                valid = result == {"added": 0, "updated": 0, "unchanged": 0, "removed": 0, change: args.batch}
             if not valid:
                 raise RuntimeError(f"{name}: unexpected benchmark result")
 
@@ -131,6 +159,9 @@ def main() -> None:
             ("exact_read", lambda: read([store], "decision:0")),
             ("changed_record", change_record),
             ("unchanged_record", unchanged_record),
+            ("upsert_add", lambda: write_batch("upsert_add")),
+            ("upsert_update", lambda: write_batch("upsert_update")),
+            ("upsert_remove", lambda: write_batch("upsert_remove")),
         ]:
             if name == "note_edit" and not args.notes:
                 continue
@@ -146,7 +177,12 @@ def main() -> None:
                 "median": round(statistics.median(timings), 3),
                 "max": round(max(timings), 3),
             }
-        sys.stdout.write(json.dumps({"corpus": vars(args), "seconds": measurements}) + "\n")
+        # Fixture validation is outside the timers and must pass before timings are published.
+        if not validate(store)["valid"]:
+            raise RuntimeError("benchmark fixture failed brain validation")
+        # The report omits the local directory so timings can be shared.
+        corpus = {key: value for key, value in vars(args).items() if key != "dir"}
+        sys.stdout.write(json.dumps({"corpus": corpus, "seconds": measurements}) + "\n")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import cast
 
 ROOT = Path(__file__).resolve().parents[1]
-_DISTRIBUTION_HEADER = re.compile(r"^## (?P<name>[A-Za-z0-9._-]+) (?P<version>\S+)$", re.MULTILINE)
 _PLATFORM_MARKERS = {
     "linux": {
         "implementation_name != 'PyPy'": True,
@@ -121,31 +120,10 @@ def _runtime_distributions(platform: str) -> dict[str, str]:
     return distributions
 
 
-def _declared_notices() -> tuple[dict[str, str], tuple[str, ...]]:
-    text = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
-    matches = tuple(_DISTRIBUTION_HEADER.finditer(text))
-    declared: dict[str, str] = {}
-    for index, match in enumerate(matches):
-        name = _canonical_name(match.group("name"))
-        assert name not in declared, f"duplicate third-party notice for {name}"
-        declared[name] = match.group("version")
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        section = text[match.end() : end]
-        assert "\nSource: <https://" in section, f"{name} notice has no authoritative source"
-        assert "\nLicense: `" in section, f"{name} notice has no license expression"
-        assert "\nEvidence: `" in section, f"{name} notice has no installed legal-file evidence"
-        assert "\n```text\n" in section, f"{name} notice has no legal text"
-    return declared, tuple(match.group(0) for match in matches)
-
-
-def test_notices_match_the_complete_locked_runtime_distribution_closure() -> None:
-    linux = _runtime_distributions("linux")
-    macos = _runtime_distributions("macos")
-    declared, headings = _declared_notices()
-
-    assert linux == macos, "declared Linux and macOS runtime closures diverged"
-    assert declared == linux
-    assert headings == tuple(sorted(headings, key=str.casefold))
+def test_linux_and_macos_select_the_same_locked_runtime_closure() -> None:
+    # Unknown lock markers fail until reviewed per platform. `check:notices` generates the notices from one platform's
+    # synced environment, so the declared platforms must select the same closure.
+    assert _runtime_distributions("linux") == _runtime_distributions("macos")
 
 
 def test_distribution_packages_both_project_and_third_party_licenses() -> None:

@@ -1,6 +1,25 @@
 :root > * {
+  --md-text-font: "Google Sans", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --md-code-font: "Google Sans Code", ui-monospace, SFMono-Regular, Consolas, monospace;
   --md-primary-fg-color: #3d59a1;
   --md-primary-fg-color--light: #526fb8;
   --md-primary-fg-color--dark: #3d59a1;
   --md-accent-fg-color: #654a9e;
+}
+
+.md-nav__link[data-bf-toggle]:disabled {
+  color: inherit;
+  opacity: 1;
+}
+
+button[data-bf-toggle]:focus-visible {
+  outline: 2px solid var(--md-accent-fg-color);
+  outline-offset: 2px;
+}
+
+/* Keep the native drawer button aligned with Zensical's label-based breakpoint. */
+@media screen and (min-width: 76.25em) {
+  .md-header__button[data-bf-toggle="__drawer"] {
+    display: none;
+  }
 }

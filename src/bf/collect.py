@@ -16,80 +16,34 @@ from pathlib import Path
 from typing import NoReturn, Protocol
 from uuid import uuid4
 
-from pydantic import Field, TypeAdapter, ValidationError, field_validator
+from pydantic import TypeAdapter, ValidationError
 
 from bf import ontology, records
 from bf.config import load
+from bf.history import ROUTINES, SENSORS, environment, log_path, remember, state
 from bf.markdown import note, validate_okf
-from bf.models import NAME, Error, Model, Program, Record, decode, encode, explain, timestamp
-from bf.storage import Store, collecting, relative, state_store, writer
-
-SENSORS = "sensors.json"
-ROUTINES = "routines.json"
+from bf.models import Error, Program, Record, decode, explain, timestamp
+from bf.storage import Store, collecting, relative, writer
 
 _LOG = 256 << 10
-# Variables that make a shell, loader or interpreter run code before the program itself.
-_STARTUP = (
-    "BASH_ENV",
-    "ENV",
-    "GCONV_PATH",
-    "JAVA_TOOL_OPTIONS",
-    "JDK_JAVA_OPTIONS",
-    "_JAVA_OPTIONS",
-    "NODE_OPTIONS",
-    "NODE_PATH",
-    "RUBYOPT",
-    "RUBYLIB",
-    "PERL5OPT",
-    "PERL5LIB",
-    "PERLLIB",
-)
-_PREFIXES = ("LD_", "DYLD_", "BASH_FUNC_", "PYTHON", "LUA_INIT")
-
-
-class _Run(Model):
-    run: str = ""
-    success: str = ""
-    start: str = ""
-    end: str = ""
-    error: str = ""
-    records: int = Field(default=0, ge=0)
-    added: int = Field(default=0, ge=0)
-    updated: int = Field(default=0, ge=0)
-    unchanged: int = Field(default=0, ge=0)
-    removed: int = Field(default=0, ge=0)
-    requested_start: str = ""
-    requested_end: str = ""
-    reconciled: str = ""
-    reconcile: bool = False
-    elapsed_seconds: float = Field(default=0.0, ge=0)
-    output_bytes: int = Field(default=0, ge=0)
-    action: str = ""
-
-    @field_validator("run", "success", "start", "end", "requested_start", "requested_end", "reconciled")
-    @classmethod
-    def instant(cls, value: str) -> str:
-        if value:
-            timestamp(value)
-        return value
+# Seconds a finished program's background descendants may keep its stdout open.
+_DRAIN = 1.0
+# Window sensors catch up at most this far after a pause.
+CATCH_UP = timedelta(days=30)
+# A failed program's first retry waits this long, doubling per consecutive failure up to its refresh.
+BACKOFF = timedelta(minutes=1)
+# A snapshot may remove half of its catalog, or up to this many records, without --allow-removal.
+SHRINK_FLOOR = 10
 
 
 class Runner(Protocol):
     def __call__(self, argv: list[str], sensor: Program, store: Store, log: Path, /) -> bytes: ...
 
 
-def environment() -> dict[str, str]:
-    """The caller's environment without loader injection or relative PATH entries."""
-    env = {key: value for key, value in os.environ.items() if key not in _STARTUP and not key.startswith(_PREFIXES)}
-    if "PATH" in env:
-        # Programs run from the brain root, where a relative entry would find commands inside the brain.
-        env["PATH"] = os.pathsep.join(entry for entry in env["PATH"].split(os.pathsep) if Path(entry).is_absolute())
-    return env
-
-
 def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
     """Execute one sensor or routine from the brain root; stderr goes to a bounded private log, never to errors."""
-    env = environment()
+    # A nested bf call without --brain reads the executing brain, never an inherited selection.
+    env = {**environment(), "BF_BRAIN": str(store.root)}
     executable = argv[0]
     if executable.startswith(("sensors/", "routines/")):
         relative(executable)
@@ -115,19 +69,31 @@ def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
         )
     except OSError as error:
         raise Error("could not start the program; check its executable bit and interpreter") from error
+    stdout, stderr = child.stdout, child.stderr
     output, errors = bytearray(), bytearray()
     deadline = time.monotonic() + sensor.timeout
+    exited: float | None = None
     try:
+        if stdout is None or stderr is None:
+            raise Error("program pipes were not created")
         with selectors.DefaultSelector() as selector:
-            for pipe, buffer in ((child.stdout, output), (child.stderr, errors)):
-                if pipe is None:
-                    raise Error("program pipes were not created")
+            for pipe, buffer in ((stdout, output), (stderr, errors)):
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, buffer)
-            while selector.get_map() or child.poll() is None:
-                if time.monotonic() >= deadline:
+            # A run ends with the program's exit and the end of its stdout. Stderr only feeds the log,
+            # so a background descendant holding it cannot delay or fail a finished program.
+            while stdout in selector.get_map() or child.poll() is None:
+                now = time.monotonic()
+                if exited is None and child.poll() is not None:
+                    exited = now
+                if exited is not None and now >= exited + _DRAIN:
+                    raise Error(
+                        "program exited but a background process kept its stdout open; "
+                        "redirect its descendants' output; nothing was written"
+                    )
+                if now >= deadline:
                     raise Error(f"program timed out after {sensor.timeout}s; nothing was written")
-                if not selector.get_map():
+                if stdout not in selector.get_map():
                     with suppress(subprocess.TimeoutExpired):
                         child.wait(timeout=0.05)
                 for key, _ in selector.select(0.05):
@@ -139,6 +105,12 @@ def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
                     if len(output) > sensor.max_bytes:
                         raise Error("program output exceeded max_bytes; nothing was written")
                     del errors[:-_LOG]
+        # Keep diagnostics written before the exit; a bounded read never waits for descendants.
+        with suppress(BlockingIOError):
+            for _ in range(_LOG // 65536 + 1):
+                if not (chunk := os.read(stderr.fileno(), 65536)):
+                    break
+                errors.extend(chunk)
         code = child.wait()
         if code:
             raise Error(f"program exited with status {code}; nothing was written")
@@ -153,37 +125,6 @@ def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
                 pipe.close()
         # Use the same confined atomic writer as other private state.
         Store(log.parent).write(log.name, bytes(errors[-_LOG:]))
-
-
-def state(store: Store, file: str = SENSORS) -> dict[str, dict[str, object]]:
-    """Per-sensor or per-routine run history, kept on this machine outside the brain."""
-    try:
-        value = decode(state_store(store.root).read(file))
-    except FileNotFoundError, Error:
-        return {}
-    if not isinstance(value, dict):
-        return {}
-    valid = {}
-    for name, entry in value.items():
-        if not isinstance(name, str) or not re.fullmatch(NAME, name):
-            continue
-        try:
-            valid[name] = _Run.model_validate(entry).model_dump(exclude_unset=True)
-        except ValidationError:
-            # Disposable run history must not stop evidence recovery or other sensors.
-            continue
-    return valid
-
-
-def _remember(store: Store, name: str, file: str = SENSORS, /, **values: object) -> None:
-    """Update local history while the caller holds the brain writer lock."""
-    current = state(store, file)
-    current[name] = {**current.get(name, {}), **values}
-    state_store(store.root).write(file, encode(current))
-
-
-def log_path(store: Store, name: str) -> Path:
-    return state_store(store.root).root / f"{name}.log"
 
 
 def _window(start: str, end: str) -> tuple[str, str]:
@@ -203,18 +144,23 @@ def _failed(
     if not dry_run:
         try:
             with writer(store, wait=120):
-                _remember(store, name, file, run=started.isoformat(), error=message)
+                failures = int(str(state(store, file).get(name, {}).get("failures", 0))) + 1
+                remember(store, name, file, run=timestamp(started.isoformat()), error=message, failures=failures)
         except (Error, OSError) as history_error:
             raise Error(f"{name}: {message}; run history could not be saved") from history_error
     raise Error(f"{name}: {message}; see {log_path(store, name)}") from cause
 
 
-def _coverage(previous: dict[str, object], start: str, end: str, observed: str) -> tuple[dict[str, str], bool]:
+def _coverage(
+    previous: dict[str, object], start: str, end: str, observed: str, *, resumes: bool
+) -> tuple[dict[str, str], bool]:
     """The contiguous collected interval after a run, and whether the run is the latest window.
 
     Coverage never extends past the run itself: later items can still appear upstream. A backfill that
     ends before the recorded coverage neither moves the resume point nor counts as a fresh success, and
-    coverage never claims an uncollected gap.
+    coverage never claims an uncollected gap. When updates resume from the coverage (scheduled window
+    sensors), a later run leaving a gap inside the catch-up horizon is not the latest either, so the
+    next update still fills that gap. Nothing revisits a manual sensor's gap, so its later run is the latest.
     """
     covered = min(end, observed)
     before_start, before_end = str(previous.get("start", "")), str(previous.get("end", ""))
@@ -227,11 +173,24 @@ def _coverage(previous: dict[str, object], start: str, end: str, observed: str) 
             before_start = before_end = ""
     if start >= covered:
         return ({"start": before_start, "end": before_end} if before_end else {}), False
-    latest = not before_end or covered >= before_end
+    horizon = timestamp((datetime.fromisoformat(observed) - CATCH_UP).isoformat())
+    latest = not before_end or (covered >= before_end and (not resumes or start <= max(before_end, horizon)))
     interval = (start, covered) if latest else (before_start, before_end)
     if before_start and before_end and start <= before_end and covered >= before_start:
         interval = (min(start, before_start), max(covered, before_end))
     return {"start": interval[0], "end": interval[1]}, latest
+
+
+def _check_shrink(store: Store, name: str, incoming: list[Record]) -> None:
+    """A wrong account, a lost folder or a truncated listing also looks like a smaller catalog."""
+    existing = records.files(store, name)
+    kept = {records.path(name, record.id) for record in incoming}
+    removed = sum(file not in kept for file in existing)
+    if removed and (not incoming or (removed > len(existing) / 2 and removed > SHRINK_FLOOR)):
+        raise Error(
+            f"snapshot would remove {removed} of {len(existing)} records; kept the existing catalog. "
+            f"Check the sensor's scope, then run bf collect {name} --allow-removal to accept the removal"
+        )
 
 
 def collect(
@@ -242,10 +201,15 @@ def collect(
     end: str,
     dry_run: bool = False,
     reconcile: bool = False,
+    allow_removal: bool = False,
     runner: Runner = run,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
-    """Run one sensor over [start, end) and upsert its records; failures write nothing."""
+    """Run one sensor over [start, end) and upsert its records; failures write nothing.
+
+    A snapshot that would empty its catalog, or remove more than half of it and more than SHRINK_FLOOR
+    records, fails unless `allow_removal` accepts it for this run.
+    """
     start, end = _window(start, end)
     config = load(store)
     sensor = config.sensors.get(name)
@@ -293,25 +257,24 @@ def collect(
                     "samples": [r.model_dump(exclude_defaults=True) for r in incoming[:3]],
                 }
             with writer(store, wait=120):
-                if sensor.mode == "snapshot" and not incoming and records.files(store, name):
-                    # A wrong account or an unmounted folder also looks empty: never erase a catalog silently.
-                    raise Error(
-                        f"snapshot returned no records; kept the existing catalog. Check the sensor's scope, "
-                        f"or delete memories/{name}/ to clear it deliberately"
-                    )
+                if sensor.mode == "snapshot" and not allow_removal:
+                    _check_shrink(store, name, incoming)
                 result.update(records.upsert(store, name, incoming, snapshot=sensor.mode == "snapshot"))
                 committed = True
                 result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
-                coverage, latest = _coverage(state(store).get(name, {}), start, end, observed)
-                _remember(
+                previous = state(store).get(name, {})
+                resumes = sensor.mode == "window" and sensor.refresh > 0
+                coverage, latest = _coverage(previous, start, end, observed, resumes=resumes)
+                remember(
                     store,
                     name,
                     SENSORS,
-                    run=started.isoformat(),
+                    run=observed,
                     **coverage,
                     error="",
-                    **({"success": started.isoformat()} if latest else {}),
-                    **({"reconciled": started.isoformat()} if reconcile and latest else {}),
+                    failures=0,
+                    **({"success": observed} if latest else {}),
+                    **({"reconciled": observed} if reconcile and latest else {}),
                     **{key: value for key, value in result.items() if key != "sensor"},
                 )
         except (Error, OSError, UnicodeError) as error:
@@ -329,6 +292,19 @@ def collect(
 def _argv(store: Store, program: Program, start: str, end: str) -> list[str]:
     values = {"brain": str(store.root), "home": str(Path.home()), "start": start, "end": end}
     return [re.sub(r"\{\{(brain|home|start|end)\}\}", lambda match: values[match[1]], arg) for arg in program.command]
+
+
+def _used(store: Store, folder: str) -> bool:
+    """Whether an action folder holds anything, such as an ACTION.md or an editor's `.#ACTION.md` lock.
+
+    A link or unaddressable name inside marks the folder as used instead of failing the run, so nothing is written
+    beside it; a linked folder or `actions/` still fails by name.
+    """
+    skipped: dict[str, tuple[int, int, int, int]] = {}
+    found = store.files(folder, skipped=skipped)
+    if linked := sorted(name for name in skipped if not name.startswith(folder + "/")):
+        raise Error(f"{linked[0]}: expected a directory; symlinks and special files are forbidden")
+    return bool(found or skipped)
 
 
 def routine(
@@ -371,24 +347,24 @@ def routine(
                 return {**result, **({"text": text} if text.strip() else {})}
             with writer(store, wait=120):
                 previous = str(state(store, ROUTINES).get(name, {}).get("action", ""))
-                already_ran = previous.startswith(f"actions/{day}_{name}-") and bool(
-                    store.files(previous.rsplit("/", 1)[0])
-                )
-                if text.strip() and (already_ran or store.files(folder)):
+                already_ran = previous.startswith(f"actions/{day}_{name}-") and _used(store, previous.rsplit("/", 1)[0])
+                if text.strip() and (already_ran or _used(store, folder)):
                     del result["action"]
                     result["skipped"] = "an action for this routine already exists today"
                 elif text.strip():
                     store.write(path, raw)
                 # A skipped review keeps its window open, so the next written action covers it.
                 reviewed = {} if "skipped" in result else {"start": start, "end": end}
-                _remember(
+                at = timestamp(started.isoformat())
+                remember(
                     store,
                     name,
                     ROUTINES,
-                    run=started.isoformat(),
-                    success=started.isoformat(),
+                    run=at,
+                    success=at,
                     **reviewed,
                     error="",
+                    failures=0,
                     **({"action": path} if "action" in result else {}),
                 )
         except (Error, OSError, UnicodeError) as error:
@@ -401,11 +377,28 @@ def routine(
         return result
 
 
+def next_due(program: Program, last: dict[str, object], now: datetime) -> datetime | None:
+    """When an enabled scheduled program is next due; None when it is manual or disabled.
+
+    It is due one refresh after its last success. After consecutive failures, it retries after
+    BACKOFF, doubling per failure but never waiting longer than its refresh.
+    """
+    if not program.enabled or not program.refresh:
+        return None
+    refresh = timedelta(seconds=program.refresh)
+    anchor, delay = str(last.get("success", "")), refresh
+    if last.get("error"):
+        failures = max(1, int(str(last.get("failures", 1))))
+        anchor, delay = str(last.get("run", "")), min(refresh, BACKOFF * 2 ** min(failures - 1, 30))
+    if not anchor:
+        return now
+    since = datetime.fromisoformat(anchor)
+    # Clock corrections must not suppress work until a future timestamp catches up.
+    return now if since > now else since + delay
+
+
 def _due(program: Program, last: dict[str, object], now: datetime) -> bool:
-    """Enabled, scheduled, and failed or its refresh interval has elapsed since the last success."""
-    success = str(last.get("success", ""))
-    elapsed = not success or now >= datetime.fromisoformat(success) + timedelta(seconds=program.refresh)
-    return program.enabled and bool(program.refresh) and (bool(last.get("error")) or elapsed)
+    return (due_at := next_due(program, last, now)) is not None and due_at <= now
 
 
 def due_routines(store: Store, now: datetime) -> list[tuple[str, str, str]]:
@@ -434,14 +427,16 @@ def due(store: Store, now: datetime) -> list[tuple[str, str, str, bool]]:
         start = now - timedelta(seconds=sensor.lookback)
         if last.get("end") and sensor.mode == "window":
             # Resume after the last window with overlap for late arrivals (upserts make it harmless),
-            # catching up at most 30 days after a long pause.
-            resumed = datetime.fromisoformat(str(last["end"])) - timedelta(seconds=sensor.overlap)
+            # catching up at most CATCH_UP after a long pause.
+            floor = now - CATCH_UP
+            resumed = max(datetime.fromisoformat(str(last["end"])), floor) - timedelta(seconds=sensor.overlap)
             if resumed < now:
-                start = max(resumed, now - timedelta(days=30))
+                start = max(resumed, floor)
         reconciliation = sensor.reconcile
         reconciled = str(last.get("reconciled", ""))
         revisit = reconciliation is not None and (
-            not reconciled or now >= datetime.fromisoformat(reconciled) + timedelta(seconds=reconciliation.refresh)
+            not reconciled
+            or not timedelta(0) <= now - datetime.fromisoformat(reconciled) < timedelta(seconds=reconciliation.refresh)
         )
         if revisit and reconciliation is not None:
             start = min(start, now - timedelta(seconds=reconciliation.lookback))

@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import sqlite3
+import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -12,13 +16,13 @@ import pytest
 from mcp.types import CallToolResult
 from typer.testing import CliRunner
 
-from bf import retrieve
+from bf import graph, health, index, retrieve
 from bf.cli import app
 from bf.collect import collect
 from bf.config import user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
-from bf.models import Error, Query, Record, digest, encode
+from bf.models import Error, NotFoundError, Query, Record, digest, encode
 from bf.storage import Store
 from bf.validate import validate
 from conftest import records_file
@@ -33,7 +37,6 @@ def corpus(brain: Store, tmp_path: Path) -> list[Store]:
         records_file(
             store,
             "mail",
-            "2026-09",
             [
                 Record(
                     id=f"{i:03}",
@@ -78,10 +81,9 @@ def test_search_continues_lexical_and_identity_results(brain: Store, tmp_path: P
         assert len(items) <= 7
         assert all("_rank" not in item for item in items)
         refs.extend(item["uri"] for item in items)
+        assert "more" not in reply
         if "next_offset" not in reply:
-            assert "more" not in reply
             break
-        assert reply["more"] is True
         offset = cast("int", reply["next_offset"])
     assert len(refs) == len(set(refs)) == 123
     assert retrieve.search(stores, Query(text=query, offset=2**63 - 1))["items"] == []
@@ -128,10 +130,9 @@ def test_skipped_directories_are_visible_without_following_them(brain: Store, tm
     assert not validate(brain)["valid"]
 
 
-def test_oversized_record_reassembles_exact_json(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(retrieve, "MAX_REPLY", 128 << 10)
+def test_oversized_record_reassembles_exact_json(brain: Store) -> None:
     record = Record(id="large", title="Unicode evidence", text='é "\\\n' * 40000)
-    records_file(brain, "docs", "undated", [record])
+    records_file(brain, "docs", [record])
     chunks: list[str] = []
     offset = 0
     hashes = set()
@@ -141,6 +142,7 @@ def test_oversized_record_reassembles_exact_json(brain: Store, monkeypatch: pyte
         assert "external" not in reply
         assert len(encode(reply)) <= retrieve.MAX_REPLY
         assert reply["offset"] == offset
+        assert len(cast("str", reply["chunk"])) == retrieve.CHUNK or "next_offset" not in reply
         hashes.add(reply["sha256"])
         chunks.append(cast("str", reply["chunk"]))
         if "next_offset" not in reply:
@@ -186,10 +188,16 @@ def test_cli_and_mcp_accept_continuations(brain: Store, tmp_path: Path) -> None:
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("ref", ["", "memories", "topic:missing"])
+@pytest.mark.parametrize("ref", ["", "memories", "repo:example/project", "projects/offline.md#decision"])
 def test_summary_pages_do_not_silently_ignore_offsets(brain: Store, ref: str) -> None:
     with pytest.raises(Error, match="offset"):
         retrieve.read([brain], ref, offset=1)
+
+
+@pytest.mark.parametrize("ref", ["topic:missing", "projects/absent.md", "gmail:absent"])
+def test_missing_refs_are_not_found_whatever_the_offset(brain: Store, ref: str) -> None:
+    with pytest.raises(NotFoundError):
+        retrieve.read([brain], ref, offset=5)
 
 
 def test_read_rejects_invalid_service_offsets(brain: Store) -> None:
@@ -197,13 +205,32 @@ def test_read_rejects_invalid_service_offsets(brain: Store) -> None:
         retrieve.read([brain], "projects", offset=-1)
 
 
-def test_evaluation_never_accepts_one_chunk_as_a_complete_read(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(retrieve, "MAX_REPLY", 128 << 10)
-    records_file(brain, "docs", "undated", [Record(id="large", title="Large", text="evidence " * 20000)])
+def test_evaluation_assembles_chunked_exact_reads_before_checking_them(brain: Store) -> None:
+    records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000 + "closing clause")])
+    brain.write(
+        "evals/large.yaml",
+        b"version: 5\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n  text: [closing clause]\n",
+    )
+    assert "chunk" in retrieve.read([brain], "docs:large")
+    reply = evaluate(brain)
+    assert reply["passed"] is True, reply["cases"]
+
+
+def test_evaluation_rejects_a_chunked_read_that_changes_between_chunks(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000)])
     brain.write("evals/large.yaml", b"version: 5\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n")
+    original = retrieve.read
+
+    def changing(stores: list[Store], ref: str = "", *, offset: int = 0, counted: bool = True) -> dict[str, object]:
+        reply = original(stores, ref, offset=offset, counted=counted)
+        return {**reply, "sha256": "0" * 64} if offset else reply
+
+    monkeypatch.setattr("bf.evaluate.read", changing)
     reply = evaluate(brain)
     assert reply["passed"] is False
-    assert "chunk assembly" in str(reply["cases"])
+    assert "changed during evaluation" in str(reply["cases"])
 
 
 @pytest.mark.parametrize("path", ["concepts", "memories/meetings", "memories"])
@@ -221,7 +248,8 @@ def test_linked_evidence_roots_preserve_other_retrieval(brain: Store, tmp_path: 
     assert str(outside) not in str(reply)
     assert validate(brain)["valid"] is False
     if path.startswith("memories"):
-        with pytest.raises(Error, match=r"unreadable|incomplete"):
+        # A linked memories root is named: it cannot prove the record absent.
+        with pytest.raises(Error, match=r"^memories: expected a directory|unreadable|incomplete"):
             retrieve.read([brain], "meetings:missing")
 
 
@@ -229,7 +257,7 @@ def test_linked_transaction_directory_still_blocks_reads(brain: Store, tmp_path:
     outside = tmp_path / "transaction"
     outside.mkdir()
     (brain.root / "memories/.pending").symlink_to(outside, target_is_directory=True)
-    with pytest.raises((Error, OSError)):
+    with pytest.raises(Error, match=r"^memories/\.pending: expected a directory; symlinks"):
         retrieve.search([brain], Query(text="retention"))
 
 
@@ -244,3 +272,138 @@ def test_claim_preview_reports_truncation(brain: Store) -> None:
     reply = retrieve.read([brain], "projects/many.md")
     assert len(cast("list", reply["claims"])) == 50
     assert reply["claims_truncated"] is True
+
+
+def test_every_chunk_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(brain: Store) -> None:
+    brain.write("projects/mid.md", b"# Mid\n\n" + b"evidence " * 22_000)
+    whole = retrieve.read([brain], "projects/mid.md", counted=False)
+    assert whole["format"] == "json"
+    assert (whole["offset"], whole["next_offset"]) == (0, retrieve.CHUNK)
+
+    def assemble(read: Callable[[int], dict]) -> str:
+        chunks, offset = [], 0
+        while True:
+            reply = read(offset)
+            chunks.append(reply["chunk"])
+            if "next_offset" not in reply:
+                return "".join(chunks)
+            offset = reply["next_offset"]
+
+    def cli(offset: int) -> dict:
+        arguments = ["read", "projects/mid.md", "--brain", str(brain.root), "--offset", str(offset)]
+        result = CliRunner().invoke(app, arguments)
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)
+
+    mcp = server([brain])
+
+    def tool(offset: int) -> dict:
+        result = asyncio.run(mcp.call_tool("read", {"ref": "projects/mid.md", "offset": offset}))
+        assert isinstance(result, CallToolResult)
+        return cast("dict", result.structured_content)
+
+    for raw in (assemble(cli), assemble(tool)):
+        assert digest(raw.encode()) == whole["sha256"]
+        assert json.loads(raw)["text"].startswith("# Mid")
+    with pytest.raises(Error, match="not chunked"):
+        retrieve.read([brain], "projects/offline.md", offset=1)
+
+
+def test_typed_links_read_their_unowned_target_identity(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 6\nname: fixture\nschema:\n  owner:\n    description: Owner.\n    type: identity\n    relation: true\n",
+    )
+    brain.write("projects/a.md", b"---\ntype: project\n---\n# A\n\n[Alice](bf://fixture/people/alice?rel=owner)\n")
+    plain = retrieve.read([brain], "bf://fixture/people/alice")
+    assert cast("list[dict]", plain["backlinks"])[0]["relation"] == "owner"
+    assert retrieve.read([brain], "bf://fixture/people/alice?rel=owner") == plain
+    with pytest.raises(Error, match="offset applies"):
+        retrieve.read([brain], "bf://fixture/people/alice", offset=1)
+    with pytest.raises(NotFoundError):
+        retrieve.read([brain], "bf://fixture/people/bob?rel=owner")
+
+
+def test_identity_problems_name_the_configured_brain(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "team-folder"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 6\nname: team\n")
+    original = index.database
+    opened: list[Path] = []
+
+    def unavailable_later(store: Store) -> contextlib.AbstractContextManager[tuple[sqlite3.Connection, str]]:
+        opened.append(store.root)
+        # The second visit to the team brain checks shared aliases, after the owner was resolved.
+        if opened.count(root) > 1:
+            raise Error("simulated unavailable cache")
+        return original(store)
+
+    monkeypatch.setattr(index, "database", unavailable_later)
+    _targets, problems = graph.expand([brain, team], "repo:example/project")
+    assert {"brain": "team", "error": "identity cache unavailable"} in problems
+
+
+# Process and network events that retrieval must never cause. Audit hooks cannot be removed, so a flag gates them.
+_EXECUTION = {
+    "subprocess.Popen",
+    "os.posix_spawn",
+    "os.fork",
+    "os.exec",
+    "os.system",
+    "socket.connect",
+    "socket.getaddrinfo",
+}
+_WATCHING: list[set[str]] = []
+
+
+def _audit(event: str, _arguments: tuple[object, ...]) -> None:
+    if _WATCHING and event in _EXECUTION:
+        _WATCHING[-1].add(event)
+
+
+sys.addaudithook(_audit)
+
+
+def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 6\nname: fixture\nsensors:\n  mail:\n    command: [sensors/marker.sh]\n    refresh: 60\n"
+        b"routines:\n  digest:\n    command: [routines/marker.sh]\n    refresh: 60\n",
+    )
+    marker = brain.root / "ran"
+    for folder in ("sensors", "routines"):
+        script = brain.root / folder / "marker.sh"
+        script.parent.mkdir()
+        script.write_text(f"#!/bin/sh\ntouch '{marker}'\necho '[]'\n")
+        script.chmod(0o700)
+    brain.write(
+        "evals/retrieval.yaml",
+        b"version: 5\ncases:\n- name: decision\n  query: retention\n  expect: [projects/offline.md]\n",
+    )
+    mcp = server([brain])
+    events: set[str] = set()
+    _WATCHING.append(events)
+    try:
+        retrieve.search([brain], Query(text="offline"))
+        for ref in ("", "today", "tasks", "memories", "memories/mail", "projects", "meetings:decision-1"):
+            retrieve.read([brain], ref)
+        retrieve.read([brain], "projects/offline.md")
+        health.source_health(brain)
+        health.report([brain])
+        assert validate(brain)["valid"]
+        assert evaluate(brain)["score"] == "1/1"
+        # Due, never-collected programs fail the status check without running.
+        for arguments, code in ((["search", "offline"], 0), (["read", "today"], 0), (["status", "--check"], 1)):
+            result = CliRunner().invoke(app, [*arguments, "--brain", str(brain.root)])
+            assert result.exit_code == code, result.output
+        for tool, arguments in (("search", {"query": "offline"}), ("read", {"ref": "projects/offline.md"})):
+            reply = asyncio.run(mcp.call_tool(tool, arguments))
+            assert isinstance(reply, CallToolResult)
+            assert not reply.is_error, reply.content
+    finally:
+        _WATCHING.pop()
+    assert events == set()
+    assert not marker.exists()

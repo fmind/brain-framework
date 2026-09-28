@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
+
 from pydantic import JsonValue
 
 from bf import links
 from bf.markdown import Note, authored, reference, split_ref
 from bf.models import Config, Error, Record, Sensor
+
+_PAGES = "home, folder roots, tasks, periods, tags and memories are computed page addresses"
+# Reads resolve such a path as a record ref, so an entity or alias there would never reach its owner.
+_RECORDS = "a BF path whose first segment contains ':' names a source:id record"
 
 
 def pointer(document: JsonValue, path: str) -> JsonValue:
@@ -49,9 +55,11 @@ def project(record: Record, sensor: Sensor, config: Config) -> Record:
     return result
 
 
-def validate(record: Record, config: Config) -> None:
+def validate(record: Record, config: Config, *, fields: bool = True) -> None:
     """Validate persisted fields, including historical sources with no active sensor."""
-    for name, value in record.fields.items():
+    for name, value in record.fields.items() if fields else ():
+        if name == links.TAGGED:
+            raise Error(f"schema field {name} is reserved for tag membership")
         if name not in config.ontology:
             raise Error(f"undeclared schema field {name}")
         try:
@@ -63,7 +71,9 @@ def validate(record: Record, config: Config) -> None:
                 links.identity(str(target))
     for alias in record.aliases:
         if links.computed(alias):
-            raise Error("tag and task addresses are computed pages and cannot be aliases")
+            raise Error(f"{_PAGES} and cannot be aliases")
+        if links.record_address(alias):
+            raise Error(f"{_RECORDS} and cannot be an alias")
         if parsed := links.parse(alias):
             links.identity(alias)
             if parsed.brain != config.name:
@@ -74,14 +84,22 @@ def validate(record: Record, config: Config) -> None:
 
 
 def relations(record: Record, config: Config) -> list[tuple[str, str]]:
-    """Each edge is supported by this record; replacement removes its obsolete edges."""
-    validate(record, config)
-    return [
-        (name, links.identity(str(target)))
-        for name, value in record.fields.items()
-        if config.ontology[name].relation
-        for target in (value if isinstance(value, list) else [value])
-    ]
+    """Each edge is supported by this record; replacement removes its obsolete edges.
+
+    Edges follow the current schema, so a schema edit never hides a stored record: a field no longer declared as a
+    relation adds no edge, while a declared relation keeps every stored value that is an identity, whatever
+    cardinality or type the field was collected with. `bf validate` names the values the schema now rejects.
+    """
+    validate(record, config, fields=False)
+    result = []
+    for name, value in record.fields.items():
+        if (definition := config.ontology.get(name)) is None or not definition.relation:
+            continue
+        for target in value if isinstance(value, list) else [value]:
+            with suppress(Error):
+                # A value collected before the field became an identity never named one; it claims nothing.
+                result.append((name, links.identity(str(target))))
+    return result
 
 
 def qualify(config: Config, ref: str, fragment: str = "") -> str:
@@ -98,10 +116,10 @@ def note_claims(note: Note, config: Config) -> list[links.Claim]:
         if (parsed := links.parse(alias)) and parsed.brain != config.name:
             raise Error(f"{note.path}: BF aliases must belong to their own brain namespace")
     if any(links.computed(value) for value in [subject, *note.knowledge.aliases]):
-        raise Error(
-            "tag and task addresses are computed pages and cannot be entities or aliases; link to the page instead"
-        )
-    result = [links.Claim(subject, "tagged-with", qualify(config, f"tags/{tag}"), file) for tag in note.knowledge.tags]
+        raise Error(f"{_PAGES} and cannot be entities or aliases; link to the page instead")
+    if any(links.record_address(value) for value in [subject, *note.knowledge.aliases]):
+        raise Error(f"{_RECORDS} and cannot be an entity or alias; link to the record instead")
+    result = [links.Claim(subject, links.TAGGED, qualify(config, f"tags/{tag}"), file) for tag in note.knowledge.tags]
     for value, fragment in note.contexts:
         origin = qualify(config, note.path, fragment)
         claim = links.claim(value, config, subject, origin)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -14,7 +15,7 @@ import pytest
 from bf.models import Query
 from bf.retrieve import search
 from bf.storage import Store
-from conftest import Provider, records_file
+from conftest import ROOT, Provider, records_file
 
 PAGE_ONE = {
     "kind": "calendar#events",
@@ -69,6 +70,37 @@ def test_calendar_pages_project_facts_and_all_day_boundaries(provider: Provider)
     assert '"calendarId": "team"' in calls[0][-1]
 
 
+def test_calendar_agenda_and_window_keep_cancellations_titled_as_cancelled(provider: Provider) -> None:
+    offsite = {
+        "id": "offsite",
+        "status": "cancelled",
+        "summary": "Team offsite",
+        "start": {"dateTime": "2026-09-29T09:00:00Z"},
+    }
+    # A cancelled instance of a recurring event may carry only its original start.
+    instance = {
+        "id": "weekly_20260930",
+        "status": "cancelled",
+        "recurringEventId": "weekly",
+        "originalStartTime": {"dateTime": "2026-09-30T09:00:00Z"},
+    }
+    page = {"kind": "calendar#events", "items": [offsite, instance]}
+    provider.install("gws", [{"match": ["events", "list"], "stdout": page, "repeat": True}])
+    window = ("primary", "2026-09-28T00:00:00Z", "2026-10-01T00:00:00Z")
+    # The agenda snapshot keeps a cancellation in place, so it never shrinks toward the removal guard.
+    agenda = provider.records("google-calendar.py", *window, "--agenda-days", "7")
+    records = provider.records("google-calendar.py", *window)
+    assert all(json.loads(call[-1])["showDeleted"] is True for call in provider.calls("gws"))
+    assert "originalStartTime" in json.loads(provider.calls("gws")[-1][-1])["fields"]
+    expected = [
+        ("Cancelled: Team offsite", "2026-09-29T09:00:00.000000Z"),
+        ("Cancelled calendar event", "2026-09-30T09:00:00.000000Z"),
+    ]
+    assert [(record.title, record.time) for record in agenda] == expected
+    assert [(record.title, record.time) for record in records] == expected
+    assert [record.aliases for record in agenda] == [["agenda:primary/offsite"], ["agenda:primary/weekly_20260930"]]
+
+
 def test_calendar_fails_closed_on_provider_error_repeated_token_and_bad_shape(provider: Provider) -> None:
     for responses in [
         [{"match": ["events"], "stdout": "", "stderr": "token expired for user@example.invalid", "code": 1}],
@@ -96,7 +128,7 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
 
     def run(*args: str) -> None:
         # Real git is the provider this adapter wraps; the repository is temporary and offline.
-        subprocess.run(["git", "-C", str(repository), *args], env=env, check=True, capture_output=True)  # noqa: S603,S607
+        subprocess.run(["git", "-C", str(repository), *args], env=env, check=True, capture_output=True, timeout=30)  # noqa: S603,S607
 
     run("init", "-q", "-b", "main")
     run("config", "user.email", "owner@fmind.dev")
@@ -123,7 +155,7 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
         run("-c", f"user.email={email}", "commit", "-q", "--allow-empty", "-m", "chore: automated")
     hidden = root / ".codex" / "memories"
     hidden.mkdir(parents=True)
-    subprocess.run(["git", "-C", str(hidden), "init", "-q"], env=env, check=True, capture_output=True)  # noqa: S603,S607
+    subprocess.run(["git", "-C", str(hidden), "init", "-q"], env=env, check=True, capture_output=True, timeout=30)  # noqa: S603,S607
     window = (str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     assert len(provider.records("git-history.py", *window)) == 1
     assert provider.records("git-history.py", *window, "--skip", "owner/project") == []
@@ -168,7 +200,7 @@ def test_people_and_repository_identities_join_across_providers(
     )
     events = provider.records("google-calendar.py", "primary", "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     for source, records in [("git", commits), ("calendar", events)]:
-        records_file(brain, source, "undated", records)
+        records_file(brain, source, records)
     result = search([brain], Query(text="person:email/owner@fmind.dev"))
     items = cast("list[dict[str, object]]", result["items"])
     assert {item["source"] for item in items} == {"git", "calendar"}
@@ -200,7 +232,7 @@ def test_git_history_obeys_half_open_windows_with_out_of_order_dates(
     env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig")}
 
     def git(*args: str) -> None:
-        subprocess.run(["git", "-C", str(repository), *args], env=env, check=True, capture_output=True)  # noqa: S603,S607
+        subprocess.run(["git", "-C", str(repository), *args], env=env, check=True, capture_output=True, timeout=30)  # noqa: S603,S607
 
     git("init", "-q", "-b", "main")
     git("config", "user.email", "owner@fmind.dev")
@@ -222,6 +254,145 @@ def test_git_history_obeys_half_open_windows_with_out_of_order_dates(
         result = provider.run("git-history.py", str(empty), *invalid)
         assert result.returncode == 1
         assert not result.stdout
+
+
+def test_git_history_reads_history_refs_only(provider: Provider, tmp_path: Path) -> None:
+    root = tmp_path / "code"
+    repository = root / "my project"
+    repository.mkdir(parents=True)
+    (root / "fresh").mkdir()
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-09-01T10:00:00+00:00",
+        "GIT_COMMITTER_DATE": "2026-09-01T10:00:00+00:00",
+        "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"),
+    }
+
+    def git(folder: Path, *args: str) -> None:
+        subprocess.run(["git", "-C", str(folder), *args], env=env, check=True, capture_output=True)  # noqa: S603,S607
+
+    git(repository, "init", "-q", "-b", "main")
+    git(repository, "config", "user.email", "owner@fmind.dev")
+    git(repository, "config", "user.name", "Owner")
+    git(repository, "commit", "-q", "--allow-empty", "-m", "keep\tevidence")
+    git(repository, "commit", "-q", "--allow-empty", "--allow-empty-message", "-m", "")
+    (repository / "draft.md").write_text("draft\n")
+    git(repository, "add", "draft.md")
+    git(repository, "stash", "-q")
+    git(repository, "notes", "add", "-m", "reviewed", "HEAD")
+    # A new repository without commits has an unborn HEAD; it holds no history, not an error.
+    git(root / "fresh", "init", "-q", "-b", "main")
+    records = provider.records("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    # Stash and notes commits stay out; a tab and an empty message still give one-line titles.
+    assert sorted(record.title for record in records) == ["my project:", "my project: keep evidence"]
+    assert {record.aliases[0].partition("@")[0] for record in records} == {"commit:local/my%20project"}
+    assert all("repo:local/my%20project" in record.links for record in records)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can list every folder")
+def test_git_history_skips_unreadable_and_unnameable_folders(provider: Provider, tmp_path: Path) -> None:
+    root = tmp_path / "home"
+    (root / "code/project/.git").mkdir(parents=True)
+    # A Latin-1 folder name is not UTF-8: Python reads it with a lone surrogate that JSON cannot carry.
+    (root / os.fsdecode(b"code/caf\xe9/.git")).mkdir(parents=True)
+    (root / "code/bad\x01name/.git").mkdir(parents=True)
+    private = root / "private"
+    private.mkdir()
+    provider.install(
+        "git",
+        [
+            # `log` comes first: its `--remotes` argument would also match `remote`.
+            {"match": ["log"], "stdout": "abc\u00002026-09-01T10:00:00Z\u0000owner@fmind.dev\u0000Keep\u0000"},
+            {"match": ["remote"], "code": 2, "repeat": True},
+        ],
+    )
+    private.chmod(0)
+    try:
+        result = provider.run("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    finally:
+        private.chmod(0o700)
+    assert result.returncode == 0, result.stderr
+    assert [record["id"] for record in json.loads(result.stdout)] == ["code/project@abc"]
+    assert "skipped 3 " in result.stderr
+    assert "caf" not in result.stderr
+
+
+def test_git_history_names_the_limit_it_reached(provider: Provider, tmp_path: Path) -> None:
+    root = tmp_path / "code"
+    for index in range(201):
+        (root / f"project-{index}/.git").mkdir(parents=True)
+    result = provider.run("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    assert result.returncode == 1
+    assert not result.stdout
+    assert result.stderr == (
+        "Git history collection failed: more than 200 repositories; select a narrower ROOT or add --skip.\n"
+    )
+
+
+def test_git_history_names_the_repository_git_cannot_read(provider: Provider, tmp_path: Path) -> None:
+    # A stale worktree, damaged objects or another owner's repository fails the run by name, so it can be skipped.
+    root = tmp_path / "code"
+    for name in ("healthy", "worktree-x9"):
+        (root / name / ".git").mkdir(parents=True)
+    provider.install(
+        "git",
+        [
+            {"match": ["worktree-x9", "log"], "code": 128, "stderr": "fatal: not a git repository\n", "repeat": True},
+            {
+                "match": ["log"],
+                "stdout": "abc\u00002026-09-01T10:00:00Z\u0000owner@fmind.dev\u0000Keep\u0000",
+                "repeat": True,
+            },
+            {"match": ["remote"], "code": 2, "repeat": True},
+        ],
+    )
+    window = (str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    result = provider.run("git-history.py", *window)
+    assert result.returncode == 1
+    assert not result.stdout
+    assert result.stderr == (
+        "Git history collection failed: worktree-x9: Git failed or timed out; repair the repository or add "
+        "--skip worktree-x9.\n"
+    )
+    assert [record.id for record in provider.records("git-history.py", *window, "--skip", "worktree-x9")] == [
+        "healthy@abc"
+    ]
+
+
+def test_git_history_names_a_repository_whose_remote_lookup_times_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A stalled mount can hang any Git call, including the remote lookup before `git log`.
+    spec = importlib.util.spec_from_file_location("git_history", ROOT / "examples/sensors/git-history.py")
+    assert spec is not None
+    assert spec.loader is not None
+    sensor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sensor)
+    root = tmp_path / "code"
+    for name in ("healthy", "slow"):
+        (root / name / ".git").mkdir(parents=True)
+
+    def git(argv: list[str], _limit: int, _timeout: int) -> bytes:
+        if argv[3] == "remote" and Path(argv[2]).name == "slow":
+            raise TimeoutError("provider exceeded its timeout")
+        if argv[3] == "remote":
+            raise subprocess.CalledProcessError(2, argv)
+        return b""
+
+    monkeypatch.setattr(sensor, "run", git)
+    window = (root, "2026-09-01T00:00:00+00:00", "2026-09-02T00:00:00+00:00")
+    with pytest.raises(sensor.InvalidError, match=r"^slow: Git failed or timed out; repair .* add --skip slow$"):
+        sensor.collect(*window)
+    assert sensor.collect(*window, frozenset({"slow"})) == ([], 0)
+
+
+def test_git_history_drops_an_author_link_beyond_the_reference_bound(provider: Provider, tmp_path: Path) -> None:
+    (tmp_path / "code/project/.git").mkdir(parents=True)
+    author = "a" * 8300 + "@fmind.dev"
+    log = f"abc\u00002026-09-01T10:00:00Z\u0000{author}\u0000Keep\u0000"
+    provider.install("git", [{"match": ["log"], "stdout": log}, {"match": ["remote"], "code": 2, "repeat": True}])
+    records = provider.records("git-history.py", str(tmp_path / "code"), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    assert [(record.links, record.attributes["author_refs"]) for record in records] == [(["repo:local/project"], [])]
 
 
 def test_git_history_does_not_follow_linked_ancestor_directories(provider: Provider, tmp_path: Path) -> None:

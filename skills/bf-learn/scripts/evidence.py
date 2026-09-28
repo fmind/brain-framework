@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Capture one exact bf read, or compare a retained capture with a new read, using stdin only."""
+"""Read one exact bf reply whole, capture it, or compare a retained capture with a new read.
+
+`read` runs the offline `bf read` and assembles JSON chunks; `capture` and `compare` use stdin only.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from datetime import UTC, datetime
 from typing import TypeAlias, cast
@@ -13,6 +17,7 @@ from typing import TypeAlias, cast
 # Agents run this helper with whatever python3 is on PATH: keep it compatible with Python 3.11.
 JSON: TypeAlias = "bool | int | float | str | list[JSON] | dict[str, JSON] | None"
 
+MAX_REPLY = 4 << 20  # UTF-8 bytes of one assembled exact read; larger evidence needs a section.
 MAX_INPUT = 9 << 20  # Two bounded bf replies, plus the small capture envelope.
 
 
@@ -46,6 +51,8 @@ def identity(reply: dict[str, JSON]) -> tuple[str, str]:
 
 def body(reply: dict[str, JSON]) -> dict[str, JSON]:
     """Keep the answer, never backlinks, aliases resolved elsewhere, or a page listing."""
+    if "chunk" in reply or "next_offset" in reply:
+        raise ValueError("assemble the complete exact read before retaining evidence")
     if "page" in reply or ("text" in reply) == ("record" in reply):
         raise ValueError("expected an exact note, section or record read")
     if "text" in reply:
@@ -58,6 +65,47 @@ def body(reply: dict[str, JSON]) -> dict[str, JSON]:
     if "attributes" in record:
         object_value(record["attributes"])
     return {"record": record}
+
+
+def exact(ref: str, brain: str) -> dict[str, JSON]:
+    """Follow next_offset through an exact read's JSON chunks and verify their digest before parsing."""
+    pieces: list[str] = []
+    offset, total, digest = 0, 0, ""
+    while True:
+        # bf reads offline and never runs sensors. Its diagnostics may contain private paths: discard them.
+        result = subprocess.run(  # noqa: S603 - literal argv; main() rejects a ref that could start an option
+            ["bf", "read", ref, "--brain", brain, *(["--offset", str(offset)] if offset else [])],  # noqa: S607
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+            check=False,
+        )
+        if result.returncode or len(result.stdout) > MAX_REPLY:
+            raise ValueError("read failed or exceeded the reply limit")
+        reply = object_value(json.loads(result.stdout, object_pairs_hook=unique))
+        if "chunk" not in reply:
+            if offset:
+                raise ValueError("chunks ended early")
+            return reply
+        chunk = reply["chunk"]
+        if not isinstance(chunk, str) or not chunk or reply.get("format") != "json" or reply.get("offset") != offset:
+            raise ValueError("unexpected chunk")
+        if offset == 0:
+            total, digest = cast("int", reply.get("total_characters")), cast("str", reply.get("sha256"))
+            if type(total) is not int or total > MAX_REPLY or not isinstance(digest, str):
+                raise ValueError("unexpected chunk")
+        elif (reply.get("total_characters"), reply.get("sha256")) != (total, digest):
+            raise ValueError("the reply changed while reading")
+        pieces.append(chunk)
+        offset += len(chunk)
+        if "next_offset" not in reply:
+            break
+        if reply["next_offset"] != offset or offset >= total:
+            raise ValueError("unexpected continuation")
+    data = "".join(pieces).encode()
+    if offset != total or len(data) > MAX_REPLY or hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError("the reply changed while reading")
+    return object_value(json.loads(data, object_pairs_hook=unique))
 
 
 def fingerprint(value: dict[str, JSON]) -> str:
@@ -95,7 +143,8 @@ def capture(reply: dict[str, JSON]) -> dict[str, JSON]:
         raise ValueError("incomplete read; inspect bf status before capturing")
     return {
         "capture_version": 1,
-        "captured_at": datetime.now(UTC).isoformat(),
+        # The same canonical UTC form as bf reply instants, so they compare as strings.
+        "captured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "brain": brain,
         "ref": ref,
         **value,
@@ -133,8 +182,22 @@ def compare(before: dict[str, JSON], after: dict[str, JSON]) -> dict[str, JSON]:
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in {"capture", "compare"}:
-        sys.stderr.write("usage: evidence.py capture|compare < JSON\n")
+    arguments = sys.argv[1:]
+    if arguments[:1] == ["read"] and len(arguments) == 4 and arguments[2] == "--brain":
+        ref, brain = arguments[1], arguments[3]
+        # bf would parse a leading hyphen as an option; the brain is always an option value.
+        if not ref or ref.startswith("-") or len(ref) > 8192 or any(ord(c) < 32 for c in ref) or not brain:
+            sys.stderr.write("evidence: expected an exact ref and a brain name or path\n")
+            return 2
+        try:
+            output = encode(exact(ref, brain))
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, RecursionError):
+            sys.stderr.write("evidence: bf read failed or changed while reading; inspect the exact read and retry\n")
+            return 1
+        sys.stdout.buffer.write(output + b"\n")
+        return 0
+    if len(arguments) != 1 or arguments[0] not in {"capture", "compare"}:
+        sys.stderr.write("usage: evidence.py read REF --brain BRAIN | evidence.py capture|compare < JSON\n")
         return 2
     try:
         data = sys.stdin.buffer.read(MAX_INPUT + 1)
@@ -161,4 +224,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None

@@ -43,7 +43,10 @@ def fields(value: object, required: set[str], optional: set[str]) -> dict[str, o
 def text(value: object, field: str, limit: int = TEXT_BYTES, *, empty: bool = False) -> str:
     if not isinstance(value, str) or (not empty and not value.strip()):
         raise InvalidError(f"{field} requires a nonempty string")
-    if len(value.encode("utf-8")) > limit or any(ord(char) < 32 and char not in "\t\r\n" for char in value):
+    # C0 controls other than tab and line breaks, DEL and C1 controls never belong in exported highlights.
+    if len(value.encode("utf-8")) > limit or any(
+        (ord(char) < 32 and char not in "\t\r\n") or 0x7F <= ord(char) <= 0x9F for char in value
+    ):
         raise InvalidError(f"{field} exceeds its byte limit or contains control characters")
     return value
 

@@ -1,6 +1,12 @@
+---
+description: Find saved evidence, read exact sources and check whether results are complete and current.
+---
+
 # Search and read
 
 Use `bf search` to find evidence and `bf read` to open it. Both work offline and notice file edits automatically. Run commands inside your brain directory.
+
+**Start with words you remember → read the returned ref → check freshness and completeness.** Use [pages](#pages) when you want to browse.
 
 ## Search
 
@@ -11,7 +17,7 @@ bf search "visitors clear explanation"
 bf search "product page" --scope projects
 ```
 
-The first search finds the decision's reason; the second limits matches to project notes. Search matches any query word and ranks results, so `product page` can match either word. It does not generate an answer or translate your query. Use a few words the source is likely to contain.
+The first search finds the decision's reason; the second limits matches to project notes. Search matches any query word and ranks results, so `product page` can match either word. It does not generate an answer or translate your query. Use a few words the source is likely to contain. Words need spaces or punctuation between them: for Chinese, Japanese or Thai text written without spaces, search a whole run between punctuation exactly as written, a tag or an alias.
 
 Each item includes a title, excerpt, `ref` and brain-qualified `uri`. Read a returned ref exactly:
 
@@ -20,6 +26,8 @@ bf read projects/new-website.md#decision
 ```
 
 The `text` field contains the original Decision section. To include the whole note and its backlinks, omit `#decision`. See [the walkthrough's output](getting-started.md#find-its-reason).
+
+When several brains are selected, read each result's `uri` instead: a plain ref that exists in more than one brain fails and asks for a `bf://` address. See [notes, records and identities](retrieval.md#notes-records-and-identities).
 
 If a query misses, try the evidence's wording and remove the scope. For example, the sample says “visitors” and “signing up”; searching for “customer conversion” need not find it. Add evidence only when the source itself lacks the answer.
 
@@ -42,9 +50,14 @@ Recent-activity pages use note dates and record timestamps. They do not fetch an
 
 ## Summarize open tasks
 
-`bf read tasks` returns open checkboxes from project notes, concepts and action `ACTION.md` notes, with full-selection counts in `summary` and a paginated `items` list. Each item has a source section `ref`, owning `note`, source `line` and a short `text` preview. Read that ref before acting. Deprecated notes and action attachments are excluded.
+```bash
+bf read tasks
+bf read projects/new-website.md#next-actions
+```
 
-For the first-decision walkthrough, the list contains “Draft the product page.” Checking it off removes it from the open list and increases `summary.done`. Follow `next_offset` for the complete list; `problems` or `stale` also qualify the summary. A task is recorded work, not authorization to perform it. See [task-page details](retrieval.md#tasks).
+The first lists “Draft the product page.” with its source `ref`, `line` and counts in `summary`. The second opens its context. Checking the task off removes it from the open list and increases `summary.done`. Read before acting: a saved task is not authorization.
+
+See [task-page rules](retrieval.md#tasks) for included notes, counts and pagination.
 
 ## Browse tags
 
@@ -56,13 +69,18 @@ bf read bf://brain/tags/website
 bf search "product page" --scope bf://brain/tags/website
 ```
 
-The directory gives each tag's count and ref. The tag page lists New website; the scoped search considers only notes with that exact frontmatter tag. A plain search for `website` also matches prose. See [tag authoring](brain.md#tags).
+The directory shows counts; the tag page lists New website; the scoped search matches only explicitly tagged notes. A plain search for `website` also matches prose. See [tag authoring](brain.md#tags).
 
 ## Notes, records and identities
 
-A note ref is a path, optionally followed by a section: `projects/new-website.md#decision`. A record ref is `SOURCE:ID`; the [sensor walkthrough](sensors.md#collect-and-read) produces `local-documents:website-demo/brief.txt`.
+| Read     | Example                                    | Result                                                                              |
+| -------- | ------------------------------------------ | ----------------------------------------------------------------------------------- |
+| Note     | `bf read projects/new-website.md`          | Whole note and backlinks.                                                           |
+| Section  | `bf read projects/new-website.md#decision` | Decision text only.                                                                 |
+| Record   | `bf read brief:website-brief`              | Brief collected in [Getting started](getting-started.md#collect-your-first-source). |
+| Identity | `bf read repo:github.com/team/new-website` | Owning note after [declaring the alias](links.md#give-a-subject-a-stable-identity). |
 
-An explicit identity, such as a repository alias, lets you find the note that owns it and the evidence linking to it. An ordinary name does not establish an identity. Start with [Linking knowledge](links.md) before using identity scopes.
+Use returned refs exactly. Ordinary names do not establish identities.
 
 ## Incomplete answers and freshness
 
@@ -95,7 +113,7 @@ bf search "product" --limit 1 --offset 1
 
 Keep the query, scope, limit and brain selection unchanged. Stop when there is no `next_offset`; restart if the files change. Listings use the same `--offset` option.
 
-Very large exact reads return chunks instead of a full reply. Follow the [chunk assembly and digest checks](retrieval.md#continuations) to reconstruct them; a preview or single chunk is not complete evidence.
+Exact reads longer than 65,536 characters return chunks, from the first one, instead of a full reply. Follow the [chunk assembly and digest checks](retrieval.md#continuations) to reconstruct them; a preview or single chunk is not complete evidence.
 
 ## Retrieval cases
 

@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/docs/schedule/#watch-preferences
 interval: 5
 poll_interval: 1
-notifications: "off"
+notifications: off
 notification_cooldown: 30

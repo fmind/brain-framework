@@ -1,15 +1,26 @@
-"""Validation reports every broken note, link, citation and partition at once."""
+"""Validation reports every broken note, link and record at once, each located in its file."""
 
 from __future__ import annotations
 
+import time
 from typing import cast
 
 import pytest
 
-from bf.markdown import note, section, validate_okf
-from bf.models import Error
+from bf.markdown import note, reference, section, validate_okf
+from bf.models import Error, Query, Record
+from bf.records import path as record_path
+from bf.retrieve import read, search
 from bf.storage import Store
 from bf.validate import validate
+from conftest import records_file
+
+
+def located(result: dict[str, object]) -> list[str]:
+    """Each problem as `file: error`; every problem names the file or folder to repair."""
+    problems = cast("list[dict[str, str]]", result["problems"])
+    assert all(set(problem) == {"file", "error"} and problem["file"] for problem in problems)
+    return [f"{problem['file']}: {problem['error']}" for problem in problems]
 
 
 def test_a_clean_brain_is_valid(brain: Store) -> None:
@@ -25,8 +36,7 @@ def test_action_folders_are_dated_and_resumable(brain: Store) -> None:
     for folder in ("2026-09-24-hyphen", "undated", "2026-02-30_bad-date", "2026-09-24_Upper"):
         brain.write(f"actions/{folder}/ACTION.md", b"---\ntype: action\n---\n# Misnamed\n")
     brain.write("actions/2026-09-24_no-action/inputs/request.md", b"# Request\n")
-    problems = cast("list[str]", validate(brain)["problems"])
-    assert problems == [
+    assert located(validate(brain)) == [
         "actions/2026-02-30_bad-date: name action folders YYYY-MM-DD_slug (lowercase slug, hyphens)",
         "actions/2026-09-24-hyphen: name action folders YYYY-MM-DD_slug (lowercase slug, hyphens)",
         "actions/2026-09-24_Upper: name action folders YYYY-MM-DD_slug (lowercase slug, hyphens)",
@@ -41,27 +51,83 @@ def test_problems_are_collected_not_fail_fast(brain: Store) -> None:
         b"# Links\n\n[gone](absent.md) [heading](offline.md#absent) [ok](offline.md#decision) [dir](../concepts)\n"
         b"[up](../../outside.md) [cited](meetings:absent) [web](https://example.com) [self](#links)\n",
     )
-    brain.write("projects/bad.md", b"---\nstatus: current\n---\n# Bad\n")
-    brain.write(
-        "memories/meetings/8810ad581e59f2bc3928b261707a71308f7e139eb04820366dc4d5c18d980225.json",
-        b'{"id":"lunch","title":"Moved","time":"2026-08-01T00:00:00Z"}\n',
-    )
+    brain.write("projects/bad.md", b"---\ntags: [a/b]\n---\n# Bad\n")
+    meeting = "memories/meetings/8810ad581e59f2bc3928b261707a71308f7e139eb04820366dc4d5c18d980225.json"
+    brain.write(meeting, b'{"id":"lunch","title":"Moved","time":"2026-08-01T00:00:00Z"}\n')
     brain.write("memories/other/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json", b"{broken\n")
     result = validate(brain)
     assert not result["valid"]
-    problems = "\n".join(cast("list[str]", result["problems"]))
+    problems = "\n".join(located(result))
     for expected in [
         "projects/links.md: broken link: absent.md",
         "projects/links.md: missing heading: offline.md#absent",
         "projects/links.md: link leaves the brain: ../../outside.md",
         "projects/links.md: missing record meetings:absent",
-        "projects/bad.md: invalid frontmatter: status",
-        "record id does not match its SHA-256 filename",
+        "projects/bad.md: invalid frontmatter: tags",
+        f"{meeting}: record id does not match its SHA-256 filename",
         "memories/other/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json: invalid JSON document",
     ]:
         assert expected in problems
     assert "decision" not in problems
     assert "example.com" not in problems
+
+
+def test_link_schema_and_identity_problems_name_their_file_once(brain: Store) -> None:
+    brain.write("bf.yaml", b"version: 6\nname: fixture\n")
+    brain.write("concepts/foreign.md", b"---\ntype: person\nentity: bf://other/people/alice\n---\n# Foreign\n")
+    brain.write(
+        "concepts/role.md", b"---\ntype: concept\n---\n# Role\n\n[x](bf://fixture/projects/offline.md?rel=nope)\n"
+    )
+    brain.write(
+        "concepts/dup.md", b"---\ntype: concept\n---\n# Dup\n\n[x](../projects/absent.md) [y](evidence.md#missing)\n"
+    )
+    records_file(
+        brain,
+        "fake",
+        [
+            Record(id="fields", title="Fields", fields={"nope": "value"}),
+            Record(id="alias", title="Alias", aliases=["bf://other/items/alias"]),
+            Record(id="linked", title="Linked", links=["bf://fixture/projects/absent.md"]),
+        ],
+    )
+    brain.write("projects/cites.md", b"---\ntype: project\n---\n# Cites\n\n[record](fake:fields)\n")
+    result = validate(brain)
+    problems = located(result)
+    assert f"{record_path('fake', 'fields')}: undeclared schema field nope" in problems
+    assert f"{record_path('fake', 'alias')}: BF aliases must belong to their own brain namespace" in problems
+    assert f"{record_path('fake', 'linked')}: unresolved BF target: bf://fixture/projects/absent.md" in problems
+    assert "concepts/foreign.md: a note entity must belong to its own brain namespace" in problems
+    assert "concepts/role.md: link relation is undeclared; declare an identity relationship in schema" in problems
+    assert {p.split(": ", 1)[0] for p in problems} == {
+        "concepts/dup.md",
+        "concepts/foreign.md",
+        "concepts/role.md",
+        record_path("fake", "alias"),
+        record_path("fake", "fields"),
+        record_path("fake", "linked"),
+    }
+    # A relative link is checked once, as written; it is never reported again as a qualified BF address.
+    assert [p for p in problems if p.startswith("concepts/dup.md")] == [
+        "concepts/dup.md: broken link: ../projects/absent.md",
+        "concepts/dup.md: missing heading: evidence.md#missing",
+    ]
+    # A record with a field the schema no longer declares still exists: citing it is not a missing record.
+    assert result["records"] == 5
+    assert not any("missing record" in p for p in problems)
+
+
+def test_problem_lists_are_capped_with_a_flag(brain: Store) -> None:
+    body = "".join(f"[gone](absent-{i}.md) [far](bf://other/n/{i})\n" for i in range(201))
+    brain.write("projects/many.md", f"---\ntype: project\n---\n# Many\n\n{body}".encode())
+    result = validate(brain)
+    assert len(cast("list", result["problems"])) == 200
+    assert result["problems_truncated"] is True
+    assert len(cast("list", result["unresolved"])) == 200
+    assert result["unresolved_truncated"] is True
+    brain.write("projects/many.md", b"---\ntype: project\n---\n# Few\n\n[gone](absent.md) [far](bf://other/n)\n")
+    result = validate(brain)
+    assert "problems_truncated" not in result
+    assert "unresolved_truncated" not in result
 
 
 def test_okf_concept_structure() -> None:
@@ -76,7 +142,7 @@ def test_okf_concept_structure() -> None:
         ("concepts/log.md", b"---\ntype: log\n---\n"),
         ("concepts/log.md", b"# Log\n\n## September\n"),
         ("concepts/a.md", b"# No type\n"),
-        ("concepts/a.md", b"---\ntype: concept\nstatus: active\n---\n"),
+        ("concepts/a.md", b"---\ntype: concept\nstatus: published\n---\n"),
         ("concepts/a.md", b"---\ntype: concept\nsources: [https://x]\n---\n"),
         ("concepts/a.md", b"---\ntype: concept\nverified: [{by: me}]\n---\n"),
     ]:
@@ -103,16 +169,102 @@ def test_note_projection_sections_and_titles() -> None:
     assert note("actions/t/ACTION.md", b"# T\n\n## Only\n\nFirst section text.\n").lead == "First section text."
     data = "# T\r\n\r\n## A\r\n\r\nx\u2028y\r\n\r\n## B\r\n".encode()
     assert section("concepts/t.md", data, "a") == "## A\r\n\r\nx\u2028y\r\n\r\n"
-    for bad in [b"---\ntitle: x\n", b"\xff", b"---\ntags: x\n---\n"]:
+    for bad in [b"---\ntitle: x\n", b"\xff", b"---\ntags: x\n---\n", f"# {'x' * 4097}\n".encode()]:
         with pytest.raises(Error):
             note("concepts/x.md", bad)
+
+
+@pytest.mark.parametrize("frontmatter", ["", "---\ntype: concept\n---\n"])
+def test_a_rule_below_the_title_is_not_frontmatter(frontmatter: str) -> None:
+    data = f"{frontmatter}# Title\n---\nIntro text.\n\n---\n\n## Next\n\nBody\n".encode()
+    projection = note("concepts/x.md", data)
+    assert projection.title == "Title"
+    assert projection.lead == "Intro text."
+    assert [p.fragment for p in projection.passages] == ["", "next"]
+
+
+def test_a_byte_order_mark_does_not_hide_frontmatter(brain: Store) -> None:
+    data = b"\xef\xbb\xbf---\ntype: project\nstatus: draft\ntags: [beta]\n---\n# Bom project\n\nOkapi notes.\n"
+    assert note("projects/bom.md", data).knowledge.tags == ["beta"]
+    brain.write("projects/bom.md", data)
+    assert validate(brain)["valid"]
+    assert [i["ref"] for i in cast("list[dict]", search([brain], Query(text="okapi"))["items"])] == ["projects/bom.md"]
+    assert cast("dict", read([brain], "bf://fixture/tags/beta"))["total"] == 1
+
+
+def test_indented_conflict_markers_are_literal_examples() -> None:
+    example = b"# Git\n\n```text\n <<<<<<< HEAD\n ours\n =======\n theirs\n >>>>>>> feature\n```\n"
+    assert note("concepts/git.md", example).title == "Git"
+    with pytest.raises(Error, match=r"line 4: unresolved merge conflict marker; .* indent a literal example"):
+        note("concepts/git.md", example.replace(b" <<<", b"<<<"))
+
+
+def test_adversarial_markdown_parses_in_linear_time() -> None:
+    started = time.perf_counter()
+    note("concepts/links.md", b"# Links\n\n" + b"[" * 100_000 + b"]\n")
+    note("concepts/links.md", b"# Links\n\n- [ ] " + b"[](" * 30_000 + b"\n")
+    note("concepts/heading.md", b"# Heading\n\n## a" + b" " * 100_000 + b"b\n")
+    # The former backtracking patterns took over a minute on these inputs.
+    assert time.perf_counter() - started < 10
+
+
+def test_images_are_checked_links(brain: Store) -> None:
+    brain.write("assets/logo.svg", b"<svg/>")
+    brain.write(
+        "concepts/media.md",
+        b"---\ntype: concept\n---\n# Media\n\n![Logo](../assets/logo.svg) ![Pixel](data:image/png;base64,AAAA)\n",
+    )
+    assert note("concepts/media.md", brain.read("concepts/media.md")).links == ["assets/logo.svg"]
+    assert validate(brain)["valid"]
+    brain.write("concepts/media.md", b"---\ntype: concept\n---\n# Media\n\n![Logo](../assets/missing.svg)\n")
+    assert located(validate(brain)) == ["concepts/media.md: broken link: ../assets/missing.svg"]
+
+
+@pytest.mark.parametrize("bundle", ["projects", "concepts"])
+def test_okf_notes_resolve_a_leading_slash_from_their_bundle_root(brain: Store, bundle: str) -> None:
+    # OKF's recommended bundle-relative form survives moving the linking note within its bundle.
+    brain.write(f"{bundle}/tables/customers.md", b"---\ntype: table\n---\n# Customers\n\n## Join key\n")
+    orders = f"{bundle}/sales/orders.md"
+    brain.write(orders, b"---\ntype: table\n---\n# Orders\n\nSee [customers](/tables/customers.md#join-key).\n")
+    assert reference(orders, "/tables/customers.md") == f"{bundle}/tables/customers.md"
+    assert validate(brain)["valid"]
+    backlinks = cast("list[dict[str, object]]", read([brain], f"{bundle}/tables/customers.md")["backlinks"])
+    assert [item["ref"] for group in backlinks for item in cast("list[dict]", group["items"])] == [orders]
+    brain.write(orders, b"---\ntype: table\n---\n# Orders\n\n[a](/tables/absent.md) [b](/../../outside.md)\n")
+    assert located(validate(brain)) == [
+        f"{orders}: link leaves the brain: /../../outside.md",
+        f"{orders}: broken link: /tables/absent.md",
+    ]
+
+
+def test_actions_and_their_attachments_have_no_bundle_root(brain: Store) -> None:
+    brain.write("actions/2026-09-27_x/ACTION.md", b"---\ntype: action\n---\n# X\n\n[root](/evidence.md)\n")
+    brain.write("actions/2026-09-27_x/outputs/doc.md", b"# Doc\n\n[root](/evidence.md)\n")
+    assert located(validate(brain)) == [
+        "actions/2026-09-27_x/ACTION.md: absolute link; use a path relative to this file: /evidence.md",
+        "actions/2026-09-27_x/outputs/doc.md: absolute link; use a path relative to this file: /evidence.md",
+    ]
+    brain.write(
+        "actions/2026-09-27_x/ACTION.md", b"---\ntype: action\n---\n# X\n\n[root](../../concepts/evidence.md)\n"
+    )
+    brain.delete("actions/2026-09-27_x/outputs/doc.md")
+    assert validate(brain)["valid"]
+
+
+def test_link_case_must_match_the_file_name(brain: Store) -> None:
+    # A case-insensitive volume would find the file, but the graph matches exact names on every platform.
+    brain.write("projects/cased.md", b"---\ntype: project\n---\n# Cased\n\n[x](Offline.md) [y](../Concepts)\n")
+    assert located(validate(brain)) == [
+        "projects/cased.md: broken link: ../Concepts",
+        "projects/cased.md: broken link: Offline.md",
+    ]
 
 
 def test_malformed_links_report_one_file_without_blocking_validation(brain: Store) -> None:
     brain.write("projects/bad-url.md", b'---\nlinks: ["https://["]\n---\n# Invalid link\n')
     result = validate(brain)
     assert not result["valid"]
-    assert "projects/bad-url.md: invalid link" in str(result["problems"])
+    assert "projects/bad-url.md: invalid link" in located(result)
 
 
 @pytest.mark.parametrize("path", ["projects/new.md", "concepts/new.md", "actions/2026-09-27_new/ACTION.md"])
@@ -120,7 +272,7 @@ def test_okf_sources_are_checked_explicit_relations(brain: Store, path: str) -> 
     data = b'---\ntype: concept\nsources:\n  - resource: "meetings:absent"\n---\n# Concept\n'
     brain.write(path, data)
     assert note(path, data).links == ["meetings:absent"]
-    assert f"{path}: missing record meetings:absent" in str(validate(brain)["problems"])
+    assert f"{path}: missing record meetings:absent" in located(validate(brain))
 
 
 @pytest.mark.parametrize("path", ["projects/new.md", "concepts/new.md", "actions/2026-09-27_new/ACTION.md"])
@@ -129,12 +281,16 @@ def test_okf_source_relationships_must_be_declared(brain: Store, path: str) -> N
         path,
         b"---\ntype: note\nsources:\n  - resource: bf://fixture/projects/offline.md?rel=undeclared\n---\n# Source\n",
     )
-    assert "declare an identity relationship" in str(validate(brain)["problems"])
+    assert any(p.startswith(f"{path}: ") and "declare an identity relationship" in p for p in located(validate(brain)))
 
 
 def test_duplicate_aliases_are_reported(brain: Store) -> None:
-    brain.write("projects/duplicate.md", b'---\naliases: ["repo:example/project"]\n---\n# Duplicate owner\n')
-    assert "ambiguous identity repo:example/project" in str(validate(brain)["problems"])
+    brain.write(
+        "projects/duplicate.md", b'---\ntype: project\naliases: ["repo:example/project"]\n---\n# Duplicate owner\n'
+    )
+    assert located(validate(brain)) == [
+        "projects/duplicate.md: ambiguous identity repo:example/project: projects/duplicate.md, projects/offline.md"
+    ]
 
 
 def test_local_links_decode_filename_escapes_once_after_splitting_fragments(brain: Store) -> None:
@@ -142,11 +298,18 @@ def test_local_links_decode_filename_escapes_once_after_splitting_fragments(brai
         "projects/C# guide.md", b"---\ntype: project\n---\n# Guide\n\n## Decision\n\nKeep the reference readable.\n"
     )
     brain.write("projects/literal%20name.md", b"---\ntype: project\n---\n# Literal percent\n")
-    data = b"---\ntype: project\n---\n# Links\n\n[guide](C%23%20guide.md#decision) [whole](C%23%20guide.md) [literal](literal%2520name.md)\n"
+    brain.write("projects/100%.md", b"---\ntype: project\n---\n# Percent\n")
+    brain.write("projects/Réunion notes.md", b"---\ntype: project\n---\n# Meeting\n")
+    data = (
+        "---\ntype: project\n---\n# Links\n\n[guide](C%23%20guide.md#decision) [whole](C%23%20guide.md) "
+        "[literal](literal%2520name.md) [raw](100%.md) [spaced](<Réunion notes.md>)\n"
+    ).encode()
     brain.write("projects/links.md", data)
     assert note("projects/links.md", data).links == [
+        "projects/100%.md",
         "projects/C# guide.md",
         "projects/C# guide.md#decision",
+        "projects/Réunion notes.md",
         "projects/literal%20name.md",
     ]
     assert validate(brain)["valid"]
@@ -158,10 +321,7 @@ def test_local_links_decode_filename_escapes_once_after_splitting_fragments(brai
     [
         ("", "nonempty type"),
         ("type: ' '", "nonempty type"),
-        *[
-            (f"type: project\nstatus: {status}", "OKF status")
-            for status in ("active", "paused", "blocked", "done", "archived")
-        ],
+        *[(f"type: project\nstatus: {status}", "OKF status") for status in ("published", "current", "''")],
         ("type: project\nsources: [https://example.com]", "sources require mappings"),
         ("type: project\nsources: [{resource: ' '}]", "nonempty resource"),
         ("type: project\nverified: [{by: human:owner}]", "require by and at"),
@@ -171,7 +331,7 @@ def test_validate_enforces_okf_for_authored_notes(brain: Store, path: str, metad
     brain.write(path, f"---\n{metadata}\n---\n# New note\n".encode())
     result = validate(brain)
     assert not result["valid"]
-    assert any(path in entry and problem in entry for entry in cast("list[str]", result["problems"]))
+    assert any(entry.startswith(f"{path}: ") and problem in entry for entry in located(result))
 
 
 @pytest.mark.parametrize("status", ["", "draft", "stable", "deprecated"])

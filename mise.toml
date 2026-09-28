@@ -10,7 +10,6 @@ python = "3.14.7"
 shellcheck = "0.11.0"
 trivy = "0.74.0"
 "aqua:astral-sh/uv" = "0.12.19"
-yq = "4.53.6"
 # 1.30 requires GitHub's new $/ self-reference, which actionlint 1.7.12 cannot parse yet
 # (rhysd/actionlint#711). Keep both strict gates warning-free rather than suppressing either.
 zizmor = "1.29.0"
@@ -30,17 +29,12 @@ run_auto_install = false
 
 [tasks.all]
 alias = "a"
-description = "Format, check, test, and build the project"
-run = ["mise run format", "mise run check", "mise run test", "mise run eval", "mise run build"]
+description = "Check, test, and build without rewriting source files"
+run = ["mise run check", "mise run test", "mise run build"]
 
 [tasks.benchmark]
-description = "Observe build and retrieval latency over a deterministic 20k-record corpus"
-run = "uv run python scripts/benchmark_scale.py"
-
-[tasks.eval]
-description = "Evaluate retrieval against a fixed fictional corpus without models or providers"
-env.TZ = "UTC"
-run = ["uv run bf validate --brain ./evals", "uv run bf eval --brain ./evals --path retrieval.yaml"]
+description = "Time record writes, cache builds and retrieval over a deterministic 20k-record corpus"
+run = "uv run --locked python scripts/benchmark_scale.py"
 
 [tasks.build]
 alias = "b"
@@ -57,8 +51,10 @@ depends = [
   "check:leaks",
   "check:links",
   "check:lint",
+  "check:notices",
   "check:scan",
   "check:schema",
+  "check:screenshot",
   "check:shell",
   "check:types",
   "check:vuln",
@@ -75,7 +71,7 @@ run = [
 [tasks."check:docs"]
 description = "Build strict documentation and check rendered links and anchors"
 run = [
-  "uv run zensical build --clean --strict",
+  "mise run docs:build",
   'lychee --offline --include-fragments --index-files index.html --root-dir "$PWD/site" --no-progress "site/brain-framework/**/*.html"',
 ]
 
@@ -83,10 +79,10 @@ run = [
 alias = "cf"
 description = "Check Python, metadata, lockfile, markup, and whitespace formatting"
 run = [
-  "uv run validate-pyproject pyproject.toml",
-  "uv run ruff format --check",
-  "dprint check",
   "uv lock --check",
+  "uv run --locked validate-pyproject pyproject.toml",
+  "uv run --locked ruff format --check",
+  "dprint check",
   "git diff --check \"$(git hash-object -t tree /dev/null)\"",
 ]
 
@@ -110,25 +106,31 @@ run = "lychee --offline --no-progress --hidden --extensions md --exclude-path '(
 [tasks."check:lint"]
 alias = "cl"
 description = "Lint application, tests, and shipped Python helpers (Ruff)"
-run = "uv run ruff check"
+run = "uv run --locked ruff check"
+
+[tasks."check:notices"]
+description = "Verify third-party notices and site license copies match the synced dependencies"
+run = "uv run --locked python scripts/notices.py"
 
 [tasks."check:outdated"]
-description = "Report drift in the pinned toolchain without failing the gate"
-run = "mise outdated --local --bump || true"
+description = "Report drift in pinned mise tools and dprint plugins without failing the gate"
+run = [
+  "mise outdated --local --bump || true",
+  # Honors the seven-day cooldown and names any newer release it holds back.
+  "dprint config update --dry-run --minimum-dependency-age P7D",
+]
 
 [tasks."check:scan"]
 description = "Scan the repository for vulnerabilities, secrets, licenses, and misconfigurations"
 run = "trivy --config trivy.yaml fs ."
 
 [tasks."check:schema"]
-description = "Verify the committed JSON Schema matches the Python configuration loader"
-run = [
-  "mkdir -p .schema-cache",
-  "uv run bf schema > .schema-cache/schema-current.json",
-  "jq -S . .schema-cache/schema-current.json > .schema-cache/schema-actual.json",
-  "jq -S . docs/bf.schema.json > .schema-cache/schema-expected.json",
-  "diff -u .schema-cache/schema-expected.json .schema-cache/schema-actual.json",
-]
+description = "Verify every published configuration schema matches its loader"
+run = "uv run --locked python scripts/schemas.py"
+
+[tasks."check:screenshot"]
+description = "Verify the published watch screenshot matches the dashboard"
+run = "uv run --locked python scripts/render_watch.py"
 
 [tasks."check:shell"]
 description = "Lint every shipped and release shell helper"
@@ -137,7 +139,7 @@ run = "shellcheck -S warning scripts/release-notes scripts/verify-release-tag"
 [tasks."check:types"]
 alias = "ct"
 description = "Type-check Python sources (ty)"
-run = "uv run ty check"
+run = "uv run --locked ty check"
 
 [tasks."check:vuln"]
 alias = "cv"
@@ -147,22 +149,22 @@ run = "uv audit --preview-features audit-command --locked"
 [tasks.clean]
 alias = "n"
 description = "Remove generated build, test, and documentation output"
-run = "rm -rf dist site .cache .schema-cache .coverage htmlcov .pytest_cache .ruff_cache"
+run = "rm -rf dist site .cache .coverage htmlcov .pytest_cache .ruff_cache"
 
 [tasks.coverage]
 alias = "v"
 description = "Write an HTML branch-coverage report"
 depends = ["test"]
-run = "uv run coverage html"
+run = "uv run --locked coverage html"
 
 [tasks."docs:build"]
 description = "Build the documentation site into site/brain-framework"
-run = "uv run zensical build --clean --strict"
+run = "uv run --locked zensical build --clean --strict"
 
 [tasks."docs:watch"]
 alias = "w"
 description = "Serve the documentation site locally with live reload"
-run = "uv run zensical serve"
+run = "uv run --locked zensical serve"
 
 [tasks.format]
 alias = "f"
@@ -175,20 +177,29 @@ run = "dprint fmt --allow-no-files"
 
 [tasks."format:python"]
 description = "Format Python sources"
-run = "uv run ruff format --force-exclude"
+run = "uv run --locked ruff format --force-exclude"
 
 [tasks."format:imports"]
 description = "Sort Python imports"
-run = "uv run ruff check --select=I --fix --force-exclude"
+run = "uv run --locked ruff check --select=I --fix --force-exclude"
 
 [tasks."generate:schema"]
-description = "Generate the schema before replacing the committed copy"
+description = "Generate and format all configuration schemas from their models"
 run = [
-  "mkdir -p .schema-cache",
-  "uv run bf schema > .schema-cache/schema-generated.json",
-  "mv .schema-cache/schema-generated.json docs/bf.schema.json",
-  "dprint fmt docs/bf.schema.json",
+  "uv run --locked python scripts/schemas.py --write",
+  "dprint fmt docs/*.schema.json",
 ]
+
+[tasks."generate:notices"]
+description = "Regenerate third-party notices and site license copies from the synced dependencies"
+run = [
+  "uv run --locked python scripts/notices.py --write",
+  "dprint fmt THIRD_PARTY_NOTICES.md docs/third-party-notices.md",
+]
+
+[tasks."generate:screenshot"]
+description = "Render the watch screenshot from the fictional offline demo"
+run = "uv run --locked python scripts/render_watch.py --write"
 
 [tasks.install]
 alias = "i"
@@ -197,28 +208,26 @@ run = ["uv sync --locked", "lefthook install"]
 
 [tasks.test]
 alias = "t"
-description = "Run isolated tests with at least 85% branch coverage"
+description = "Run isolated tests with at least 95% branch coverage"
+# Tests pin UTC themselves; the variable also covers Python builds without time.tzset.
 env.TZ = "UTC"
-run = "uv run pytest -q --cov --cov-report="
+run = "uv run --locked pytest -q --cov --cov-report="
 
 [tasks."report:coverage"]
 description = "Show per-file coverage and missing lines from the last test run"
-run = "uv run coverage report --show-missing"
+run = "uv run --locked coverage report --show-missing"
 
 [tasks."test:package"]
 description = "Smoke-test the wheel and source distribution outside the checkout"
-run = "uv run python scripts/test_package.py"
+run = "uv run --locked python scripts/test_package.py"
 
 [tasks."test:watch"]
 alias = "tw"
 description = "Run the test suite in watch mode"
-run = "uv run pytest-watcher ."
+env.TZ = "UTC"
+run = "uv run --locked pytest-watcher ."
 
 [tasks.upgrade]
 alias = "u"
 description = "Upgrade dependencies to latest compatible versions"
 run = "uv sync --upgrade"
-
-[tasks.watch]
-description = "Run the Brain Framework CLI from the working tree"
-run = "uv run bf"

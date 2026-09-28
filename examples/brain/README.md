@@ -24,9 +24,9 @@ bf validate
 bf eval
 ```
 
-On this disposable copy, expect `bf validate` to return `"valid":true` and `bf eval` to return `"passed":true`. Reading `demo:retention` gives the fictional evidence that upstream content can disappear; the action read lists `ACTION.md`, its input request and the linked project.
+On this disposable copy, expect `bf validate` to return `"valid":true` and `bf eval` to return `"passed":true` with `"score":"16/16"`. Reading `demo:retention` gives the fictional evidence that upstream content can disappear; the action read lists `ACTION.md`, its input request and, under `backlinks`, the project that links to it.
 
-`update` runs the configured `sensors/demo.py` in this copy; the wrapper keeps the demo's configuration and state in its temporary directory. A second update within the hour runs nothing. The fake sensor emits one fictional event inside each requested window, always with the same id, so repeated runs update one line in `memories/demo/`.
+`update` runs the configured `sensors/demo.py` in this copy; the wrapper keeps the demo's configuration and state in its temporary directory. A second update within the hour runs nothing. The fake sensor emits one fictional event inside each requested window, always with the same id, so later collections update the same JSON record file in `memories/demo/`.
 
 `bf read` shows the example project with its first open task, and `bf read actions/2026-09-19_retention` returns the action with its request file and the project that links to it. Continue that action by writing its answer with the record ref, then find it again:
 
@@ -96,16 +96,17 @@ Retain the exact policy section locally without inserting its body into an agent
 )
 ```
 
-The comparison returns `"state":"unchanged"`. Edit the policy body in this disposable copy, for example `sed -i.bak 's/latest version/two latest versions/' concepts/archive-policy.md`, and compare again:
+The comparison returns `"state":"unchanged"`. Edit the policy body in this disposable copy and compare again:
 
 ```bash
+sed -i.bak 's/latest version/two latest versions/' concepts/archive-policy.md
 {
   cat actions/2026-09-25_retention-review/inputs/policy-v1.json
   bf read 'bf://example/concepts/archive-policy.md#retention'
 } | python3 "$bf_checkout/skills/bf-learn/scripts/evidence.py" compare
 ```
 
-It returns `"state":"changed"`, while the capture retains the old body. It does not revise the dependent decision for you. Incomplete evidence yields `unknown` or an error, never permission to dismiss an intention. The helper needs Python 3.11 or later.
+It returns `"state":"changed"`, while the capture retains the old body. It does not revise the dependent decision for you. Incomplete evidence yields `unknown` or an error, never permission to dismiss an intention. The helper needs Python 3.11 or later. A direct pipe suits this short section: `bf read` chunks replies above 65,536 characters, which `capture` refuses. For those, pipe the helper's `read REF --brain BRAIN` mode instead: it runs `bf` from PATH and assembles the chunks, as the [evidence guide](../../skills/bf-learn/references/evidence.md#retain-a-revision) shows.
 
 ### Share the procedure with a team brain
 

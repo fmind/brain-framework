@@ -54,6 +54,7 @@ def test_highlights_preserve_passage_annotation_locator_and_dates(provider: Prov
     [
         ("id", "../../private-marker"),
         ("title", "private-marker\nsecond line"),
+        ("title", "private-marker\u0085"),
         ("selection", ""),
         ("selection", "é" * 32769),
         ("selection", "private-marker\u0000"),
@@ -62,6 +63,7 @@ def test_highlights_preserve_passage_annotation_locator_and_dates(provider: Prov
         ("source_url", "https://name:private-marker@example.com/"),
         ("source_url", "https:///private-marker"),
         ("source_url", "https://example.com:invalid/private-marker"),
+        ("source_url", "https://example.com/private-marker\u007f"),
         ("locator", {}),
         ("locator", {"page": True}),
         ("locator", {"page": 0}),
@@ -231,6 +233,6 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
         collect(brain, "highlights", start=START, end=END)
     assert {name: brain.read(name) for name in brain.files("memories/highlights")} == stored
     save(path, [])
-    with pytest.raises(Error, match="snapshot returned no records"):
+    with pytest.raises(Error, match="snapshot would remove 1 of 1 records"):
         collect(brain, "highlights", start=START, end=END)
     assert {name: brain.read(name) for name in brain.files("memories/highlights")} == stored

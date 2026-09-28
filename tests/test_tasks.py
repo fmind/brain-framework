@@ -93,7 +93,7 @@ def test_task_page_identity_cannot_be_claimed_by_notes_or_records(brain: Store) 
         assert not validate(brain)["valid"]
         assert read([brain], "tasks")["problems"]
     brain.delete("projects/owner.md")
-    records_file(brain, "mail", "2026-09", [Record(id="owner", title="Owner", aliases=["bf://fixture/tasks"])])
+    records_file(brain, "mail", [Record(id="owner", title="Owner", aliases=["bf://fixture/tasks"])])
     assert not validate(brain)["valid"]
     assert read([brain], "tasks")["problems"]
     brain.delete("memories/mail/4c1029697ee358715d3a14a2add817c4b01651440de808371f78165ac90dc581.json")

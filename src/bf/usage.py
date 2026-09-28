@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime, timedelta
 
-from bf.models import Error, decode, encode
+from bf.models import Error, decode, encode, timestamp
 from bf.storage import Store, state_store
 
 USAGE = "usage.jsonl"
@@ -18,7 +18,7 @@ def note(store: Store, operation: str, results: int, now: datetime | None = None
     try:
         state = state_store(store.root)
         path = state.root / USAGE
-        line = encode({"at": (now or datetime.now(UTC)).isoformat(), "op": operation, "results": results})
+        line = encode({"at": timestamp((now or datetime.now(UTC)).isoformat()), "op": operation, "results": results})
         fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, "a+b") as stream:
             stream.write(line)
@@ -47,12 +47,14 @@ def summary(store: Store, now: datetime | None = None) -> dict[str, dict[str, in
             if not isinstance(event, dict):
                 continue
             age = now - datetime.fromisoformat(str(event["at"]))
-            operation, results = str(event["op"]), int(event["results"])
+            operation, results = str(event["op"]), event["results"]
+            if type(results) is not int or results < 0:
+                continue
         except Error, KeyError, TypeError, ValueError:
             # Private counts are advisory: a malformed line never hides the rest.
             continue
         for window, days in WINDOWS.items():
-            if age <= timedelta(days=days) and operation in {"search", "read"}:
+            if timedelta(0) <= age <= timedelta(days=days) and operation in {"search", "read"}:
                 counts[window][operation] += 1
                 counts[window]["empty"] += operation == "search" and not results
     return counts

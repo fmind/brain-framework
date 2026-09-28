@@ -8,10 +8,24 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from bf import index, usage
-from bf.collect import ROUTINES, log_path, state
-from bf.config import load
+from bf.config import ABSENT, Selection, brain_name, load, related
+from bf.history import ROUTINES, log_path, state
 from bf.models import Error, Program
 from bf.storage import Store
+
+# Counters of the last successful collection, reported apart from indexed totals.
+_COUNTERS = (
+    "records",
+    "added",
+    "updated",
+    "unchanged",
+    "removed",
+    "requested_start",
+    "requested_end",
+    "reconcile",
+    "elapsed_seconds",
+    "output_bytes",
+)
 
 
 def _freshness(program: Program, success: str, now: datetime) -> str:
@@ -20,7 +34,8 @@ def _freshness(program: Program, success: str, now: datetime) -> str:
         return "manual"
     if not success:
         return "never"
-    return "stale" if datetime.fromisoformat(success) < now - timedelta(seconds=2 * program.refresh) else "fresh"
+    elapsed = now - datetime.fromisoformat(success)
+    return "fresh" if timedelta(0) <= elapsed <= timedelta(seconds=2 * program.refresh) else "stale"
 
 
 def source_health(
@@ -39,6 +54,7 @@ def source_health(
             "freshness": "unknown",
         }
         if success:
+            # Run history already holds canonical UTC instants.
             item["last_collected"] = success
         if settings is not None:
             item["mode"] = settings.mode
@@ -52,23 +68,35 @@ def source_health(
     return result
 
 
+def _failure(store: Store, name: str, entry: dict[str, object]) -> dict[str, object]:
+    """The last attempt's error, consecutive failures and private log; empty after a success."""
+    if not entry.get("error"):
+        return {}
+    return {
+        "failed": True,
+        "error": entry["error"],
+        "failures": entry.get("failures", 1),
+        "log": str(log_path(store, name)),
+    }
+
+
 def routine_health(store: Store, *, now: datetime | None = None) -> dict[str, dict[str, object]]:
-    """Each configured routine's last run, error, latest action and freshness."""
+    """Each configured routine's state, freshness, last success, latest action and failure."""
     now = now or datetime.now(UTC)
     config, history = load(store), state(store, ROUTINES)
     result: dict[str, dict[str, object]] = {}
     for name, settings in sorted(config.routines.items()):
         entry = history.get(name, {})
         success = str(entry.get("success", ""))
-        item: dict[str, object] = {"enabled": settings.enabled, "freshness": "unknown"}
-        if settings.enabled:
-            item["freshness"] = _freshness(settings, success, now)
-        for key in ("run", "success", "error", "action"):
-            if entry.get(key):
-                item[key] = entry[key]
-        if entry.get("error"):
-            item["log"] = str(log_path(store, name))
-        result[name] = item
+        item: dict[str, object] = {
+            "state": "active" if settings.enabled else "disabled",
+            "freshness": _freshness(settings, success, now) if settings.enabled else "unknown",
+        }
+        if success:
+            item["last_success"] = success
+        if entry.get("action"):
+            item["action"] = entry["action"]
+        result[name] = {**item, **_failure(store, name, entry)}
     return result
 
 
@@ -89,18 +117,19 @@ def attention(store: Store, now: datetime | None = None) -> list[dict[str, objec
                 {"sensor": name, "freshness": health["freshness"], **({"failed": True} if health.get("failed") else {})}
             )
     for name, health in routine_health(store, now=now).items():
-        settings = config.routines[name]
-        if settings.enabled and settings.refresh and (health.get("error") or health["freshness"] in {"never", "stale"}):
-            result.append(
-                {"routine": name, "freshness": health["freshness"], **({"failed": True} if health.get("error") else {})}
-            )
+        settings, failed = config.routines[name], health.get("failed")
+        if settings.enabled and settings.refresh and (failed or health["freshness"] in {"never", "stale"}):
+            result.append({"routine": name, "freshness": health["freshness"], **({"failed": True} if failed else {})})
     return result
 
 
 def report(stores: list[Store], now: datetime | None = None) -> dict[str, object]:
     """Per brain: cache, notes, records, source and routine freshness, errors, logs and usage."""
     now = now or datetime.now(UTC)
-    brains, healthy = [], True
+    brains: list[dict[str, object]] = [
+        {"brain": name, "error": ABSENT} for name in (stores.absent if isinstance(stores, Selection) else ())
+    ]
+    healthy = not brains
     for store in stores:
         try:
             config, history, summary = load(store), state(store), index.status(store)
@@ -111,7 +140,7 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
                 raise
             # Status diagnoses brains: one that cannot load is reported, and the others still are.
             message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; check its path"
-            brains.append({"brain": store.root.name, "path": str(store.root), "error": message})
+            brains.append({"brain": brain_name(store), "path": str(store.root), "error": message})
             healthy = False
             continue
         counts = cast("dict[str, dict[str, object]]", summary.pop("sources"))
@@ -120,48 +149,25 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
         for name in sorted({*config.sensors, *counts}):
             settings = config.sensors.get(name)
             run = history.get(name, {})
-            counters = {
-                key: run[key]
-                for key in (
-                    "records",
-                    "added",
-                    "updated",
-                    "unchanged",
-                    "removed",
-                    "requested_start",
-                    "requested_end",
-                    "reconcile",
-                    "elapsed_seconds",
-                    "output_bytes",
-                )
-                if key in run
-            }
-            entry: dict[str, object] = {
-                **{key: value for key, value in run.items() if key not in counters},
-                **counts.get(name, {"records": 0}),
-                **coverage[name],
-            }
-            if counters:
+            # One shape shared with retrieval coverage, plus indexed totals and local run diagnostics.
+            entry: dict[str, object] = {**coverage[name], **counts.get(name, {"records": 0})}
+            if counters := {key: run[key] for key in _COUNTERS if key in run}:
                 entry["last_run"] = counters
-            if settings is None:
-                entry["configured"] = False
-            else:
-                entry["enabled"] = settings.enabled
-                if settings.enabled and settings.refresh:
-                    entry["stale"] = coverage[name]["freshness"] in {"never", "stale"}
-                    healthy &= not entry["stale"]
-                if entry.get("error"):
-                    entry["log"] = str(log_path(store, name))
-                    # Like routines, only a scheduled sensor this machine runs fails the check.
-                    healthy &= not (settings.enabled and settings.refresh)
+            if run.get("reconciled"):
+                entry["reconciled"] = run["reconciled"]
+            entry.update(_failure(store, name, run))
+            # Like routines, only a scheduled program this machine runs fails the check.
+            if settings is not None and settings.enabled and settings.refresh:
+                entry["stale"] = coverage[name]["freshness"] in {"never", "stale"}
+                healthy &= not entry["stale"] and not entry.get("failed")
             sources[name] = {key: value for key, value in entry.items() if value != ""}
         routines = routine_health(store, now=now)
         for name, entry in routines.items():
             settings = config.routines[name]
             if settings.enabled and settings.refresh:
                 entry["stale"] = entry["freshness"] in {"never", "stale"}
-                healthy &= not entry["stale"] and not entry.get("error")
-        healthy &= not summary["problems"] and summary["index"] == "ready"
+                healthy &= not entry["stale"] and not entry.get("failed")
+        healthy &= not summary["problems"] and summary["cache"] == "ready"
         brains.append(
             {
                 "brain": config.name,
@@ -183,4 +189,17 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
                 "usage": usage.summary(store),
             }
         )
+    # A reference that retrieval cannot include makes every search and read incomplete, like a skipped file.
+    for problem in related(stores)[1]:
+        if problem["error"] == ABSENT:
+            continue
+        healthy = False
+        owners = [entry for entry in brains if entry["brain"] == problem["brain"] and "problems" in entry]
+        for entry in owners:
+            cast("list[dict[str, object]]", entry["problems"]).append(
+                {key: value for key, value in problem.items() if key != "brain"}
+            )
+        if not owners:
+            # An ambiguous name may belong to no reported brain: report it like an unavailable one.
+            brains.append({"brain": problem["brain"], "error": problem["error"]})
     return {"healthy": healthy, "brains": brains}

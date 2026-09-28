@@ -1,0 +1,10 @@
+# https://github.com/gitleaks/gitleaks#configuration
+title = "brain-framework"
+
+[extend]
+useDefault = true
+
+# Like trivy.yaml's skip-dirs: local scans skip ignored generated output, so they see what a CI checkout sees.
+[[allowlists]]
+description = "Ignored generated output: environments, builds, caches, reports and the rendered site."
+paths = ['''^(\./)?(\.agents/tmp|\.cache|\.pytest_cache|\.ruff_cache|\.venv|dist|htmlcov|site)/''']

@@ -47,11 +47,11 @@ def test_context_hub_collects_once_and_remains_readable_without_sensors(tmp_path
 
     # A broken mapping fails collection without replacing an already collected source.
     shutil.copytree(Path(__file__).parents[1] / "examples/context-hub/sensors", brain / "sensors")
-    partitions = {path: path.read_bytes() for path in (brain / "memories/jira").glob("*.json")}
+    record_files = {path: path.read_bytes() for path in (brain / "memories/jira").glob("*.json")}
     config = yaml.safe_load((brain / "bf.yaml").read_text())
     config["sensors"]["jira"]["fields"]["project"] = {"path": "/attributes/missing"}
     (brain / "bf.yaml").write_text(yaml.safe_dump(config))
     result = runner.invoke(app, ["collect", "jira", "--brain", str(brain)])
     assert result.exit_code == 1
     assert "required mapped value is missing" in str(result.exception)
-    assert partitions == {path: path.read_bytes() for path in (brain / "memories/jira").glob("*.json")}
+    assert record_files == {path: path.read_bytes() for path in (brain / "memories/jira").glob("*.json")}

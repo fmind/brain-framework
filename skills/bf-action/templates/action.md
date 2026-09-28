@@ -22,7 +22,7 @@ Outcome, binding constraints, current decision, material unknowns and at most si
 - [ ] Validate the outcome and realistic failure cases.
 - [ ] Record decisions in the owning project note with evidence refs.
 
-## Decisions
+## Decision {#decision}
 
 - 2026-01-01: decision, because reason ([evidence](source:id)).
 

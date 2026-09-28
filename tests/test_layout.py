@@ -1,4 +1,4 @@
-"""Brain Framework's single format preserves searchable evidence and rejects legacy interfaces."""
+"""A brain's layout: initialized folders, authored scope and readable evidence of disabled sensors."""
 
 from __future__ import annotations
 
@@ -10,15 +10,17 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
+from bf import records
 from bf.cli import app
-from bf.config import load, select, user_path
+from bf.config import load, user_path
 from bf.markdown import note, reference
-from bf.models import Config, Error, Query, Sensor, UserConfig
+from bf.models import Error, Query, Sensor
 from bf.retrieve import read, search
 from bf.storage import Store, state_store
+from bf.validate import validate
 
 
-def test_initialization_uses_only_the_final_layout_and_private_namespaces(tmp_path: Path) -> None:
+def test_initialization_creates_the_layout_and_private_namespaces(tmp_path: Path) -> None:
     target = tmp_path / "new-brain"
     result = CliRunner().invoke(app, ["init", str(target), "--name", "fresh"])
     assert result.exit_code == 0, result.output
@@ -43,7 +45,6 @@ def test_initialization_uses_only_the_final_layout_and_private_namespaces(tmp_pa
     result = CliRunner().invoke(app, ["search", "welcome", "--brain", str(target)])
     assert result.exit_code == 0, result.output
     assert (target / ".bf/index.sqlite").is_file()
-    assert ".fkf/" not in store.read(".gitignore").decode()
     full = tmp_path / "full-brain"
     result = CliRunner().invoke(app, ["init", str(full), "--name", "full", "--full"])
     assert result.exit_code == 0, result.output
@@ -62,47 +63,49 @@ def test_initialization_uses_only_the_final_layout_and_private_namespaces(tmp_pa
     }
 
 
-def test_prior_schema_registry_and_placeholder_are_rejected() -> None:
-    for value in ({"version": 2, "name": "old"}, {"version": 3, "name": "old", "sources": {}}):
-        with pytest.raises(ValidationError):
-            Config.model_validate(value)
-    with pytest.raises(ValidationError):
-        UserConfig.model_validate({"bases": {}})
+def test_sensor_commands_reject_unknown_placeholders() -> None:
     with pytest.raises(ValidationError, match="unknown placeholder"):
-        Sensor(command=["echo", "{{base}}"])
-    result = CliRunner().invoke(app, ["search", "evidence", "--base", "old"])
-    assert result.exit_code == 2
-    assert "No such option" in result.output
+        Sensor(command=["echo", "{{unknown}}"])
 
 
-def test_old_selection_environment_does_not_override_registered_brains(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("FKF_BASE", "missing-legacy-brain")
-    assert [store.root for store in select()] == [brain.root]
-
-
-def test_authored_scope_and_types_follow_the_new_layout(brain: Store) -> None:
+def test_authored_scope_and_types_follow_the_layout(brain: Store) -> None:
     authored = {
-        "projects/transition.md": "project",
-        "actions/2026-09-24_transition/ACTION.md": "action",
-        "actions/2026-09-24_transition/inputs/context.md": "action",
-        "actions/2026-09-24_transition/outputs/result.md": "action",
-        "concepts/transition.md": "concept",
+        "projects/layout.md": "project",
+        "actions/2026-09-24_layout/ACTION.md": "action",
+        "actions/2026-09-24_layout/inputs/context.md": "action",
+        "actions/2026-09-24_layout/outputs/result.md": "action",
+        "concepts/layout.md": "concept",
     }
     for path in authored:
-        brain.write(path, b"# Transitionmarker\n")
+        brain.write(path, b"# Layoutmarker\n")
     for directory in ("sensors", "routines", "settings", "skills", "tests", "inputs", "tasks", "wiki"):
-        brain.write(f"{directory}/excluded.md", b"# Transitionmarker\n")
-    reply = search([brain], Query(text="transitionmarker"))
+        brain.write(f"{directory}/excluded.md", b"# Layoutmarker\n")
+    reply = search([brain], Query(text="layoutmarker"))
     items = cast("list[dict[str, object]]", reply["items"])
     assert {item["ref"]: item["type"] for item in items} == authored
     for path in authored:
-        assert read([brain], path)["text"] == "# Transitionmarker\n"
+        assert read([brain], path)["text"] == "# Layoutmarker\n"
     with pytest.raises(Error, match="not found"):
         read([brain], "inputs/excluded.md")
     assert note("concepts/domain.md", b"---\ntype: decision\n---\n# Domain\n").knowledge.type == "decision"
-    assert reference("concepts/nested/note.md", "/transition.md") == "concepts/transition.md"
+    assert reference("concepts/nested/note.md", "/layout.md") == "concepts/layout.md"
+    assert reference("projects/nested/note.md", "/layout.md") == "projects/layout.md"
+
+
+def test_attachments_keep_their_own_status_words(brain: Store) -> None:
+    # Only projects, concepts and ACTION.md follow OKF statuses; an exported attachment stays searchable.
+    brain.write("actions/2026-09-27_import/ACTION.md", b"---\ntype: action\nstatus: draft\n---\n# Import\n")
+    brain.write("actions/2026-09-27_import/outputs/export.md", b"---\nstatus: wip\n---\n# Quokka export\n")
+    reply = search([brain], Query(text="quokka"))
+    assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == [
+        "actions/2026-09-27_import/outputs/export.md"
+    ]
+    assert "problems" not in reply
+    assert validate(brain)["valid"]
+    brain.write("projects/finished.md", b"---\ntype: project\nstatus: wip\n---\n# Finished\n")
+    assert validate(brain)["problems"] == [
+        {"file": "projects/finished.md", "error": "OKF status must be draft, stable or deprecated"}
+    ]
 
 
 def test_disabled_sensor_keeps_source_identity_and_memories_readable(brain: Store) -> None:
@@ -113,7 +116,7 @@ def test_disabled_sensor_keeps_source_identity_and_memories_readable(brain: Stor
     reply = read([brain], "meetings:decision-1")
     assert reply["brain"] == "fixture"
     assert reply["ref"] == "meetings:decision-1"
-    assert reply["path"] == "memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json"
+    assert reply["path"] == records.path("meetings", "decision-1")
     assert cast("dict[str, object]", reply["collection"])["state"] == "disabled"
     assert cast("dict[str, object]", reply["record"])["id"] == "decision-1"
     found = search([brain], Query(text="offline", prefix="memories/meetings"))

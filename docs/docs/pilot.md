@@ -1,4 +1,8 @@
-# Try BF with your team
+---
+description: Evaluate whether shared context helps your team, with comparable tasks and explicit evidence.
+---
+
+# Evaluate a team pilot
 
 Test whether a shared information hub helps teammates answer recurring questions and act across tools. Start with one project, three to five volunteers and four weeks. The [four-tool demo](context-hub.md) explains the mechanism; this pilot measures usefulness. No adoption, time saving or successful team outcome is assumed.
 

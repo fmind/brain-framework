@@ -106,7 +106,7 @@ def test_invalid_tags_fail_validation_without_leaking_content(brain: Store, tag:
 
 
 def test_tag_pages_preserve_incomplete_evidence_signals(brain: Store) -> None:
-    brain.write("projects/bad.md", b"---\nstatus: typo\n---\n# Missing\n")
+    brain.write("projects/bad.md", b"---\nreview_after: typo\n---\n# Missing\n")
     for ref in ("tags", "tags/absent"):
         assert read([brain], ref)["problems"]
     assert search([brain], Query(text="needle", **pages.scope("bf://fixture/tags/absent")))["problems"]

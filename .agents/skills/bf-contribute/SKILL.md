@@ -6,14 +6,8 @@ license: MIT
 
 # bf-contribute
 
-Read AGENTS.md first. Keep one package and command, OKF project/concept/action notes, independent JSON record files upserted by id, and a disposable, self-refreshing SQLite cache. Canonical `ACTION.md` carries metadata; its inputs and outputs may remain ordinary Markdown. Provider projection, native schedule files and harness installation belong to brain maintenance. `bf schedule` generates files without activating them; `bf watch` reuses update execution and local history. Keep native scheduling out of the brain schema. Keep only the current data format; do not add migration or compatibility code.
-
-Test observable behavior and failures with synthetic data and fake providers. Preserve offline reads, readable refs that resolve to files, path confinement, bounded output, atomic writes, process cancellation, and explicit collection commands scoped to selected roots. Do not run live providers without task authorization or weaken a check.
-
-Run focused tests and `mise run all`. Update schema, README, docs, the user skills under `skills/` and the source examples under `examples/sensors/` with public behavior; an adapter change needs a fake-provider test and a README table entry. Preserve unrelated changes; commits, publication and provider execution follow the user's explicit scope.
-
-For onboarding changes, execute the documented path in a disposable brain with isolated config and state: save a decision, search, read, validate and evaluate it. Keep the README focused on the user's outcome, detailed contracts in docs and agent procedures in skills. Check actual host discovery separately from copying a skill or installing the package.
-
-For an authorized publication, follow the [release checklist](references/release.md); keep release mechanics there rather than in user workflows.
-
-Write everyday documentation commands from inside the brain directory. Reserve `--brain` for selection examples, host configuration and unattended scripts. Prefer short tables, bullets and runnable examples with expected results; keep exact contracts in one reference and link to them. Document the current format without obsolete migration walkthroughs in onboarding.
+1. Read [AGENTS.md](../../../AGENTS.md) for product constraints, safety boundaries and code ownership. Inspect Git status and the relevant implementation before changing it; preserve staged and unrelated work.
+1. Follow [CONTRIBUTING.md](../../../CONTRIBUTING.md#set-up-and-check-a-change) for development commands and verification. Its [test guidance](../../../CONTRIBUTING.md#test-outcomes-and-failures) owns fixtures, workflow checks and documentation updates; example READMEs own runnable steps and expected results.
+1. Keep changes within the requested scope. Provider projection, native schedule activation and agent-host installation belong to brain maintenance. Do not run live providers or use private-brain data for contribution tests.
+1. Write everyday user commands from inside the brain directory. Reserve `--brain` for selection examples, host configuration and unattended scripts. Prefer short tables and runnable examples; link to the owning contract instead of repeating it.
+1. Report the verified snapshot and evidence boundaries described in [Contributing](../../../CONTRIBUTING.md#release). Commit, push and publish only when authorized; an authorized publication follows the [release checklist](references/release.md).

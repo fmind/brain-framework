@@ -18,7 +18,7 @@ Review after the next usability session. Outcome: unknown until the session note
 
 At review, compare the expectation with an observed result and its evidence. Mark it met, missed or unknown, recording circumstances that changed. Distinguish delivery from impact: a shipped change is not proof it achieved its purpose. Retain a failed prediction; correct the current project conclusion and link the lesson. One outcome does not establish causation. When reviewing a similar decision, inspect both the earlier conditions and its result before reusing it.
 
-For decisions whose old rationale matters, keep a small dated decision note under the action's `outputs/`, with supporting captures in `inputs/`. Correct a mistake explicitly or create a successor with a `supersedes` link; do not silently rewrite the earlier prediction as hindsight. Current project notes still stay short and current. Follow `bf-learn` for evidence capture and claim revision.
+For decisions whose old rationale matters, keep a small dated decision note under the action's `outputs/`, with supporting captures in `inputs/`. These files are ordinary Markdown: `type`, `status: deprecated` and `updated` apply, but reminders (`review_after`, `review_due`) work only in project, concept and `ACTION.md` notes, so keep the review date in the owning project. Correct a mistake explicitly or create a successor with a `supersedes` link; do not silently rewrite the earlier prediction as hindsight. Current project notes still stay short and current. Follow `bf-learn` for evidence capture and claim revision.
 
 ## Remember an intention
 

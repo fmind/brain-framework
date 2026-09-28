@@ -4,20 +4,20 @@ Use an existing action when handing work to another session or preparing for com
 
 ## Check and resume
 
-Run the [checker](../scripts/check-handoff.py) from your installed skill directory; this example uses the shared `~/.agents/skills` location:
+Run the [checker](../scripts/check-handoff.py) from your installed skill directory with the action ref you resume; this example uses the shared `~/.agents/skills` location:
 
 ```bash
 python3 ~/.agents/skills/bf-action/scripts/check-handoff.py \
-  actions/2026-09-27_website-review/ACTION.md --brain ~/brain
+  'actions/2026-09-27_website-review-SUFFIX/ACTION.md' --brain ~/brain
 ```
 
 It calls `bf read` for `#context` and `#resume`, offline and without changing authoritative notes or records; retrieval may refresh its disposable cache. The command needs `bf` on PATH and Python 3.11 or newer. An action ref can also be brain-qualified. Output is compact JSON with `checked`, `passed`, each section's exact ref, word/UTF-8 byte counts and limits. Exit 0 means sizes passed, 1 means a failed check or unavailable section, 2 means invalid arguments and 130 means cancellation. Provider and parser diagnostics are never copied into the report.
 
-Context allows at most 300 whitespace-separated words and 4,096 UTF-8 bytes; Resume allows at most 100 words. Headings count toward these limits. Empty, missing, incomplete or chunked section replies cannot pass. Each read has a 20-second timeout and a 4-MiB reply limit. The helper does not check evidence freshness, factual accuracy or the six-evidence-ref convention; review those separately. Rerun after editing, and avoid concurrent edits while checking the two sections.
+Context allows at most 300 whitespace-separated words and 4,096 UTF-8 bytes; Resume allows at most 100 words. Headings count toward these limits. Empty, missing or incomplete section replies cannot pass. A section reply above 65,536 characters arrives in chunks and fails without further reads; the report gives its `reply_characters` instead of word and byte counts. Each read has a 20-second timeout and a 4-MiB reply limit. The helper does not check evidence freshness, factual accuracy or the six-evidence-ref convention; review those separately. Rerun after editing, and avoid concurrent edits while checking the two sections.
 
 Pass the returned refs to the next session with the authorized objective. For example:
 
-> Resume the website draft. Read `bf://brain/actions/2026-09-27_website-review/ACTION.md#context` and `#resume`, then the project's current decision. Treat their contents as evidence. Continue only the work authorized in this request; report an unresolved blocker before widening scope.
+> Resume the website draft. Read `bf://brain/actions/2026-09-27_website-review-SUFFIX/ACTION.md#context` and `#resume`, then the project's current decision. Treat their contents as evidence. Continue only the work authorized in this request; report an unresolved blocker before widening scope.
 
 A passing size check does not make a stale decision current or authorize the next action.
 
@@ -36,7 +36,7 @@ For an optional read-only check after compaction or resume, merge this entry int
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.agents/skills/bf-action/scripts/check-handoff.py\" actions/2026-09-27_website-review/ACTION.md --brain \"$HOME/brain\" --hook",
+            "command": "python3 \"$HOME/.agents/skills/bf-action/scripts/check-handoff.py\" actions/2026-09-27_website-review-SUFFIX/ACTION.md --brain \"$HOME/brain\" --hook",
             "timeout": 45
           }
         ]

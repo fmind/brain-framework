@@ -1755,7 +1755,7 @@ Source: <https://github.com/fastapi/typer>
 
 License: `MIT`
 
-Typer 0.27.2 vendors code adapted from Click 8.3.1 in `typer/_click/`; its bundled BSD-3-Clause license is included below.
+The distribution vendors code adapted from Click in `typer/_click/`; its bundled `BSD-3-Clause` license is included below.
 
 Evidence: `typer-0.27.2.dist-info/licenses/LICENSE`
 

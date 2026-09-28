@@ -19,25 +19,16 @@ from bf.storage import Store, writer
 from bf.validate import validate
 
 
-def test_two_git_writers_keep_independent_records_and_actions() -> None:
-    script = Path(__file__).parents[1] / "examples/team/demo.py"
-    result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, check=True, timeout=30)  # noqa: S603
-    assert json.loads(result.stdout) == {
-        "independent_merge": "clean",
-        "records": 3,
-        "actions": 2,
-        "same_record_merge": "conflict",
-        "conflict_rejected": True,
-    }
-
-
 @pytest.mark.parametrize("marker", ["<<<<<<< ours", "||||||| base", ">>>>>>> theirs", "<<<<<<<< ours"])
 @pytest.mark.parametrize("path", ["projects/conflict.md", "actions/2026-09-27_review/inputs/conflict.md"])
 def test_conflicted_markdown_is_invalid_and_never_indexed(brain: Store, marker: str, path: str) -> None:
     brain.write(path, f"---\ntype: project\nstatus: draft\n---\n# Decision\n\n{marker}\nconflictneedle\n".encode())
     report = validate(brain)
     assert not report["valid"]
-    assert any(f"{path}:7: unresolved merge conflict" in problem for problem in cast("list[str]", report["problems"]))
+    assert any(
+        problem["file"] == path and problem["error"].startswith("line 7: unresolved merge conflict")
+        for problem in cast("list[dict[str, str]]", report["problems"])
+    )
     reply = search([brain], Query(text="conflictneedle"))
     assert not reply["items"]
     assert reply["problems"]
@@ -59,15 +50,32 @@ def test_record_filename_survives_rescheduling_and_input_order(brain: Store) -> 
     assert brain.fingerprint(records.path("team", "two")) == before[records.path("team", "two")]
 
 
-def test_obsolete_storage_and_duplicate_inputs_fail_without_writes(brain: Store) -> None:
-    old = "memories/team/2026-09.jsonl"
-    brain.write(old, b'{"id":"old","title":"Original"}\n')
-    with pytest.raises(Error, match="manual upgrade"):
-        records.upsert(brain, "team", [Record(id="new", title="New")], snapshot=False)
-    assert records.files(brain, "team") == [old]
+def test_stray_memory_files_stay_visible_and_duplicate_inputs_fail_without_writes(brain: Store) -> None:
+    # Collection and search read only <sha256-id>.json record files; validation reports other visible files.
+    stray = "memories/team/export.csv"
+    brain.write(stray, b'{"id":"old","title":"Original"}\n')
+    brain.write("memories/team/.DS_Store", b"operating-system metadata")
+    for snapshot in (False, True):
+        records.upsert(brain, "team", [Record(id="new", title="New")], snapshot=snapshot)
+    assert records.files(brain, "team") == [records.path("team", "new")]
+    assert brain.read(stray) == b'{"id":"old","title":"Original"}\n'
+    assert validate(brain)["problems"] == [{"file": stray, "error": "expected memories/<source>/<sha256-id>.json"}]
     with pytest.raises(Error, match="duplicate incoming"):
         records.upsert(brain, "other", [Record(id="x", title="A"), Record(id="x", title="B")], snapshot=False)
     assert not records.files(brain, "other")
+
+
+def test_hidden_record_like_files_are_reported_wherever_they_are_read(brain: Store) -> None:
+    # A macOS AppleDouble file ends in .json: collection and search read it, so validation reports it too.
+    hidden = "memories/team/._" + records.path("team", "x").rsplit("/", 1)[1]
+    brain.write(hidden, b"\x00\x05\x16\x07")
+    expected = "expected memories/<source>/<sha256-id>.json"
+    for problems in (validate(brain)["problems"], search([brain], Query(text="durable"))["problems"]):
+        assert hidden in json.dumps(problems)
+        assert expected in json.dumps(problems)
+    with pytest.raises(Error, match=expected):
+        records.upsert(brain, "team", [Record(id="new", title="New")], snapshot=True)
+    assert records.files(brain, "team") == [hidden]
 
 
 def test_same_routine_on_two_clones_creates_distinct_actions(tmp_path: Path) -> None:
@@ -77,7 +85,7 @@ def test_same_routine_on_two_clones_creates_distinct_actions(tmp_path: Path) -> 
         root = tmp_path / clone
         root.mkdir()
         store = Store(root)
-        store.write("bf.yaml", b"name: team\nroutines:\n  review:\n    command: [fake]\n")
+        store.write("bf.yaml", b"version: 6\nname: team\nroutines:\n  review:\n    command: [fake]\n")
         result = routine(
             store,
             "review",
@@ -122,3 +130,20 @@ def test_action_helper_refuses_redirected_actions(brain: Store, tmp_path: Path) 
     )
     assert reply.returncode == 1
     assert not list(outside.iterdir())
+
+
+def test_action_helper_follows_a_linked_brain_root_only(brain: Store, tmp_path: Path) -> None:
+    # bf itself accepts a linked root, such as ~/brain pointing at a synced folder; links below it stay refused.
+    linked = tmp_path / "linked-brain"
+    linked.symlink_to(brain.root, target_is_directory=True)
+    script = Path(__file__).parents[1] / "skills/bf-action/scripts/new-action.py"
+    reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
+        [sys.executable, str(script), "review", "--brain", str(linked)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert reply.returncode == 0, reply.stderr
+    action = json.loads(reply.stdout)["action"]
+    assert (brain.root / action).is_file()

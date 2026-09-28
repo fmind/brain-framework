@@ -17,6 +17,10 @@ MAX_ENTRIES = 20_000
 MAX_HOSTS = 200
 
 
+class LimitError(ValueError):
+    """An exceeded inventory limit: its fixed message names the limit, never the input."""
+
+
 class Inventory:
     """Keep only hostname counts, with bounded work and output."""
 
@@ -28,7 +32,7 @@ class Inventory:
     def visit(self) -> None:
         self.entries += 1
         if self.entries > MAX_ENTRIES:
-            raise ValueError("too many entries")
+            raise LimitError(f"{MAX_ENTRIES:,}-entry")
 
     def url(self, value: str) -> None:
         try:
@@ -43,7 +47,7 @@ class Inventory:
             return
         self.hosts[host] += 1
         if len(self.hosts) > MAX_HOSTS:
-            raise ValueError("too many hosts")
+            raise LimitError(f"{MAX_HOSTS}-host")
 
     def report(self) -> dict[str, object]:
         return {
@@ -86,9 +90,19 @@ class BookmarksHTML(HTMLParser):
             self.list_depth -= 1
 
 
+def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject hidden overrides instead of silently dropping selected evidence."""
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
 def chromium(raw: str, inventory: Inventory) -> None:
     """Validate the bookmark tree before releasing any summary."""
-    data = json.loads(raw)
+    data = json.loads(raw, object_pairs_hook=unique)
     if not isinstance(data, dict) or not isinstance(data.get("roots"), dict):
         raise ValueError("unsupported bookmark data")
     nodes = list(data["roots"].values())
@@ -101,7 +115,7 @@ def chromium(raw: str, inventory: Inventory) -> None:
             inventory.url(node["url"])
         elif node.get("type") == "folder" and isinstance(node.get("children"), list):
             if len(nodes) + len(node["children"]) + inventory.entries > MAX_ENTRIES:
-                raise ValueError("too many entries")
+                raise LimitError(f"{MAX_ENTRIES:,}-entry")
             nodes.extend(node["children"])
         else:
             raise ValueError("invalid node")
@@ -133,7 +147,7 @@ def main() -> int:
         try:
             data = sys.stdin.buffer.read(MAX_BYTES + 1)
             if len(data) > MAX_BYTES:
-                raise ValueError("input too large")
+                raise LimitError("4 MiB")
             raw = data.decode("utf-8-sig")
             inventory = Inventory()
             if args.format == "chromium":
@@ -145,9 +159,15 @@ def main() -> int:
                 if not reader.bookmark_export or not reader.saw_list or reader.list_depth:
                     raise ValueError("not a complete bookmark export")
             report = inventory.report()
+        except LimitError as error:
+            sys.stderr.write(
+                f"Cannot summarize bookmarks: the export exceeds the {error} limit; select a smaller supported "
+                "export, such as one exported folder or a copy without some folders.\n"
+            )
+            return 1
         except (ValueError, RecursionError, OSError):
             sys.stderr.write(
-                "Cannot summarize bookmarks: invalid export or inventory limit exceeded; select a smaller supported export.\n"
+                "Cannot summarize bookmarks: not a complete, supported export; select a supported export.\n"
             )
             return 1
     sys.stdout.write(json.dumps(report, separators=(",", ":")) + "\n")

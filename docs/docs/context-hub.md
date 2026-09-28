@@ -1,3 +1,7 @@
+---
+description: Run a fictional four-tool example that connects a brief, review, implementation and deployment.
+---
+
 # Connect context across tools
 
 Ask one question across Google Workspace, Jira, GitHub and Gcloud: **“Is the New website ready to launch, what remains, and why did we choose one page?”** Collect their selected evidence once, map it into a shared schema, then let your terminal agent read it together.
@@ -11,17 +15,17 @@ This walkthrough uses four fictional records. It needs no provider accounts, cre
 You need Linux or macOS, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git and `python3` for the standard-library demo sensor. Install BF if needed:
 
 ```bash
-uv tool install brain-framework
+uv tool install --python 3.14 brain-framework
 bf --version
 ```
 
 If `bf` is not on PATH, run `uv tool update-shell` and open a new shell. From a source checkout, you can instead use `uv run bf` for each command; the [example README](https://github.com/fmind/brain-framework/tree/main/examples/context-hub) shows that route.
 
-Create a disposable directory, retrieve the example and copy it into its own brain:
+Create a disposable directory, retrieve the example from the release matching your installation and copy it into its own brain:
 
 ```bash
 context_demo=$(mktemp -d)
-git clone --depth 1 https://github.com/fmind/brain-framework.git "$context_demo/source"
+git clone --depth 1 --branch "v$(bf --version)" https://github.com/fmind/brain-framework.git "$context_demo/source"
 cp -R "$context_demo/source/examples/context-hub" "$context_demo/brain"
 cd "$context_demo/brain"
 ```
@@ -96,7 +100,7 @@ On collection, BF validates the value, saves `fields.project: project:new-websit
 
 Print the absolute demo path with `echo "$context_demo/brain"`. In a fresh terminal-agent session, replace `ABSOLUTE_DEMO_PATH` in this prompt:
 
-> Work in the demo brain directory and use the `bf` CLI. Read `project:new-website`, then read the Workspace, Jira, GitHub and Gcloud record refs supporting it. Is the website ready to launch, what remains, and why did we choose one page? Cite each supporting ref and distinguish recorded facts from inference. Report incomplete or stale evidence. Do not collect, fetch source URLs or change files.
+> Work in `ABSOLUTE_DEMO_PATH` and use the `bf` CLI. Read `project:new-website`, then read the Workspace, Jira, GitHub and Gcloud record refs supporting it. Is the website ready to launch, what remains, and why did we choose one page? Cite each supporting ref and distinguish recorded facts from inference. Report incomplete or stale evidence. Do not collect, fetch source URLs or change files.
 
 No skill installation or MCP configuration is needed for this first explicit CLI task. The host must be able to execute `bf` and access the directory. Inspect its tool history: it should read all four records and cite the open Jira review before explaining the next action. A plausible answer without those reads does not verify access. Install [bf-use](agents.md#install-the-skills) later to make the retrieval procedure discoverable across sessions.
 

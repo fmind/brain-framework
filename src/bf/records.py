@@ -50,9 +50,10 @@ def _clear(store: Store) -> None:
         not re.fullmatch(r"memories/\.pending/(?:manifest\.json|[0-9]+\.before|\.write-[0-9a-f]{32})", n) for n in names
     ):
         raise Error("unexpected file in memories/.pending; preserve it and repair the pending transaction")
-    # The completion marker remains until every staged file is gone.
+    # The completion marker remains until every staged file is gone. Removing the directory syncs its
+    # parent once: a crash before then leaves staged files that the next recovery clears again.
     for name in sorted(names, key=lambda name: name == _MANIFEST):
-        store.delete(name)
+        store.delete(name, durable=False)
     with suppress(FileNotFoundError):
         store.rmdir(_PENDING)
 
@@ -124,15 +125,22 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
     if len(manifest) > _MANIFEST_LIMIT:
         raise Error("record transaction exceeds its manifest limit")
     try:
+        # Each file's bytes are synced as it is written; one sync per directory then makes its entries
+        # durable. Backups are durable before the manifest names them, and records before completion.
+        backups = False
         for number, (name, change) in enumerate(zip(replacements, changes, strict=True)):
             if change.existed:
-                store.write(f"{_PENDING}/{number}.before", store.read(name, MAX_RECORD))
+                store.write(f"{_PENDING}/{number}.before", store.read(name, MAX_RECORD), durable=False)
+                backups = True
+        if backups:
+            store.sync(_PENDING)
         store.write(_MANIFEST, manifest)
         for name, data in replacements.items():
             if data is None:
-                store.delete(name)
+                store.delete(name, durable=False)
             else:
-                store.write(name, data)
+                store.write(name, data, durable=False)
+        store.sync(f"memories/{source}")
         journal.complete = True
         store.write(_MANIFEST, encode(journal.model_dump()))
     except BaseException as error:
@@ -151,37 +159,60 @@ def path(source: str, record_id: str) -> str:
     return f"memories/{source}/{digest(record_id.encode())}.json"
 
 
-def line(record: Record) -> bytes:
+def serialize(record: Record) -> bytes:
     return encode(record.model_dump(exclude_defaults=True))
 
 
+def stored(name: str) -> bool:
+    """Whether collection, search and `bf validate` read a memories/ file as a record, even a hidden or misnamed one."""
+    return name.endswith(".json") and not name.startswith(_PENDING + "/")
+
+
 def files(store: Store, source: str = "", *, skipped: dict[str, tuple[int, int, int, int]] | None = None) -> list[str]:
-    """Include obsolete JSONL files so an unconverted brain fails visibly instead of losing evidence."""
+    """Record files below memories/; `bf validate` also reports other visible files."""
     directory = f"memories/{source}" if source else "memories"
-    return [
-        name
-        for name in store.files(directory, skipped=skipped)
-        if name.endswith((".json", ".jsonl")) and not name.startswith(_PENDING + "/")
-    ]
+    return [name for name in store.files(directory, skipped=skipped) if stored(name)]
 
 
-def load(store: Store, name: str) -> list[Record]:
+def load(store: Store, name: str) -> Record:
+    """The one record a file holds; its SHA-256 filename must match its id."""
     source = source_of(name)
+    data = store.read(name, MAX_RECORD)
     try:
-        record = Record.model_validate(decode(store.read(name, MAX_RECORD)))
+        record = Record.model_validate(decode(data))
     except ValidationError as error:
         raise Error(f"{name}: invalid record: {explain(error, {*Record.model_fields, '[key]'})}") from error
     except Error as error:
         raise Error(f"{name}: {error}") from error
     if path(source, record.id) != name:
         raise Error(f"{name}: record id does not match its SHA-256 filename; run bf validate and reconcile it")
-    return [record]
+    return record
+
+
+def _stored(store: Store, name: str) -> Record | None:
+    """The record a change replaces or removes; None when the file holds exactly this name's id but breaks the
+    current record rules, such as a display-name alias or an over-long title.
+
+    Its SHA-256 name proves the file belongs to this record, so collection may replace or remove it; misnamed,
+    unparsable or unreadable evidence still fails the change. A missing file raises FileNotFoundError.
+    """
+    try:
+        return load(store, name)
+    except FileNotFoundError:
+        raise
+    except Error:
+        try:
+            value = decode(store.read(name, MAX_RECORD))
+        except Error:
+            value = None
+        identifier = value.get("id") if isinstance(value, dict) else None
+        if isinstance(identifier, str) and path(source_of(name), identifier) == name:
+            return None
+        raise
 
 
 def source_of(name: str) -> str:
     parts = name.split("/")
-    if name.endswith(".jsonl"):
-        raise Error(f"{name}: obsolete JSON Lines storage; follow the manual upgrade before collecting")
     if (
         len(parts) != 3
         or parts[0] != "memories"
@@ -193,30 +224,37 @@ def source_of(name: str) -> str:
 
 
 def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool) -> dict[str, int]:
-    """Update independent record files; snapshot removal and all replacements remain transactional."""
+    """Update independent record files; snapshot removal and all replacements remain transactional.
+
+    Only files a change replaces or removes are parsed, and each must hold its own id: collection never
+    overwrites or deletes misnamed evidence, while a file with its own id that breaks the current record
+    rules is replaced like any update. `bf validate` and the search cache check every other file.
+    """
     recover(store)
     if not re.fullmatch(NAME, source):
         raise Error("invalid record source")
-    wanted = {record.id for record in incoming}
+    wanted = {path(source, record.id): record for record in incoming}
     if len(wanted) != len(incoming):
         raise Error("duplicate incoming record ids; reconcile them before collecting")
-    existing: dict[str, Record] = {}
-    for name in files(store, source):
-        record = load(store, name)[0]
-        existing[record.id] = record
     counts = {"added": 0, "updated": 0, "unchanged": 0, "removed": 0}
     replacements: dict[str, bytes | None] = {}
-    if snapshot:
-        for record_id in existing.keys() - wanted:
-            replacements[path(source, record_id)] = None
+    # A window leaves other files alone; a snapshot lists its catalog without parsing what it keeps.
+    for name in files(store, source) if snapshot else ():
+        if name not in wanted:
+            _stored(store, name)
+            replacements[name] = None
             counts["removed"] += 1
-    for record in incoming:
-        previous = existing.get(record.id)
+    for name, record in wanted.items():
+        existed = True
+        try:
+            previous = _stored(store, name)
+        except FileNotFoundError:
+            previous, existed = None, False
         reliable = previous and not (previous.observed and previous.updated > previous.observed)
         if reliable and previous.updated and record.updated and previous.updated > record.updated:
             record = previous
         if previous is None:
-            counts["added"] += 1
+            counts["updated" if existed else "added"] += 1
         elif previous.model_dump(exclude={"attributes": {"observed"}}) == record.model_dump(
             exclude={"attributes": {"observed"}}
         ):
@@ -226,16 +264,20 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
         else:
             counts["updated"] += 1
         if record != previous:
-            data = line(record)
+            data = serialize(record)
             if len(data) > MAX_RECORD:
-                raise Error(f"{path(source, record.id)}: record exceeds its {MAX_RECORD}-byte limit")
-            replacements[path(source, record.id)] = data
+                raise Error(f"{name}: record exceeds its {MAX_RECORD}-byte limit")
+            replacements[name] = data
     _commit(store, source, replacements)
     return counts
 
 
-def find(store: Store, source: str, record_id: str) -> tuple[str, Record] | None:
-    """Exact identities resolve directly, without depending on cache hints or scanning other records."""
+def find(store: Store, source: str, record_id: str, *, complete: bool = False) -> tuple[str, Record] | None:
+    """Exact identities resolve directly by their SHA-256 filename.
+
+    Malformed or misnamed evidence never proves absence: a missing file is confirmed by parsing the source,
+    unless `complete` states that a ready search cache has already parsed all of it without a problem.
+    """
     if not re.fullmatch(NAME, source):
         return None
     try:
@@ -250,9 +292,10 @@ def find(store: Store, source: str, record_id: str) -> tuple[str, Record] | None
     with reading(store):
         name = path(source, record_id)
         try:
-            return name, load(store, name)[0]
+            return name, load(store, name)
         except FileNotFoundError:
-            # Do not turn malformed or unconverted evidence into proof of absence.
+            if complete:
+                return None
             skipped: dict[str, tuple[int, int, int, int]] = {}
             for other in files(store, source, skipped=skipped):
                 load(store, other)

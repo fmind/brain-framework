@@ -18,3 +18,7 @@ Use the local evidence to explain why originals must be retained.
 ## Resume
 
 The request is in inputs/request.txt. No collection has run in a fresh copy. Next action: run `bf update --dry-run`, then `bf update` from the brain. Keep collected records and completed outputs when resuming.
+
+## Outcome
+
+Pending. After writing the answer, record what the evidence established and the validation result here.

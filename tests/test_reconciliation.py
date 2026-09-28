@@ -7,13 +7,16 @@ import pytest
 from pydantic import ValidationError
 
 from bf import collect as collection
-from bf.collect import collect, due, state
+from bf.collect import collect, due
 from bf.health import report
-from bf.models import Error, Sensor
-from bf.storage import Store
+from bf.history import state
+from bf.models import Error, Sensor, encode
+from bf.storage import Store, state_store
 from bf.update import update
+from bf.watch import snapshot
 
 NOW = datetime(2026, 9, 8, tzinfo=UTC)
+AT = "2026-09-08T00:00:00.000000Z"
 CONFIG = b"""version: 6
 name: fixture
 sensors:
@@ -26,7 +29,7 @@ sensors:
 
 def test_daily_reconciliation_preserves_hourly_resume_and_reports_cost(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
-    first = cast(Any, update([brain], dry_run=True, now=NOW))["brains"][0]["sensors"][0]
+    first = cast(Any, update(brain, dry_run=True, now=NOW))["sensors"][0]
     assert first["reconcile"] is True
     assert first["start"] == "2026-09-01T00:00:00.000000Z"
     assert state(brain) == {}
@@ -36,12 +39,12 @@ def test_daily_reconciliation_preserves_hourly_resume_and_reports_cost(brain: St
         windows.append(argv[1:])
         return b'[{"id":"one","title":"Evidence"}]'
 
-    assert update([brain], now=NOW, runner=fake)["ok"]
-    assert state(brain)["mail"]["reconciled"] == NOW.isoformat()
+    assert update(brain, now=NOW, runner=fake)["ok"]
+    assert state(brain)["mail"]["reconciled"] == AT
     assert due(brain, NOW + timedelta(minutes=30)) == []
-    assert update([brain], now=NOW + timedelta(hours=1), runner=fake)["ok"]
+    assert update(brain, now=NOW + timedelta(hours=1), runner=fake)["ok"]
     assert windows[-1] == ["2026-09-07T23:55:00.000000Z", "2026-09-08T01:00:00.000000Z"]
-    assert state(brain)["mail"]["reconciled"] == NOW.isoformat()
+    assert state(brain)["mail"]["reconciled"] == AT
     assert due(brain, NOW + timedelta(days=1)) == [
         ("mail", "2026-09-02T00:00:00.000000Z", "2026-09-09T00:00:00.000000Z", True)
     ]
@@ -61,17 +64,43 @@ def test_failed_commit_does_not_advance_reconciliation(brain: Store, monkeypatch
         raise Error("synthetic write failure")
 
     monkeypatch.setattr(collection.records, "upsert", fail)
-    assert not update([brain], now=NOW, runner=lambda *_: b"[]")["ok"]
+    assert not update(brain, now=NOW, runner=lambda *_: b"[]")["ok"]
     assert not state(brain)["mail"].get("reconciled")
-    assert due(brain, NOW)[0][-1] is True
+    # The retry after the failure backoff still reconciles.
+    retry = NOW + timedelta(minutes=1)
+    assert due(brain, retry)[0][-1] is True
     monkeypatch.setattr(collection.records, "upsert", original)
-    assert update([brain], now=NOW, runner=lambda *_: b"[]")["ok"]
-    assert state(brain)["mail"]["reconciled"] == NOW.isoformat()
+    assert update(brain, now=retry, runner=lambda *_: b"[]")["ok"]
+    assert state(brain)["mail"]["reconciled"] == "2026-09-08T00:01:00.000000Z"
+
+
+@pytest.mark.parametrize("extreme", [False, True])
+def test_future_success_cannot_freeze_schedules_after_a_clock_correction(brain: Store, extreme: bool) -> None:
+    now = datetime.now(UTC)
+    future = "9999-12-31T23:59:59Z" if extreme else (now + timedelta(days=1)).isoformat()
+    brain.write("bf.yaml", CONFIG + b"routines:\n  review:\n    command: [review]\n    refresh: 3600\n")
+    local = state_store(brain.root)
+    local.write("sensors.json", encode({"mail": {"success": future, "reconciled": future}}))
+    local.write("routines.json", encode({"review": {"success": future}}))
+    assert not report([brain], now=now)["healthy"]
+    assert {row.name: row.status for row in snapshot(brain)} == {"mail": "due", "review": "due"}
+    plan = cast(Any, update(brain, dry_run=True, now=now))
+    assert plan["sensors"][0]["reconcile"] is True
+    assert plan["routines"][0]["routine"] == "review"
+    assert update(brain, now=now, runner=lambda argv, *_: b"" if argv[0] == "review" else b"[]")["ok"]
+    assert report([brain], now=now)["healthy"]
+    assert due(brain, now) == []
+
+
+def test_ancient_resume_timestamp_respects_the_catchup_bound(brain: Store) -> None:
+    brain.write("bf.yaml", CONFIG)
+    state_store(brain.root).write("sensors.json", encode({"mail": {"end": "0001-01-01T00:00:00Z"}}))
+    assert due(brain, NOW)[0][1] == "2026-08-09T00:00:00.000000Z"
 
 
 def test_manual_failure_retries_before_the_previous_success_expires(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
-    assert update([brain], now=NOW, runner=lambda *_: b"[]")["ok"]
+    assert update(brain, now=NOW, runner=lambda *_: b"[]")["ok"]
     later = NOW + timedelta(minutes=5)
 
     def fail(*_):
@@ -86,9 +115,12 @@ def test_manual_failure_retries_before_the_previous_success_expires(brain: Store
             clock=lambda: later,
             runner=fail,
         )
-    assert due(brain, later)[0][0] == "mail"
-    assert update([brain], now=later, runner=lambda *_: b"[]")["ok"]
-    assert due(brain, later) == []
+    # The failure backs off for a minute, far less than the hourly refresh of the earlier success.
+    retry = later + timedelta(minutes=1)
+    assert due(brain, retry - timedelta(seconds=1)) == []
+    assert due(brain, retry)[0][0] == "mail"
+    assert update(brain, now=retry, runner=lambda *_: b"[]")["ok"]
+    assert due(brain, retry) == []
 
 
 def test_reconciliation_keeps_longer_catchup_and_manual_backfills_do_not_acknowledge_it(brain: Store) -> None:

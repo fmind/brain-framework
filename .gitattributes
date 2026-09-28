@@ -1,2 +1,3 @@
+# https://git-scm.com/docs/gitattributes
 # Preserve reviewed third-party license evidence byte for byte.
 docs/third-party/*.txt -text -diff

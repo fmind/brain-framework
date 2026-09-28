@@ -3,7 +3,15 @@
     "BrainReference": {
       "additionalProperties": false,
       "description": "A directly related brain, located relative to the declaring brain.",
-      "properties": { "path": { "maxLength": 4096, "minLength": 1, "title": "Path", "type": "string" } },
+      "properties": {
+        "path": {
+          "description": "Relative to the declaring brain; absolute and home-relative paths also work.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        }
+      },
       "required": ["path"],
       "title": "BrainReference",
       "type": "object"
@@ -12,13 +20,26 @@
     "Mapping": {
       "additionalProperties": false,
       "description": "One JSON Pointer into sensor output, or one literal value; never executable expressions.",
+      "oneOf": [
+        { "not": { "required": ["value"] }, "properties": { "path": { "type": "string" } }, "required": ["path"] },
+        {
+          "not": { "required": ["path"] },
+          "properties": { "value": { "not": { "type": "null" } } },
+          "required": ["value"]
+        }
+      ],
       "properties": {
         "path": {
-          "anyOf": [{ "maxLength": 4096, "type": "string" }, { "type": "null" }],
+          "anyOf": [{ "maxLength": 4096, "pattern": "^/(?:[^~]|~[01])*$", "type": "string" }, { "type": "null" }],
           "default": null,
+          "description": "JSON Pointer into sensor output; escape / as ~1 and ~ as ~0. Use instead of value.",
           "title": "Path"
         },
-        "value": { "$ref": "#/$defs/JsonValue", "default": null }
+        "value": {
+          "$ref": "#/$defs/JsonValue",
+          "default": null,
+          "description": "Non-null constant checked against the shared field. Use instead of path."
+        }
       },
       "title": "Mapping",
       "type": "object"
@@ -27,8 +48,20 @@
       "additionalProperties": false,
       "description": "Occasionally revisit older evidence in the same window source.",
       "properties": {
-        "lookback": { "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" },
-        "refresh": { "maximum": 31536000, "minimum": 1, "title": "Refresh", "type": "integer" }
+        "lookback": {
+          "description": "Revisit this many seconds of history to discover edits or late arrivals.",
+          "maximum": 31536000,
+          "minimum": 1,
+          "title": "Lookback",
+          "type": "integer"
+        },
+        "refresh": {
+          "description": "Seconds between older-evidence revisits, checked when the sensor is due.",
+          "maximum": 31536000,
+          "minimum": 1,
+          "title": "Refresh",
+          "type": "integer"
+        }
       },
       "required": ["refresh", "lookback"],
       "title": "Reconciliation",
@@ -39,17 +72,58 @@
       "description": "A deterministic program whose Markdown output becomes the day's action for review.",
       "properties": {
         "command": {
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
+          "prefixItems": [
+            {
+              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
+              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines)(?:/[^/{}\\\\]+)+)$",
+              "type": "string"
+            }
+          ],
           "title": "Command",
           "type": "array"
         },
-        "enabled": { "default": true, "title": "Enabled", "type": "boolean" },
-        "lookback": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" },
-        "max_bytes": { "default": 1048576, "maximum": 4194304, "minimum": 1, "title": "Max Bytes", "type": "integer" },
-        "refresh": { "default": 0, "maximum": 31536000, "minimum": 0, "title": "Refresh", "type": "integer" },
-        "timeout": { "default": 300, "maximum": 3600, "minimum": 1, "title": "Timeout", "type": "integer" }
+        "enabled": {
+          "default": true,
+          "description": "Allow execution; false disables both manual and due runs.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "lookback": {
+          "default": 86400,
+          "description": "Initial collection or review window in seconds when no local history exists.",
+          "maximum": 31536000,
+          "minimum": 1,
+          "title": "Lookback",
+          "type": "integer"
+        },
+        "max_bytes": {
+          "default": 1048576,
+          "description": "Maximum action Markdown output in bytes; bounded by the note read limit.",
+          "maximum": 4194304,
+          "minimum": 1,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "refresh": {
+          "default": 0,
+          "description": "Seconds between due runs; zero excludes this program from update and watch.",
+          "maximum": 31536000,
+          "minimum": 0,
+          "title": "Refresh",
+          "type": "integer"
+        },
+        "timeout": {
+          "default": 300,
+          "description": "Maximum runtime in seconds.",
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Timeout",
+          "type": "integer"
+        }
       },
       "required": ["command"],
       "title": "Routine",
@@ -58,16 +132,29 @@
     "SchemaField": {
       "additionalProperties": false,
       "description": "A shared meaning; cardinality applies when a sensor maps this field.",
+      "if": { "properties": { "relation": { "const": true } }, "required": ["relation"] },
       "properties": {
         "cardinality": {
           "default": "optional",
+          "description": "Required scalar, optional scalar, or up to 1000 scalars; applies only when mapped.",
           "enum": ["one", "optional", "many"],
           "title": "Cardinality",
           "type": "string"
         },
         "description": { "maxLength": 4096, "minLength": 1, "title": "Description", "type": "string" },
-        "examples": { "items": { "$ref": "#/$defs/JsonValue" }, "maxItems": 20, "title": "Examples", "type": "array" },
-        "relation": { "default": false, "title": "Relation", "type": "boolean" },
+        "examples": {
+          "description": "Complete field values checked against type and cardinality; never defaults.",
+          "items": { "$ref": "#/$defs/JsonValue" },
+          "maxItems": 20,
+          "title": "Examples",
+          "type": "array"
+        },
+        "relation": {
+          "default": false,
+          "description": "Create directed graph claims; requires type: identity.",
+          "title": "Relation",
+          "type": "boolean"
+        },
         "type": {
           "enum": ["string", "integer", "number", "boolean", "timestamp", "identity"],
           "title": "Type",
@@ -75,74 +162,155 @@
         }
       },
       "required": ["description", "type"],
+      "then": { "properties": { "type": { "const": "identity" } } },
       "title": "SchemaField",
       "type": "object"
     },
     "Sensor": {
       "additionalProperties": false,
       "description": "Execution and explicit mapping of sensor output into the shared schema.",
+      "if": { "properties": { "reconcile": { "type": "object" } }, "required": ["reconcile"] },
       "properties": {
         "command": {
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
+          "prefixItems": [
+            {
+              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
+              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines)(?:/[^/{}\\\\]+)+)$",
+              "type": "string"
+            }
+          ],
           "title": "Command",
           "type": "array"
         },
-        "enabled": { "default": true, "title": "Enabled", "type": "boolean" },
+        "enabled": {
+          "default": true,
+          "description": "Allow execution; false disables both manual and due runs.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
         "fields": {
+          "additionalProperties": false,
+          "description": "Map declared shared fields to output paths or constants; unmapped fields do not apply.",
           "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Mapping" } },
+          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
           "title": "Fields",
           "type": "object"
         },
-        "lookback": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" },
+        "lookback": {
+          "default": 86400,
+          "description": "Initial collection or review window in seconds when no local history exists.",
+          "maximum": 31536000,
+          "minimum": 1,
+          "title": "Lookback",
+          "type": "integer"
+        },
         "max_bytes": {
           "default": 67108864,
+          "description": "Maximum stdout in bytes; exceeding it fails without committing evidence.",
           "maximum": 268435456,
           "minimum": 1,
           "title": "Max Bytes",
           "type": "integer"
         },
-        "mode": { "default": "window", "enum": ["window", "snapshot"], "title": "Mode", "type": "string" },
-        "overlap": { "default": 300, "maximum": 31536000, "minimum": 0, "title": "Overlap", "type": "integer" },
-        "reconcile": { "anyOf": [{ "$ref": "#/$defs/Reconciliation" }, { "type": "null" }], "default": null },
-        "refresh": { "default": 0, "maximum": 31536000, "minimum": 0, "title": "Refresh", "type": "integer" },
-        "timeout": { "default": 300, "maximum": 3600, "minimum": 1, "title": "Timeout", "type": "integer" }
+        "mode": {
+          "default": "window",
+          "description": "Window upserts returned ids; snapshot replaces the complete selected catalog.",
+          "enum": ["window", "snapshot"],
+          "title": "Mode",
+          "type": "string"
+        },
+        "overlap": {
+          "default": 300,
+          "description": "Seconds reread before a resumed window; unused in snapshot mode.",
+          "maximum": 31536000,
+          "minimum": 0,
+          "title": "Overlap",
+          "type": "integer"
+        },
+        "reconcile": {
+          "anyOf": [{ "$ref": "#/$defs/Reconciliation" }, { "type": "null" }],
+          "default": null,
+          "description": "Optional older-evidence revisits; window mode only."
+        },
+        "refresh": {
+          "default": 0,
+          "description": "Seconds between due runs; zero excludes this program from update and watch.",
+          "maximum": 31536000,
+          "minimum": 0,
+          "title": "Refresh",
+          "type": "integer"
+        },
+        "timeout": {
+          "default": 300,
+          "description": "Maximum runtime in seconds.",
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Timeout",
+          "type": "integer"
+        }
       },
       "required": ["command"],
+      "then": { "properties": { "mode": { "const": "window" } } },
       "title": "Sensor",
       "type": "object"
     }
   },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "One brain: its name, related brains, shared schema, and the sensors and routines it may run.",
   "properties": {
     "brains": {
+      "additionalProperties": false,
+      "description": "Direct references keyed by the target name; retrieval only, without recursion or execution.",
       "maxProperties": 32,
       "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/BrainReference" } },
+      "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
       "title": "Brains",
       "type": "object"
     },
-    "name": { "pattern": "^[a-z][a-z0-9-]{0,63}$", "title": "Name", "type": "string" },
+    "name": {
+      "description": "Stable namespace in bf:// addresses; unique among selected brains.",
+      "not": { "pattern": "[^a-z0-9-]" },
+      "pattern": "^[a-z][a-z0-9-]{0,63}$",
+      "title": "Name",
+      "type": "string"
+    },
     "routines": {
+      "additionalProperties": false,
+      "description": "Reviewed deterministic programs producing action Markdown; names must differ from sensors.",
       "patternProperties": { "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": { "$ref": "#/$defs/Routine" } },
-      "propertyNames": { "maxLength": 64 },
+      "propertyNames": { "maxLength": 64, "not": { "pattern": "[^a-z0-9-]" } },
       "title": "Routines",
       "type": "object"
     },
     "schema": {
+      "additionalProperties": false,
+      "description": "Shared record fields and declared relationship meanings.",
       "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/SchemaField" } },
+      "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
       "title": "Schema",
       "type": "object"
     },
     "sensors": {
+      "additionalProperties": false,
+      "description": "Reviewed evidence collectors.",
       "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Sensor" } },
+      "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
       "title": "Sensors",
       "type": "object"
     },
-    "version": { "const": 6, "default": 6, "title": "Version", "type": "integer" }
+    "version": {
+      "const": 6,
+      "description": "Brain storage format of bf.yaml, the memories/<source>/<sha256>.json layout and the record envelope; independent of the package version.",
+      "title": "Version",
+      "type": "integer"
+    }
   },
-  "required": ["name"],
+  "required": ["version", "name"],
   "title": "Config",
   "type": "object"
 }

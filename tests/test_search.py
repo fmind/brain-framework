@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
+import shutil
 import sqlite3
+import stat
+import sys
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -13,14 +19,19 @@ from threading import Event
 from typing import cast
 
 import pytest
+from mcp.types import CallToolResult
+from pydantic import ValidationError
 
 from bf import index, usage
+from bf.cli import main
 from bf.config import register, user_path
-from bf.markdown import LEAD
-from bf.models import Error, Query, Record, timestamp
+from bf.markdown import LEAD, entry_note
+from bf.mcp import server
+from bf.models import Error, NotFoundError, Query, Record, timestamp
 from bf.pages import scope
 from bf.retrieve import read, search
-from bf.storage import Store, state_store, writer
+from bf.storage import UNNAMED, Store, state_store, writer
+from bf.update import update
 from bf.validate import validate
 from conftest import records_file
 
@@ -94,7 +105,15 @@ def test_scopes_bound_searches_to_a_folder_a_period_or_a_source(brain: Store) ->
         **scope("memories/meetings/f3bb79e48a7a8af1d028f6acb7fa34b0c7f75da596fc205907d2a708fe28ebef.json"),
     ) == ["meetings:lunch"]
     assert refs(brain, "lunch", **scope("memories/meetings/undated")) == []
-    assert refs(brain, "offline", **scope("repo:example/project")) == ["meetings:decision-1"]
+    # The undated page is a scope too; any other segment below a source scopes nothing, so it is refused.
+    records_file(brain, "meetings", [Record(id="minutes", title="Lunch minutes")])
+    assert refs(brain, "lunch", **scope("memories/meetings/undated")) == ["meetings:minutes"]
+    for unknown in ("memories/meetings/anything", "memories/meetings/2026-08-30/x", "memories/meetings/x.json"):
+        with pytest.raises(Error, match="scope accepts"):
+            scope(unknown)
+    # An identity scope covers its owning note and the items that link to it.
+    assert refs(brain, "offline", **scope("repo:example/project")) == ["projects/offline.md", "meetings:decision-1"]
+    assert refs(brain, "offline", **scope("meetings:decision-1")) == ["projects/offline.md", "meetings:decision-1"]
     assert refs(brain, "evidence", limit=1) == ["concepts/evidence.md"]
     for invalid in ["bf.yaml", "sensors", "../x", "memories/../bf.yaml", "soon"]:
         with pytest.raises(Error, match="scope accepts"):
@@ -103,9 +122,15 @@ def test_scopes_bound_searches_to_a_folder_a_period_or_a_source(brain: Store) ->
 
 
 def test_demoted_notes_rank_last_but_stay_visible(brain: Store) -> None:
-    brain.write("projects/old.md", b"---\nstatus: archived\n---\n# Old offline retrieval\n\nOffline retrieval.\n")
+    brain.write(
+        "projects/old.md",
+        b"---\ntype: project\nstatus: deprecated\n---\n# Old offline retrieval\n\nOffline retrieval.\n",
+    )
+    # Only deprecated closes a note; other words, as in an attachment's frontmatter, rank normally.
+    brain.write("projects/wip.md", b"---\nstatus: wip\n---\n# Unfinished offline retrieval\n\nOffline retrieval.\n")
     found = refs(brain, "offline retrieval")
     assert found.index("projects/old.md") > found.index("meetings:decision-1")
+    assert found.index("projects/wip.md") < found.index("meetings:decision-1")
 
 
 def test_cache_follows_edits_additions_removals_and_touches(brain: Store) -> None:
@@ -126,16 +151,92 @@ def test_cache_follows_edits_additions_removals_and_touches(brain: Store) -> Non
 
 
 def test_invalid_files_are_skipped_and_reported(brain: Store) -> None:
-    brain.write("projects/broken.md", b"---\nstatus: current\n---\n# Broken\n")
+    brain.write("projects/broken.md", b"---\nreview_after: soon\n---\n# Broken\n")
     brain.write("memories/bad/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json", b'{"id":"x"}\n')
-    records_file(brain, "dupes", "2026-09", [Record(id="a", title="A", time="2026-09-01T00:00:00Z")])
+    records_file(brain, "dupes", [Record(id="a", title="A", time="2026-09-01T00:00:00Z")])
     brain.write("memories/dupes/" + "0" * 64 + ".json", b'{"id":"a","title":"A"}\n')
     assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
-    problems = index.status(brain)["problems"]
-    assert isinstance(problems, list)
+    problems = cast("list[dict[str, str]]", index.status(brain)["problems"])
     assert len(problems) == 3
-    assert any(p.startswith("projects/broken.md: invalid frontmatter: status") for p in problems)
-    assert any("record id does not match" in p for p in problems)
+    # Each skipped file is one object naming it once.
+    assert {"file": "projects/broken.md", "error": problems[2]["error"]} == problems[2]
+    assert problems[2]["error"].startswith("invalid frontmatter: review_after")
+    assert any("record id does not match" in p["error"] for p in problems)
+    reply = search([brain], Query(text="offline"))
+    assert {"brain": "fixture", **problems[2]} in cast("list[dict[str, str]]", reply["problems"])
+
+
+def test_unaddressable_names_are_reported_without_hiding_the_brain(brain: Store) -> None:
+    # A Latin-1 name from an old archive, or a backslash, cannot be a ref: report it and keep answering.
+    brain.write("actions/2026-09-26_demo/ACTION.md", b"---\ntype: action\n---\n# Demo\n\nResume the offline import.\n")
+    created = []
+    for name in (
+        b"concepts/caf\xe9.md",
+        b"actions/2026-09-26_demo/inputs/data\xe9.csv",
+        b"memories/meetings/caf\xe9.json",
+        b"concepts/back\\slash.md",
+    ):
+        target = brain.root / os.fsdecode(name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            target.write_bytes(b"# Unaddressable offline note\n")
+        except OSError:
+            continue  # APFS stores only UTF-8 names
+        created.append(name.decode("utf-8", "backslashreplace"))
+    assert index.refresh(brain, full=True)["skipped"] == len(created)
+    reply = search([brain], Query(text="offline"))
+    assert cast(list, reply["items"])[0]["ref"] == "projects/offline.md"
+    problems = cast("list[dict[str, str]]", reply["problems"])
+    assert {problem["file"]: problem["error"] for problem in problems} == dict.fromkeys(created, UNNAMED)
+    action = read([brain], "actions/2026-09-26_demo")
+    assert action["files"] == []
+    attachment = [name for name in created if name.startswith("actions/")]
+    assert [p["file"] for p in cast(list, action["problems"]) if p.get("file", "").startswith("actions/")] == attachment
+    report = validate(brain)
+    assert {p["file"]: p["error"] for p in cast(list, report["problems"])} == dict.fromkeys(created, UNNAMED)
+    # Collection never binds such a name: listing the source fails closed and names it.
+    if any(name.startswith("memories/") for name in created):
+        with pytest.raises(Error, match=r"memories/meetings/caf\\xe9\.json: file name is not valid UTF-8"):
+            brain.files("memories/meetings")
+
+
+def test_editor_locks_beside_notes_never_fail_retrieval_or_updates(brain: Store) -> None:
+    # Emacs keeps a dangling `.#NAME` link, or a small file, beside a note while its buffer has unsaved edits.
+    brain.write("actions/2026-09-26_demo/ACTION.md", b"---\ntype: action\n---\n# Demo\n\nResume the offline import.\n")
+    (brain.root / "projects/.#offline.md").symlink_to("owner@host.12345:1790000000")
+    (brain.root / "actions/2026-09-26_demo/.#ACTION.md").symlink_to("owner@host.12345:1790000000")
+    brain.write("concepts/.#evidence.md", b"owner@host.12345:1790000000")
+    assert index.refresh(brain, full=True)["skipped"] == 0
+    assert "problems" not in search([brain], Query(text="offline"))
+    assert validate(brain)["valid"]
+    action = read([brain], "actions/2026-09-26_demo")
+    assert (action["files"], "problems" in action) == ([], False)
+    assert update(brain)["ok"]
+    # Other links in note folders are still reported.
+    (brain.root / "projects/linked.md").symlink_to(brain.root / "bf.yaml")
+    assert index.refresh(brain)["skipped"] == 1
+
+
+def test_foreign_frontmatter_keeps_ordinary_markdown_searchable(brain: Store) -> None:
+    # A document copied from another tool may carry frontmatter that is not valid YAML; OKF notes stay strict.
+    brain.write(
+        "actions/2026-09-26_vendor/ACTION.md",
+        b"---\ntype: action\n---\n# Vendor review\n\n[Notes](inputs/vendor.md) and [draft](inputs/draft.md)\n",
+    )
+    brain.write(
+        "actions/2026-09-26_vendor/inputs/vendor.md", b"---\ntitle: Release: notes\n---\n# Vendor\n\nZircon steps.\n"
+    )
+    brain.write("actions/2026-09-26_vendor/inputs/draft.md", b"---\nZircon draft without a closing rule\n")
+    assert index.refresh(brain, full=True)["skipped"] == 0
+    assert sorted(refs(brain, "zircon")) == [
+        "actions/2026-09-26_vendor/inputs/draft.md",
+        "actions/2026-09-26_vendor/inputs/vendor.md",
+    ]
+    assert str(read([brain], "actions/2026-09-26_vendor/inputs/vendor.md")["text"]).startswith("---\ntitle: Release")
+    assert validate(brain)["valid"]
+    brain.write("projects/strict.md", b"---\ntitle: Release: notes\n---\n# Strict\n")
+    assert index.refresh(brain)["skipped"] == 1
+    assert [p["file"] for p in cast(list, validate(brain)["problems"])] == ["projects/strict.md"]
 
 
 def test_links_and_special_files_are_reported_without_hiding_the_brain(brain: Store, tmp_path: Path) -> None:
@@ -146,42 +247,44 @@ def test_links_and_special_files_are_reported_without_hiding_the_brain(brain: St
     (brain.root / "actions/2026-09-26_demo/inputs").mkdir()
     (brain.root / "actions/2026-09-26_demo/inputs/dataset.bin").symlink_to(outside)
     (brain.root / "concepts/linked.md").symlink_to(outside)
-    os.mkfifo(brain.root / "memories/meetings/2026-07.jsonl")
+    os.mkfifo(brain.root / "memories/meetings/pipe.json")
     reply = search([brain], Query(text="offline"))
     assert cast(list, reply["items"])[0]["ref"] == "projects/offline.md"
-    files = cast(list, reply["problems"])[0]["files"]
-    assert [name.split(":")[0] for name in files] == [
+    problems = cast("list[dict[str, str]]", reply["problems"])
+    assert [problem["file"] for problem in problems] == [
         "actions/2026-09-26_demo/inputs/dataset.bin",
         "concepts/linked.md",
-        "memories/meetings/2026-07.jsonl",
+        "memories/meetings/pipe.json",
     ]
-    assert "symlinks are not followed" in files[0]
+    assert "symlinks are not followed" in problems[0]["error"]
     assert refs(brain, "exfiltrated") == []
-    assert index.status(brain)["index"] == "ready"
+    assert index.status(brain)["cache"] == "ready"
     assert "projects" in read([brain])
     action = read([brain], "actions/2026-09-26_demo")
     assert "actions/2026-09-26_demo/inputs/dataset.bin" not in cast(list, action["files"])
-    assert any(
-        "dataset.bin: symlinks and special files are not listed" in f
-        for p in cast(list, action["problems"])
-        for f in p.get("files", [])
-    )
-    # The cache names the partition, and a skipped partition keeps an absent record from looking absent.
+    assert {
+        "brain": "fixture",
+        "file": "actions/2026-09-26_demo/inputs/dataset.bin",
+        "error": "symlinks and special files are not listed",
+    } in cast(list, action["problems"])
+    # The cache names the record file, and a skipped file keeps an absent record from looking absent.
     assert cast(dict, read([brain], "meetings:decision-1")["record"])["id"] == "decision-1"
     with pytest.raises(Error, match="unreadable records"):
         read([brain], "meetings:missing")
     report = validate(brain)
     assert not report["valid"]
-    assert sorted(p.split(":")[0] for p in cast(list, report["problems"])) == [
+    assert sorted(p["file"] for p in cast(list, report["problems"])) == [
         "actions/2026-09-26_demo/inputs/dataset.bin",
         "concepts/linked.md",
-        "memories/meetings/2026-07.jsonl",
+        "memories/meetings/pipe.json",
     ]
 
 
 def test_search_says_when_results_exist_beyond_the_limit(brain: Store) -> None:
-    assert search([brain], Query(text="offline", limit=1))["more"] is True
-    assert "more" not in search([brain], Query(text="offline", limit=50))
+    assert search([brain], Query(text="offline", limit=1))["next_offset"] == 1
+    reply = search([brain], Query(text="offline", limit=50))
+    assert "next_offset" not in reply
+    assert "more" not in reply
 
 
 def test_full_build_creates_every_index_after_loading_and_serves_in_wal_mode(brain: Store) -> None:
@@ -242,6 +345,69 @@ def test_outdated_or_corrupt_cache_is_rebuilt(brain: Store) -> None:
         refs(brain, "offline")
 
 
+def plant(store: Store, *statements: str) -> None:
+    """Add rows no brain file supports, as a cloned or extracted cache could carry, and optional schema objects."""
+    with closing(sqlite3.connect(store.root / index.CACHE)) as connection, connection:
+        connection.execute(
+            "INSERT INTO items(id,ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
+            "tasks_open,tasks_done,next,weight,review_after,review_due) VALUES(999,'projects/roadmap.md',"
+            "'projects/roadmap.md','note','','Roadmap','','project','','planted','','','',0,0,0,'',1,0,'')"
+        )
+        connection.execute("INSERT INTO passages(id,item,fragment,title,original) VALUES(999,999,'','Roadmap','')")
+        connection.execute("INSERT INTO search(rowid,title,text,names) VALUES(999,'roadmap','zanzibar planted','')")
+        for statement in statements:
+            connection.execute(statement)
+
+
+def cache_file(store: Store) -> str:
+    with closing(sqlite3.connect(store.root / index.CACHE)) as connection:
+        return connection.execute("SELECT file FROM ontology").fetchone()[0]
+
+
+def test_a_cache_copied_with_its_brain_is_rebuilt_instead_of_trusted(brain: Store, tmp_path: Path) -> None:
+    # A copy, clone or archive can carry a cache whose rows no brain file supports; only its file identity differs.
+    refs(brain, "offline")
+    plant(brain)
+    copy = Store(shutil.copytree(brain.root, tmp_path / "copy", symlinks=True))
+    assert refs(copy, "zanzibar") == []
+    assert refs(copy, "offline")[0] == "projects/offline.md"
+    assert cache_file(copy) != cache_file(brain)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["CREATE TRIGGER planted AFTER INSERT ON files BEGIN SELECT 1; END", "CREATE VIEW planted AS SELECT 1"],
+    ids=["trigger", "view"],
+)
+def test_a_cache_holding_triggers_or_views_is_rebuilt_in_place(brain: Store, statement: str) -> None:
+    # bf never creates them: a trigger could add rows on refresh that no brain file supports.
+    refs(brain, "offline")
+    plant(brain, statement)
+    assert refs(brain, "zanzibar") == []
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
+        found = connection.execute("SELECT count(*) FROM sqlite_master WHERE type IN ('trigger','view')").fetchone()
+    assert found == (0,)
+
+
+def test_a_remount_that_changes_the_device_number_keeps_the_cache(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # btrfs subvolumes, NFS and FUSE mounts can get another device number after a remount or reboot.
+    refs(brain, "offline")
+    cache, lstat = brain.root / index.CACHE, Path.lstat
+
+    def remounted(self: Path) -> os.stat_result:
+        info = lstat(self)
+        if self != cache:
+            return info
+        values = list(info)
+        values[2] += 1  # st_dev
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", remounted)
+    assert index.refresh(brain)["changed"] == 0
+
+
 def test_a_busy_writer_serves_the_current_cache_as_stale(brain: Store) -> None:
     refs(brain, "offline")
     brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
@@ -264,7 +430,7 @@ def test_concurrent_first_search_waits_for_a_complete_cache(
     original_index, original_refresh = index._index, index.refresh  # noqa: SLF001 - coordinated ingestion failure boundary
     waits: list[float] = []
 
-    def paused(connection: sqlite3.Connection, store: Store, path: str) -> list[str]:
+    def paused(connection: sqlite3.Connection, store: Store, path: str) -> None:
         ingest_started.set()
         assert release_ingest.wait(10)
         return original_index(connection, store, path)
@@ -301,7 +467,7 @@ def test_failed_full_rebuild_does_not_publish_an_incomplete_cache(
     original_index = index._index  # noqa: SLF001 - inject failure after a file was indexed
     indexed: list[str] = []
 
-    def fail_second(connection: sqlite3.Connection, store: Store, path: str) -> list[str]:
+    def fail_second(connection: sqlite3.Connection, store: Store, path: str) -> None:
         if indexed:
             raise sqlite3.OperationalError("simulated disk full")
         indexed.append(path)
@@ -346,10 +512,10 @@ def test_several_brains_interleave_and_reads_name_their_brain(brain: Store, tmp_
     ]
     with pytest.raises(Error, match="several brains"):
         read(stores, "projects/offline.md")
-    assert read(stores, "projects/offline.md", "team")["brain"] == "team"
+    assert read(stores, "bf://team/projects/offline.md")["brain"] == "team"
     assert read(stores, "meetings:lunch")["brain"] == "fixture"
-    with pytest.raises(Error, match="unknown brain"):
-        read(stores, "meetings:lunch", "absent")
+    with pytest.raises(Error, match="unknown brain absent"):
+        read(stores, "bf://absent/meetings:lunch")
     team.write("projects/august.md", b"---\nupdated: 2026-08-31\n---\n# August\n")
     timeline = read(stores, "2026-08")["items"]
     assert isinstance(timeline, list)
@@ -397,7 +563,9 @@ def test_usage_counts_searches_empty_results_and_reads_without_queries(brain: St
     read([brain], "meetings:lunch")
     search([brain], Query(text="offline"), counted=False)
     log = state_store(brain.root).root / usage.USAGE
-    assert "offline" not in log.read_text()
+    # Each line holds only a time, an operation and a count: never the query, ref or page.
+    assert [set(json.loads(line)) for line in log.read_text().splitlines()] == [{"at", "op", "results"}] * 3
+    assert not any(word in log.read_text() for word in ("offline", "zzabsent", "meetings", "lunch"))
     assert usage.summary(brain) == {
         "7d": {"search": 2, "empty": 1, "read": 1},
         "30d": {"search": 2, "empty": 1, "read": 1},
@@ -419,7 +587,6 @@ def test_identity_relations_keep_newest_first(brain: Store) -> None:
     records_file(
         brain,
         "updates",
-        "2026-09",
         [
             Record(id="a", title="Old", links=["repo:unique-evidence"], time="2026-09-01T00:00:00Z"),
             Record(id="b", title="New", links=["repo:unique-evidence"], time="2026-09-23T00:00:00Z"),
@@ -435,7 +602,7 @@ def test_malformed_link_does_not_block_other_notes(brain: Store) -> None:
 
 
 def test_removing_a_misnamed_record_clears_its_problem(brain: Store) -> None:
-    records_file(brain, "duplicates", "2026-08", [Record(id="same", title="Needle")])
+    records_file(brain, "duplicates", [Record(id="same", title="Needle")])
     wrong = "memories/duplicates/" + "0" * 64 + ".json"
     brain.write(wrong, b'{"id":"same","title":"Needle"}\n')
     assert refs(brain, "needle") == ["duplicates:same"]
@@ -461,7 +628,7 @@ def test_direct_record_read_survives_unavailable_cache(brain: Store, monkeypatch
     monkeypatch.setattr(index, "fresh", unavailable)
     brain.write(
         "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json",
-        b"malformed unrelated newer partition\n",
+        b"malformed unrelated newer record\n",
     )
     assert read([brain], "meetings:decision-1")["ref"] == "meetings:decision-1"
 
@@ -477,12 +644,11 @@ def test_record_cache_hint_cannot_change_the_requested_source(brain: Store, hint
     records_file(
         brain,
         "other",
-        "2026-09",
         [Record(id="decision-1", title="Evidence from another source", time="2026-09-01T00:00:00Z")],
     )
     brain.write(
         "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json",
-        b"malformed unrelated newer partition\n",
+        b"malformed unrelated newer record\n",
     )
     index.refresh(brain)
     with closing(sqlite3.connect(brain.root / index.CACHE)) as connection, connection:
@@ -510,7 +676,6 @@ def test_changed_since_uses_modification_time_without_changing_event_time(brain:
     records_file(
         brain,
         "updates",
-        "2026-01",
         [
             Record(
                 id="old",
@@ -523,7 +688,6 @@ def test_changed_since_uses_modification_time_without_changing_event_time(brain:
     records_file(
         brain,
         "updates",
-        "2026-09",
         [
             Record(id="recent", title="New event", time="2026-09-22T00:00:00Z"),
         ],
@@ -550,17 +714,15 @@ def test_searches_report_collection_coverage_of_their_sources(brain: Store) -> N
         b"version: 6\nname: fixture\nsensors:\n  meetings:\n    command: [true-command]\n    refresh: 3600\n  disabled:\n    command: [true-command]\n    enabled: false\n",
     )
     for source in ("disabled", "historical"):
-        records_file(brain, source, "undated", [Record(id="x", title="Offline retrieval")])
+        records_file(brain, source, [Record(id="x", title="Offline retrieval")])
     for source, expected in (("meetings", "active"), ("disabled", "disabled"), ("historical", "historical")):
         result = search([brain], Query(text="offline", **scope(f"memories/{source}")))
         sources = result["sources"]
         assert isinstance(sources, list)
         assert sources[0]["state"] == expected
-    result = search([brain], Query(text="offline", **scope("memories/absent")))
-    assert result["items"] == []
-    assert result["sources"] == [
-        {"brain": "fixture", "source": "absent", "state": "historical", "freshness": "unknown"}
-    ]
+    # A source that no brain indexes or configures is unknown, like its page, not an empty historical source.
+    with pytest.raises(NotFoundError, match="unknown source"):
+        search([brain], Query(text="offline", **scope("memories/absent")))
     collection = read([brain], "meetings:decision-1")["collection"]
     assert isinstance(collection, dict)
     # A scheduled sensor without a successful local run has never collected here.
@@ -619,7 +781,6 @@ def test_recent_identity_keeps_owners_ahead_of_newer_relations_across_brains(bra
     records_file(
         brain,
         "updates",
-        "2026-09",
         [
             Record(id="latest", title="Latest activity", time="2026-09-23T00:00:00Z", links=["repo:example/project"]),
         ],
@@ -652,7 +813,7 @@ def test_an_exact_record_ref_takes_precedence_over_a_colliding_alias(brain: Stor
 
 
 def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Store, tmp_path: Path) -> None:
-    brain.write("projects/broken.md", b"---\nstatus: typo\n---\n# Hidden answer\n")
+    brain.write("projects/broken.md", b"---\nreview_after: typo\n---\n# Hidden answer\n")
     broken = tmp_path / "broken"
     broken.mkdir()
     other = Store(broken)
@@ -663,7 +824,7 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
     assert isinstance(reply["problems"], list)
     assert reply["items"][0]["brain"] == "fixture"
     assert reply["problems"][0]["brain"] == "fixture"
-    assert "projects/broken.md" in reply["problems"][0]["files"][0]
+    assert reply["problems"][0]["file"] == "projects/broken.md"
     assert reply["problems"][1]["brain"] == "interrupted"
     assert "interrupted transaction" in reply["problems"][1]["error"]
     assert other.read("memories/.pending/0.before") == b"preserve this original"
@@ -698,7 +859,7 @@ def test_search_waits_if_a_rebuild_replaces_the_checked_generation(
             assert reopen.wait(10)
         return state
 
-    def paused_index(connection: sqlite3.Connection, store: Store, path: str) -> list[str]:
+    def paused_index(connection: sqlite3.Connection, store: Store, path: str) -> None:
         ingesting.set()
         assert finish.wait(10)
         return original_index(connection, store, path)
@@ -731,7 +892,7 @@ def test_evaluation_names_missing_retrieval_cases(brain: Store) -> None:
     brain.write(
         "evals/retrieval.yaml", b"version: 5\ncases:\n  - name: later\n    query: x\n    scope: soon\n    empty: true\n"
     )
-    with pytest.raises(Error, match="case later: scope accepts"):
+    with pytest.raises(Error, match=r"invalid evals/retrieval\.yaml: cases\.0\.scope: scope accepts"):
         evaluate(brain)
     for case in (b"    query: x\n    read: today\n", b"    read: today\n    scope: 7d\n", b"    since: 7d\n"):
         brain.write("evals/retrieval.yaml", b"version: 5\ncases:\n  - name: bad\n" + case + b"    empty: true\n")
@@ -742,7 +903,7 @@ def test_evaluation_names_missing_retrieval_cases(brain: Store) -> None:
 def test_evaluation_rejects_incomplete_empty_answers(brain: Store) -> None:
     from bf.evaluate import evaluate
 
-    brain.write("projects/broken.md", b"---\nstatus: typo\n---\n# Lost answer\n")
+    brain.write("projects/broken.md", b"---\nreview_after: typo\n---\n# Lost answer\n")
     brain.write(
         "evals/retrieval.yaml", b"version: 5\ncases:\n  - name: absent\n    query: lost answer\n    empty: true\n"
     )
@@ -766,7 +927,7 @@ def test_search_refs_keep_hash_characters_in_note_filenames(brain: Store) -> Non
 def test_retrieval_cases_distinguish_record_ids_from_note_sections(brain: Store) -> None:
     from bf.evaluate import evaluate
 
-    records_file(brain, "issues", "undated", [Record(id="item#comment", title="Hashneedle")])
+    records_file(brain, "issues", [Record(id="item#comment", title="Hashneedle")])
     brain.write(
         "evals/retrieval.yaml",
         b"version: 5\ncases:\n  - name: exact-record\n    query: hashneedle\n    expect: [issues:item]\n",
@@ -781,7 +942,6 @@ def test_one_ranked_query_keeps_notes_above_long_records_that_happen_to_hold_eve
     records_file(
         brain,
         "traces",
-        "undated",
         [
             Record(id=f"t{i}", title=f"Trace {i}", text=f"{filler} brain {filler} framework search ranking")
             for i in range(12)
@@ -791,18 +951,27 @@ def test_one_ranked_query_keeps_notes_above_long_records_that_happen_to_hold_eve
     assert refs(brain, "brain framework search ranking", limit=3)[0] == "projects/ranking.md"
 
 
-def test_only_distilled_notes_rank_above_evidence() -> None:
-    assert index.distilled("projects/archive.md")
-    assert index.distilled("concepts/retention.md")
-    assert index.distilled("actions/2026-09-25_review/ACTION.md")
+def test_only_entry_notes_rank_above_evidence(brain: Store) -> None:
+    assert entry_note("projects/archive.md")
+    assert entry_note("concepts/retention.md")
+    assert entry_note("actions/2026-09-25_review/ACTION.md")
     for working in (
+        "projects/index.md",
+        "projects/log.md",
+        "projects/team/log.md",
         "concepts/index.md",
         "concepts/log.md",
         "concepts/team/index.md",
         "actions/2026-09-25_review/inputs/request.md",
         "actions/2026-09-25_review/outputs/ACTION.md",
     ):
-        assert not index.distilled(working)
+        assert not entry_note(working)
+    # An OKF bundle index navigates its notes: it gets no boost over the project it lists.
+    brain.write("projects/index.md", b"# Projects\n\n- [Offline retrieval](offline.md)\n")
+    refs(brain, "offline")
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
+        weights = dict(connection.execute("SELECT ref,weight FROM items WHERE kind='note'").fetchall())
+    assert weights == {"projects/offline.md": 2, "projects/index.md": 1, "concepts/evidence.md": 2}
 
 
 def test_a_known_identity_ignores_other_brains_words(brain: Store, tmp_path: Path) -> None:
@@ -817,3 +986,149 @@ def test_a_known_identity_ignores_other_brains_words(brain: Store, tmp_path: Pat
         ("fixture", "projects/offline.md"),
         ("fixture", "meetings:decision-1"),
     }
+
+
+def test_query_words_fold_like_the_indexed_text(brain: Store) -> None:
+    # A PDF ligature and full-width letters, as extracted documents and East Asian input methods produce them.
+    fullwidth = "".join(chr(ord(letter) + 0xFEE0) for letter in "ATRIUM")
+    brain.write("concepts/street.md", f"# Hauptstraße\n\nDie ﬁnance team meets in the {fullwidth}.\n".encode())
+    brain.write("concepts/summer.md", "# Budget\n\nLe budget de l'été.\n".encode())
+    for query in ("Hauptstraße", "HAUPTSTRAẞE", "finance", "ﬁnance", "atrium"):
+        assert refs(brain, query) == ["concepts/street.md"], query
+    decomposed = unicodedata.normalize("NFD", "été")
+    assert decomposed != "été"
+    assert refs(brain, decomposed) == refs(brain, "été") == ["concepts/summer.md"]
+    assert index.terms("Été été ETE the") == ["Été", "ETE"]
+
+
+def test_queries_without_words_are_invalid_input(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    mcp = server([brain])
+    for query in ("", " ", "!!!", "—", "_"):
+        with pytest.raises(ValidationError, match="give words or an identity"):
+            Query(text=query)
+        monkeypatch.setattr(sys, "argv", ["bf", "search", query, "--brain", str(brain.root)])
+        with pytest.raises(SystemExit) as exited:
+            main()
+        assert exited.value.code == 2
+        result = asyncio.run(mcp.call_tool("search", {"query": query}))
+        assert isinstance(result, CallToolResult)
+        assert result.is_error
+        assert "invalid" in str(result.content)
+
+
+def test_excerpts_keep_the_evidence_characters(brain: Store) -> None:
+    body = "The ﬁnal budget is 10 m² … wait™ for approval."
+    brain.write("concepts/budget.md", f"# Plan\n\n{body}\n".encode())
+    padding = " ".join(["filler"] * 80)
+    brain.write("concepts/ration.md", f"# Ration\n\n{padding} the ﬁnal ½ ration {padding}\n".encode())
+    reply = search([brain], Query(text="final"))
+    excerpts = {item["ref"]: item["excerpt"] for item in cast("list[dict[str, str]]", reply["items"])}
+    assert excerpts["concepts/budget.md"] == body
+    assert excerpts["concepts/ration.md"].startswith("… filler")
+    assert excerpts["concepts/ration.md"].endswith("filler …")
+    assert "the ﬁnal ½ ration" in excerpts["concepts/ration.md"]
+
+
+def test_only_returned_results_compute_excerpts(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    records_file(brain, "notes", [Record(id=f"{n:03}", title="Needle", text="needle") for n in range(60)])
+    computed: list[int] = []
+    original = index.excerpt
+
+    def counted(connection: sqlite3.Connection, text: str, passage: int) -> str:
+        computed.append(passage)
+        return original(connection, text, passage)
+
+    monkeypatch.setattr(index, "excerpt", counted)
+    reply = search([brain], Query(text="needle", limit=5, offset=50))
+    assert len(cast("list", reply["items"])) == len(computed) == 5
+    assert all(item["excerpt"] == "needle" for item in cast("list[dict[str, object]]", reply["items"]))
+
+
+def test_source_scopes_cover_only_brains_that_hold_the_source(brain: Store, tmp_path: Path) -> None:
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("projects/offline.md", b"# Team offline\n\nOffline retrieval too.\n")
+    reply = search([brain, team], Query(text="offline", **scope("memories/meetings")))
+    assert [(source["brain"], source["source"]) for source in cast("list[dict]", reply["sources"])] == [
+        ("fixture", "meetings")
+    ]
+    with pytest.raises(NotFoundError, match="unknown source"):
+        search([brain, team], Query(text="offline", **scope("memories/meeting")))
+
+
+def test_retired_schema_fields_keep_their_records_searchable(brain: Store) -> None:
+    field = b"schema:\n  kind:\n    description: Kind.\n    type: string\n"
+    brain.write("bf.yaml", b"version: 6\nname: fixture\n" + field)
+    records_file(brain, "notes", [Record(id="a1", title="Zirconium", fields={"kind": "note"})])
+    assert refs(brain, "zirconium") == ["notes:a1"]
+    brain.write("bf.yaml", b"version: 6\nname: fixture\n")
+    reply = search([brain], Query(text="zirconium"))
+    assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == ["notes:a1"]
+    assert "problems" not in reply
+    # Validation still names the stored field that the schema no longer declares.
+    assert "undeclared schema field kind" in str(validate(brain)["problems"])
+
+
+def test_brain_record_addresses_never_resolve_other_schemes_aliases(brain: Store) -> None:
+    brain.write("concepts/alice.md", b"---\ntype: person\naliases: [person:email/alice@example.test]\n---\n# Alice\n")
+    address = "bf://fixture/person:email/alice@example.test"
+    brain.write("projects/cite.md", f"---\ntype: project\n---\n# Cite\n\n[Alice]({address})\n".encode())
+    # Read, validate and the search scope agree: the address names a record, which does not exist.
+    view = read([brain], address)
+    assert view["page"] == address
+    assert [item["ref"] for group in cast("list[dict]", view["backlinks"]) for item in group["items"]] == [
+        "projects/cite.md"
+    ]
+    assert f"unresolved BF target: {address}" in str(validate(brain)["problems"])
+    assert refs(brain, "cite", **scope(address)) == ["projects/cite.md"]
+    assert read([brain], "person:email/alice@example.test")["ref"] == "concepts/alice.md"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+def test_read_only_brains_name_the_cache_they_need(brain: Store) -> None:
+    index.refresh(brain)
+    folders = [brain.root / ".bf", brain.root]
+    for folder in folders:
+        folder.chmod(0o500)
+    try:
+        with pytest.raises(Error, match=r"write access to the brain.s \.bf cache"):
+            search([brain], Query(text="offline"))
+    finally:
+        for folder in folders:
+            folder.chmod(0o700)
+
+
+def test_the_cache_directory_must_be_your_own_directory(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = brain.root / ".bf"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    elsewhere.chmod(0o755)
+    cache.symlink_to(elsewhere)
+    with pytest.raises(Error, match=r"^\.bf: expected a directory"):
+        search([brain], Query(text="offline"))
+    # The check never follows the link, so it tightens nothing elsewhere.
+    assert stat.S_IMODE(elsewhere.stat().st_mode) == 0o755
+    cache.unlink()
+    cache.write_bytes(b"not a directory")
+    with pytest.raises(Error, match=r"^\.bf: expected a directory"):
+        search([brain], Query(text="offline"))
+    cache.unlink()
+    cache.mkdir()
+    monkeypatch.setattr(os, "getuid", lambda: os.geteuid() + 1)
+    with pytest.raises(Error, match="belongs to another user"):
+        search([brain], Query(text="offline"))
+
+
+def test_the_cache_is_private_and_distrusts_its_own_schema(brain: Store) -> None:
+    (brain.root / ".bf").mkdir()
+    (brain.root / ".bf").chmod(0o755)
+    refs(brain, "offline")
+    assert stat.S_IMODE((brain.root / ".bf").stat().st_mode) == 0o700
+    assert stat.S_IMODE((brain.root / index.CACHE).stat().st_mode) == 0o600
+    with index.database(brain) as (connection, _state):
+        assert not connection.getconfig(sqlite3.SQLITE_DBCONFIG_TRUSTED_SCHEMA)
+        assert connection.getconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE)

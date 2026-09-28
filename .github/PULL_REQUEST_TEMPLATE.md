@@ -1,6 +1,6 @@
 ## What
 
-<!-- Describe the problem and resulting behavior. For collector changes, name the provider CLI and version verified. -->
+<!-- Describe the problem and resulting behavior. For sensor changes, name the provider CLI and version verified. -->
 
 ## Why
 
@@ -9,5 +9,7 @@
 ## Test plan
 
 - [ ] `mise run all` is green
+- [ ] User-facing docs, the owning skill and a runnable example with its expected result are updated
+- [ ] `CHANGELOG.md` records user-visible changes under `Unreleased`
 - [ ] No real brain, workspace data, or personal identifier appears in the diff
 - [ ] Any break to a flag, configuration key, stored format, reference format, or MCP tool name is stated above — there is no compatibility layer

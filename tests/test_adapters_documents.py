@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
-import sys
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from pydantic import TypeAdapter
 
+from bf.models import Record
 from conftest import ROOT, Provider
 
 
@@ -85,6 +88,100 @@ def test_document_xml_rejects_wide_encoded_entities(provider: Provider, tmp_path
     assert "hidden" not in result.stderr
 
 
+def test_local_documents_keep_legacy_text_and_skip_unnameable_entries(provider: Provider, tmp_path: Path) -> None:
+    root = tmp_path / "documents"
+    root.mkdir()
+    (root / "legacy.csv").write_bytes(b"caf\xe9;prix\n")
+    (root / "notes.txt").write_text("Keep evidence")
+    # Names BF cannot store in a record id: not UTF-8 (a lone surrogate), or with a control character.
+    (root / os.fsdecode(b"caf\xe9")).mkdir()
+    (root / os.fsdecode(b"caf\xe9/inside.txt")).write_text("hidden by its folder")
+    (root / "tab\tname.txt").write_text("unnameable")
+    result = provider.run("local-documents.py", "work", str(root))
+    assert result.returncode == 0, result.stderr
+    records = {record.id: record for record in TypeAdapter(list[Record]).validate_json(result.stdout)}
+    assert set(records) == {"work/legacy.csv", "work/notes.txt"}
+    assert records["work/legacy.csv"].text == "caf�;prix\n"
+    assert records["work/legacy.csv"].attributes["partial"] is True
+    assert records["work/notes.txt"].attributes["partial"] is False
+    assert "skipped 2 entries" in result.stderr
+
+
+def test_local_documents_name_the_file_that_fails(provider: Provider, tmp_path: Path) -> None:
+    root = tmp_path / "documents"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub/paper.pdf").write_bytes(b"%PDF-1.7\nprivate-marker")
+    provider.install("pdftotext", [{"match": ["-layout"], "code": 1, "stderr": "private-marker"}])
+    result = provider.run("local-documents.py", "work", str(root))
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == "Local document collection failed: sub/paper.pdf: PDF conversion failed.\n"
+    (root / "sub/paper.pdf").unlink()
+    (root / "sub/broken.docx").write_bytes(b"private-marker")
+    result = provider.run("local-documents.py", "work", str(root))
+    assert result.returncode == 1
+    assert "sub/broken.docx: damaged or unsupported document" in result.stderr
+    assert "private-marker" not in result.stderr
+
+
+def _archive(member: str, compression: int = zipfile.ZIP_STORED) -> bytearray:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression) as archive:
+        archive.writestr(member, "<document><p><t>" + "private-marker " * 400 + "</t></p></document>")
+    return bytearray(buffer.getvalue())
+
+
+def _corrupt_stream() -> bytes:
+    data = _archive("word/document.xml", zipfile.ZIP_DEFLATED)
+    start = 30 + len("word/document.xml")  # the compressed stream follows the local file header
+    data[start : start + 20] = bytes(byte ^ 0xFF for byte in data[start : start + 20])
+    return bytes(data)
+
+
+def _encrypted_member() -> bytes:
+    data = _archive("word/document.xml")
+    data[6] |= 1  # the encryption flag in the local file header
+    data[data.index(b"PK\x01\x02") + 8] |= 1  # and in the central directory
+    return bytes(data)
+
+
+@pytest.mark.parametrize("damage", [_corrupt_stream, _encrypted_member], ids=["corrupt-stream", "encrypted"])
+def test_damaged_office_documents_are_named(provider: Provider, tmp_path: Path, damage: Callable[[], bytes]) -> None:
+    root = tmp_path / "documents"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub/report.docx").write_bytes(damage())
+    result = provider.run("local-documents.py", "work", str(root))
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        "Local document collection failed: sub/report.docx: damaged or unsupported document; repair or exclude it.\n"
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read every file")
+@pytest.mark.parametrize("entry", ["sub/locked.txt", "private"])
+def test_unreadable_entries_are_named_instead_of_dropped(provider: Provider, tmp_path: Path, entry: str) -> None:
+    root = tmp_path / "documents"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub/locked.txt").write_text("evidence")
+    (root / "private").mkdir()
+    locked = root / entry
+    locked.chmod(0)
+    try:
+        result = provider.run("local-documents.py", "work", str(root))
+    finally:
+        locked.chmod(0o700)
+    # Skipping would remove the entry's saved records from the snapshot, so collection fails instead.
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        f"Local document collection failed: {entry}: cannot be read; check its permissions or exclude it.\n"
+    )
+
+
+def test_missing_pdf_converter_is_named(documents: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(ValueError, match="pdftotext is not installed"):
+        documents.extract(b"%PDF synthetic", ".pdf")
+
+
 def test_document_root_cannot_be_redirected_through_an_ancestor(provider: Provider, tmp_path: Path) -> None:
     root = tmp_path / "selected" / "documents"
     root.mkdir(parents=True)
@@ -93,6 +190,11 @@ def test_document_root_cannot_be_redirected_through_an_ancestor(provider: Provid
     result = provider.run("local-documents.py", "work", str(tmp_path / "redirect/documents"))
     assert result.returncode == 1
     assert not result.stdout
+    # The refusal names its cause and fix, such as a linked {{home}} or Documents folder, not permissions.
+    assert result.stderr == (
+        "Local document collection failed: ROOT or one of its parent folders is a symbolic link or not a "
+        "directory; configure its physical path, as realpath prints it.\n"
+    )
 
 
 @pytest.fixture
@@ -113,17 +215,15 @@ def test_pdf_converter_is_killed_on_timeout_or_excess_output(
     documents: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flood: bool
 ) -> None:
     executable, marker = tmp_path / "pdftotext", tmp_path / "converter.pid"
+    # A shell fake starts in milliseconds; exec keeps the recorded PID for the sleeping converter.
     executable.write_text(
-        f"#!{sys.executable}\nimport os,time\nfrom pathlib import Path\n"
-        f"Path({str(marker)!r}).write_text(str(os.getpid()))\n"
-        + ("os.write(1,b'x'*1024)\n" if flood else "")
-        + "time.sleep(60)\n"
+        f"#!/bin/sh\necho $$ > '{marker}'\n" + ("head -c 1024 /dev/zero\n" if flood else "") + "exec sleep 60\n"
     )
     executable.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.defpath)
     monkeypatch.setattr(documents, "FILE_BYTES", 256)
-    # Include interpreter startup under CI load; the output test must reach its byte limit first.
-    monkeypatch.setattr(documents, "PDF_TIMEOUT", 10 if flood else 5)
+    # The output test must reach its byte limit before the timeout.
+    monkeypatch.setattr(documents, "PDF_TIMEOUT", 10 if flood else 2)
     with pytest.raises(ValueError, match="limit" if flood else "timed out"):
         documents.extract(b"%PDF synthetic", ".pdf")
     assert marker.exists()

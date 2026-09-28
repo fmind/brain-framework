@@ -1,14 +1,15 @@
+# https://git-scm.com/docs/gitignore
 .DS_Store
 /.agents/tmp/
 /.cache/
-/.schema-cache/
 /.coverage
 /.env
+/.env.*
+!/.env.example
 /.pytest_cache/
 /.ruff_cache/
 /.venv/
 /dist/
-/evals/.bf/
 /htmlcov/
 /site/
 __pycache__/

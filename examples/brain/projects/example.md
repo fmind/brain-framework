@@ -16,7 +16,7 @@ Demonstrate collecting fictional evidence and retrieving a grounded answer local
 
 The source is a local deterministic script with no credentials or network access. See the [retention concept](bf://example/concepts/retention.md?rel=related-to).
 
-## Decisions
+## Decision {#decision}
 
 - 2026-09-19: keep original evidence ([record](demo:retention)).
 

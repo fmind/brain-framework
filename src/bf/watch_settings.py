@@ -6,20 +6,30 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import Field, ValidationError
 
-from bf.collect import environment
 from bf.config import yaml_object
+from bf.history import environment
 from bf.models import Error, Model, explain
 from bf.storage import Store
 
 
 class Settings(Model):
-    interval: int = Field(default=60, ge=5, le=86400)
-    poll_interval: float = Field(default=2, ge=0.2, le=60)
-    notifications: str = Field(default="failure", pattern="^(off|failure|success|all)$")
-    notification_cooldown: int = Field(default=300, ge=0, le=86400)
+    """Optional watch preferences; CLI values override the file, then defaults apply. Restart to reload."""
+
+    interval: int = Field(default=60, ge=5, le=86400, description="Seconds between checks for due programs.")
+    poll_interval: float = Field(
+        default=2, ge=0.2, le=60, description="Seconds between local history reads and JSON snapshots."
+    )
+    notifications: Literal["off", "failure", "success", "all"] = Field(
+        default="failure",
+        description="Desktop alert policy. Recovery alerts accompany enabled modes.",
+    )
+    notification_cooldown: int = Field(
+        default=300, ge=0, le=86400, description="Minimum seconds between notification attempts."
+    )
 
 
 def settings(store: Store, **overrides: object) -> Settings:
@@ -34,7 +44,8 @@ def settings(store: Store, **overrides: object) -> Settings:
         result = Settings.model_validate(values)
         return Settings.model_validate(result.model_dump() | {k: v for k, v in overrides.items() if v is not None})
     except ValidationError as error:
-        raise Error(f"invalid {name}: " + explain(error, Settings.model_fields)) from error
+        # The brain's owner writes this file, like bf.yaml: name each invalid key so it can be fixed.
+        raise Error(f"invalid {name}: " + explain(error)) from error
 
 
 def desktop(title: str, body: str) -> bool:
@@ -129,5 +140,6 @@ class Notifications:
             return ""
         if not self.warned:
             self.warned = True
-            return "Desktop notification unavailable; collection continues. Check your desktop session or set notifications: off."
+            # One screen line (80 columns): the dashboard truncates longer messages.
+            return "Desktop alerts unavailable; collection continues (set notifications: off)"
         return ""

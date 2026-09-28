@@ -4,7 +4,7 @@
 
 ## Supported versions
 
-Only the latest published release receives security fixes. Every earlier release is unsupported, including earlier majors and minors. Upgrade before reporting, then confirm the defect still reproduces.
+Only the latest published release receives security fixes. Every earlier release is unsupported, including earlier majors and minors. Confirm that the defect reproduces with the latest release before reporting it.
 
 ## Report a vulnerability
 

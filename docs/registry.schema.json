@@ -1,0 +1,34 @@
+{
+  "$defs": {
+    "Registration": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Machine-local absolute or home-relative path to the brain.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": ["path"],
+      "title": "Registration",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The brains this user selects by default outside a brain directory.",
+  "properties": {
+    "brains": {
+      "additionalProperties": false,
+      "description": "Names and local paths selected outside a brain when no explicit selection is supplied.",
+      "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Registration" } },
+      "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+      "title": "Brains",
+      "type": "object"
+    }
+  },
+  "title": "UserConfig",
+  "type": "object"
+}

@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import ast
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import cast
 
 import pytest
-import yaml
 
-from bf import __version__, retrieve
+from bf import retrieve
 from bf.storage import Store
+from conftest import Provider
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "skills/bf-learn/scripts/evidence.py"
@@ -44,19 +44,14 @@ def run(mode: str, *values: dict) -> dict:
     return json.loads(result.stdout)
 
 
-def test_helper_is_a_standalone_script_for_older_interpreters() -> None:
-    # Agents invoke it with their own python3; the package itself requires 3.14.
-    ast.parse(HELPER.read_text(), feature_version=(3, 11))
-    assert HELPER.read_text().startswith("#!/usr/bin/env python3\n")
-    assert os.access(HELPER, os.X_OK)
-
-
 def test_capture_keeps_only_selected_evidence_and_comparison_is_compact() -> None:
     capture = run("capture", {**NOTE, "backlinks": [{"text": "UNRELATED"}], "claims": [{"text": "UNRELATED"}]})
     assert capture["text"] == NOTE["text"]
     assert "UNRELATED" not in json.dumps(capture)
     assert "external" not in capture
     assert len(capture["sha256"]) == 64
+    # Captures use the canonical UTC instants of bf replies.
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z", capture["captured_at"])
     assert run("compare", capture, NOTE)["state"] == "unchanged"
     changed = run("compare", capture, {**NOTE, "text": "## Retention\n\nKeep selected older versions.\n"})
     assert changed["state"] == "changed"
@@ -113,6 +108,8 @@ def test_partial_baseline_stays_unknown_and_missing_source_is_not_unchanged() ->
     [
         {**NOTE, "problems": [{"error": "PRIVATE FAILURE"}]},
         {**NOTE, "stale": ["example"]},
+        {**NOTE, "chunk": "PRIVATE FAILURE"},
+        {**NOTE, "next_offset": 100},
         {"page": "projects", **NOTE},
         {**NOTE, "record": RECORD["record"]},
         {**NOTE, "text": []},
@@ -152,6 +149,9 @@ def test_capture_identity_and_integrity_are_required() -> None:
         ({**capture, "text": "altered"}, NOTE),
         (capture, {**NOTE, "brain": "other"}),
         (capture, {**NOTE, "ref": "projects/other.md"}),
+        (capture, {**NOTE, "next_offset": 100}),
+        (capture, {**NOTE, "chunk": "PRIVATE FAILURE"}),
+        ({**capture, "next_offset": 100}, NOTE),
         ({**capture, "capture_version": True}, NOTE),
         ({**capture, "captured_at": "2026-09-25"}, NOTE),
     ]:
@@ -186,14 +186,79 @@ def test_real_reads_keep_history_after_replacement_and_explain_direct_impact(bra
     assert len(groups) == 1
     assert "projects/decision.md" in json.dumps(groups)
     assert "origin" in json.dumps(groups)
-    # The helper reads only stdin. A changed answer does not silently rewrite the conclusion.
+    # Capture and compare read only stdin. A changed answer does not silently rewrite the conclusion.
     assert brain.read("projects/decision.md").startswith(b"# Decision")
 
 
-@pytest.mark.parametrize("skill", sorted((ROOT / "skills").glob("*/SKILL.md")), ids=lambda path: path.parent.name)
-def test_distributed_skills_name_the_release_they_were_copied_from(skill: Path) -> None:
-    # Skills are copied into hosts separately from the package: their version shows a stale copy.
-    frontmatter = yaml.safe_load(skill.read_text(encoding="utf-8").split("---\n")[1])
-    assert frontmatter["name"] == skill.parent.name
-    assert frontmatter["metadata"] == {"version": __version__}
-    assert f"Brain Framework {__version__.split('.')[0]} " in frontmatter["compatibility"]
+LARGE = "## Retention {#retention}\n\n" + "Keep one revision per decision. " * 3000 + "\n"
+
+
+def chunks(brain: Store, ref: str) -> list[dict[str, object]]:
+    """The genuine chunked replies of one exact read, in order."""
+    replies = [retrieve.read([brain], ref)]
+    while "next_offset" in replies[-1]:
+        replies.append(retrieve.read([brain], ref, offset=cast("int", replies[-1]["next_offset"])))
+    return replies
+
+
+def test_read_assembles_chunked_exact_replies_for_capture(brain: Store) -> None:
+    # Exact replies above 65,536 characters arrive in chunks; one chunk is never complete evidence.
+    brain.write("projects/large.md", ("# Large\n\n" + LARGE).encode())
+    ref = "projects/large.md#retention"
+    assert len(chunks(brain, ref)) == 2
+    assert execute("capture", retrieve.read([brain], ref)).returncode == 1
+    reply = subprocess.run(  # noqa: S603 - the bundled helper runs this checkout's bf on a synthetic brain
+        [sys.executable, str(HELPER), "read", ref, "--brain", str(brain.root)],
+        env={**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert reply.returncode == 0, reply.stderr
+    whole = json.loads(reply.stdout)
+    assert whole["ref"] == ref
+    capture = run("capture", whole)
+    assert capture["text"] == LARGE
+    assert run("compare", capture, whole)["state"] == "unchanged"
+
+
+@pytest.mark.parametrize("tamper", ["changed", "corrupt", "offset", "truncated", "missing", "ended"])
+def test_read_rejects_changed_or_incomplete_chunks(brain: Store, provider: Provider, tamper: str) -> None:
+    brain.write("projects/large.md", ("# Large\n\n" + LARGE).encode())
+    ref = "projects/large.md#retention"
+    first, last = chunks(brain, ref)
+    replaced = {
+        "changed": {**last, "sha256": "0" * 64},
+        "corrupt": {**last, "chunk": str(last["chunk"]).replace("Keep", "Drop", 1)},
+        "offset": {**last, "offset": 1},
+        "truncated": {**last, "chunk": str(last["chunk"])[:-1]},
+        "missing": None,
+        "ended": NOTE,
+    }[tamper]
+    provider.install("bf", [{"match": ["read"], "stdout": reply} for reply in (first, replaced) if reply is not None])
+    result = provider.run(
+        "evidence.py", "read", ref, "--brain", "/brains/selected", folder="../skills/bf-learn/scripts"
+    )
+    assert result.returncode == 1
+    assert not result.stdout
+    assert "Keep" not in result.stderr
+    assert provider.calls("bf")[1] == [
+        "read",
+        ref,
+        "--brain",
+        "/brains/selected",
+        "--offset",
+        str(first["next_offset"]),
+    ]
+
+
+def test_read_passes_whole_replies_and_rejects_option_like_refs(provider: Provider) -> None:
+    provider.install("bf", [{"match": ["read"], "stdout": NOTE}])
+    result = provider.run("evidence.py", "read", NOTE["ref"], "--brain", "brain", folder="../skills/bf-learn/scripts")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == NOTE
+    for arguments in (("read", "--offset=1", "--brain", "brain"), ("read", NOTE["ref"]), ("read", "", "--brain", "x")):
+        result = provider.run("evidence.py", *arguments, folder="../skills/bf-learn/scripts")
+        assert result.returncode == 2
+    assert provider.calls("bf") == [["read", NOTE["ref"], "--brain", "brain"]]

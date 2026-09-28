@@ -22,30 +22,44 @@ From the checkout:
 ```bash
 mise run install
 uv run bf --help
+mise run format
 mise run all
 ```
 
-`install` syncs locked dependencies and installs Git hooks. `all` formats, checks, tests, evaluates retrieval and builds the distributions. Inspect its diff before committing; run mutating checks in an isolated copy when the checkout has unrelated work.
+`install` syncs locked dependencies and installs Git hooks. Run `format` deliberately after editing; it rewrites source files, so preserve unrelated work and inspect its diff. `all` checks, tests (including runnable examples) and builds distributions without rewriting source files. Formatting drift fails the gate; fix it with `format`, then rerun the failed check. Tasks use `uv run --locked`, so a stale `uv.lock` fails instead of being rewritten; run `uv lock` deliberately. Validation still writes ignored caches, coverage, documentation and build output.
+
+Use `uv run bf` to exercise checkout code on a disposable brain. `mise run test:watch` reruns tests after edits; `mise run docs:watch` serves the documentation.
 
 Use a focused check while editing, then run the full gate:
 
-| Changed area                   | Focused check                                    | What to verify                                                      |
-| ------------------------------ | ------------------------------------------------ | ------------------------------------------------------------------- |
-| Search                         | `TZ=UTC uv run pytest -q tests/test_search.py`   | Results and realistic failure cases.                                |
-| Retrieval quality              | `mise run eval`                                  | Questions still find the expected source, rank and answer fragment. |
-| Documentation                  | `mise run check:docs` and `mise run check:links` | Strict build, rendered anchors and local repository links.          |
-| Configuration model            | `mise run generate:schema`                       | Generated `docs/bf.schema.json` matches the loader.                 |
-| Indexing, retrieval or storage | `mise run benchmark` before and after            | Comparable timings with valid, complete results.                    |
+| Changed area                   | Focused check                                                                 | What to verify                                                                                   |
+| ------------------------------ | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Search                         | `uv run pytest -q tests/test_search.py`                                       | Results and realistic failure cases.                                                             |
+| Retrieval quality              | [Run the retrieval example's test](examples/retrieval/README.md#run-the-test) | Questions still find the expected source, rank and answer fragment.                              |
+| Documentation                  | `mise run check:docs` and `mise run check:links`                              | Strict build, rendered anchors and local repository links.                                       |
+| Getting started, first sensor  | `uv run pytest -q tests/test_guides.py`                                       | Commands return the documented replies; the test applies each other block as its prose says.     |
+| Configuration model            | `mise run generate:schema`                                                    | Generated `docs/*.schema.json` match their loaders; test valid and invalid inputs against both.  |
+| Watch dashboard                | `mise run generate:screenshot`                                                | `docs/assets/watch.svg` shows the current dashboard; regenerate after dashboard or Rich changes. |
+| Dependencies                   | `mise run generate:notices`                                                   | `THIRD_PARTY_NOTICES.md` and the site's license copies match the synced environment.             |
+| Indexing, retrieval or storage | `mise run benchmark` before and after                                         | Comparable timings with valid, complete results.                                                 |
 
-For example, if a query finds the wrong project's budget, add that question and both competing project notes to [evals/](evals/README.md). Reproduce the miss before changing ranking; keep the expected answer tied to its source. A passing retrieval case checks that case, not source truth or arbitrary answer quality.
+For example, if a query finds the wrong project's budget, add that question and both competing project notes to the [retrieval example](examples/retrieval/README.md). Reproduce the miss before changing ranking and rerun its test after the fix; keep the expected answer tied to its source. A passing retrieval case checks that case, not source truth or arbitrary answer quality. Evaluating a real brain requires authorization; work on a copy and report only aggregate results.
 
 ## Test outcomes and failures
 
-Technical tests belong in `tests/`; question-to-evidence cases belong in `evals/`. Both run without an LLM. Use the fake providers in `tests/conftest.py`; tests isolate HOME, configuration and state. Do not use private brains or live credentials.
+Tests belong in `tests/`; runnable brains and their question-to-evidence cases live together under `examples/`. Pytest validates and evaluates disposable copies. Both technical and retrieval checks run without an LLM. Use synthetic fixtures and the fake providers in `tests/conftest.py`; tests run in UTC with neutral terminal settings, isolate HOME, configuration and state and unset `BF_BRAIN`. A test of local dates chooses its zone in a subprocess. Reserve real POSIX tools for process-boundary tests. Do not use private brains or live credentials.
 
-For a sensor change, test a valid response and a realistic failure such as an incomplete provider page. Confirm that failure leaves saved evidence intact and diagnostics contain no provider text. Keep the 85% branch-coverage floor and all existing safety checks.
+For a sensor change, test a valid response and a realistic failure such as an incomplete provider page. Confirm that failure leaves saved evidence intact and diagnostics contain no provider text. Keep the 95% branch-coverage floor and all existing safety checks.
 
-For a documentation change, follow the actual commands in a disposable brain with isolated configuration and state: save a decision, search its reason, read its ref, validate and evaluate. Show the expected result beside the example. Keep the README focused on first use, `docs/` on user contracts and `skills/` on agent procedures.
+For onboarding or workflow changes, follow the actual commands in a disposable brain with isolated configuration and state: save a decision, search its reason, read its ref, validate and evaluate. Show the expected result beside the example. Keep the README focused on first use, `docs/` on user contracts and `skills/` on agent procedures. Check host discovery separately from copying a skill or installing the package.
+
+Update the owning docs, skills and examples with public behavior. An adapter change needs a fake-provider test and an entry in `examples/sensors/README.md`. Regenerate the schema when configuration models change and the notices when dependencies change. Record user-visible outcomes under `Unreleased` in `CHANGELOG.md`; change versions and tags only for an authorized release.
+
+## Write documentation people can follow
+
+Keep tutorials focused on one working result, task guides on a practical goal, concepts on why the model works and reference pages on exact contracts ([Diátaxis](https://diataxis.fr/start-here/)). Put prerequisites before commands and observable results beside them. Label fictional evidence and optional steps; link to the canonical explanation instead of repeating it.
+
+Use descriptive links, one page title, logical heading levels and text alternatives for images ([W3C guidance](https://www.w3.org/WAI/tutorials/page-structure/)). Preserve published documentation-site paths and heading anchors when reorganizing; `tests/test_readme.py` checks the README's deep links. Keep all guides in `zensical.toml`; after layout changes, check narrow screens, keyboard navigation, code copying and search when enabled.
 
 ## Read check output
 
@@ -61,14 +75,18 @@ The first restores command echoes. The second runs verbose tests. The third read
 
 ## Maintain the shared gate
 
-Keep `mise.toml` and workflow steps declarative: one command per step, short command arrays and native flags. Git hooks run import sorting and Python formatting separately, with the staged file selection. Secret checks cover the working tree and recent history; `check:leaks:staged` checks staged content only.
+Keep `mise.toml` and workflow steps declarative: one command per step, short command arrays and native flags. The pre-commit hook formats staged files (dprint, import sorting, then Ruff), scans the staged snapshot for secrets and runs `check`; the pre-push hook runs `test`. `check` sees the working tree, including unstaged and untracked files, so commit or set aside unrelated work first. Secret checks cover the working tree and recent history; `check:leaks:staged` checks staged content only. Local secret and vulnerability scans skip ignored generated directories (`.gitleaks.toml`, `trivy.yaml`), so they see what a CI checkout sees.
 
-`test:package` installs the wheel and source distribution outside the checkout and exercises initialization, retrieval, validation and evaluation. The benchmark uses synthetic records, verifies results outside its timers and has no performance threshold. The owning scripts document the details.
+`all` runs `check`, `test` and `build` in sequence. CI and CD use the same tasks in `.github/workflows/verify.yml`: `check` runs once on Linux x64, then `test` and `build` run on Linux and macOS, x64 and arm64. Shared checks include formatting, lint, types, schema, notices, screenshot, documentation, workflow validation and security scans. Each job lists unexpected checkout changes before rejecting them. Keep every check in the local gate and its corresponding CI job.
 
-Docs build into `site/brain-framework/`. Zensical owns `.cache/`; schema generation uses separate `.schema-cache/` files so a clean docs build cannot remove them.
+`test:package` installs the wheel and source distribution outside the checkout and verifies initialization, search matches, exact file contents, project and task pages, validation, health, evaluation and an MCP stdio handshake with search and read. It rejects incomplete replies and incorrect results even when commands exit successfully. The benchmark uses synthetic records, times record writes, cache builds and retrieval, verifies results and validates the final brain outside its timers and has no performance threshold. Its temporary brain lives under `$XDG_CACHE_HOME/bf-benchmark` (default `~/.cache/bf-benchmark`, or `--dir`), because a RAM-backed `/tmp` hides fsync costs; writing the default 20,000-record corpus then takes a few minutes. The owning scripts document the details.
+
+Dependabot updates GitHub Actions and `uv.lock` weekly, with a seven-day cooldown and separate major-version proposals. `mise run upgrade` takes the newest compatible releases without that delay; for an urgent fix, prefer `uv lock --upgrade-package NAME`. After any dependency update, run `mise run generate:notices`; after a Rich update, also run `mise run generate:screenshot`. mise tools, dprint plugins and the workflows' mise `version:` are pinned by hand: `mise run check:outdated` reports drift in mise tools and dprint plugins, honoring the seven-day cooldown for plugins, and `mise version` warns when a newer mise release exists. The scheduled security workflow rescans complete Git history, the checkout and all locked Python dependencies, including development tools, runs the online workflow audits and installs the built package with the newest dependencies its ranges allow (`scripts/test_package.py --unlocked`), even when no code changes trigger CI.
+
+`docs:build` owns the strict documentation build into `site/brain-framework/`; `check:docs` calls it before checking rendered links. Zensical owns `.cache/`. `check:schema` compares all four generated schema documents in memory without modifying files or using the documentation cache. `generate:schema` regenerates their checked-in copies under `docs/`. `check:notices` compares `THIRD_PARTY_NOTICES.md`, the site notices page and its license copies with the synced environment and fails on an unreviewed dependency or vendored license; `generate:notices` rewrites them. `check:screenshot` renders the watch dashboard over the fictional `examples/watch` history and fails when `docs/assets/watch.svg` differs, including after a Rich upgrade; `generate:screenshot` rewrites it.
 
 ## Release
 
-CI and CD share `.github/workflows/verify.yml`, which runs the gate on Linux and macOS, x64 and arm64. CI deploys docs from current `main`; tag-triggered CD publishes the tested package artifacts. Local success is separate from hosted CI and publication.
+CI deploys the shared check job's documentation from current `main` only after all verification jobs pass. Tag-triggered CD publishes the tested Linux x64 package artifacts after the same gate. Report local checks, hosted CI, published artifacts, installed runtime, provider freshness and agent-host integration as separate evidence. Commit, push and publish only when authorized.
 
 Follow the [release checklist](.agents/skills/bf-contribute/references/release.md) only with release authorization. See [SECURITY.md](SECURITY.md) for private vulnerability reports and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.

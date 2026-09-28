@@ -16,7 +16,7 @@ Outcome: keep consequential decisions explainable after source replacement. Cons
 - [ ] Measure a small synthetic sample before choosing a retention limit.
 - [ ] Try the proposed procedure on a separate synthetic case.
 
-## Decisions
+## Decision {#decision}
 
 The [new decision](outputs/decision.md) supersedes the [earlier decision](outputs/prior-decision.md); both retain their original rationale. These are fictional observations, not measured product results.
 

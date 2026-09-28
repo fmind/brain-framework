@@ -16,12 +16,17 @@ from threading import Event
 from typing import Any, cast
 
 import pytest
+from typer.testing import CliRunner
 
 from bf import records
-from bf.collect import collect, due, log_path, run, state
+from bf.cli import app
+from bf.collect import Runner, collect, due, run
+from bf.health import source_health
+from bf.history import environment, log_path, state
 from bf.models import Error, Program, Sensor, timestamp
 from bf.storage import BusyError, Store, state_store, writer
 from bf.update import update
+from bf.watch import snapshot
 
 START = "2026-09-01T00:00:00.000000Z"
 END = "2026-09-02T00:00:00.000000Z"
@@ -89,16 +94,19 @@ def test_collect_dry_run_then_upsert(configured: Store) -> None:
     }
     assert result["output_bytes"] == preview["output_bytes"]
     assert records.files(configured, "sample") == [records.path("sample", "x")]
+    # Run history keeps canonical UTC instants, like every other reply timestamp.
     assert state(configured)["sample"] == {
-        "run": NOW.isoformat(),
-        "success": NOW.isoformat(),
+        "run": END,
+        "success": END,
         "start": START,
         "end": END,
         "error": "",
+        "failures": 0,
         **{key: value for key, value in result.items() if key != "sensor"},
     }
 
 
+@pytest.mark.parametrize("dry_run", [False, True], ids=["collect", "preview"])
 @pytest.mark.parametrize(
     ("output", "match"),
     [
@@ -106,14 +114,22 @@ def test_collect_dry_run_then_upsert(configured: Store) -> None:
         (b'{"id":"x"}', "one JSON array"),
         (b'[{"id":"x"}]', "title"),
         (b'[{"id":"x","title":"A"},{"id":"x","title":"B"}]', "duplicate record ids"),
+        # The JSON escape of a surrogate-escaped, non-UTF-8 filename.
+        (b'[{"id":"x","title":"A","links":["file:caf\\udce9"]}]', "links: .*valid Unicode"),
     ],
 )
-def test_invalid_output_writes_nothing_and_is_remembered(configured: Store, output: bytes, match: str) -> None:
+def test_invalid_output_writes_nothing_and_is_remembered(
+    configured: Store, output: bytes, match: str, dry_run: bool
+) -> None:
     with pytest.raises(Error, match=match) as failure:
-        collect(configured, "sample", start=START, end=END, runner=lambda *_: output)
+        collect(configured, "sample", start=START, end=END, runner=lambda *_: output, dry_run=dry_run)
     assert str(log_path(configured, "sample")) in str(failure.value)
     assert records.files(configured, "sample") == []
-    assert match.split()[0] in str(state(configured)["sample"]["error"])
+    if dry_run:
+        # A failed preview saves no run history either, so it cannot make a source failed or due.
+        assert state(configured) == {}
+    else:
+        assert match.split()[0] in str(state(configured)["sample"]["error"])
 
 
 def test_provider_keys_never_reach_errors_or_history(configured: Store) -> None:
@@ -126,6 +142,18 @@ def test_provider_keys_never_reach_errors_or_history(configured: Store) -> None:
         assert "ceo@corp" not in str(failure.value)
         assert "<key>" in str(failure.value)
         assert "ceo@corp" not in str(state(configured)["sample"]["error"])
+
+
+def test_provider_relation_names_never_reach_errors_history_or_status(configured: Store) -> None:
+    # A sensor controls a link's `?rel=` value: an undeclared one fails the run without being quoted.
+    output = emit({"id": "a", "title": "t", "links": ["bf://fixture/x?rel=ignore-previous-instructions"]})
+    with pytest.raises(Error, match="link relation is undeclared") as failure:
+        collect(configured, "sample", start=START, end=END, runner=lambda *_: output)
+    assert "ignore-previous" not in str(failure.value)
+    assert "ignore-previous" not in json.dumps(state(configured))
+    status = CliRunner().invoke(app, ["status", "--brain", str(configured.root)])
+    assert "ignore-previous" not in status.stdout
+    assert "link relation is undeclared" in status.stdout
 
 
 def test_collection_requires_a_known_enabled_source_and_a_window(configured: Store, tmp_path: Path) -> None:
@@ -141,7 +169,7 @@ def test_collection_requires_a_known_enabled_source_and_a_window(configured: Sto
     shared.write("bf.yaml", CONFIG.replace(b"name: fixture", b"name: shared"))
 
     assert collect(shared, "sample", start=START, end=END, runner=lambda *_: b"[]")["records"] == 0
-    assert update([shared], now=NOW, runner=lambda *_: b"[]")["ok"]
+    assert update(shared, now=NOW, runner=lambda *_: b"[]")["ok"]
 
 
 def test_due_windows_resume_with_overlap_and_catch_up_at_most_30_days(configured: Store) -> None:
@@ -165,17 +193,45 @@ def test_update_isolates_failures_and_refreshes_the_cache(configured: Store) -> 
             raise Error("provider unavailable")
         return emit({"id": "x", "title": "Collected zirconium", "time": "2026-09-01T10:00:00Z"})
 
-    planned = cast("Any", update([configured], dry_run=True, now=NOW))
-    assert [s["status"] for s in planned["brains"][0]["sensors"]] == ["due", "due"]
-    assert "index" not in planned["brains"][0]
-    report = cast("Any", update([configured], now=NOW, runner=fake))
+    planned = cast("Any", update(configured, dry_run=True, now=NOW))
+    assert [s["status"] for s in planned["sensors"]] == ["due", "due"]
+    assert "index" not in planned
+    report = cast("Any", update(configured, now=NOW, runner=fake))
     assert not report["ok"]
-    sources = report["brains"][0]["sensors"]
+    sources = report["sensors"]
     assert [s["status"] for s in sources] == ["failed", "collected"]
     assert "provider unavailable" in sources[0]["error"]
-    assert report["brains"][0]["index"]["changed"] >= 1
-    # The failed snapshot stays due; the collected window waits for its refresh interval.
+    assert report["index"]["changed"] >= 1
+    # The failed snapshot retries after a minute; the collected window waits for its refresh interval.
+    assert due(configured, NOW + timedelta(seconds=59)) == []
     assert [name for name, *_ in due(configured, NOW + timedelta(minutes=1))] == ["folders"]
+
+
+def test_failed_programs_back_off_exponentially_up_to_their_refresh(configured: Store) -> None:
+    def fail(*_: object) -> bytes:
+        raise Error("provider unavailable")
+
+    def pending(when: datetime) -> bool:
+        return "folders" in [name for name, *_ in due(configured, when)]
+
+    at = NOW
+    for failures in range(1, 13):
+        with pytest.raises(Error, match="provider unavailable"):
+            collect(configured, "folders", start=START, end=END, runner=fail, clock=lambda at=at: at)
+        # One minute, doubling per consecutive failure, but never longer than the daily refresh.
+        delay = min(timedelta(minutes=2 ** (failures - 1)), timedelta(days=1))
+        assert not pending(at + delay - timedelta(seconds=1))
+        assert pending(at + delay)
+        (row,) = [row for row in snapshot(configured) if row.name == "folders"]
+        assert (row.status, row.next_due) == ("failed", timestamp((at + delay).isoformat()))
+        at += delay
+    assert state(configured)["folders"]["failures"] == 12
+    # A success resets the count: the next failure retries after one minute again.
+    collect(configured, "folders", start=START, end=END, runner=catalog(1), clock=lambda: at)
+    assert not pending(at + timedelta(hours=23))
+    with pytest.raises(Error):
+        collect(configured, "folders", start=START, end=END, runner=fail, clock=lambda: at)
+    assert pending(at + timedelta(minutes=1))
 
 
 def test_real_process_boundary(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -201,6 +257,34 @@ def test_real_process_boundary(configured: Store, monkeypatch: pytest.MonkeyPatc
         run(["no-such-bf-command"], source, configured, log)
     with pytest.raises(Error, match="bare command"):
         run(["/bin/sh"], source, configured, log)
+
+
+def test_programs_select_the_executing_brain(
+    configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An inherited selection would make a nested `bf read` without --brain read another brain.
+    monkeypatch.setenv("BF_BRAIN", str(tmp_path / "other"))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    source = Sensor(command=["sh"])
+    output = run(["sh", "-c", 'printf "%s" "$BF_BRAIN"'], source, configured, log_path(configured, "sample"))
+    assert output == str(configured.root).encode()
+
+
+def test_background_descendants_cannot_hold_a_finished_program(
+    configured: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    log = log_path(configured, "sample")
+    source = Sensor(command=["sh"], timeout=30)
+    started = time.monotonic()
+    # A helper that inherits only stderr, such as an SSH master, holds diagnostics, not the result.
+    script = 'sleep 30 >/dev/null & printf "[]"; printf note >&2'
+    assert run(["sh", "-c", script], source, configured, log) == b"[]"
+    assert log.read_text() == "note"
+    # Output still open after the program exited may be incomplete: fail quickly with the cause.
+    with pytest.raises(Error, match="kept its stdout open"):
+        run(["sh", "-c", 'sleep 30 & printf "[]"'], source, configured, log)
+    assert time.monotonic() - started < 10
 
 
 def test_brain_collectors_run_from_the_brain_root(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -240,9 +324,9 @@ def test_missing_source_does_not_prevent_other_sources(configured: Store) -> Non
         b"  a-missing:\n    command: [sensors/missing.py]\n    refresh: 3600\n"
         b'  b-good:\n    command: [echo, "[]"]\n    refresh: 3600\n',
     )
-    report = cast("Any", update([configured], now=NOW))
+    report = cast("Any", update(configured, now=NOW))
     assert not report["ok"]
-    assert [item["status"] for item in report["brains"][0]["sensors"]] == ["failed", "collected"]
+    assert [item["status"] for item in report["sensors"]] == ["failed", "collected"]
     assert state(configured)["a-missing"]["error"]
     assert state(configured)["b-good"]["success"]
 
@@ -251,12 +335,12 @@ def test_success_and_failure_history_are_serialized(configured: Store, monkeypat
     original = Store.write
     writes = []
 
-    def checked(self: Store, name: str, data: bytes) -> None:
+    def checked(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
         if name == "sensors.json":
             with pytest.raises(BusyError), writer(configured):
                 pass
             writes.append(name)
-        original(self, name, data)
+        original(self, name, data, durable=durable)
 
     monkeypatch.setattr(Store, "write", checked)
     collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]")
@@ -266,16 +350,45 @@ def test_success_and_failure_history_are_serialized(configured: Store, monkeypat
     assert set(state(configured)) == {"sample", "folders"}
 
 
-def test_an_empty_snapshot_never_erases_an_existing_catalog(configured: Store) -> None:
-    collect(configured, "folders", start=START, end=END, runner=lambda *_: emit({"id": "one", "title": "Kept"}))
-    # A wrong account or an unmounted folder also returns an empty catalog.
-    with pytest.raises(Error, match="snapshot returned no records"):
-        collect(configured, "folders", start=START, end=END, runner=lambda *_: b"[]")
-    assert records.find(configured, "folders", "one") is not None
-    assert "snapshot returned no records" in str(state(configured)["folders"]["error"])
+def catalog(count: int, first: int = 0) -> Runner:
+    return lambda *_: json.dumps(
+        [{"id": f"item-{n}", "title": f"Item {n}"} for n in range(first, first + count)]
+    ).encode()
+
+
+def test_a_shrinking_snapshot_never_erases_most_of_a_catalog(configured: Store) -> None:
     # A first empty catalog is a valid answer.
-    configured.delete("memories/folders/7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed.json")
-    assert collect(configured, "folders", start=START, end=END, runner=lambda *_: b"[]")["records"] == 0
+    assert collect(configured, "folders", start=START, end=END, runner=catalog(0))["records"] == 0
+    collect(configured, "folders", start=START, end=END, runner=catalog(30))
+    # A wrong account, a lost folder or a truncated listing also looks like a smaller catalog.
+    for smaller, removed in ((0, 30), (14, 16)):
+        with pytest.raises(Error, match=f"would remove {removed} of 30 records.*--allow-removal"):
+            collect(configured, "folders", start=START, end=END, runner=catalog(smaller))
+        assert len(records.files(configured, "folders")) == 30
+    entry = state(configured)["folders"]
+    assert "would remove 16 of 30 records" in str(entry["error"])
+    assert entry["failures"] == 2
+    # Half of a catalog, or at most ten records of a small one, can change like an agenda.
+    for count, first, removed in ((30, 15, 15), (16, 29, 14), (6, 39, 10)):
+        assert collect(configured, "folders", start=START, end=END, runner=catalog(count, first))["removed"] == removed
+    assert (state(configured)["folders"]["error"], state(configured)["folders"]["failures"]) == ("", 0)
+
+
+def test_allow_removal_accepts_one_deliberate_shrink(configured: Store) -> None:
+    configured.write(
+        "bf.yaml", CONFIG.replace(b"command: [echo]\n    mode: snapshot", b'command: [echo, "[]"]\n    mode: snapshot')
+    )
+    collect(configured, "folders", start=START, end=END, runner=catalog(30))
+    command = ["collect", "folders", "--brain", str(configured.root)]
+    refused = CliRunner().invoke(app, command)
+    assert refused.exit_code == 1
+    assert "--allow-removal" in str(refused.exception)
+    assert len(records.files(configured, "folders")) == 30
+    accepted = CliRunner().invoke(app, [*command, "--allow-removal"])
+    assert accepted.exit_code == 0, accepted.output
+    assert json.loads(accepted.stdout)["removed"] == 30
+    assert records.files(configured, "folders") == []
+    assert not state(configured)["folders"]["error"]
 
 
 def test_overlapping_source_run_cannot_overwrite_newer_snapshot(configured: Store) -> None:
@@ -298,7 +411,42 @@ def test_overlapping_source_run_cannot_overwrite_newer_snapshot(configured: Stor
     assert records.find(configured, "folders", "one") is not None
 
 
-def test_interpreter_startup_injection_is_removed(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_environment_removes_documented_startup_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The documented contract, not the implementation's list: removing an entry must fail here.
+    startup = (
+        "BASH_ENV",
+        "BASHOPTS",
+        "BASH_FUNC_x%%",
+        "DYLD_INSERT_LIBRARIES",
+        "ENV",
+        "GCONV_PATH",
+        "JAVA_TOOL_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "_JAVA_OPTIONS",
+        "LD_PRELOAD",
+        "LUA_INIT_5_4",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "PERL5LIB",
+        "PERL5OPT",
+        "PERLLIB",
+        "PS4",
+        "PYTHONSTARTUP",
+        "RUBYLIB",
+        "RUBYOPT",
+        "SHELLOPTS",
+    )
+    for key in startup:
+        monkeypatch.setenv(key, "startup-injection")
+    monkeypatch.setenv("EXAMPLE_PROVIDER_ACCOUNT", "ordinary-value")
+    env = environment()
+    assert not set(startup) & env.keys()
+    assert env["EXAMPLE_PROVIDER_ACCOUNT"] == "ordinary-value"
+
+
+def test_interpreter_startup_injection_is_removed(
+    configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     variables = (
         "PYTHONPATH",
         "PYTHONHOME",
@@ -312,19 +460,29 @@ def test_interpreter_startup_injection_is_removed(configured: Store, monkeypatch
     )
     for key in variables:
         monkeypatch.setenv(key, "startup-injection")
+    # Bash would run each of these before the program: a startup file, xtrace with a command
+    # substitution in its prompt, and an imported function replacing a builtin.
+    marker = tmp_path / "injected"
+    startup = tmp_path / "startup.sh"
+    startup.write_text(f"touch '{marker}'\n")
+    monkeypatch.setenv("BASH_ENV", str(startup))
+    monkeypatch.setenv("SHELLOPTS", "xtrace")
+    monkeypatch.setenv("PS4", f"$(touch '{marker}')")
+    monkeypatch.setenv("BASH_FUNC_printf%%", f"() {{ touch '{marker}'; }}")
     # A relative PATH entry would resolve inside the brain, where only sensors/ and routines/ may run.
     configured.write("bin/tool", b"#!/bin/sh\necho injected\n")
     (configured.root / "bin/tool").chmod(0o700)
     monkeypatch.setenv("PATH", "bin:/usr/bin:/bin")
-    source = Sensor(command=["sh"])
+    source = Sensor(command=["bash"])
     log = log_path(configured, "sample")
     output = run(
-        ["sh", "-c", 'printf "%s|%s" "$PATH" "' + "".join(f"${key}" for key in variables) + '"'],
+        ["bash", "-c", 'printf "%s|%s" "$PATH" "' + "".join(f"${key}" for key in variables) + '"'],
         source,
         configured,
         log,
     )
     assert output == b"/usr/bin:/bin|"
+    assert not marker.exists()
     with pytest.raises(Error, match="not on PATH"):
         run(["tool"], source, configured, log)
 
@@ -372,7 +530,8 @@ def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_pat
         child.send_signal(signum)
         stdout, stderr = child.communicate(timeout=10)
         assert child.returncode == 130, stderr.decode()
-        assert stdout == b""
+        # Cancellation exits 130 without a message.
+        assert (stdout, stderr) == (b"", b"")
         for pid in pids:
             status = subprocess.run(  # noqa: S603 - inspect only process ids from the synthetic collector
                 ["ps", "-o", "stat=", "-p", str(pid)],  # noqa: S607 - POSIX process-boundary check
@@ -392,21 +551,30 @@ def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_pat
             child.communicate(timeout=5)
 
 
-def test_invalid_history_and_other_brain_errors_do_not_stop_update(configured: Store, tmp_path: Path) -> None:
-    state_store(configured.root).write("sensors.json", b'{"sample":{"success":"not-a-date"},"folders":[]}')
+def test_invalid_history_and_cache_errors_do_not_stop_update(configured: Store, tmp_path: Path) -> None:
+    state_store(configured.root).write(
+        "sensors.json",
+        b'{"sample":{"success":"2026-09-01T02:00:00+02:00"},"manual":{"success":"not-a-date"},'
+        b'"folders":[],"Bad Name":{}}',
+    )
+    # Each invalid entry is dropped alone, and instants read back in canonical UTC.
+    assert state(configured) == {"sample": {"success": START}}
+    state_store(configured.root).write("sensors.json", b"[]")
     assert state(configured) == {}
     state_store(configured.root).write("sensors.json", b"broken")
     assert state(configured) == {}
+    configured.write(".bf", b"not a directory")
+    report = cast("Any", update(configured, now=NOW, runner=lambda *_: b"[]"))
+    assert not report["ok"]
+    assert report["index"]["error"]
+    assert [item["status"] for item in report["sensors"]] == ["collected", "collected"]
+    # Like collect, a brain whose configuration cannot load fails before running anything.
     other = tmp_path / "broken-brain"
     other.mkdir()
     broken = Store(other)
     broken.write("bf.yaml", b"invalid: true\n")
-    configured.write(".bf", b"not a directory")
-    report = cast("Any", update([broken, configured], now=NOW, runner=lambda *_: b"[]"))
-    assert not report["ok"]
-    assert report["brains"][0]["error"]
-    assert report["brains"][1]["index"]["error"]
-    assert [item["status"] for item in report["brains"][1]["sensors"]] == ["collected", "collected"]
+    with pytest.raises(Error):
+        update(broken, now=NOW, runner=lambda *_: pytest.fail("no program runs"))
 
 
 def test_observation_and_coverage_describe_collected_evidence(configured: Store) -> None:
@@ -423,13 +591,20 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
     assert (entry["start"], entry["end"], entry["success"], entry["run"]) == (
         "2026-08-31T00:00:00.000000Z",
         END,
-        NOW.isoformat(),
-        later.isoformat(),
+        END,
+        timestamp(later.isoformat()),
     )
     # An older, disjoint backfill keeps the recorded coverage, resume point and freshness.
-    collect(configured, "sample", start="2026-01-01T00:00:00Z", end="2026-01-02T00:00:00Z", runner=lambda *_: b"[]")
+    collect(
+        configured,
+        "sample",
+        start="2026-01-01T00:00:00Z",
+        end="2026-01-02T00:00:00Z",
+        runner=lambda *_: b"[]",
+        clock=lambda: later,
+    )
     entry = state(configured)["sample"]
-    assert (entry["start"], entry["end"], entry["success"]) == ("2026-08-31T00:00:00.000000Z", END, NOW.isoformat())
+    assert (entry["start"], entry["end"], entry["success"]) == ("2026-08-31T00:00:00.000000Z", END, END)
     assert due(configured, NOW + timedelta(days=1)) == [
         (
             "folders",
@@ -439,7 +614,8 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
         ),
         ("sample", "2026-09-01T23:55:00.000000Z", timestamp((NOW + timedelta(days=1)).isoformat()), False),
     ]
-    # A newer, disjoint window becomes the coverage and the latest success.
+    # A newer window leaving a gap, such as `bf collect sample --since 1d` after a pause, keeps the
+    # resume point and freshness, so the next update still fills the gap.
     newer = datetime(2026, 9, 11, 1, tzinfo=UTC)
     collect(
         configured,
@@ -450,10 +626,12 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
         clock=lambda: newer,
     )
     entry = state(configured)["sample"]
-    assert (entry["start"], entry["end"], entry["success"]) == (
-        "2026-09-10T00:00:00.000000Z",
-        "2026-09-11T00:00:00.000000Z",
-        newer.isoformat(),
+    assert (entry["start"], entry["end"], entry["success"]) == ("2026-08-31T00:00:00.000000Z", END, END)
+    assert due(configured, newer)[-1] == (
+        "sample",
+        "2026-09-01T23:55:00.000000Z",
+        timestamp(newer.isoformat()),
+        False,
     )
     # A window ending after its run covers only up to the run, so later scheduled runs stay the latest.
     ahead = newer + timedelta(hours=1)
@@ -462,11 +640,63 @@ def test_observation_and_coverage_describe_collected_evidence(configured: Store)
     after = ahead + timedelta(hours=2)
     window = due(configured, after)[-1]
     collect(configured, "sample", start=window[1], end=window[2], runner=lambda *_: b"[]", clock=lambda: after)
-    assert state(configured)["sample"]["success"] == after.isoformat()
+    assert state(configured)["sample"]["success"] == timestamp(after.isoformat())
     # A window entirely after its run claims no coverage and no success.
-    collect(configured, "sample", start="2027-01-01T00:00:00Z", end="2027-01-02T00:00:00Z", runner=lambda *_: b"[]")
-    assert state(configured)["sample"]["success"] == after.isoformat()
+    collect(
+        configured,
+        "sample",
+        start="2027-01-01T00:00:00Z",
+        end="2027-01-02T00:00:00Z",
+        runner=lambda *_: b"[]",
+        clock=lambda: after,
+    )
+    assert state(configured)["sample"]["success"] == timestamp(after.isoformat())
     assert state(configured)["sample"]["end"] == window[2]
+
+
+def test_scheduled_catch_up_after_a_long_pause_is_the_latest_window(configured: Store) -> None:
+    collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]", clock=lambda: NOW)
+    far = NOW + timedelta(days=60)
+    # A manual day inside the catch-up horizon leaves the older gap due.
+    day = far - timedelta(days=1)
+    collect(
+        configured,
+        "sample",
+        start=timestamp(day.isoformat()),
+        end=timestamp(far.isoformat()),
+        clock=lambda: far,
+        runner=lambda *_: b"[]",
+    )
+    assert state(configured)["sample"]["success"] == END
+    ((_, start, end, _),) = [window for window in due(configured, far) if window[0] == "sample"]
+    assert start == timestamp((far - timedelta(days=30)).isoformat())
+    # The update catches up the last 30 days only, and that window becomes the latest.
+    collect(configured, "sample", start=start, end=end, runner=lambda *_: b"[]", clock=lambda: far)
+    entry = state(configured)["sample"]
+    assert (entry["start"], entry["end"], entry["success"]) == (start, end, end)
+    assert not [window for window in due(configured, far) if window[0] == "sample"]
+
+
+@pytest.mark.parametrize("days", [3, 45])
+def test_manual_window_sensor_coverage_follows_its_latest_run(configured: Store, days: int) -> None:
+    # No update revisits a manual sensor's gap, so each default `bf collect manual` window is the latest.
+    def default_window(now: datetime) -> None:
+        since = timestamp((now - timedelta(days=1)).isoformat())
+        collect(
+            configured,
+            "manual",
+            start=since,
+            end=timestamp(now.isoformat()),
+            runner=lambda *_: b"[]",
+            clock=lambda: now,
+        )
+
+    default_window(NOW)
+    later = NOW + timedelta(days=days)
+    default_window(later)
+    since, until = timestamp((later - timedelta(days=1)).isoformat()), timestamp(later.isoformat())
+    report = source_health(configured, now=later)["manual"]
+    assert (report["last_collected"], report["window"]) == (until, {"since": since, "until": until})
 
 
 def test_failed_run_history_reports_that_records_were_committed(
@@ -474,10 +704,10 @@ def test_failed_run_history_reports_that_records_were_committed(
 ) -> None:
     original = Store.write
 
-    def fail_history(self: Store, name: str, data: bytes) -> None:
+    def fail_history(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
         if name == "sensors.json":
             raise PermissionError("synthetic state failure")
-        original(self, name, data)
+        original(self, name, data, durable=durable)
 
     monkeypatch.setattr(Store, "write", fail_history)
     with pytest.raises(Error, match="records were committed"):
@@ -491,10 +721,10 @@ def test_future_run_history_cannot_block_current_collection(configured: Store, p
         "sensors.json",
         json.dumps({"sample": {"start": previous_start, "end": "2027-01-01T00:00:00Z", "success": START}}).encode(),
     )
-    report = cast("Any", update([configured], now=NOW, runner=lambda *_: b"[]"))
+    report = cast("Any", update(configured, now=NOW, runner=lambda *_: b"[]"))
     assert report["ok"]
     entry = state(configured)["sample"]
-    assert entry["success"] == NOW.isoformat()
+    assert entry["success"] == END
     assert entry["end"] == END
     assert entry["start"] == min(previous_start, START)
     assert not due(configured, NOW)

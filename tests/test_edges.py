@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from pydantic import ValidationError
 
-from bf import index, pages
+from bf import index, links, pages
 from bf.markdown import note
 from bf.models import Error, Knowledge, Query, Record
 from bf.retrieve import read, search
@@ -48,7 +49,6 @@ def test_a_damaged_cache_is_an_error_not_a_crash(brain: Store, monkeypatch: pyte
 
     monkeypatch.setattr(index, "search", damaged)
     monkeypatch.setattr(index, "listing", damaged)
-    monkeypatch.setattr(index, "listing_rows", damaged)
     for operation in (lambda: search([brain], Query(text="offline")), lambda: read([brain], "projects")):
         with pytest.raises(Error, match="run bf build"):
             operation()
@@ -94,7 +94,6 @@ def test_period_pages_order_changed_items_by_modification(brain: Store) -> None:
     records_file(
         brain,
         "mail",
-        "2026-01",
         [
             Record(
                 id="late",
@@ -107,7 +106,6 @@ def test_period_pages_order_changed_items_by_modification(brain: Store) -> None:
     records_file(
         brain,
         "mail",
-        "2026-08",
         [
             Record(
                 id=f"early-{n}",
@@ -130,17 +128,51 @@ def test_unknown_sources_are_missing_pages(brain: Store) -> None:
     assert read([brain], "memories/meetings/2026-08")["total"] == 2
 
 
-def test_a_record_too_long_for_an_address_still_reads(brain: Store) -> None:
-    record = Record(id="é" * 2000, title="Long identifier")
-    records_file(brain, "mail", "undated", [record])
-    reply = read([brain], f"mail:{record.id}")
+def test_every_record_id_fits_a_bf_address(brain: Store) -> None:
+    # Percent-encoding makes each "é" six characters: 2,000 of them cannot fit an 8,192-character address.
+    with pytest.raises(ValidationError, match="percent-encoded"):
+        Record(id="é" * 2000, title="Long identifier")
+    record = Record(id="é" * 1300, title="Long identifier")
+    records_file(brain, "mail", [record])
+    reply = read([brain], links.address("fixture", f"mail:{record.id}"))
     assert cast("dict[str, object]", reply["record"])["title"] == "Long identifier"
-    assert "backlinks are unavailable" in str(reply["problems"])
+    assert "problems" not in reply
+    assert validate(brain)["valid"]
+
+
+def test_a_note_path_too_long_for_an_address_is_named_and_still_reads(brain: Store) -> None:
+    # Each CJK character percent-encodes to nine characters: the path fits the filesystem but not an address.
+    path = "projects/" + "/".join(["漢" * 80] * 12) + "/note.md"
+    brain.write(path, b"# Long path\n\nlongpathneedle\n")
+    reply = read([brain], path)
+    assert "longpathneedle" in str(reply["text"])
+    assert reply["problems"] == [
+        {"brain": "fixture", "error": "backlinks are unavailable for a path this long; shorten it"}
+    ]
+    for problems in (validate(brain)["problems"], search([brain], Query(text="longpathneedle"))["problems"]):
+        assert path in str(problems)
+        assert "path exceeds 7988 characters once percent-encoded in a BF address" in str(problems)
+
+
+def test_a_note_path_with_a_control_character_still_reads(brain: Store) -> None:
+    # No BF address can hold a tab, so search skips the note; its exact bytes stay readable for repair.
+    path = "projects/tab\tname.md"
+    brain.write(path, b"# Tab\n\ntabneedle\n")
+    skipped = cast("list[dict[str, object]]", search([brain], Query(text="tabneedle"))["problems"])
+    assert [problem["file"] for problem in skipped] == [path]
+    reply = read([brain], path)
+    assert reply["text"] == "# Tab\n\ntabneedle\n"
+    assert reply["problems"] == [
+        {"brain": "fixture", "file": path, "error": "backlinks are unavailable for this path; rename it"}
+    ]
 
 
 def test_headings_and_file_names_stay_addressable(brain: Store) -> None:
     with pytest.raises(Error, match=r"cannot end in \.md"):
         note("projects/x.md", b"# X\n\n## Readme {#notes.md}\n")
+    # A suffix outside the anchor syntax is ordinary title text.
+    suffixed = note("projects/x.md", b"# X\n\n## Part {#-bad}\n").passages
+    assert [(passage.fragment, passage.heading) for passage in suffixed] == [("", "X"), ("part--bad", "Part {#-bad}")]
     parsed = note("projects/x.md", b"# X\n\n## ???\n\nFirst.\n\n## !!!\n\nSecond.\n")
     assert [passage.fragment for passage in parsed.passages] == ["", "section", "section-1"]
     brain.write("actions/2026-09-25_import/inputs/data#1.csv", b"a,b\n")

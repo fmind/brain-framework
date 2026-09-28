@@ -9,12 +9,14 @@ from typing import cast
 import pytest
 from mcp.types import CallToolResult
 
-from bf import index, links
+from bf import index, links, pages
 from bf.collect import collect
+from bf.config import load
 from bf.evaluate import evaluate
 from bf.markdown import note, section
 from bf.mcp import server
-from bf.models import Error, Query, Record, encode
+from bf.models import Error, NotFoundError, Query, Record, encode
+from bf.records import path as record_path
 from bf.retrieve import read, search
 from bf.storage import Store, writer
 from bf.validate import validate
@@ -65,6 +67,15 @@ aliases: [person:bob]
 A reviewed profile.
 """,
     )
+
+
+def test_bf_links_percent_encode_spaces_and_percent_signs() -> None:
+    # Destinations are read as written, so angle brackets do not make a space part of a BF address.
+    for destination in ("<bf://fixture/projects/launch plan.md>", "bf://fixture/projects/100%.md"):
+        with pytest.raises(Error, match=r"^invalid BF link; .* percent-encoded as %20 and %25"):
+            note("projects/web.md", f"# Web\n\n[plan]({destination})\n".encode())
+    encoded = note("projects/web.md", b"# Web\n\n[plan](bf://fixture/projects/launch%20plan.md)\n")
+    assert encoded.targets == ["bf://fixture/projects/launch%20plan.md"]
 
 
 @pytest.mark.parametrize(
@@ -137,8 +148,12 @@ def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
     alice = read([brain], "person:alice")
     assert alice["claims"] == [{"brain": "fixture", **claim}]
     assert alice["backlinks"] == []
+    # The identity's scope holds its owning note and what links to it, with the linking claims.
     scoped = search([brain], Query(text="bob", target="person:bob"))["items"]
-    assert [(i["ref"], i["relations"]) for i in cast(list[dict], scoped)] == [("projects/alice.md#friends", [claim])]
+    assert [(i["ref"], i.get("relations")) for i in cast(list[dict], scoped)] == [
+        ("projects/bob.md", None),
+        ("projects/alice.md#friends", [claim]),
+    ]
     assert validate(brain)["valid"]
     assert read([brain], "bf://fixture/people/bob#about")["text"] == "## About Bob {#about}\nA reviewed profile.\n"
     assert read([brain], "bf://fixture/people/bob?rel=friend#about")["ref"] == "projects/bob.md#about"
@@ -224,7 +239,7 @@ def test_federation_and_no_implicit_brain_access(brain: Store, tmp_path: Path) -
     }
     # An identity without an owning note still lists what links to it across the selected brains.
     team.write("projects/carol.md", b"# Met Carol\n[Carol](person:carol)\n")
-    records_file(brain, "mail", "undated", [Record(id="c", title="From Carol", links=["person:carol"])])
+    records_file(brain, "mail", [Record(id="c", title="From Carol", links=["person:carol"])])
     orphan = read([brain, team], "person:carol")
     assert orphan["page"] == "person:carol"
     assert {(i["brain"], i["ref"]) for i in group(orphan)["items"]} == {
@@ -261,7 +276,7 @@ def test_validation_and_skip_invalid_links(brain: Store) -> None:
 
 @pytest.mark.parametrize("record_id", ["a/b#c?d", "https://example.test/a//../b\\name#? "])
 def test_record_ids_preserve_delimiters_and_require_no_cache_for_exact_read(brain: Store, record_id: str) -> None:
-    records_file(brain, "mail", "undated", [Record(id=record_id, title="Exact")])
+    records_file(brain, "mail", [Record(id=record_id, title="Exact")])
     ref = links.address("fixture", "mail:" + record_id)
     assert cast(dict, read([brain], ref)["record"])["id"] == record_id
     with pytest.raises(Error, match="Markdown"):
@@ -392,3 +407,253 @@ def test_notes_cannot_claim_another_brains_alias(brain: Store) -> None:
     assert "own brain namespace" in str(found["problems"])
     # Exact bytes remain available to repair the invalid note.
     assert "Foreign ownership" in str(read([brain], "projects/foreign.md")["text"])
+
+
+def problems(store: Store) -> list[str]:
+    return [f"{p['file']}: {p['error']}" for p in cast("list[dict[str, str]]", validate(store)["problems"])]
+
+
+def test_display_name_aliases_never_resolve_and_only_okf_notes_reject_them(brain: Store) -> None:
+    # Imported Markdown, such as an Obsidian note, often carries display-name aliases; ordinary Markdown ignores them.
+    attachment = "actions/2026-01-01_demo/inputs/imported.md"
+    brain.write("actions/2026-01-01_demo/ACTION.md", b"---\ntype: action\nstatus: draft\n---\n# Demo\n")
+    brain.write(attachment, b"---\naliases: [Imported Meeting]\n---\n# Imported\n\nattachmentneedle\n")
+    assert [item["ref"] for item in cast(list, search([brain], Query(text="attachmentneedle"))["items"])] == [
+        attachment
+    ]
+    assert validate(brain)["valid"]
+    # A display name never resolves to the file, unlike a namespaced alias.
+    with pytest.raises(NotFoundError):
+        read([brain], "Imported Meeting")
+    brain.write("projects/site.md", b"---\ntype: project\naliases: [Website]\n---\n# Site\n\nprojectneedle\n")
+    found = cast(list, search([brain], Query(text="projectneedle"))["items"])
+    assert [item["ref"] for item in found] == ["projects/site.md"]
+    with pytest.raises(NotFoundError):
+        read([brain], "Website")
+    assert any(
+        p.startswith("projects/site.md: ") and "OKF aliases must be namespaced identities" in p for p in problems(brain)
+    )
+
+
+def test_body_links_keep_their_written_form(brain: Store) -> None:
+    alias = "person:email/éric@example.test"
+    brain.write("concepts/eric.md", f"---\ntype: person\naliases: [{alias}]\n---\n# Éric\n".encode())
+    brain.write("projects/web.md", f"---\ntype: project\n---\n# Web\n\n## Team\n\n[Éric]({alias})\n".encode())
+    ids = ["docs/Réunion.txt", "docs/Meeting notes.txt", "docs/100%.txt"]
+    records_file(brain, "local", [Record(id=value, title=f"Document {n}") for n, value in enumerate(ids)])
+    brain.write(
+        "projects/docs.md",
+        f"---\ntype: project\n---\n# Docs\n\n[a](local:{ids[0]}) [b](<local:{ids[1]}>) [c](local:{ids[2]})\n".encode(),
+    )
+    assert validate(brain)["valid"]
+    eric = read([brain], alias)
+    assert eric["ref"] == "concepts/eric.md"
+    assert [i["ref"] for i in group(eric)["items"]] == ["projects/web.md"]
+    scoped = cast(list[dict], search([brain], Query(text="team", target=alias))["items"])
+    assert [i["ref"] for i in scoped] == ["projects/web.md#team"]
+    for value in ids:
+        assert [i["ref"] for i in group(read([brain], f"local:{value}"))["items"]] == ["projects/docs.md"]
+    # BF addresses are parsed as written, in the body as in frontmatter: a bare % is malformed encoding.
+    for data in (
+        b"# Bad\n\n[c](bf://fixture/projects/100%.md)\n",
+        b'---\nlinks: ["bf://fixture/projects/100%.md"]\n---\n# Bad\n',
+    ):
+        brain.write("projects/bad.md", data)
+        assert any(p.startswith("projects/bad.md: invalid BF link") for p in problems(brain))
+
+
+def test_ordinary_markdown_declares_no_identity_or_membership(brain: Store) -> None:
+    people(brain)
+    brain.write("actions/2026-09-27_import/ACTION.md", b"---\ntype: action\n---\n# Import\n")
+    capture = "actions/2026-09-27_import/inputs/vendor-doc.md"
+    brain.write(
+        capture,
+        b"---\nentity: bf://fixture/people/alice\naliases: [person:bob]\ntags: [website, team/web]\n"
+        b"status: published\ntitle: 2024\n---\n# Vendor capture\n\nokapi facts.\n\n## Claims\n\n"
+        b"[Bob](bf://fixture/people/bob?rel=friend)\n",
+    )
+    assert validate(brain)["valid"]
+    # The copied document neither shadows an identity nor asserts claims in another entity's name.
+    assert read([brain], "bf://fixture/people/alice")["ref"] == "projects/alice.md"
+    assert read([brain], "person:bob")["ref"] == "projects/bob.md"
+    friend = next(i for i in group(read([brain], "person:bob"), "friend")["items"] if i["ref"] == capture)
+    assert friend["relations"][0]["subject"] == f"bf://fixture/{capture}"
+    assert read([brain], "bf://fixture/tags/website")["items"] == []
+    found = cast(list[dict], search([brain], Query(text="okapi"))["items"])
+    assert [(i["ref"], i["title"]) for i in found] == [(capture, "Vendor capture")]
+    # Valid retrieval metadata still applies, so a retired decision output stays retired.
+    decision = note(
+        "actions/2026-09-27_import/outputs/decision.md", b"---\ntype: decision\nstatus: deprecated\n---\n# Old\n"
+    )
+    assert (decision.knowledge.type, decision.knowledge.status) == ("decision", "deprecated")
+    # Only display and lifecycle metadata apply: frontmatter links and review dates stay the document's own data.
+    helper = note(
+        "actions/2026-09-27_import/inputs/doc.md",
+        b'---\ndescription: Vendor summary\nlinks: ["jira:PROJ-9"]\nreview_after: 3\nreview_due: 2026-10-01\n---\n# D\n',
+    )
+    assert (helper.lead, helper.targets, helper.knowledge.review_after, helper.knowledge.review_due) == (
+        "Vendor summary",
+        [],
+        None,
+        "",
+    )
+
+
+def test_an_overlong_or_blank_title_fails_only_okf_notes() -> None:
+    heading = b"# " + b"x" * 4097 + b"\n\nbody\n"
+    with pytest.raises(Error, match=r"concepts/long\.md: title exceeds 4096 characters"):
+        note("concepts/long.md", heading)
+    # A copied document stays searchable under its file name.
+    assert note("actions/2026-09-27_import/inputs/long-capture.md", heading).title == "long capture"
+    assert note("concepts/long.md", b"# " + b"x" * 4096 + b"\n").title == "x" * 4096
+    # An image-only heading or a blank frontmatter title leaves no words either.
+    for blank in (b'# <img src="logo.png" alt="Logo">\n\nwalrus\n', b'---\ntitle: "  "\n---\nwalrus\n'):
+        with pytest.raises(Error, match=r"concepts/blank\.md: title must be nonempty"):
+            note("concepts/blank.md", blank)
+        assert note("actions/2026-09-27_import/inputs/read-me.md", blank).title == "read me"
+
+
+def test_a_note_alias_repeating_a_record_ref_is_ambiguous(brain: Store) -> None:
+    records_file(brain, "jira", [Record(id="PROJ-1", title="Launch issue")])
+    records_file(brain, "mail", [Record(id="m1", title="About the launch", links=["jira:PROJ-1"])])
+    brain.write("projects/launch.md", b"---\ntype: project\naliases: [jira:PROJ-1]\n---\n# Launch\n")
+    assert problems(brain) == ["projects/launch.md: ambiguous identity jira:PROJ-1: jira:PROJ-1, projects/launch.md"]
+    # The exact record and links to its ref stay visible; the ambiguous alias adds the note to neither.
+    scoped = search([brain], Query(text="launch", target="jira:PROJ-1"))
+    assert [i["ref"] for i in cast(list[dict], scoped["items"])] == ["jira:PROJ-1", "mail:m1"]
+    assert "ambiguous" in str(scoped["problems"])
+    launch = read([brain], "projects/launch.md")
+    assert "claimed elsewhere" in str(launch["problems"])
+    assert not launch.get("backlinks")
+
+
+def test_the_same_record_in_two_brains_keeps_qualified_reads_exact(brain: Store, tmp_path: Path) -> None:
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 6\nname: team\n")
+    for store in (brain, team):
+        records_file(store, "jira", [Record(id="PROJ-1", title="Launch issue")])
+    brain.write("projects/launch.md", b"---\ntype: project\n---\n# Launch\n\n[Issue](jira:PROJ-1)\n")
+    reply = read([brain, team], "bf://fixture/jira:PROJ-1")
+    assert "problems" not in reply
+    assert [i["ref"] for i in group(reply)["items"]] == ["projects/launch.md"]
+
+
+def test_page_addresses_are_link_targets(brain: Store) -> None:
+    brain.write("actions/2026-09-27_import/ACTION.md", b"---\ntype: action\n---\n# Import\n")
+    brain.write("projects/archive/old.md", b"---\ntype: project\n---\n# Old\n")
+    decision = record_path("meetings", "decision-1")
+    paths = [
+        *("", "tasks", "tags", "tags/retention", "memories", "memories/meetings", "memories/meetings/2026-08"),
+        *("memories/meetings/undated", decision),
+        *("projects", "projects/archive", "concepts", "actions", "actions/2026-09-27_import"),
+        *("today", "7d", "2026-09", "2026-09-27"),
+    ]
+    body = " ".join(f"[{n}](bf://fixture/{path})" for n, path in enumerate(paths))
+    brain.write("projects/hub.md", f"---\ntype: project\n---\n# Hub\n\nhubneedle {body}\n".encode())
+    assert validate(brain)["valid"]
+    assert [i["ref"] for i in cast(list[dict], search([brain], Query(text="hubneedle"))["items"])] == [
+        "projects/hub.md"
+    ]
+    for path in paths:
+        assert read([brain], f"bf://fixture/{path}")
+    brain.write(
+        "projects/hub.md",
+        b"---\ntype: project\n---\n# Hub\n\n[a](bf://fixture/projects/absent) [b](bf://fixture/memories/absent)\n"
+        b"[c](bf://fixture/projects#part) [d](bf://fixture/meetings:decision-1#part)\n",
+    )
+    assert problems(brain) == [
+        "projects/hub.md: record cannot select a Markdown section: bf://fixture/meetings:decision-1#part",
+        "projects/hub.md: unresolved BF target: bf://fixture/memories/absent",
+        "projects/hub.md: unresolved BF target: bf://fixture/projects#part",
+        "projects/hub.md: unresolved BF target: bf://fixture/projects/absent",
+    ]
+    with pytest.raises(Error, match="invalid BF link"):
+        links.parse("bf://fixture/#part")
+
+
+def test_page_links_follow_the_routing_of_bf_read(brain: Store) -> None:
+    # Each target is a page `bf read` rejects or that no evidence backs, so validation reports it.
+    absent = "memories/meetings/" + "0" * 64 + ".json"
+    failing = [
+        *("tags/retention/extra", "2026-13", "2026-02-30"),
+        *("memories/meetings/garbage", "memories/meetings/2026-08/extra", "memories/unknown"),
+    ]
+    window = "\u0661\u0662h"  # 12h in Arabic-Indic digits
+    paths = [*failing, "tags/unused", absent, window]
+    body = " ".join(f"[{n}](bf://fixture/{path})" for n, path in enumerate(paths))
+    brain.write("projects/hub.md", f"---\ntype: project\n---\n# Hub\n\n{body}\n".encode())
+    assert problems(brain) == sorted(
+        f"projects/hub.md: unresolved BF target: {links.address('fixture', path)}" for path in paths
+    )
+    for path in failing:
+        with pytest.raises(Error):
+            read([brain], f"bf://fixture/{path}")
+    # These open empty pages, so a misspelled tag or record file would otherwise go unnoticed.
+    assert read([brain], "bf://fixture/tags/unused")["items"] == []
+    assert read([brain], f"bf://fixture/{absent}")["items"] == []
+    # Page routing and the reserved namespace agree on ASCII digits: this unowned entity path is no timeline.
+    assert pages.period(window) is None
+    assert not links.computed(f"bf://fixture/{window}")
+    assert "since" not in read([brain], f"bf://fixture/{window}")
+
+
+@pytest.mark.parametrize(
+    "entity",
+    [
+        *("bf://fixture/", "bf://fixture/today", "bf://fixture/2026-09-27", "bf://fixture/12h", "bf://fixture/tasks"),
+        *("bf://fixture/projects", "bf://fixture/tags", "bf://fixture/tags/x", "bf://fixture/memories/team"),
+    ],
+)
+def test_page_addresses_cannot_be_claimed(brain: Store, entity: str) -> None:
+    brain.write("concepts/claim.md", f"---\ntype: person\nentity: {entity}\n---\n# Claim\n".encode())
+    assert problems(brain) == [
+        (
+            "concepts/claim.md: home, folder roots, tasks, periods, tags and memories are computed page addresses "
+            "and cannot be entities or aliases; link to the page instead"
+        )
+    ]
+    brain.delete("concepts/claim.md")
+    records_file(brain, "mail", [Record(id="x", title="X", aliases=[entity])])
+    assert any("computed page addresses and cannot be aliases" in p for p in problems(brain))
+
+
+def test_record_addresses_cannot_be_claimed(brain: Store) -> None:
+    # bf read resolves a first path segment with ':' as a source:id record, so such a claim never reaches its note.
+    brain.write("concepts/team.md", b"---\ntype: concept\nentity: bf://fixture/team:core\n---\n# Team\n")
+    brain.write("concepts/web.md", b"---\ntype: concept\naliases: [bf://fixture/team:web/app]\n---\n# Web\n")
+    record = "a BF path whose first segment contains ':' names a source:id record"
+    assert problems(brain) == [
+        f"concepts/{name}.md: {record} and cannot be an entity or alias; link to the record instead"
+        for name in ("team", "web")
+    ]
+    brain.delete("concepts/team.md")
+    brain.delete("concepts/web.md")
+    records_file(brain, "mail", [Record(id="x", title="X", aliases=["bf://fixture/team:core"])])
+    assert any(f"{record} and cannot be an alias" in p for p in problems(brain))
+    # A colon in a later segment names an ordinary entity path.
+    brain.write("concepts/alice.md", b"---\ntype: person\nentity: bf://fixture/people/alice:ops\n---\n# Alice\n")
+    assert not any("concepts/alice.md" in p for p in problems(brain))
+
+
+def test_folders_and_tag_membership_are_not_claimed(brain: Store) -> None:
+    people(brain)
+    brain.write("projects/archive/old.md", b"---\ntype: project\n---\n# Old\n")
+    brain.write("concepts/archive.md", b"---\ntype: concept\nentity: bf://fixture/projects/archive\n---\n# Archive\n")
+    assert problems(brain) == [
+        "concepts/archive.md: identity bf://fixture/projects/archive is also a folder page; rename the entity or folder"
+    ]
+    brain.delete("concepts/archive.md")
+    brain.write(
+        "projects/tagged.md", b"---\ntype: project\n---\n# Tagged\n\n[x](bf://fixture/tags/x?rel=tagged-with)\n"
+    )
+    assert any("tagged-with is reserved for tag membership" in p for p in problems(brain))
+    brain.delete("projects/tagged.md")
+    records_file(brain, "mail", [Record(id="t", title="Tagged", fields={"tagged-with": "bf://fixture/tags/x"})])
+    assert any("schema field tagged-with is reserved" in p for p in problems(brain))
+    # bf.yaml cannot declare it either.
+    field = "  tagged-with: {description: Tags, type: identity, relation: true}\n"
+    brain.write("bf.yaml", b"version: 6\nname: fixture\nschema:\n" + field.encode())
+    with pytest.raises(Error, match="schema field tagged-with is reserved for tag membership"):
+        load(brain)

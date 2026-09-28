@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ast
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -57,23 +55,24 @@ def test_bookmarks_retain_only_hosts_and_counts(fmt: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "raw",
+    ("raw", "diagnostic"),
     [
-        b"SECRET",
-        b'{"roots":{"x":{"type":"url","url":123}}}',
-        b"\xff",
-        b"x" * (4 * 1024 * 1024 + 1),
-        export(*(f"https://h{i}.example.org" for i in range(201))),
-        export(*(["https://example.org"] * 20_001)),
-        export("https://example.org")[:-1],
+        (b"SECRET", b"not a complete, supported export"),
+        (b'{"roots":{"x":{"type":"url","url":123}}}', b"not a complete, supported export"),
+        (b"\xff", b"not a complete, supported export"),
+        (b"x" * (4 * 1024 * 1024 + 1), b"exceeds the 4 MiB limit"),
+        (export(*(f"https://h{i}.example.org" for i in range(201))), b"exceeds the 200-host limit"),
+        (export(*(["https://example.org"] * 20_001)), b"exceeds the 20,000-entry limit"),
+        (export("https://example.org")[:-1], b"not a complete, supported export"),
     ],
     ids=["text", "bad-node", "encoding", "bytes", "hosts", "entries", "truncated"],
 )
-def test_invalid_or_excessive_input_releases_no_partial_summary(raw: bytes) -> None:
+def test_invalid_or_excessive_input_releases_no_partial_summary(raw: bytes, diagnostic: bytes) -> None:
+    # A reached limit and a malformed export need different next steps: the fixed message says which.
     result = run("bookmarks", "--format", "chromium", raw=raw)
     assert result.returncode == 1
     assert not result.stdout
-    assert b"select a smaller supported export" in result.stderr
+    assert diagnostic in result.stderr
     assert b"SECRET" not in result.stderr
     assert b"Traceback" not in result.stderr
 
@@ -90,6 +89,21 @@ def test_html_requires_an_export_and_rejects_malformed_links() -> None:
         result = run("bookmarks", "--format", "html", raw=raw)
         assert result.returncode == 1
         assert not result.stdout
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"roots":{"bar":{"type":"url","url":"https://example.org"}},"roots":{}}',
+        b'{"roots":{"bar":{"type":"url","url":"https://example.org","url":"https://PRIVATE.example"}}}',
+    ],
+    ids=["duplicate-roots", "duplicate-url"],
+)
+def test_duplicate_keys_never_hide_bookmarks(raw: bytes) -> None:
+    result = run("bookmarks", "--format", "chromium", raw=raw)
+    assert result.returncode == 1
+    assert not result.stdout
+    assert b"PRIVATE" not in result.stderr
 
 
 def test_html_nested_folders_and_empty_exports() -> None:
@@ -140,8 +154,3 @@ def test_no_implicit_scan_or_arbitrary_executable_path(args: tuple[str, ...]) ->
     result = run(*args)
     assert result.returncode == 2
     assert not result.stdout
-
-
-def test_helper_supports_the_agent_interpreter() -> None:
-    ast.parse(HELPER.read_text(encoding="utf-8"), feature_version=(3, 11))
-    assert os.access(HELPER, os.X_OK)

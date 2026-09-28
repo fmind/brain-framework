@@ -28,7 +28,7 @@ body:
     attributes:
       label: Reproduction
       description: >-
-        The smallest safe sequence using a synthetic brain. For collection failures, include the redacted source configuration and error. `bf collect --dry-run` executes the collector and prints record samples; never paste private samples or logs.
+        The smallest safe sequence using a synthetic brain. For collection failures, include the redacted source configuration and error. `bf collect SENSOR --dry-run` runs the sensor and previews record samples; never paste private samples or logs.
     validations:
       required: true
   - type: textarea

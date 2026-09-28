@@ -11,7 +11,7 @@ import sys
 from typing import cast
 
 # Skills use the host's python3; this helper needs only the Python 3.11 standard library.
-MAX_REPLY = 4 << 20
+MAX_REPLY = 4 << 20  # Bytes of one bf reply.
 ACTION = re.compile(r"(?:bf://([a-z][a-z0-9-]{0,63})/)?(actions/\d{4}-\d{2}-\d{2}_[a-z0-9-]+/ACTION\.md)")
 
 
@@ -24,7 +24,8 @@ def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def read(action: str, brain: str, section: str) -> tuple[str, str]:
+def read(action: str, brain: str, section: str) -> tuple[str, str | int]:
+    """The section's brain and text, or the reply's serialized size when bf chunked it."""
     ref = f"{action}#{section}"
     try:
         # bf already bounds replies. Capture its stdout only; diagnostics may contain private paths.
@@ -38,9 +39,13 @@ def read(action: str, brain: str, section: str) -> tuple[str, str]:
         if result.returncode or len(result.stdout) > MAX_REPLY:
             raise ValueError("read failed or exceeded the reply limit")
         reply = json.loads(result.stdout, object_pairs_hook=unique)
-        if not isinstance(reply, dict) or reply.get("problems") or reply.get("stale") or "next_offset" in reply:
+        if not isinstance(reply, dict) or reply.get("problems") or reply.get("stale"):
             raise ValueError("incomplete read")
-        if any(key in reply for key in ("page", "chunk", "record")):
+        chunked = "chunk" in reply
+        size = reply.get("total_characters")
+        if chunked and (reply.get("format") != "json" or reply.get("offset") != 0 or type(size) is not int):
+            raise ValueError("unexpected chunk")
+        if not chunked and any(key in reply for key in ("next_offset", "page", "record")):
             raise ValueError("expected an exact section")
         match = ACTION.fullmatch(action)
         assert match is not None  # noqa: S101 - argument validation happens before any read
@@ -50,6 +55,8 @@ def read(action: str, brain: str, section: str) -> tuple[str, str]:
             raise ValueError("expected a named brain")
         if (owner and owner != name) or reply.get("ref") != f"{path}#{section}":
             raise ValueError("read resolved to another action")
+        if chunked:
+            return name, cast("int", size)
         if not isinstance(text, str) or not text.partition("\n")[2].strip():
             raise ValueError("empty section")
     except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, RecursionError) as error:
@@ -62,12 +69,18 @@ def check(action: str, brain: str) -> dict[str, object]:
     owner = ""
     passed = True
     for section, words_limit in (("context", 300), ("resume", 100)):
+        limits = {"words": words_limit, **({"bytes": 4096} if section == "context" else {})}
         try:
             name, text = read(action, brain, section)
             if owner and owner != name:
                 raise ValueError("sections resolved to different brains; use a brain-qualified action ref")
             owner = name
-            words, size = len(text.split()), len(text.encode("utf-8"))
+            # bf chunks a reply above 65,536 characters, far beyond a handoff budget: fail it unassembled.
+            counts = (
+                {"reply_characters": text}
+                if isinstance(text, int)
+                else {"words": len(text.split()), "bytes": len(text.encode("utf-8"))}
+            )
         except (ValueError, UnicodeError) as error:
             # Only our fixed diagnostics leave the helper; never quote decoder or provider failures.
             message = (
@@ -76,22 +89,16 @@ def check(action: str, brain: str) -> dict[str, object]:
                 else "invalid section encoding"
             )
             return {"checked": False, "passed": False, "sections": sections, "error": message}
-        okay = words <= words_limit and (section != "context" or size <= 4096)
+        okay = "reply_characters" not in counts and all(counts[key] <= limit for key, limit in limits.items())
         path = action.removeprefix(f"bf://{name}/")
-        sections[section] = {
-            "ref": f"bf://{name}/{path}#{section}",
-            "words": words,
-            "bytes": size,
-            "limits": {"words": words_limit, **({"bytes": 4096} if section == "context" else {})},
-            "passed": okay,
-        }
+        sections[section] = {"ref": f"bf://{name}/{path}#{section}", **counts, "limits": limits, "passed": okay}
         passed = passed and okay
     return {"checked": True, "passed": passed, "sections": sections}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", help="actions/YYYY-MM-DD_slug/ACTION.md, optionally brain-qualified")
+    parser.add_argument("action", help="actions/YYYY-MM-DD_topic-SUFFIX/ACTION.md, optionally brain-qualified")
     parser.add_argument("--brain", required=True, help="brain name or path passed to bf read")
     parser.add_argument("--hook", action="store_true", help="emit a non-blocking Claude Code SessionStart reply")
     args = parser.parse_args()

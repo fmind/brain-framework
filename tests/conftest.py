@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,25 @@ from bf.records import path as record_path
 from bf.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
+# Host terminal settings that change Rich and Typer output: width, color and forced terminal behavior.
+TERMINAL = ("COLUMNS", "LINES", "FORCE_COLOR", "NO_COLOR", "TTY_COMPATIBLE", "TTY_INTERACTIVE", "GITHUB_ACTIONS")
+
+
+def pytest_configure() -> None:
+    """Run every test in UTC on any host; tests of local dates choose their own zone in a subprocess."""
+    os.environ["TZ"] = "UTC"
+    if hasattr(time, "tzset"):
+        time.tzset()
+    elif datetime.now().astimezone().utcoffset():
+        # Some Intel macOS Python builds omit tzset, so TZ applies only from interpreter startup.
+        pytest.exit("run the tests with TZ=UTC: this Python cannot change its timezone at runtime", returncode=4)
+
+
+def plain(text: str) -> str:
+    """Terminal text without ANSI styles, which Typer and Rich emit when a terminal or CI forces colors."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
 _FAKE = '''#!{python}
 """Answer argv patterns from a JSON script once each unless repeated; record every call."""
 import json, sys
@@ -70,8 +92,8 @@ class Provider:
             "HOME": str(home or self.state / "home"),
             "PYTHONDONTWRITEBYTECODE": "1",
             "LANG": "C.UTF-8",
-            # Adapters that derive local dates follow the suite's pinned timezone.
-            **({"TZ": os.environ["TZ"]} if "TZ" in os.environ else {}),
+            # Adapters that derive local dates follow the suite's pinned timezone unless a test chooses one.
+            "TZ": os.environ.get("TZ", "UTC"),
         }
         return subprocess.run(  # noqa: S603 - the subject is the adapter's own process boundary
             [sys.executable, str(ROOT / "examples" / folder / adapter), *arguments],
@@ -106,7 +128,7 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("BF_BRAIN", raising=False)
     monkeypatch.chdir(tmp_path)
     for key in tuple(os.environ):
-        if key.startswith("GIT_"):
+        if key.startswith("GIT_") or key in TERMINAL:
             monkeypatch.delenv(key)
 
 
@@ -132,7 +154,8 @@ Provider retention cannot guarantee historical evidence, so the team keeps durab
 """
 
 
-def records_file(store: Store, source: str, _month: str, records: list[Record]) -> None:
+def records_file(store: Store, source: str, records: list[Record]) -> None:
+    """Write each record to its own SHA-256-named file, as collection does."""
     for record in records:
         store.write(record_path(source, record.id), encode(record.model_dump(exclude_defaults=True)))
 
@@ -152,7 +175,6 @@ def brain(tmp_path: Path) -> Store:
     records_file(
         store,
         "meetings",
-        "2026-08",
         [
             Record(
                 id="decision-1",

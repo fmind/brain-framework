@@ -1,7 +1,7 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "13.0.2"
+version = "14.0.0"
 description = "🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -21,6 +21,7 @@ keywords = [
   "second-brain",
 ]
 classifiers = [
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
@@ -54,20 +55,22 @@ module-name = "bf"
 
 [dependency-groups]
 dev = [
+  "jsonschema>=4.26.0,<5",
   "pytest-cov>=7.1.0",
   "pytest-watcher>=0.6.3",
   "pytest>=9.1.1",
   "ruff>=0.16.6",
   "ty>=0.0.70,<0.1",
-  "validate-pyproject>=0.25",
+  # The extra validates classifiers offline instead of downloading them or skipping the check.
+  "validate-pyproject[all]>=0.25",
   "zensical>=0.0.59,<0.1",
 ]
 
 [tool.ruff]
 line-length = 120
 src = ["src", "tests"]
-# Skill scripts run with the agent's python3, not the package interpreter.
-per-file-target-version = { "skills/*/scripts/*.py" = "py311" }
+# Skill scripts and copied examples run with the host's python3, not the package interpreter.
+per-file-target-version = { "skills/*/scripts/*.py" = "py311", "examples/**/*.py" = "py311" }
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -124,21 +127,20 @@ ignore = [
   "T201", # Test diagnostics may use print.
 ]
 
-[tool.ty.environment]
-python-version = "3.14"
-
-[tool.pytest.ini_options]
-addopts = ["-ra", "--strict-config", "--strict-markers"]
+[tool.pytest]
+addopts = ["-ra"]
+# Dump every thread's traceback when a test hangs instead of stalling until the CI timeout (a string option).
+faulthandler_timeout = "120"
 filterwarnings = ["error"]
+strict = true
 testpaths = ["tests"]
-xfail_strict = true
 
 [tool.coverage.run]
 branch = true
 source = ["bf"]
 
 [tool.coverage.report]
-fail_under = 85
+fail_under = 95
 show_missing = true
 skip_covered = true
 skip_empty = true

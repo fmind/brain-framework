@@ -1,0 +1,116 @@
+{
+  "$defs": {
+    "Case": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            { "properties": { "query": { "pattern": "\\S" }, "read": { "type": "null" } }, "required": ["query"] },
+            {
+              "not": { "required": ["limit"] },
+              "properties": {
+                "query": { "not": { "pattern": "\\S" } },
+                "read": { "type": "string" },
+                "scope": { "const": "" }
+              },
+              "required": ["read"]
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": { "empty": { "const": true }, "expect": { "maxItems": 0 }, "text": { "maxItems": 0 } },
+              "required": ["empty"]
+            },
+            {
+              "anyOf": [
+                { "properties": { "expect": { "minItems": 1 } }, "required": ["expect"] },
+                { "properties": { "text": { "minItems": 1 } }, "required": ["text"] }
+              ],
+              "properties": { "empty": { "const": false } }
+            }
+          ]
+        }
+      ],
+      "description": "A search (`query`, optional `scope`) or a read (`read`: a page, note, record or identity).",
+      "properties": {
+        "empty": {
+          "default": false,
+          "description": "Require no returned refs; excludes expect and text assertions.",
+          "title": "Empty",
+          "type": "boolean"
+        },
+        "expect": {
+          "description": "Refs that must appear; whole-note refs match any section.",
+          "items": { "pattern": "\\S", "type": "string" },
+          "title": "Expect",
+          "type": "array"
+        },
+        "forbid": {
+          "description": "Refs that must not appear.",
+          "items": { "pattern": "\\S", "type": "string" },
+          "title": "Forbid",
+          "type": "array"
+        },
+        "limit": {
+          "default": 10,
+          "description": "Maximum search hits; unavailable for read cases.",
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "name": {
+          "description": "Nonblank case label, unique within this suite.",
+          "pattern": "\\S",
+          "title": "Name",
+          "type": "string"
+        },
+        "query": {
+          "default": "",
+          "description": "Search words; use either query or read.",
+          "maxLength": 4096,
+          "title": "Query",
+          "type": "string"
+        },
+        "read": {
+          "anyOf": [{ "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "Exact ref or page; an empty string reads home. Use instead of query.",
+          "title": "Read"
+        },
+        "scope": {
+          "default": "",
+          "description": "Optional search scope; unavailable for read cases.",
+          "title": "Scope",
+          "type": "string"
+        },
+        "text": {
+          "description": "Nonblank answer fragments; case-insensitive literal matching.",
+          "items": { "pattern": "\\S", "type": "string" },
+          "title": "Text",
+          "type": "array"
+        }
+      },
+      "required": ["name"],
+      "title": "Case",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A bounded collection of retrieval assertions; evaluated offline without executing programs.",
+  "properties": {
+    "cases": { "items": { "$ref": "#/$defs/Case" }, "maxItems": 200, "minItems": 1, "title": "Cases", "type": "array" },
+    "version": {
+      "const": 5,
+      "description": "Evaluation format, independent of the brain and package versions.",
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": ["version", "cases"],
+  "title": "Suite",
+  "type": "object"
+}

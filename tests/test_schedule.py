@@ -6,14 +6,17 @@ import json
 import plistlib
 import shlex
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import cast
+from threading import Event
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
 
 from bf.cli import app
-from bf.models import Error
+from bf.models import Error, Program
 from bf.schedule import backend_name, generate
 from bf.storage import Store, collecting
 from bf.update import update
@@ -47,43 +50,60 @@ def scheduled(brain: Store) -> Store:
 
 
 def test_update_selects_only_named_programs_and_keeps_due_rules(scheduled: Store) -> None:
-    preview: dict = update([scheduled], sensors=("mail", "manual", "disabled"), dry_run=True)
-    assert [s["sensor"] for s in preview["brains"][0]["sensors"]] == ["mail"]
-    assert "routines" not in preview["brains"][0]
-    preview: dict = update([scheduled], routines=("review",), dry_run=True)
-    assert preview["brains"][0]["sensors"] == []
-    assert [r["routine"] for r in preview["brains"][0]["routines"]] == ["review"]
+    preview: dict = update(scheduled, sensors=("mail", "manual", "disabled"), dry_run=True)
+    assert [s["sensor"] for s in preview["sensors"]] == ["mail"]
+    assert preview["routines"] == []
+    preview: dict = update(scheduled, routines=("review",), dry_run=True)
+    assert preview["sensors"] == []
+    assert [r["routine"] for r in preview["routines"]] == ["review"]
     executed = []
 
     def fake(*args: object) -> bytes:
         executed.append(args)
         return b'[{"id":"one","title":"One"}]'
 
-    assert update([scheduled], sensors=("mail",), runner=fake)["ok"]
+    assert update(scheduled, sensors=("mail",), runner=fake)["ok"]
     assert len(executed) == 1
-    assert update([scheduled], sensors=("mail",), runner=fake)["ok"]
+    assert update(scheduled, sensors=("mail",), runner=fake)["ok"]
     assert len(executed) == 1
 
 
-def test_invalid_selection_is_rejected_before_any_execution(scheduled: Store, tmp_path: Path) -> None:
-    other = tmp_path / "other"
-    other.mkdir()
-    second = Store(other)
-    second.write("bf.yaml", b"version: 6\nname: other\n")
+def test_invalid_selection_is_rejected_before_any_execution(scheduled: Store) -> None:
     calls = []
     with pytest.raises(Error, match="unknown sensor"):
-        update([scheduled, second], sensors=("mail",), runner=lambda *args: (calls.append(args), b"[]")[1])
+        update(scheduled, sensors=("mail", "absent"), runner=lambda *args: (calls.append(args), b"[]")[1])
     assert not calls
-    with collecting(scheduled, ".update"):
-        result: dict = update([scheduled])
-    assert not result["ok"]
-    assert "another update" in result["brains"][0]["error"]
+    # Like a busy collect, a cycle that cannot start fails instead of reporting an empty run.
+    with collecting(scheduled, ".update"), pytest.raises(Error, match="another update is still active"):
+        update(scheduled, wait=0.1)
+
+
+def test_schedules_for_other_selections_queue_instead_of_failing(scheduled: Store) -> None:
+    # Named schedules fire at the same minutes; a second cycle waits for the first, then runs its own due list.
+    entered, release = Event(), Event()
+
+    def slow(_argv: list[str], program: Program, *_: object) -> bytes:
+        if program.refresh == 3600:
+            entered.set()
+            assert release.wait(5)
+        return b"[]"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(update, scheduled, sensors=("mail",), runner=slow)
+        assert entered.wait(5)
+        second = executor.submit(update, scheduled, sensors=("git",), runner=slow)
+        time.sleep(0.3)
+        assert not second.done()
+        release.set()
+        reports: list[Any] = [first.result(timeout=10), second.result(timeout=10)]
+    assert [report["ok"] for report in reports] == [True, True]
+    assert [report["sensors"][0]["status"] for report in reports] == ["collected", "collected"]
 
 
 def test_cli_selection_and_preview_do_not_execute(scheduled: Store, tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["update", "--brain", str(scheduled.root), "--sensor", "mail", "--dry-run"])
     assert result.exit_code == 0, result.output
-    assert len(json.loads(result.stdout)["brains"][0]["sensors"]) == 1
+    assert len(json.loads(result.stdout)["sensors"]) == 1
     result = CliRunner().invoke(
         app,
         [
@@ -124,9 +144,12 @@ def test_systemd_quotes_arguments_and_captures_only_safe_environment(
     assert "relative" not in service
     assert "never-copy-this" not in service
     assert "OnCalendar=*-*-* *:00,15,30,45:00" in timer
-    assert "TimeoutStartSec=45min" in service
+    # Per-program timeouts bound each run; a total limit would kill long legitimate cycles.
+    assert "TimeoutStartSec" not in service
     assert "Persistent=true" in timer
     assert result["written"] == []
+    # The install commands copy files a preview did not write: say so before anyone runs them.
+    assert any(warning.startswith("Preview only: no file was written") for warning in result["warnings"])
     assert result["remove"][0][:4] == ["systemctl", "--user", "disable", "--now"]
 
 
@@ -173,6 +196,20 @@ def test_generated_files_are_idempotent_but_never_overwrite_edits(scheduled: Sto
         generate(scheduled, executable=Path(sys.executable), output=symlink)
 
 
+def test_relative_output_resolves_against_the_brain(
+    scheduled: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Run from elsewhere, as an agent working in another repository would.
+    monkeypatch.chdir(tmp_path)
+    result: dict = generate(
+        scheduled, backend="cron", executable=Path(sys.executable), output=Path("settings/schedules")
+    )
+    assert [Path(path).parent for path in result["written"]] == [scheduled.root / "settings/schedules"]
+    assert not (tmp_path / "settings").exists()
+    outside: dict = generate(scheduled, backend="cron", executable=Path(sys.executable), output=Path("../jobs"))
+    assert Path(outside["written"][0]).parent == scheduled.root.parent / "jobs"
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
@@ -192,9 +229,13 @@ def test_invalid_schedules_fail_visibly(scheduled: Store, kwargs: dict, match: s
 def test_schedule_environment_validation_and_backend_detection(
     scheduled: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Like every command, generation ignores a relative value and expands ~, so the job uses the same state.
     monkeypatch.setenv("XDG_CONFIG_HOME", "relative")
-    with pytest.raises(Error, match="must be absolute"):
-        generate(scheduled)
+    monkeypatch.setenv("XDG_STATE_HOME", "~/state")
+    files = cast("dict[str, str]", generate(scheduled, backend="cron", executable=Path(sys.executable))["files"])
+    job = next(iter(files.values()))
+    assert "XDG_CONFIG_HOME" not in job
+    assert f"XDG_STATE_HOME={Path.home() / 'state'}" in job
     monkeypatch.setenv("XDG_CONFIG_HOME", str(scheduled.root / "invalid\npath"))
     with pytest.raises(Error, match="control characters"):
         generate(scheduled)

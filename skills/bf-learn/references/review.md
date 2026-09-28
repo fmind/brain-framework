@@ -14,7 +14,7 @@ For example, a website review may establish that the draft was delivered while i
 ```markdown
 ## Now {#now}
 
-The [product-page draft](../actions/2026-09-27_product-page/outputs/product-page.md) is ready for review. The expectation that visitors can explain the product remains untested: no usability-session notes are available.
+The [product-page draft](../actions/2026-09-27_product-page-SUFFIX/outputs/product-page.md) is ready for review. The expectation that visitors can explain the product remains untested: no usability-session notes are available.
 
 ## Next actions {#next-actions}
 

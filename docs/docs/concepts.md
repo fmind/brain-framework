@@ -1,3 +1,7 @@
+---
+description: Understand projects, memories, concepts, actions and the flow from evidence to decisions.
+---
+
 # Core concepts
 
 A **brain** is a folder of evidence and notes you own. People and agents use it to remember why decisions were made, find current work and carry useful context into the next session.

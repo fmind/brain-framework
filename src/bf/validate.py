@@ -6,17 +6,25 @@ import os
 import re
 import stat
 from datetime import date
+from functools import cache
 
-from bf import links, ontology, records
+from bf import links, ontology, pages, records
 from bf.config import load
-from bf.markdown import Note, authored, broken, note, scheme, validate_okf
+from bf.markdown import Note, authored, broken, editor_lock, note, okf, scheme, validate_okf
 from bf.models import AUTHORED, MAX_NOTE, Error
-from bf.storage import Store, relative
+from bf.storage import UNNAMED, Store, relative, unnamed
 
 _ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
+# A reply lists at most this many problems and unresolved targets; a `*_truncated` flag marks the rest.
+LIMIT = 200
 
 
-def _actions(files: list[str]) -> list[str]:
+def _problem(file: str, message: str) -> dict[str, str]:
+    """One problem names its brain-relative file or folder once, whether or not the message already did."""
+    return {"file": file, "error": message.removeprefix(file + ":").lstrip()}
+
+
+def _actions(files: list[str]) -> list[dict[str, str]]:
     """Each folder below actions/ is one dated action with its ACTION.md; loose files are allowed."""
     problems = []
     for folder in sorted({name.split("/")[1] for name in files if name.count("/") >= 2}):
@@ -25,10 +33,12 @@ def _actions(files: list[str]) -> list[str]:
                 raise ValueError
             date.fromisoformat(folder[:10])
         except ValueError:
-            problems.append(f"actions/{folder}: name action folders YYYY-MM-DD_slug (lowercase slug, hyphens)")
+            problems.append(
+                _problem(f"actions/{folder}", "name action folders YYYY-MM-DD_slug (lowercase slug, hyphens)")
+            )
             continue
         if f"actions/{folder}/ACTION.md" not in files:
-            problems.append(f"actions/{folder}: missing ACTION.md")
+            problems.append(_problem(f"actions/{folder}", "missing ACTION.md"))
     return problems
 
 
@@ -40,35 +50,56 @@ def validate(store: Store) -> dict[str, object]:
 
 def _validate(store: Store) -> dict[str, object]:
     config = load(store)
-    problems: list[str] = []
+    problems: list[dict[str, str]] = []
     ids: dict[str, set[str]] = {}
-    aliases: dict[str, set[str]] = {}
-    addresses: set[str] = set()
-    unresolved: set[str] = set()
+    # Each identity's owners, note paths or record refs, with the file declaring each one.
+    owners: dict[str, dict[str, str]] = {}
+    # Each BF address a file writes as a link, with the files writing it.
+    written: dict[str, set[str]] = {}
     count = 0
     # Linked and special files are never followed; the check reports those that would hold evidence.
     skipped: dict[str, tuple[int, int, int, int]] = {}
-    for name in records.files(store, skipped=skipped):
+    evidence = [
+        name
+        for name in store.files("memories", skipped=skipped)
+        # Check every file collection and search read as a record, even a hidden AppleDouble `._<sha>.json`, and
+        # report other visible files; ignore other hidden files, such as .DS_Store, and the pending transaction.
+        if not name.startswith("memories/.pending/")
+        and (records.stored(name) or not name.rsplit("/", 1)[1].startswith("."))
+    ]
+    for name in evidence:
         try:
             source = records.source_of(name)
-            seen = ids.setdefault(source, set())
-            for record in records.load(store, name):
-                ontology.validate(record, config)
-                for claim in ontology.record_claims(record, config, f"{source}:{record.id}"):
-                    addresses.update(v for v in (claim.subject, claim.target) if links.parse(v))
-                count += 1
-                if record.id in seen:
-                    problems.append(f"{name}: duplicate id {record.id!r} in source {source}")
-                seen.add(record.id)
-                for alias in [ontology.qualify(config, f"{source}:{record.id}"), *record.aliases]:
-                    aliases.setdefault(links.target(alias), set()).add(f"{source}:{record.id}")
+            record = records.load(store, name)
+            # A readable record exists even when its fields no longer match the schema.
+            count += 1
+            ref = f"{source}:{record.id}"
+            # The SHA-256 filename makes each id unique within its source.
+            ids.setdefault(source, set()).add(record.id)
+            # A record's ref is one of its names: a note alias repeating it is ambiguous.
+            for alias in [ref, ontology.qualify(config, ref), *record.aliases]:
+                owners.setdefault(links.target(alias), {})[ref] = name
+            for claim in ontology.record_claims(record, config, ref):
+                if links.parse(claim.target):
+                    written.setdefault(claim.target, set()).add(name)
+            # Edges follow the current schema; the check still names each stored value that schema now rejects.
+            ontology.validate(record, config)
         except Error as error:
-            problems.append(str(error))
+            problems.append(_problem(name, str(error)))
         except OSError:
-            problems.append(f"{name}: inaccessible file; check permissions")
-    listed = {directory: store.files(directory, skipped=skipped) for directory in AUTHORED}
+            problems.append(_problem(name, "inaccessible file; check permissions"))
+    # Editor locks beside authored files, such as Emacs `.#note.md` links, come and go with an open editor.
+    listed = {
+        directory: [name for name in store.files(directory, skipped=skipped) if not editor_lock(name)]
+        for directory in AUTHORED
+    }
     problems.extend(
-        f"{name}: symlinks and special files are not read; replace it with a regular file" for name in sorted(skipped)
+        _problem(
+            name,
+            UNNAMED if unnamed(name) else "symlinks and special files are not read; replace it with a regular file",
+        )
+        for name in sorted(skipped)
+        if not (name.split("/")[0] in AUTHORED and editor_lock(name))
     )
     problems.extend(_actions(listed["actions"]))
     notes: list[Note] = []
@@ -76,64 +107,117 @@ def _validate(store: Store) -> dict[str, object]:
         try:
             data = store.read(name, MAX_NOTE)
             parsed_note = note(name, data)
-            for claim in ontology.note_claims(parsed_note, config):
-                addresses.update(v for v in (claim.subject, claim.target) if links.parse(v))
+            ontology.note_claims(parsed_note, config)
             notes.append(parsed_note)
-            if name.startswith(("projects/", "concepts/")) or re.fullmatch(r"actions/[^/]+/ACTION\.md", name):
+            if okf(name):
                 validate_okf(name, data)
         except (Error, UnicodeError) as error:
-            problems.append(str(error))
+            problems.append(_problem(name, str(error)))
         except OSError:
-            problems.append(f"{name}: inaccessible file; check permissions")
+            problems.append(_problem(name, "inaccessible file; check permissions"))
     slugs = {n.path: n.slugs for n in notes}
-    tag_targets = {ontology.qualify(config, f"tags/{tag}") for n in notes for tag in n.knowledge.tags}
+
+    @cache
+    def entries(directory: str) -> frozenset[str]:
+        """Exact names: on a case-insensitive volume, stat would also accept a differently cased link."""
+        if not directory:
+            return frozenset(path.name for path in store.root.iterdir())
+        with store.parent(directory) as (parent, leaf):
+            descriptor = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            with os.scandir(descriptor) as found:
+                return frozenset(entry.name for entry in found)
+        finally:
+            os.close(descriptor)
+
+    def kind(name: str) -> int:
+        """The file type of an exactly named brain path; 0 when it is absent or named with another case."""
+        try:
+            parts = relative(name)
+            if any(part not in entries("/".join(parts[:i])) for i, part in enumerate(parts)):
+                return 0
+            with store.parent(name) as (parent, leaf):
+                return stat.S_IFMT(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode)
+        except Error, OSError:
+            return 0
 
     def exists(name: str) -> bool:
+        return kind(name) in {stat.S_IFREG, stat.S_IFDIR}
+
+    def folder(path: str) -> bool:
+        return path.split("/")[0] in AUTHORED and kind(path) == stat.S_IFDIR
+
+    stored = set(evidence)
+    tagged = {tag for item in notes for tag in item.knowledge.tags}
+
+    def page(path: str) -> bool:
+        """Whether `bf read` opens this same-brain path as a page with evidence, following pages.page's routing."""
+        parts = path.split("/")
         try:
-            relative(name)
-            with store.parent(name) as (parent, leaf):
-                mode = os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode
-            return stat.S_ISREG(mode) or stat.S_ISDIR(mode)
-        except Error, OSError:
+            if path in {"", "tasks", "tags", "memories", *AUTHORED} or pages.period(path):
+                return True
+            if parts[0] == "tags":
+                # A label no note declares opens an empty page: most likely a typo.
+                return len(parts) == 2 and parts[1] in tagged
+            if parts[0] == "memories":
+                if len(parts) > 3 or (parts[1] not in ids and parts[1] not in config.sensors):
+                    return False
+                name = parts[2] if len(parts) == 3 else ""
+                if re.fullmatch(r"[0-9a-f]{64}\.json", name):
+                    return path in stored
+                return name in {"", "undated"} or pages.period(name) is not None
+        except Error:
+            # An invalid period, such as 2026-13, fails to open.
             return False
+        return folder(path)
 
     for item in notes:
         for alias in [
             ontology.qualify(config, item.path),
-            *item.knowledge.aliases,
+            *item.knowledge.names,
             *([item.knowledge.entity] if item.knowledge.entity else []),
         ]:
-            aliases.setdefault(links.target(alias), set()).add(item.path)
-        problems.extend(broken(item, exists, slugs))
+            owners.setdefault(links.target(alias), {})[item.path] = item.path
+        problems.extend(_problem(item.path, message) for message in broken(item, exists, slugs))
         for target in item.targets:
             source = scheme(item.path, target)
             if (source in ids or source in config.sensors) and target.partition(":")[2] not in ids.get(source, set()):
-                problems.append(f"{item.path}: missing record {target}")
-    for alias, owners in sorted(aliases.items()):
-        if len(owners) > 1:
-            problems.append(f"ambiguous identity {alias}: " + ", ".join(sorted(owners)))
-    for value, parsed in ((v, p) for v in sorted(addresses) if (p := links.parse(v)) is not None):
-        if parsed.brain != config.name:
+                problems.append(_problem(item.path, f"missing record {target}"))
+            if links.parse(target):
+                written.setdefault(links.target(target), set()).add(item.path)
+    for alias, claimed in sorted(owners.items()):
+        # Prefer naming an authored note: its alias is usually the claim to revisit.
+        file = min(claimed.values(), key=lambda value: (not authored(value), value))
+        if len(claimed) > 1:
+            problems.append(_problem(file, f"ambiguous identity {alias}: " + ", ".join(sorted(claimed))))
+        if (parsed := links.parse(alias)) and parsed.brain == config.name and folder(parsed.path):
+            problems.append(_problem(file, f"identity {alias} is also a folder page; rename the entity or folder"))
+    unresolved: set[str] = set()
+    for value, files in sorted(written.items()):
+        parsed = links.parse(value)
+        if parsed is None or parsed.brain != config.name:
             unresolved.add(value)
             continue
-        if value in tag_targets or parsed.path == "tasks":
+        if not parsed.fragment and page(parsed.path):
             continue
-        owners = aliases.get(links.address(parsed.brain, parsed.path), set())
-        paths = owners or {parsed.path}
-        for path in paths:
+        errors = set()
+        for path in owners.get(links.address(parsed.brain, parsed.path), {}) or {parsed.path}:
             source, separator, record_id = path.partition(":")
             if path in slugs:
                 if parsed.fragment and parsed.fragment not in slugs[path]:
-                    problems.append(f"missing BF section: {value}")
+                    errors.add("missing BF section")
             elif separator and record_id in ids.get(source, set()):
                 if parsed.fragment:
-                    problems.append(f"record cannot select a Markdown section: {value}")
+                    errors.add("record cannot select a Markdown section")
             else:
-                problems.append(f"unresolved BF target: {value}")
+                errors.add("unresolved BF target")
+        problems.extend(_problem(file, f"{error}: {value}") for file in sorted(files) for error in sorted(errors))
     return {
         "valid": not problems,
         "notes": len(notes),
         "records": count,
-        "problems": problems[:200],
-        **({"unresolved": sorted(unresolved)[:200]} if unresolved else {}),
+        "problems": problems[:LIMIT],
+        **({"problems_truncated": True} if len(problems) > LIMIT else {}),
+        **({"unresolved": sorted(unresolved)[:LIMIT]} if unresolved else {}),
+        **({"unresolved_truncated": True} if len(unresolved) > LIMIT else {}),
     }

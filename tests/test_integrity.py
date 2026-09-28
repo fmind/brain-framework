@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import cast
 
 import pytest
 from typer.testing import CliRunner
@@ -25,21 +26,47 @@ def test_health_check_rejects_a_stale_cache(brain: Store) -> None:
         result = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
     assert result.exit_code == 1
     reply = json.loads(result.stdout)
-    assert reply["brains"][0]["index"] == "stale"
+    assert reply["brains"][0]["cache"] == "stale"
     assert not reply["healthy"]
 
 
 def test_update_reports_skipped_evidence_as_failure(brain: Store) -> None:
-    brain.write("projects/broken.md", b"---\nstatus: invalid\n---\n# Broken\n")
-    report = update([brain])
-    assert isinstance(report["brains"], list)
-    assert report["brains"][0]["index"]["problems"] == 1
+    brain.write("projects/broken.md", b"---\nreview_after: invalid\n---\n# Broken\n")
+    report = update(brain)
+    assert cast("dict[str, int]", report["index"])["skipped"] == 1
     assert not report["ok"]
+
+
+def test_malformed_yaml_scalar_does_not_hide_healthy_evidence(brain: Store) -> None:
+    from bf.models import Query
+    from bf.retrieve import search
+
+    brain.write("projects/oversized.md", b"---\nprivate-field: " + b"9" * 5000 + b"\n---\n# Broken\n")
+    reply = search([brain], Query(text="offline"), counted=False)
+    assert reply["items"]
+    assert "'file': 'projects/oversized.md', 'error': 'invalid YAML" in str(reply["problems"])
+    assert "private-field" not in str(reply)
+    assert not validate(brain)["valid"]
+
+
+def test_cache_read_snapshot_survives_a_concurrent_refresh(brain: Store) -> None:
+    index.refresh(brain)
+    with index.database(brain) as (connection, _state):
+        before = connection.execute("SELECT ref,title FROM items ORDER BY ref").fetchall()
+        brain.write("projects/offline.md", b"---\ntype: project\n---\n# Updated\n")
+        brain.write("projects/added.md", b"---\ntype: project\n---\n# Added\n")
+        index.refresh(brain)
+        after = connection.execute("SELECT ref,title FROM items ORDER BY ref").fetchall()
+        assert [tuple(row) for row in after] == [tuple(row) for row in before]
+    with index.database(brain) as (connection, _state):
+        current = dict(connection.execute("SELECT ref,title FROM items"))
+        assert current["projects/offline.md"] == "Updated"
+        assert current["projects/added.md"] == "Added"
 
 
 def test_missing_record_in_corrupt_source_is_not_proven_absent(brain: Store) -> None:
     brain.write(
-        "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json", b"broken partition\n"
+        "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json", b"broken record\n"
     )
     assert records.find(brain, "meetings", "decision-1") is not None
     with pytest.raises(Error, match="invalid JSON document"):
@@ -48,7 +75,7 @@ def test_missing_record_in_corrupt_source_is_not_proven_absent(brain: Store) -> 
 
 
 def test_missing_identity_in_skipped_evidence_is_not_proven_absent(brain: Store) -> None:
-    brain.write("projects/broken.md", b"---\nstatus: invalid\n---\n# Broken\n")
+    brain.write("projects/broken.md", b"---\nreview_after: invalid\n---\n# Broken\n")
     brain.write(
         "evals/retrieval.yaml",
         b"version: 5\ncases:\n- name: absent\n  read: 'repo:example/absent'\n  empty: true\n",
@@ -58,7 +85,7 @@ def test_missing_identity_in_skipped_evidence_is_not_proven_absent(brain: Store)
         read([brain], "repo:example/absent")
 
 
-@pytest.mark.parametrize("path", ["memories/orphan.jsonl", "memories/Bad/2026-09.jsonl", "memories/mail/2026-99.jsonl"])
+@pytest.mark.parametrize("path", ["memories/orphan.json", "memories/Bad/item.json", "memories/mail/2026-99.json"])
 def test_invalid_record_paths_never_produce_unreadable_refs(brain: Store, path: str) -> None:
     from bf.models import Query
     from bf.retrieve import search
@@ -104,7 +131,7 @@ def test_validation_refuses_links_through_unindexed_symlinks(brain: Store, tmp_p
     report = validate(brain)
     assert not report["valid"]
     assert isinstance(report["problems"], list)
-    assert len([p for p in report["problems"] if "broken link" in p]) == 2
+    assert len([p for p in report["problems"] if "broken link" in p["error"]]) == 2
 
 
 def test_new_directories_are_durable_before_their_files(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:

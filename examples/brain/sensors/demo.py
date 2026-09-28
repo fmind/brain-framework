@@ -16,7 +16,8 @@ sys.stdout.write(
                 "title": "Retention decision",
                 "text": "Keep original evidence because upstream content can disappear.",
                 "time": start.isoformat(),
-                "links": ["repo:example/project"],
+                # A purpose-built attribute that bf.yaml maps to the typed `repository` relationship.
+                "attributes": {"repository_refs": ["repo:example/project"]},
             }
         ]
     )

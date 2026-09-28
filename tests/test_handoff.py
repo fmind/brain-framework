@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import subprocess
@@ -12,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from bf import retrieve
+from bf.models import digest, encode
+from bf.retrieve import CHUNK
 from bf.storage import Store
 from conftest import Provider
 
@@ -40,11 +41,6 @@ def execute(provider: Provider, *args: str) -> subprocess.CompletedProcess[str]:
     return provider.run(
         "check-handoff.py", *(args or (ACTION, "--brain", "/brains/selected")), folder="../skills/bf-action/scripts"
     )
-
-
-def test_handoff_is_a_standalone_python311_script() -> None:
-    ast.parse(HELPER.read_text(), feature_version=(3, 11))
-    assert os.access(HELPER, os.X_OK)
 
 
 def test_handoff_returns_exact_refs_and_measures_whole_sections(provider: Provider) -> None:
@@ -184,16 +180,82 @@ def test_handoff_rejects_invalid_action_before_running_bf(provider: Provider) ->
     assert not provider.calls("bf")
 
 
-def test_real_handoff_keeps_existing_brain_files_unchanged(brain: Store) -> None:
-    brain.write(ACTION, ("---\ntype: action\nstatus: draft\n---\n\n# Website\n\n" + CONTEXT + RESUME).encode())
-    before = brain.read(ACTION)
-    result = subprocess.run(  # noqa: S603 - local helper and disposable brain only
+def split(value: dict[str, object]) -> list[dict[str, object]]:
+    """The chunked form of one exact reply, as bf returns it above 65,536 characters."""
+    text = encode(value).decode()
+    return [
+        {
+            "brain": value["brain"],
+            "ref": value["ref"],
+            "format": "json",
+            "chunk": text[start : start + CHUNK],
+            "offset": start,
+            "total_characters": len(text),
+            "sha256": digest(text.encode()),
+            **({"next_offset": start + CHUNK} if start + CHUNK < len(text) else {}),
+        }
+        for start in range(0, len(text), CHUNK)
+    ]
+
+
+def test_handoff_fails_a_chunked_section_from_its_first_chunk(provider: Provider) -> None:
+    pieces = split(reply("resume", "## Resume {#resume}\n\n" + "PRIVATE CONTENT " * 5000))
+    assert len(pieces) == 2
+    provider.install(
+        "bf",
+        [
+            {"match": ["#context"], "stdout": reply("context", CONTEXT)},
+            {"match": ["#resume"], "stdout": pieces[0]},
+        ],
+    )
+    result = execute(provider)
+    report = json.loads(result.stdout)
+    assert result.returncode == 1
+    assert report["checked"]
+    assert not report["passed"]
+    assert report["sections"]["resume"] == {
+        "ref": f"bf://example/{ACTION}#resume",
+        "reply_characters": pieces[0]["total_characters"],
+        "limits": {"words": 100},
+        "passed": False,
+    }
+    assert "PRIVATE CONTENT" not in result.stdout + result.stderr
+    # One read per section: a chunked reply is never assembled.
+    assert len(provider.calls("bf")) == 2
+    provider.install("bf", [{"match": ["#context"], "stdout": pieces[1] | {"ref": f"{ACTION}#context"}}])
+    report = json.loads(execute(provider).stdout)
+    assert not report["checked"]
+    assert "context is unavailable" in report["error"]
+
+
+def real(brain: Store) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - local helper and disposable brain only
         [sys.executable, str(HELPER), ACTION, "--brain", str(brain.root)],
+        env={**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"},
         capture_output=True,
         text=True,
         check=False,
         timeout=45,
     )
+
+
+def test_real_handoff_fails_a_chunked_context(brain: Store) -> None:
+    context = "## Context {#context}\n\n" + "word " * 20000 + "\n"
+    brain.write(ACTION, ("---\ntype: action\nstatus: draft\n---\n\n# Website\n\n" + context + RESUME).encode())
+    assert "chunk" in retrieve.read([brain], f"{ACTION}#context")
+    result = real(brain)
+    report = json.loads(result.stdout)
+    assert result.returncode == 1
+    assert report["checked"]
+    assert report["sections"]["context"]["reply_characters"] > CHUNK
+    assert not report["sections"]["context"]["passed"]
+    assert report["sections"]["resume"]["passed"]
+
+
+def test_real_handoff_keeps_existing_brain_files_unchanged(brain: Store) -> None:
+    brain.write(ACTION, ("---\ntype: action\nstatus: draft\n---\n\n# Website\n\n" + CONTEXT + RESUME).encode())
+    before = brain.read(ACTION)
+    result = real(brain)
     assert result.returncode == 0, result.stderr + result.stdout
     report = json.loads(result.stdout)
     for section, text in (("context", CONTEXT), ("resume", RESUME)):

@@ -2,8 +2,9 @@
 """Collect bounded local Git history as Brain Framework records; no provider authentication.
 
 Usage: git-history.py ROOT START END [--skip RELATIVE_REPO]...
-Automated history stays out: hidden repositories (such as ~/.codex/memories), repositories named with
---skip (such as an autonomous agent loop), and commits by bots or reserved test domains.
+Scans repositories one or two levels below ROOT. Automated history stays out: hidden repositories (such as
+~/.codex/memories), repositories named with --skip (such as an autonomous agent loop), commits by bots or
+reserved test domains, and internal refs such as stashes and notes.
 """
 
 import json
@@ -17,6 +18,18 @@ from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
+
+MAX_REPOSITORIES = 200
+MAX_COMMITS = 10000
+MAX_BYTES = 16 << 20
+# BF record bounds: titles and links are bounded single lines.
+MAX_TITLE, MAX_REF = 4096, 8192
+# C0 and C1 control characters, which BF rejects in ids, titles, URLs and identities.
+CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+class InvalidError(ValueError):
+    """A content-free diagnostic safe to show on stderr."""
 
 
 def run(argv: list[str], limit: int, timeout: int) -> bytes:
@@ -43,7 +56,7 @@ def run(argv: list[str], limit: int, timeout: int) -> bytes:
                         selector.unregister(key.fileobj)
                     output.extend(chunk)
                     if len(output) > limit:
-                        raise ValueError("provider output exceeds its byte limit")
+                        raise InvalidError("Git output exceeds its byte limit; narrow the window")
         if code := child.wait():
             raise subprocess.CalledProcessError(code, argv)
         return bytes(output)
@@ -59,95 +72,161 @@ def github(repository: Path) -> str:
     """Project only a recognized GitHub identity, never raw remote credentials."""
     try:
         raw = run(["git", "-C", str(repository), "remote", "get-url", "origin"], 8192, 10)
-    except subprocess.CalledProcessError, ValueError:
+    except (subprocess.CalledProcessError, ValueError):
         return ""
     match = re.fullmatch(
         r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)(?:\.git)?",
-        raw.decode().strip(),
+        raw.decode(errors="replace").strip(),
     )
     return "repo:github.com/" + match[1].lower() if match else ""
+
+
+def nameable(relative: str) -> bool:
+    """Whether a folder name can appear in record ids and titles: UTF-8, without control characters."""
+    try:
+        relative.encode()
+    except UnicodeEncodeError:
+        return False
+    return not CONTROL.search(relative)
+
+
+def line(value: str, fallback: str) -> str:
+    """One bounded title line: control characters become spaces and whitespace collapses."""
+    return " ".join(CONTROL.sub(" ", value).split())[:MAX_TITLE].rstrip() or fallback
 
 
 AUTOMATED = re.compile(r"(\[bot\]@users\.noreply\.github\.com|@([a-z0-9-]+\.)*(invalid|test|example|localhost))$")
 
 
-def collect(root: Path, start: str, end: str, skip: frozenset[str] = frozenset()) -> list[dict[str, object]]:
-    begin, finish = datetime.fromisoformat(start), datetime.fromisoformat(end)
-    if begin.tzinfo is None or finish.tzinfo is None or begin >= finish:
-        raise ValueError("invalid Git history window")
-    if not root.is_dir():
-        raise ValueError("root is not a directory")
+def repositories(root: Path, skip: frozenset[str]) -> tuple[list[Path], int]:
+    """Repositories one or two levels below root, and the count of folders that could not be used.
+
+    An unreadable folder cannot hold a readable repository, and window mode never removes saved records, so
+    skipping one (for example a protected ~/Documents under launchd) cannot lose evidence already collected.
+    """
+    skipped: set[Path] = set()
 
     def directories(parent: Path) -> list[Path]:
         return [p for p in parent.iterdir() if not p.name.startswith(".") and not p.is_symlink() and p.is_dir()]
 
     parents = directories(root)
-    candidates = [*parents, *(child for parent in parents for child in directories(parent))]
-    repositories = sorted(
-        {
-            p
-            for p in candidates
-            if (p / ".git").exists() and not (p / ".git").is_symlink() and p.relative_to(root).as_posix() not in skip
-        }
+    candidates = list(parents)
+    for parent in parents:
+        try:
+            candidates.extend(directories(parent))
+        except PermissionError:
+            skipped.add(parent)
+    found = []
+    for path in candidates:
+        relative = path.relative_to(root).as_posix()
+        try:
+            marker = path / ".git"
+            if not marker.exists() or marker.is_symlink() or relative in skip:
+                continue
+        except PermissionError:
+            skipped.add(path)
+            continue
+        if not nameable(relative):
+            skipped.add(path)
+            continue
+        found.append(path)
+    if len(found) > MAX_REPOSITORIES:
+        raise InvalidError(f"more than {MAX_REPOSITORIES} repositories; select a narrower ROOT or add --skip")
+    return sorted(found), len(skipped)
+
+
+def history(repository: Path, start: str, end: str) -> list[str]:
+    """One repository's commits in the window, as hash, committer time, author email and message fields."""
+    payload = run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "log",
+            f"--max-count={MAX_COMMITS + 1}",
+            # Visit older commits too: committer dates need not follow ancestry order.
+            f"--since-as-filter={start}",
+            f"--until={end}",
+            "--no-show-signature",
+            "--no-notes",
+            "--encoding=UTF-8",
+            "-z",
+            "--format=%H%x00%cI%x00%ae%x00%B",
+            # Branches, tags, remote branches and a detached HEAD; never stashes, notes or other internal
+            # refs. An unborn HEAD in a new repository is not an error.
+            "--ignore-missing",
+            "--branches",
+            "--tags",
+            "--remotes",
+            "HEAD",
+            "--",
+        ],
+        MAX_BYTES,
+        30,
     )
-    if len(repositories) > 200:
-        raise ValueError("repository count exceeds 200")
+    # A legacy commit without an encoding header keeps its message, with replacement characters.
+    fields = payload.decode(errors="replace").split("\0")
+    if fields[-1] != "" or (len(fields) - 1) % 4:
+        raise InvalidError("Git returned unexpected log framing")
+    if (len(fields) - 1) // 4 > MAX_COMMITS:
+        raise InvalidError(f"more than {MAX_COMMITS} commits in the window; narrow it")
+    return fields[:-1]
+
+
+def collect(
+    root: Path, start: str, end: str, skip: frozenset[str] = frozenset()
+) -> tuple[list[dict[str, object]], int]:
+    try:
+        begin, finish = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    except ValueError:
+        raise InvalidError("START and END must be ISO 8601 timestamps") from None
+    if begin.tzinfo is None or finish.tzinfo is None or begin >= finish:
+        raise InvalidError("START and END need timezones, with START before END")
+    if not root.is_dir():
+        raise InvalidError("ROOT is not a directory")
+    selected, skipped = repositories(root, skip)
     records: list[dict[str, object]] = []
-    for repository in repositories:
+    for repository in selected:
         relative = repository.relative_to(root).as_posix()
-        remote = github(repository)
-        payload = run(
-            [
-                "git",
-                "-C",
-                str(repository),
-                "log",
-                "--all",
-                "--max-count=10001",
-                # Visit older commits too: committer dates need not follow ancestry order.
-                f"--since-as-filter={start}",
-                f"--until={end}",
-                "--no-show-signature",
-                "--no-notes",
-                "--encoding=UTF-8",
-                "-z",
-                "--format=%H%x00%cI%x00%ae%x00%B",
-            ],
-            16 << 20,
-            30,
-        )
-        fields = payload.decode().split("\0")
-        if fields[-1] != "" or (len(fields) - 1) % 4:
-            raise ValueError("invalid Git history framing")
-        if (len(fields) - 1) // 4 > 10000 or len(payload) > 16 << 20:
-            raise ValueError("Git history exceeds its completeness ceiling")
-        for offset in range(0, len(fields) - 1, 4):
+        try:
+            remote = github(repository)
+            fields = history(repository, start, end)
+        except InvalidError as error:
+            raise InvalidError(f"{relative}: {error}") from None
+        except (subprocess.CalledProcessError, TimeoutError, ValueError):
+            # A stale worktree, damaged objects, another owner's repository or a stalled mount: name it so it can
+            # be repaired or skipped. Its window is retried, never passed over.
+            raise InvalidError(
+                f"{relative}: Git failed or timed out; repair the repository or add --skip {relative}"
+            ) from None
+        for offset in range(0, len(fields), 4):
             commit, when, author, message = fields[offset : offset + 4]
             # Git's date bounds are inclusive; BF windows are [start, end).
             instant = datetime.fromisoformat(when)
             if instant.tzinfo is None:
-                raise ValueError("commit time requires a timezone")
+                raise InvalidError("Git returned a commit time without a timezone")
             if not begin <= instant < finish:
                 continue
             author = author.strip().lower()
             if AUTOMATED.search(author):
                 continue
-            links = ["repo:local/" + relative, *([remote] if remote else [])]
-            if "@" in author:
-                links.append("person:email/" + quote(author, safe="/:@+").replace("~", "%7E"))
+            repository_ref = "repo:local/" + quote(relative, safe="/")
+            links = [repository_ref, *([remote] if remote else [])]
+            person = "person:email/" + quote(author, safe="/:@+").replace("~", "%7E")
+            if "@" in author and len(person) <= MAX_REF:
+                # An over-long author email is dropped: one invalid link would fail the whole collection.
+                links.append(person)
             message = message.strip()
             subject = message.partition("\n")[0]
-            if not subject:
-                raise ValueError("commit message has no subject")
             key = relative + "@" + commit
             records.append(
                 {
                     "id": key,
-                    "title": f"{relative}: {subject}",
+                    "title": line(f"{relative}: {subject}", relative),
                     "time": when,
                     "text": f"Repository: {relative}\nCommit: {commit}\nAuthor: {author}\nCommitted: {when}\n\n{message}",
                     "links": sorted(links),
-                    "aliases": ["commit:local/" + key],
+                    "aliases": ["commit:local/" + quote(key, safe="/@")],
                     "attributes": {
                         "repository": relative,
                         "commit": commit,
@@ -157,21 +236,26 @@ def collect(root: Path, start: str, end: str, skip: frozenset[str] = frozenset()
                     },
                 }
             )
-        if len(records) > 10000:
-            raise ValueError("total history exceeds 10000 records")
-    return records
+        if len(records) > MAX_COMMITS:
+            raise InvalidError(f"the window has more than {MAX_COMMITS} commits; narrow it")
+    return records, skipped
 
 
 if __name__ == "__main__":
     try:
         options = sys.argv[4:]
-        if len(options) % 2 or any(flag != "--skip" for flag in options[::2]):
-            raise ValueError("expected --skip RELATIVE_REPO pairs")
-        result = collect(Path(sys.argv[1]), sys.argv[2], sys.argv[3], frozenset(options[1::2]))
+        if len(sys.argv) < 4 or len(options) % 2 or any(flag != "--skip" for flag in options[::2]):
+            raise InvalidError("expected ROOT START END [--skip RELATIVE_REPO]...")
+        result, skipped = collect(Path(sys.argv[1]), sys.argv[2], sys.argv[3], frozenset(options[1::2]))
         payload = json.dumps(result, ensure_ascii=False, allow_nan=False)
-        if len(payload.encode()) > 16 << 20:
-            raise ValueError("normalized history exceeds 16 MiB")
+        if len(payload.encode()) > MAX_BYTES:
+            raise InvalidError("normalized history exceeds 16 MiB; narrow the window")
+        if skipped:
+            print(f"Git history skipped {skipped} unreadable, non-UTF-8 or control-character folders.", file=sys.stderr)
         print(payload)
-    except OSError, UnicodeError, ValueError, subprocess.SubprocessError, IndexError:
+    except InvalidError as error:
+        print(f"Git history collection failed: {error}.", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
         print("Git history collection failed; check repository access and the requested window.", file=sys.stderr)
         sys.exit(1)

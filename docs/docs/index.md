@@ -1,18 +1,20 @@
-![Brain Framework Iris logo: an exposed brain in an opening shell above twin aperture eyes](../assets/brain-framework.svg){ width="96" }
+---
+description: Save decisions and selected evidence in plain files, then find and reuse their context with Brain Framework.
+---
+
+![Brain Framework Iris logo](../assets/brain-framework.svg){ width="256" height="256" }
 
 # Brain Framework 🧠
 
 **🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.**
 
-Centralize selected information and work context from your tools in an ordinary folder. Collect it once, map it into a shared schema and let you and your agents reason across sources before making more tool calls. Add sources with small scripts using the CLIs, APIs or files already available to you.
+Keep selected evidence, decisions and next steps in a folder you can inspect and edit. Brain Framework (BF) makes those files searchable and connects them through explicit links. You and your agents use the same evidence; no BF account or model is required.
+
+**Start with [Getting started](getting-started.md): save a decision, find its reason and check the result.** You need Linux or macOS, a terminal and a text editor. Collection and agent setup can wait until you need them.
 
 ## See what a brain gives you
 
-**“Is the website ready to launch?”** spans a Google Workspace brief, a Jira review, a GitHub implementation and a Gcloud deployment. The advanced [terminal-agent walkthrough](context-hub.md) collects fictional records from all four and links them to one project. A healthy preview and merged code still leave Jira's accessibility blocker open: the next action comes from reading the evidence together.
-
-The mappings run automatically at ingestion: BF validates shared fields and creates declared relationships while retaining source refs. You configure the ontology and identity mappings; BF never guesses identity from similar names. Subsequent searches and reads reuse the saved evidence offline, with freshness and completeness visible.
-
-In the [getting-started example](getting-started.md), you save a New website project note, then ask why the team chose a single product page:
+In the walkthrough, you save a fictional New website project. Later, you can recover why the team chose a single product page:
 
 ```bash
 cd ~/brain
@@ -20,11 +22,11 @@ bf search "visitors clear explanation"
 bf read projects/new-website.md#decision
 ```
 
-The read returns the saved reason:
+The exact read returns the saved reason:
 
 > Start with a single product page because visitors need a clear explanation before signing up.
 
-Run `bf read projects` to find its next task: **Draft the product page.** Your agent can use the same commands, cite the decision and help with the work you authorize.
+`bf read projects` also shows the next task: **Draft the product page.** An agent can read the same decision, cite it and help with the work you authorize.
 
 ## Follow the work from evidence to outcome
 
@@ -32,34 +34,32 @@ Run `bf read projects` to find its next task: **Draft the product page.** Your a
 
 | Step                 | In the website example                                          |
 | -------------------- | --------------------------------------------------------------- |
-| Gather               | A sensor reads a selected product brief.                        |
-| Normalize            | BF saves it as a record with a stable ref.                      |
+| Gather               | A small sensor script reads a selected brief.                   |
+| Normalize            | BF maps its fields and saves a record with a stable address.    |
 | Organize and connect | The project links its decision to that record.                  |
-| Act                  | You review the page; an action keeps the checks and next step.  |
+| Act                  | You review the page and save the result in an action note.      |
 | Learn                | You update the project and retain a useful lesson as a concept. |
 
-Start with the note. Add sensors when you need evidence from other tools, and routines when a review is worth repeating. People and agents judge the evidence; BF does not generate answers or learn automatically from conversations.
+Start with notes; add sources and recurring reviews as the work needs them. BF stores and retrieves evidence. People and agents interpret it and decide what to do.
 
 ## Choose a guide
 
-| You want to…                             | Start here                                                                                           |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Try it now                               | [Getting started](getting-started.md): create a brain, save a decision and collect one local source. |
-| Ask one question across tools            | [Advanced multi-tool example](context-hub.md): four sources and a terminal-agent prompt.             |
-| Introduce BF to a team                   | [Team setup](team.md): a private repository, local collection and shared decisions.                  |
-| Understand the vocabulary                | [Core concepts](concepts.md), then the [glossary](glossary.md) for individual terms.                 |
-| Write projects, concepts and actions     | [Files and notes](brain.md): copyable OKF Markdown examples.                                         |
-| Find something or see what changed       | [Search and read](search.md).                                                                        |
-| Connect a decision to its evidence       | [Linking knowledge](links.md).                                                                       |
-| Keep important answers findable          | [Check your brain](checks.md): questions and expected refs.                                          |
-| Bring in selected documents or tool data | [Sensors](sensors.md), starting with one local file.                                                 |
-| Prepare a recurring review               | [Routines](routines.md), then [Schedule updates](schedule.md).                                       |
-| Work with agents or teammates            | [Agent workflows](agents.md), [MCP setup](mcp.md) or [Team brains](team.md).                         |
+You do not need to read the site in order. Choose the path that matches your task:
+
+| Need                   | Start here                                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Learn by doing         | [Getting started](getting-started.md), then the fictional [four-tool walkthrough](context-hub.md).                 |
+| Understand the model   | [Core concepts](concepts.md); look up unfamiliar terms in the [glossary](glossary.md).                             |
+| Use it each day        | [Write notes](brain.md), [find evidence](search.md), [link knowledge](links.md) and [check your brain](checks.md). |
+| Bring in other sources | [Add a sensor](sensors.md), [collect highlights](highlights.md), then [schedule updates](schedule.md).             |
+| Work with others       | [Connect an agent](agents.md) or [set up a team brain](team.md).                                                   |
+| Look up exact behavior | [Commands](commands.md), [configuration](configuration.md) and the [retrieval contract](retrieval.md).             |
+| Resolve a problem      | [Troubleshooting](troubleshooting.md) or [install and update](upgrades.md).                                        |
 
 ## Know the boundaries
 
-BF runs on Linux and macOS. It stores Markdown notes and JSON record files; a disposable SQLite cache makes them searchable. Retrieval works offline without an account or model. Search matches words and explicit identities, without embeddings.
+Notes are Markdown; collected records are JSON. A disposable SQLite cache makes them searchable. Search matches words and explicit identities, without embeddings or model calls. Links and schema mappings establish connections; BF does not guess identities from similar names.
 
-You choose what to collect and who can read the files. Sensors run only through collection commands or your schedules. A cloud agent may send the evidence it reads to its model provider. Read [Privacy and security](privacy.md) before connecting private sources or sharing a brain.
+You choose what to collect and share. Sensors run only when you collect, update or watch a brain, or through your schedules. A cloud agent may send retrieved evidence to its provider. Read [Privacy and security](privacy.md) before connecting sensitive sources.
 
-For exact options and limits, use [Commands](commands.md), [Configuration](configuration.md) and the [Retrieval contract](retrieval.md).
+These docs follow the repository's current code. Check `bf --version` and `bf COMMAND --help` if an option differs from your installation; see [version differences](upgrades.md#match-the-docs-to-your-version).

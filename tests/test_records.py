@@ -15,9 +15,8 @@ from bf.config import register
 from bf.models import Error, Query, Record
 from bf.storage import Store, writer
 
-
-def lines(store: Store, name: str) -> list[str]:
-    return [r.id for r in records.load(store, name)]
+DECISION = records.path("meetings", "decision-1")
+NEW = records.path("meetings", "new")
 
 
 def test_window_upsert_adds_updates_moves_and_keeps_unchanged(brain: Store) -> None:
@@ -32,14 +31,14 @@ def test_window_upsert_adds_updates_moves_and_keeps_unchanged(brain: Store) -> N
         "removed": 0,
     }
     assert brain.fingerprint(records.path("meetings", "lunch")) == untouched
-    assert lines(brain, records.path("meetings", "decision-1")) == ["decision-1"]
+    assert records.load(brain, DECISION).id == "decision-1"
     found = records.find(brain, "meetings", "decision-1")
     assert found is not None
     assert found[1].time.startswith("2026-09")
     assert records.upsert(brain, "meetings", [same], snapshot=False)["unchanged"] == 1
     assert records.upsert(brain, "meetings", [], snapshot=False)["added"] == 0
     records.upsert(brain, "meetings", [Record(id="loose", title="No time")], snapshot=False)
-    assert lines(brain, records.path("meetings", "loose")) == ["loose"]
+    assert records.load(brain, records.path("meetings", "loose")).id == "loose"
 
 
 def test_snapshot_replaces_the_complete_catalog(brain: Store) -> None:
@@ -47,9 +46,7 @@ def test_snapshot_replaces_the_complete_catalog(brain: Store) -> None:
     assert records.upsert(brain, "folders", folders, snapshot=True)["added"] == 2
     counts = records.upsert(brain, "folders", [Record(id="b", title="B")], snapshot=True)
     assert counts == {"added": 0, "updated": 0, "unchanged": 1, "removed": 1}
-    assert lines(brain, "memories/folders/3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d.json") == [
-        "b"
-    ]
+    assert records.files(brain, "folders") == [records.path("folders", "b")]
     assert records.upsert(brain, "folders", [], snapshot=True)["removed"] == 1
     assert records.files(brain, "folders") == []
     # Switching to snapshot mode retires records absent from the complete catalog.
@@ -57,10 +54,57 @@ def test_snapshot_replaces_the_complete_catalog(brain: Store) -> None:
     assert records.files(brain, "meetings") == [records.path("meetings", "only")]
 
 
+def test_collection_parses_only_the_files_it_replaces_or_removes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    records.upsert(brain, "catalog", [Record(id=str(n), title=f"Item {n}") for n in range(20)], snapshot=True)
+    loaded: list[str] = []
+    original = records.load
+
+    def counted(store: Store, name: str) -> Record:
+        loaded.append(name)
+        return original(store, name)
+
+    monkeypatch.setattr(records, "load", counted)
+    records.upsert(brain, "catalog", [Record(id="3", title="Changed")], snapshot=False)
+    assert loaded == [records.path("catalog", "3")]
+    loaded.clear()
+    kept = [Record(id=str(n), title=f"Item {n}") for n in range(18)]
+    assert records.upsert(brain, "catalog", kept, snapshot=True)["removed"] == 2
+    # A snapshot parses what it keeps and removes; unchanged files stay byte-identical.
+    assert sorted(loaded) == sorted(records.path("catalog", str(n)) for n in range(20))
+
+
+def test_absent_record_parses_the_source_unless_a_ready_cache_already_did(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index.refresh(brain)
+    loaded: list[str] = []
+    original = records.load
+
+    def counted(store: Store, name: str) -> Record:
+        loaded.append(name)
+        return original(store, name)
+
+    monkeypatch.setattr(records, "load", counted)
+    absent = records.path("meetings", "absent")
+    assert records.find(brain, "meetings", "absent") is None
+    assert loaded == [absent, DECISION, records.path("meetings", "lunch")]
+    loaded.clear()
+    assert records.find(brain, "meetings", "absent", complete=True) is None
+    assert loaded == [absent]
+    loaded.clear()
+    # Exact reads pass `complete` only from a ready cache that reported no problem in the source.
+    with pytest.raises(Error, match="not found"):
+        retrieve.read([brain], "meetings:absent")
+    assert loaded == [absent]
+    brain.write(records.path("meetings", "misnamed"), b'{"id":"elsewhere","title":"Misnamed"}\n')
+    with pytest.raises(Error, match="SHA-256 filename"):
+        retrieve.read([brain], "meetings:elsewhere")
+
+
 def test_find_reads_records_without_the_cache(brain: Store) -> None:
     found = records.find(brain, "meetings", "decision-1")
     assert found is not None
-    assert found[0] == "memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json"
+    assert found[0] == DECISION
     assert found[1].aliases == ["meeting:decision-1"]
     assert records.find(brain, "meetings", "absent") is None
     assert records.find(brain, "Bad Source", "x") is None
@@ -79,7 +123,7 @@ def test_invalid_record_files_name_their_location(brain: Store) -> None:
 
 
 def test_invalid_record_keys_stay_out_of_diagnostics(brain: Store) -> None:
-    path = "memories/bad/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json"
+    path = records.path("bad", "x")
     brain.write(path, b'{"id":"x","title":"ok","private-provider-key":"private-value"}\n')
     with pytest.raises(Error, match=r"invalid record: <key>") as failure:
         records.load(brain, path)
@@ -89,17 +133,16 @@ def test_invalid_record_keys_stay_out_of_diagnostics(brain: Store) -> None:
     assert "private" not in str(reply["problems"])
 
 
-def test_failed_partition_move_preserves_exact_original_bytes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    name = "memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json"
-    before = brain.read(name)
+def test_failed_record_write_preserves_exact_original_bytes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    before = brain.read(DECISION)
     original = Store.write
 
-    def fail_new_partition(self: Store, target: str, data: bytes) -> None:
-        if target == "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json":
+    def fail_new_record(self: Store, target: str, data: bytes, *, durable: bool = True) -> None:
+        if target == NEW:
             raise OSError(errno.ENOSPC, "synthetic disk full")
-        original(self, target, data)
+        original(self, target, data, durable=durable)
 
-    monkeypatch.setattr(Store, "write", fail_new_partition)
+    monkeypatch.setattr(Store, "write", fail_new_record)
     with pytest.raises(OSError, match="synthetic disk full"):
         records.upsert(
             brain,
@@ -107,27 +150,40 @@ def test_failed_partition_move_preserves_exact_original_bytes(brain: Store, monk
             [Record(id="decision-1", title="Moved", time="2026-09-01T00:00:00Z"), Record(id="new", title="New")],
             snapshot=False,
         )
-    assert brain.read(name) == before
-    assert not (
-        brain.root / "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json"
-    ).exists()
+    assert brain.read(DECISION) == before
+    assert not (brain.root / NEW).exists()
 
 
-def test_partition_size_is_checked_before_any_changes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_record_size_is_checked_before_any_changes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     records.upsert(brain, "bounded", [Record(id="one", title="First", text="x" * 100)], snapshot=False)
-    before = brain.read("memories/bounded/7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed.json")
+    before = brain.read(records.path("bounded", "one"))
     monkeypatch.setattr(records, "MAX_RECORD", 256)
     with pytest.raises(Error, match=r"record.*limit"):
         records.upsert(brain, "bounded", [Record(id="two", title="Second", text="x" * 300)], snapshot=False)
-    assert (
-        brain.read("memories/bounded/7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed.json") == before
-    )
+    assert brain.read(records.path("bounded", "one")) == before
+
+
+def test_a_commit_syncs_each_directory_once(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    fsync = os.fsync
+    calls = 0
+
+    def counted(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        fsync(fd)
+
+    records.upsert(brain, "bulk", [Record(id=str(n), title="Old") for n in range(20)], snapshot=False)
+    monkeypatch.setattr(os, "fsync", counted)
+    records.upsert(brain, "bulk", [Record(id=str(n), title="New") for n in range(20)], snapshot=False)
+    # One sync per backup and per record file, plus a few directory and manifest syncs, not one per entry.
+    assert calls <= 2 * 20 + 8
+    assert all(records.load(brain, records.path("bulk", str(n))).title == "New" for n in range(20))
 
 
 @pytest.mark.parametrize("completed", [False, True])
 def test_interrupted_transaction_recovers_from_durable_files(brain: Store, completed: bool) -> None:
-    original = brain.read("memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json")
-    script = """
+    original = brain.read(DECISION)
+    script = f"""
 import json, os, sys
 from pathlib import Path
 from bf import records
@@ -136,12 +192,12 @@ from bf.storage import Store, writer
 store = Store(Path(sys.argv[1]))
 completed = sys.argv[2] == 'True'
 write = Store.write
-def interrupted(self, name, data):
-    write(self, name, data)
+def interrupted(self, name, data, *, durable=True):
+    write(self, name, data, durable=durable)
     if completed:
         stop = name == 'memories/.pending/manifest.json' and json.loads(data)['complete']
     else:
-        stop = name == 'memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json'
+        stop = name == {DECISION!r}
     if stop:
         os._exit(73)
 Store.write = interrupted
@@ -167,10 +223,7 @@ with writer(store):
     assert found[1].title == ("Moved" if completed else "Preserve durable evidence")
     assert not (brain.root / "memories/.pending").exists()
     if not completed:
-        assert (
-            brain.read("memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json")
-            == original
-        )
+        assert brain.read(DECISION) == original
 
 
 def test_pending_manifest_is_confined_and_incomplete_preparation_is_discarded(brain: Store) -> None:
@@ -181,57 +234,66 @@ def test_pending_manifest_is_confined_and_incomplete_preparation_is_discarded(br
     index.refresh(brain, full=True)
     assert records.find(brain, "meetings", "decision-1") is not None
     assert not (brain.root / "memories/.pending").exists()
-    original = brain.read("memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json")
-    brain.write(
-        "memories/.pending/manifest.json",
-        json.dumps(
+
+
+@pytest.mark.parametrize(
+    ("manifest", "problem"),
+    [
+        ({"source": "../escape", "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": True}]}, "invalid"),
+        ({"source": "meetings", "changes": [{"name": "undated.json", "existed": False}]}, "invalid"),
+        ({"source": "meetings", "changes": [{"name": "../../bf.yaml", "existed": False}]}, "invalid"),
+        (
             {
-                "source": "../escape",
-                "changes": [{"name": "undated.jsonl", "existed": False}],
-            }
-        ).encode(),
-    )
-    with pytest.raises(Error, match="run bf build"):
-        records.find(brain, "meetings", "decision-1")
-    with pytest.raises(Error, match=r"invalid.*manifest"):
+                "source": "meetings",
+                "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": flag} for flag in (True, False)],
+            },
+            "duplicate paths",
+        ),
+    ],
+    ids=["traversal-source", "invalid-name", "traversal-name", "duplicate-names"],
+)
+def test_untrusted_manifests_are_refused_without_changing_evidence(
+    brain: Store, manifest: dict[str, object], problem: str
+) -> None:
+    brain.write("memories/.pending/0.before", b'{"id":"decision-1","title":"Forged replacement"}\n')
+    brain.write("memories/.pending/manifest.json", json.dumps(manifest).encode())
+    before = {name: brain.read(name) for name in brain.files("memories")}
+    with pytest.raises(Error, match=problem):
         index.refresh(brain, full=True)
-    assert (
-        brain.read("memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json")
-        == original
-    )
+    assert {name: brain.read(name) for name in brain.files("memories")} == before
+
+
+def test_unexpected_pending_files_are_preserved_for_repair(brain: Store) -> None:
+    brain.write("memories/.pending/notes.txt", b"an operator's note")
+    with pytest.raises(Error, match=r"unexpected file in memories/\.pending"):
+        index.refresh(brain, full=True)
+    assert brain.read("memories/.pending/notes.txt") == b"an operator's note"
+    assert brain.read(DECISION)
 
 
 def test_observing_an_unchanged_revision_does_not_rewrite_it(brain: Store) -> None:
     first = Record(id="item", title="Same evidence", attributes={"observed": "2026-09-01T00:00:00Z"})
     records.upsert(brain, "observations", [first], snapshot=True)
-    fingerprint = brain.fingerprint(
-        "memories/observations/4a33eacd5fa65f2b2e2871cd131286b53c415b131666d71173bb6e3fe59361b3.json"
-    )
+    fingerprint = brain.fingerprint(records.path("observations", "item"))
     repeated = first.model_copy(update={"attributes": {"observed": "2026-09-02T00:00:00.000000Z"}})
     assert records.upsert(brain, "observations", [repeated], snapshot=True)["unchanged"] == 1
-    assert (
-        brain.fingerprint("memories/observations/4a33eacd5fa65f2b2e2871cd131286b53c415b131666d71173bb6e3fe59361b3.json")
-        == fingerprint
-    )
+    assert brain.fingerprint(records.path("observations", "item")) == fingerprint
     found = records.find(brain, "observations", "item")
     assert found is not None
     assert found[1].observed == first.observed
 
 
 def test_failed_rollback_keeps_originals_for_explicit_build(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    old = "memories/meetings/e031d461072b6d47eb45e7cd0f15f0a65e717da62363d564c234d7f7e8713208.json"
-    before = brain.read(old)
+    before = brain.read(DECISION)
     original = Store.write
     changed = False
 
-    def exhausted(self: Store, name: str, data: bytes) -> None:
+    def exhausted(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
         nonlocal changed
-        if name == "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json" or (
-            name == old and changed
-        ):
+        if name == NEW or (name == DECISION and changed):
             raise OSError(errno.ENOSPC, "synthetic full disk during write and rollback")
-        original(self, name, data)
-        if name == old:
+        original(self, name, data, durable=durable)
+        if name == DECISION:
             changed = True
 
     with monkeypatch.context() as patch:
@@ -251,7 +313,7 @@ def test_failed_rollback_keeps_originals_for_explicit_build(brain: Store, monkey
     found = records.find(brain, "meetings", "decision-1")
     assert found is not None
     assert found[1].title == "Preserve durable evidence"
-    assert brain.read(old) == before
+    assert brain.read(DECISION) == before
     assert not (brain.root / "memories/.pending").exists()
 
 
@@ -268,10 +330,7 @@ def test_untrusted_pending_journal_cannot_mutate_evidence_through_reads(
     brain.write(
         "memories/.pending/manifest.json",
         json.dumps(
-            {
-                "source": "meetings",
-                "changes": [{"name": records.path("meetings", "decision-1").rsplit("/", 1)[1], "existed": existed}],
-            }
+            {"source": "meetings", "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": existed}]}
         ).encode(),
     )
     before = {name: brain.read(name) for name in brain.files("memories")}
@@ -288,7 +347,7 @@ def test_untrusted_pending_journal_cannot_mutate_evidence_through_reads(
 
 
 @pytest.mark.parametrize("snapshot", [False, True])
-def test_older_upstream_revision_cannot_replace_or_move_newer_evidence(brain: Store, snapshot: bool) -> None:
+def test_older_upstream_revision_cannot_replace_newer_evidence(brain: Store, snapshot: bool) -> None:
     current = Record(
         id="item",
         title="Current revision",
@@ -333,25 +392,37 @@ def test_a_revision_dated_after_its_observation_cannot_freeze_a_record(brain: St
 
 def test_aliases_and_absent_sources_do_not_wait_for_writers(brain: Store) -> None:
     with writer(brain):
-        # Existing sources still wait for a consistent set of partitions; an alias returns at once.
+        # Existing sources still wait for a consistent set of record files; an alias returns at once.
         assert records.find(brain, "repo", "example/project") is None
 
 
-@pytest.mark.parametrize("separate_partitions", [False, True])
-@pytest.mark.parametrize("snapshot", [False, True])
-def test_collection_preserves_conflicting_existing_records(
-    brain: Store, *, separate_partitions: bool, snapshot: bool
-) -> None:
-    first = records.line(Record(id="same", title="First evidence", time="2026-08-01T00:00:00Z"))
-    second = records.line(Record(id="same", title="Conflicting evidence", time="2026-09-01T00:00:00Z"))
-    brain.write(
-        "memories/conflicts/0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5.json",
-        first if separate_partitions else first + second,
-    )
-    if separate_partitions:
-        brain.write("memories/conflicts/d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa.json", second)
-    before = {name: brain.read(name) for name in records.files(brain)}
-    with pytest.raises(Error, match=r"invalid JSON|SHA-256 filename"):
-        records.upsert(brain, "conflicts", [Record(id="new", title="New evidence")], snapshot=snapshot)
-    assert {name: brain.read(name) for name in records.files(brain)} == before
+@pytest.mark.parametrize("incoming", ["same", "new"])
+def test_collection_never_replaces_or_removes_misnamed_evidence(brain: Store, incoming: str) -> None:
+    # A file named for one id holds another: collection cannot tell which evidence to keep.
+    misnamed = records.path("conflicts", "same")
+    brain.write(misnamed, records.serialize(Record(id="elsewhere", title="Conflicting evidence")))
+    before = brain.read(misnamed)
+    with pytest.raises(Error, match="SHA-256 filename"):
+        records.upsert(brain, "conflicts", [Record(id=incoming, title="Incoming")], snapshot=True)
+    assert records.files(brain, "conflicts") == [misnamed]
+    if incoming == "same":
+        with pytest.raises(Error, match="SHA-256 filename"):
+            records.upsert(brain, "conflicts", [Record(id=incoming, title="Incoming")], snapshot=False)
+    else:
+        # A window leaves unrelated files alone; bf validate still reports the misnamed one.
+        assert records.upsert(brain, "conflicts", [Record(id=incoming, title="Incoming")], snapshot=False)["added"]
+    assert brain.read(misnamed) == before
     assert not (brain.root / "memories/.pending").exists()
+
+
+def test_collection_replaces_its_own_records_that_break_current_rules(brain: Store) -> None:
+    # A stored record that breaks the rules, such as with a display-name alias or an over-long title, holds its
+    # own id: the corrected sensor replaces it, and a snapshot that no longer returns it removes it.
+    kept, gone = records.path("legacy", "w-legacy"), records.path("legacy", "gone")
+    brain.write(kept, b'{"id":"w-legacy","title":"Old","aliases":["Alice Example"]}\n')
+    brain.write(gone, b'{"id":"gone","title":"' + b"G" * 4097 + b'"}\n')
+    corrected = [Record(id="w-legacy", title="New", aliases=["person:alice"])]
+    assert records.upsert(brain, "legacy", corrected, snapshot=False)["updated"] == 1
+    assert records.load(brain, kept).aliases == ["person:alice"]
+    assert records.upsert(brain, "legacy", corrected, snapshot=True)["removed"] == 1
+    assert records.files(brain, "legacy") == [kept]

@@ -1,4 +1,8 @@
-# Routines
+---
+description: Configure an offline routine that turns saved evidence into a review action.
+---
+
+# Prepare reviews
 
 A registered routine prepares a review action from local evidence. For example, the weekly review reads your projects and recent activity, then creates an `ACTION.md` with tasks for you or your agent. It uses no model and makes no decisions for you.
 
@@ -6,12 +10,17 @@ A registered routine prepares a review action from local evidence. For example, 
 
 ## Configure a routine
 
-Complete [Getting started](getting-started.md) and work inside `~/brain`. Create `routines/`, then save and review the [weekly review example](https://github.com/fmind/brain-framework/blob/main/examples/routines/weekly-review.py) as `routines/weekly-review.py`. The Python package does not install these scripts.
+Complete [Getting started](getting-started.md) and work inside `~/brain`. Copy the [weekly review example](https://github.com/fmind/brain-framework/blob/main/examples/routines/weekly-review.py) from the release matching your installation, then review it. The Python package does not install these scripts.
 
-Add `weekly-review` beneath the existing `routines:` key in `bf.yaml`, replacing `routines: {}` if present. Keep the rest of your configuration; do not add a duplicate key:
+```bash
+mkdir -p routines
+curl -fsSLo routines/weekly-review.py "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/routines/weekly-review.py"
+```
+
+A new brain has no `routines:` key. Add this one at the top level of `bf.yaml`, keeping the rest of your configuration:
 
 ```yaml
-# https://fmind.github.io/brain-framework/
+# https://fmind.github.io/brain-framework/docs/routines/
 routines:
   weekly-review:
     command: [uv, run, --no-project, --python, "3.14", routines/weekly-review.py, "{{brain}}", "{{end}}"]
@@ -22,14 +31,14 @@ This invocation supplies Python 3.14 and does not require an executable bit on t
 
 The name becomes the action's slug: start with a lowercase letter, then use lowercase letters and digits separated by single hyphens. Sensor and routine names must be distinct.
 
-| Setting     | Default  | Meaning                                                               |
-| ----------- | -------- | --------------------------------------------------------------------- |
-| `command`   | required | A command on PATH or a `routines/` executable, followed by arguments. |
-| `enabled`   | `true`   | Whether the routine may run.                                          |
-| `refresh`   | `0`      | Seconds between runs; zero leaves it out of updates.                  |
-| `lookback`  | `86400`  | Seconds covered by the first run.                                     |
-| `timeout`   | `300`    | Maximum runtime in seconds.                                           |
-| `max_bytes` | 1 MiB    | Maximum stdout; configurable up to 4 MiB.                             |
+| Setting     | Default  | Meaning                                                                  |
+| ----------- | -------- | ------------------------------------------------------------------------ |
+| `command`   | required | A command on PATH or a `routines/` executable, then up to 127 arguments. |
+| `enabled`   | `true`   | Whether the routine may run.                                             |
+| `refresh`   | `0`      | Seconds between runs, up to 365 days; zero leaves it out of updates.     |
+| `lookback`  | `86400`  | Seconds covered by the first run; up to 365 days.                        |
+| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                             |
+| `max_bytes` | 1 MiB    | Maximum stdout; configurable up to 4 MiB.                                |
 
 Arguments support `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. After the first run, `start` is the end of the last window that produced an action or found nothing to review; `end` is now.
 
@@ -44,7 +53,7 @@ bf read actions
 bf validate
 ```
 
-If there are projects due for review, open tasks or dated items from the last seven days, the update reply names the new `actions/YYYY-MM-DD_weekly-review/ACTION.md`. Read that returned path to see the review tasks; the date is the day you ran it. If there is nothing to review, the routine succeeds without creating an action. An immediate second update leaves existing work intact.
+If there are projects due for review, open tasks or dated items from the last seven days, the update reply names the new `actions/YYYY-MM-DD_weekly-review-UUID/ACTION.md`. Read that returned path to see the review tasks; the date is the day you ran it. If there is nothing to review, the routine succeeds without creating an action. An immediate second update leaves existing work intact.
 
 To preview the Markdown without saving an action, run the script directly with your review timestamp:
 
@@ -64,11 +73,11 @@ A successful routine produces one of three outcomes:
 | Empty output                             | Success with no action.                                                 |
 | This clone already wrote an action today | Skipped; existing work stays intact and the review window remains open. |
 
-Failures, invalid OKF metadata or Markdown, and excessive output create no action. The routine remains due, and the failure appears in `bf status` and the home page's `attention`.
+Today's action counts while its folder holds any file, even an editor's `.#ACTION.md` lock, so a rerun never writes beside unsaved edits. Failures, invalid OKF metadata or Markdown, and excessive output create no action. The routine retries with the same [failure backoff](sensors.md#collect-and-update) as a sensor, and the failure appears in `bf status` and the home page's `attention`.
 
 ## Write a review routine
 
-Use `bf read` and `bf search` with literal arguments to read the brain. Keep routines offline and deterministic; do not edit existing notes or call a model. Name collected evidence by ref so a reviewer can choose what to open.
+Use `bf read` and `bf search` with literal arguments to read the brain. Programs receive `BF_BRAIN` set to the brain running them, so a nested `bf` call without `--brain` reads that brain even when your shell selected another one. The weekly review makes this explicit by passing its `{{brain}}` argument to `bf read --brain`. Keep routines offline and deterministic; do not edit existing notes or call a model. Name collected evidence by ref so a reviewer can choose what to open.
 
 For example, a routine reviewing the New website decision can print this complete action:
 
@@ -96,8 +105,8 @@ Read the project and its evidence, then record the review outcome.
 
 Every nonempty output needs a nonempty `type`. Optional `status` must be `draft`, `stable` or `deprecated`; keep review progress in the task list. Relative links resolve from the resulting `ACTION.md`, two levels below the brain root. The routine emits the complete note, including its metadata.
 
-Test the script with a fake `bf`. It runs with the same [process safeguards](limits.md#processes-and-logs) as a sensor. `bf status` reports its last run, success, error, log and latest action.
+Test the script with a fake `bf`. It runs with the same [process safeguards](limits.md#processes-and-logs) as a sensor. `bf status` reports its `state`, `freshness`, `last_success` and latest `action`, plus `failed`, `error`, `failures` and `log` after a failure; see [status fields](commands.md#status-sources-and-routines).
 
-To run updates automatically, see [Schedule updates](schedule.md).
+To run updates automatically, see [Watch and schedule updates](schedule.md).
 
-Routine action folders include a fresh UUID hex suffix. Independent clones create distinct sessions; this avoids filename conflicts but does not deduplicate overlapping reviews. Use one scheduler for a shared routine when only one team review is wanted. A clone remembers its last action in private run state and never replaces it.
+Routine action folders follow the [action folder convention](brain.md#actions): a fresh UUID hex suffix. Independent clones create distinct sessions; this avoids filename conflicts but does not deduplicate overlapping reviews. Use one scheduler for a shared routine when only one team review is wanted. A clone remembers its last action in private run state and never replaces it.

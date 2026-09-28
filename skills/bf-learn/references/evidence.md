@@ -12,16 +12,16 @@ Choose one outcome: link the useful passage from an existing decision or lesson;
 
 Read the exact note section or record through `bf read`. Record its original ref, when it became known, when the claim applies (if stated), and any dispute in a dated decision note. Use an existing action's `outputs/` and `inputs/` for the note and captures when that action owns the work. Without an action, keep the dated note under `projects/` and captures under `assets/`, linked from the owning project. Reuse existing locations and choose unused filenames; never create an action merely to retain evidence. Keep these dates distinct; the capture time is when this local copy was made, not necessarily when the underlying event happened.
 
-The standard-library [evidence helper](../scripts/evidence.py) runs with Python 3.11 or later, consumes JSON on stdin and never opens a brain, invokes a command, or contacts a network. `capture` accepts one exact read and retains its text or record, source metadata, timestamp and content digest. It excludes backlinks and other context. It refuses pages and incomplete reads. Partial or non-fresh records retain explicit limitations. This is a local observation, not proof of authorship, truth or live provider state.
+The standard-library [evidence helper](../scripts/evidence.py) runs with Python 3.11 or later and never contacts a network. `read REF --brain BRAIN` runs the offline `bf read` and prints the whole reply: above 65,536 characters it follows each `next_offset`, verifies the chunks' `sha256` and parses the assembled JSON, up to 4 MiB. `capture` and `compare` read only stdin. `capture` accepts one exact read and retains its text or record, source metadata, timestamp and content digest. It excludes backlinks and other context. It refuses pages, lone chunks and incomplete reads. Partial or non-fresh records retain explicit limitations. This is a local observation, not proof of authorship, truth or live provider state.
 
-From Bash, with the brain, exact ref, helper path and an unused destination in the chosen capture directory. The subshell keeps the options local, creates the capture owner-only, never replaces an earlier capture and removes only a capture it failed to write:
+When several brains are selected, including `brains:` references, set `$evidence_ref` to the returned `uri` (`bf://NAME/...`): a plain ref present in two brains fails, and a brain-qualified ref keeps the capture unambiguous. From Bash, with the brain, exact ref, helper path and an unused destination in the chosen capture directory. The subshell keeps the options local, creates the capture owner-only, never replaces an earlier capture and removes only a capture it failed to write:
 
 ```bash
 (
   set -o pipefail -o noclobber
   umask 077
   exec 3> "$new_capture" || exit 1
-  bf read "$evidence_ref" --brain "$brain_path" |
+  python3 "$evidence_helper" read "$evidence_ref" --brain "$brain_path" |
     python3 "$evidence_helper" capture >&3 || { rm -f -- "$new_capture"; exit 1; }
 )
 ```
@@ -35,40 +35,35 @@ To compare, supply the saved capture followed by a new exact read as two JSON do
   set -o pipefail
   {
     cat "$saved_capture"
-    bf read "$evidence_ref" --brain "$brain_path"
+    python3 "$evidence_helper" read "$evidence_ref" --brain "$brain_path"
   } | python3 "$evidence_helper" compare
 )
 ```
 
-Only the compact comparison reaches the model. `state` is `changed`, `unchanged` or `unknown`; `content_changed` compares stored content even when freshness is unknown. A new `observed` timestamp alone does not count as changed evidence; all other record fields do. Partial baselines, partial records, incomplete reads and any source that is not both `active` and `fresh` (including `manual`, disabled and historical sources) prevent a definitive state. Missing reads fail, never mean unchanged. For a record, `unchanged` means no newer local revision: a window sensor re-reads only its recent windows, so an older item can change upstream without a new local revision, while a snapshot sensor re-reads its whole catalog on each run. A digest detects accidental alteration of the capture; it is not a signature. The helper caps input at 9 MiB and emits generic errors without private excerpts.
+Only the compact comparison reaches the model. `state` is `changed`, `unchanged` or `unknown`; `content_changed` compares stored content even when freshness is unknown. A new `observed` timestamp alone does not count as changed evidence; all other record fields do. Partial baselines, partial records, incomplete reads and any source that is not both `active` and `fresh` (including `manual`, disabled and historical sources) prevent a definitive state. Missing reads fail, never mean unchanged. For a record, `unchanged` means no newer local revision: a window sensor re-reads only its recent windows, so an older item can change upstream without a new local revision, while a snapshot sensor re-reads its whole catalog on each run. A digest detects accidental alteration of the capture; it is not a signature. The helper caps stdin at 9 MiB and emits generic errors without private excerpts; rerun a read that changed while it was assembled.
 
 ## Revise a belief
 
-Keep the current conclusion in the owning project or concept. If the old claim matters, preserve its decision note and capture, then create a successor decision note linking what it supersedes and why. Use `status: deprecated` for an authored note intentionally retired; use "disputed" in its text when evidence conflicts, since disputed is not a core status. Distinguish disagreement from supersession and a factual claim from a proposal. More recent evidence is not automatically more authoritative.
+Keep the current conclusion in the owning project or concept. If the old claim matters, preserve its decision note and capture, then create a successor decision note linking what it supersedes and why. A decision note under `outputs/` is ordinary Markdown: its `type`, `status` and `updated` apply, and its typed links use the file as subject. Use `status: deprecated` for an authored note intentionally retired; use "disputed" in its text when evidence conflicts, since disputed is not a core status. Distinguish disagreement from supersession and a factual claim from a proposal. More recent evidence is not automatically more authoritative.
 
-For machine-readable relationships, declare only the roles you use in `bf.yaml`; their meanings are local conventions. For example:
+For machine-readable relationships, declare only the roles you use in `bf.yaml`; their meanings are local conventions. `bf init` already declares `depends-on`. To add `supersedes`, merge it into the existing `schema:` mapping; a second `schema:` key is invalid:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schema/
 schema:
-  depends-on:
-    description: This conclusion needs review when the target evidence changes.
-    type: identity
-    cardinality: many
-    relation: true
+  # Keep the existing roles, such as depends-on.
   supersedes:
     description: This authored decision explicitly replaces the target decision.
     type: identity
-    cardinality: many
     relation: true
 ```
 
-Use `[evidence](bf://NAME/path.md?rel=depends-on#stable-section)` and `[previous decision](bf://NAME/actions/DATE_slug/outputs/decision.md?rel=supersedes)`. Generic links do not establish dependency or supersession. Store truth dates as explicit prose unless the brain has declared corresponding schema fields. The framework resolves these links; it does not infer temporal truth or choose the winning claim.
+Use `[evidence](bf://NAME/path.md?rel=depends-on#stable-section)` and `[previous decision](bf://NAME/actions/YYYY-MM-DD_topic-SUFFIX/outputs/decision.md?rel=supersedes)`. Generic links do not establish dependency or supersession. Store truth dates as explicit prose unless the brain has declared corresponding schema fields. The framework resolves these links; it does not infer temporal truth or choose the winning claim.
 
 ## Review impact lightly
 
-When selected evidence changes, read its backlinks and inspect only the declared `depends-on` group. Section reads intentionally omit backlinks: read the parent note for this step, then check each claim's `target` to distinguish a dependency on the changed section from one on another section. Read each edge's `origin` and supporting evidence. Review direct dependents first, then at most one more dependency layer: **two hops, ten distinct dependents, one visit per qualified ref**. Stop cycles with that visited set. Equal role names in different brains need their schema meanings checked before following them.
+When selected evidence changes, read its backlinks and inspect only the declared `depends-on` group. Section reads intentionally omit backlinks: read the parent note for this step, then check each claim's `target` to distinguish a dependency on the changed section from one on another section. Read each edge's `origin` and supporting evidence. The group previews at most 20 items: when its `total` exceeds its `items`, continue with `bf search 'IDENTITY'` (following `next_offset`): each item's `relations` give its role, `origin` and `target`. Review direct dependents first, then at most one more dependency layer: **two hops, ten distinct dependents, one visit per qualified ref**. Stop cycles with that visited set. Equal role names in different brains need their schema meanings checked before following them.
 
 For each affected conclusion, report the dependency path and whether it needs review, remains justified after inspection, or lacks enough evidence. Change alone never proves falsity. Generic links and `supersedes` links do not propagate impact. A truncated backlink list, missing brain or exhausted limit produces an explicit incomplete-review note; do not silently clear the remaining dependents. Reuse a previous review when both the evidence digest and conclusion are unchanged. This is an agent review over existing graph reads, not an automatic invalidation engine.
 
-Oversized `bf read` replies carry JSON `chunk` strings and `next_offset`. Follow the same ref and brain selection with `--offset`, concatenate chunks with the same `sha256`, verify the UTF-8 digest and parse the assembled JSON before passing that exact reply to `evidence.py`. Never capture one chunk as if it were complete evidence.
+Exact `bf read` replies above 65,536 characters carry JSON `chunk` strings and `next_offset`; the helper's `read` mode assembles and verifies them. Never capture one chunk as if it were complete evidence; capture a note section when a whole reply exceeds 4 MiB.

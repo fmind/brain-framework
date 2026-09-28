@@ -1,3 +1,7 @@
+---
+description: Connect an agent through local MCP search and read tools, then verify access to a saved decision.
+---
+
 # Connect an agent with MCP
 
 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) lets an agent host call BF's **`search` and `read`** tools. The host launches `bf mcp` as a local stdio process; no network port or BF account is needed.
@@ -90,12 +94,13 @@ The answer should cite the ref. A configured entry alone does not prove the serv
 | Brain unavailable           | Read the decision in the terminal with that same absolute brain path.                          |
 | No tools or old behavior    | Restart after configuration changes or a BF update.                                            |
 | Empty or incomplete results | Inspect `problems`, `stale` and [source coverage](search.md#incomplete-answers-and-freshness). |
+| Cache write access error    | Make the brain's `.bf/` directory writable for the host's account, or serve a writable copy.   |
 
 ## What the host can read
 
 - Selected roots and their direct `brains:` references; review the intended audience.
 - No collection, routine, write or execution tools are exposed by BF's MCP server.
-- Retrieval can refresh the disposable cache and write private local usage counts.
+- Retrieval can refresh the disposable cache in the brain's `.bf/` directory, which must be writable by the host's account, and write private local usage counts.
 - The host may have other tools and may send evidence to a cloud model. See [privacy](privacy.md#your-agent-has-its-own-privacy-rules).
 
-For parameters, pagination and large replies, use the [MCP tool contract](retrieval.md#mcp-tool-contract).
+To read from one brain when a ref exists in several, pass its `bf://NAME/...` address, exactly as in the CLI. For parameters, pagination and large replies, use the [MCP tool contract](retrieval.md#mcp-tool-contract).

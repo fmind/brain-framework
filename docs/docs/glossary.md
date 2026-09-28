@@ -1,3 +1,7 @@
+---
+description: Plain-language definitions of Brain Framework terms, with links to worked examples.
+---
+
 # Glossary
 
 Find a term here, then follow its guide for a worked example. Read [Core concepts](concepts.md) first if the vocabulary is new.
@@ -7,9 +11,9 @@ In the website example, the **project** keeps the decision, an **action** record
 | Term            | Meaning                                                                                                                       | Read more                                                                   |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | Action          | One session of work recorded in an OKF `ACTION.md`, with inputs, outcome and next step.                                       | [Write and resume an action](brain.md#actions)                              |
-| Alias           | Another identity explicitly declared for the same subject, such as its repository URL.                                        | [BF links](link-reference.md#bf-links)                                      |
+| Alias           | Another namespaced identity explicitly declared for the same subject, such as `repo:github.com/team/new-website`.             | [BF links](link-reference.md#bf-links)                                      |
 | Backlink        | An incoming link: the website decision lists the review action that links to it.                                              | [Connect two notes](links.md#connect-two-notes)                             |
-| Brain           | A directory of authored notes, collected evidence and configuration.                                                          | [Files and notes](brain.md)                                                 |
+| Brain           | A directory of authored notes, collected evidence and configuration.                                                          | [Write notes and actions](brain.md)                                         |
 | Claim           | A relationship plus its source: for example, a commit credits Alice as `author`. The source is evidence, not proof.           | [Relationship links](link-reference.md#relationship-links)                  |
 | Concept         | Reusable knowledge with evidence and limits, such as why to explain a product before asking for signup.                       | [Write a concept](brain.md#concepts)                                        |
 | Coverage        | The collection windows retained in this machine's run history; not a guarantee that the provider returned every item.         | [Backfills and coverage](sensors.md#backfills-and-coverage)                 |
@@ -21,10 +25,10 @@ In the website example, the **project** keeps the decision, an **action** record
 | OKF             | Open Knowledge Format v0.2: Markdown and metadata conventions for projects, concepts and `ACTION.md` notes.                   | [Notes](brain.md#notes)                                                     |
 | Page            | A computed view returned by `bf read`, such as projects, recent activity or source coverage.                                  | [Browse pages](search.md#pages)                                             |
 | Project         | A maintained note describing a goal, current state, decisions and next tasks.                                                 | [Notes](brain.md#notes)                                                     |
-| Ref             | An address for `bf read`, such as `projects/new-website.md#decision`. A `uri` also names its brain.                           | [Search and read](search.md)                                                |
+| Ref             | An address for `bf read`, such as `projects/new-website.md#decision`. A `uri` also names its brain; read it across brains.    | [Search and read](search.md)                                                |
 | Relationship    | The declared meaning of a link, such as `depends-on` or `author`.                                                             | [Name a relationship](links.md#name-a-relationship)                         |
 | Retrieval case  | A saved question and the evidence that search or read must return.                                                            | [Check your brain](checks.md#retrieval-cases)                               |
-| Routine         | A deterministic maintenance script; routines configured in `bf.yaml` produce review actions.                                  | [Routines](routines.md)                                                     |
+| Routine         | A deterministic maintenance script; routines configured in `bf.yaml` produce review actions.                                  | [Prepare reviews](routines.md)                                              |
 | Schema          | The declared vocabulary and validation rules for shared record fields and relationship roles.                                 | [Schema mappings](schema.md#shared-fields-and-sensor-mappings)              |
 | Scope           | Where a search looks: for example, `--scope projects` or `--scope 7d`.                                                        | [Search reference](retrieval.md#search)                                     |
 | Sensor          | A program that gathers selected evidence and prints JSON records for collection.                                              | [Your first sensor](sensors.md#your-first-sensor)                           |

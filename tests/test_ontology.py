@@ -160,15 +160,19 @@ def test_config_contracts_and_pointer_escaping() -> None:
     for document, path in [(1, "/x"), ([], "/01"), ([], "/x")]:
         with pytest.raises(Error, match="cannot traverse"):
             ontology.pointer(document, path)
-    with pytest.raises(ValidationError, match="undeclared"):
+    with pytest.raises(ValidationError, match=r"sensors\.x\.fields\.missing: not declared in schema"):
         Config.model_validate(
-            {"name": "test", "sensors": {"x": {"command": ["fake"], "fields": {"missing": {"value": "x"}}}}}
+            {
+                "version": 6,
+                "name": "test",
+                "sensors": {"x": {"command": ["fake"], "fields": {"missing": {"value": "x"}}}},
+            }
         )
     with pytest.raises(ValidationError):
         Config.model_validate({"version": 3, "name": "old"})
 
 
-def test_schema_change_invalidates_cache_and_bad_partition_is_reported(brain: Store) -> None:
+def test_schema_change_invalidates_cache_and_bad_record_is_reported(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     ingest(brain, [{"id": "one", "title": "Mail", "attributes": {"from": "person:alice"}}])
     assert role(brain, "person:alice", "sender") == ["mail:one"]
@@ -177,7 +181,7 @@ def test_schema_change_invalidates_cache_and_bad_partition_is_reported(brain: St
         read([brain], "person:alice")
     record = Record(id="bad", title="Invalid", fields={"undeclared": "x"})
     brain.write(
-        "memories/bad/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json", records.line(record)
+        "memories/bad/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json", records.serialize(record)
     )
     reply = search([brain], Query(text="offline"))
     assert reply["items"]
@@ -185,6 +189,26 @@ def test_schema_change_invalidates_cache_and_bad_partition_is_reported(brain: St
     assert not validate(brain)["valid"]
     with pytest.raises(Error, match="schema field sender"):
         ontology.validate(Record(id="bad", title="Bad", fields={"sender": 1}), load(brain))
+
+
+def test_schema_edits_keep_every_stored_identity_edge(brain: Store) -> None:
+    brain.write("bf.yaml", CONFIG)
+    values = {"from": "person:alice", "to": ["person:bob"], "category": "urgent"}
+    ingest(brain, [{"id": "one", "title": "Planning", "attributes": values}])
+    assert role(brain, "person:bob", "recipient") == ["mail:one"]
+    # A declared relation keeps its stored identities whatever cardinality it now has.
+    many = b"    cardinality: many\n    relation: true\n    examples: [[person:bob, person:carol]]\n"
+    retyped = CONFIG.replace(many, b"    cardinality: optional\n    relation: true\n")
+    brain.write("bf.yaml", retyped)
+    assert role(brain, "person:bob", "recipient") == ["mail:one"]
+    assert "schema field recipient" in str(validate(brain)["problems"])
+    # A value stored before its field became an identity names none, so it claims nothing.
+    retyped = retyped.replace(b"    type: string\n  kind:", b"    type: identity\n    relation: true\n  kind:")
+    brain.write("bf.yaml", retyped)
+    reply = search([brain], Query(text="planning urgent", target="person:bob"))
+    assert [item["ref"] for item in reply["items"]] == ["mail:one"]
+    assert "problems" not in reply
+    assert "schema field label" in str(validate(brain)["problems"])
 
 
 def test_cli_mcp_and_evaluation_share_relationship_pages(brain: Store) -> None:

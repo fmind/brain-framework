@@ -1,48 +1,47 @@
 ---
 name: bf-maintain
-description: Maintain Brain Framework brains - sensor and routine health, scheduled updates, backfills, validation, retrieval cases and Git conflict resolution. Use when bf status or the home page reports stale or failing sensors or routines, when adding a sensor or routine, when setting up a schedule, or when concurrent brain revisions conflict.
+description: Diagnose and repair Brain Framework collection, routines, retrieval or conflicts; implement selected integrations and operate authorized refresh jobs. Use bf-setup for onboarding and bf-scan for discovery.
 license: MIT
-compatibility: Requires Brain Framework 13 (the bf command) on Linux or macOS.
+compatibility: Requires Brain Framework 14 (the bf command) on Linux or macOS.
 metadata:
-  version: "13.0.2"
+  version: "14.0.0"
 ---
 
 # bf-maintain
 
-For first-use onboarding, use [bf-setup](../bf-setup/SKILL.md); for approved source discovery, use [bf-scan](../bf-scan/SKILL.md). This skill owns implementing and operating their selected sensors and routines. Carry forward the recurring question, account/folder/repository scope, retained fields, exclusions, access gaps and freshness need. Discovery approval alone does not authorize provider execution; reuse explicit implementation and live-run authority already given.
+Start with offline diagnosis in the intended brain directory. Outside it, use `--brain PATH`; check an inherited `BF_BRAIN` before relying on the directory. `update`, `collect`, `watch` and `schedule` act on exactly one brain (`--brain`, `BF_BRAIN` or the enclosing brain you own), never its `brains:` references or all registered brains: registration selects brains for retrieval only. A bare `--brain NAME` resolves through the user's registry first and fails as ambiguous when a related brain claims it elsewhere; pass the path.
 
-Select the intended brain before maintenance; use `--brain NAME` so the working directory cannot broaden the operation. Start with offline diagnosis. Live `update` and `collect` require the user's authorization; `collect --dry-run` still contacts the provider and writes its private stderr log.
+## Diagnose before executing
 
 ```bash
-bf status --brain NAME             # cache, sources, routines, last success, errors, log paths
-bf update --dry-run --brain NAME   # due sensors and routines and their windows, runs nothing
-bf update --brain NAME             # when authorized: collect due sensors, refresh cache
-bf validate --brain NAME && bf eval --brain NAME
+bf status
+bf update --dry-run
+bf validate
+bf eval
 ```
 
-1. **Failing sensor**: read the log path from `bf status`, reproduce with `bf collect SENSOR --since 1d --dry-run --brain NAME`, fix the sensor under `sensors/` with a fake-provider test under `tests/`, then rerun. Provider authentication belongs to the provider CLI (`gh auth`, `gws auth`).
-1. **Stale sensor**: inspect the active watch or native scheduler before blaming the sensor. `bf status --watch` observes local history; inspect the owning service's logs when it runs in the background. A paused laptop catches up at most 30 days automatically; backfill older gaps with `bf collect SENSOR --since YYYY-MM-DD`.
-1. **New sensor**: add it only for a question the user asks repeatedly. Copy an example from the Brain Framework repository's `examples/sensors/`, keep projection focused (title and text carry the searchable facts, skip noise such as trash or bots), test it with a fake provider, declare it disabled with explicit account/folder/channel scope, modification time, partial-content and deletion behavior, try `bf collect NAME --dry-run` when enabled and authorized, then declare `refresh` in `bf.yaml`.
-1. **New routine**: add one only for a review the user repeats. Copy an example from the Brain Framework repository's `examples/routines/` into `routines/`, keep it deterministic (it reads `bf read`/`bf search` pages and prints OKF Markdown with `type: action` and `status: draft`, or nothing when there is nothing to review; no model, network or provider call), test it with a fake `bf`, and declare it under `routines:` with a `refresh`. `bf update` validates the output and writes `actions/YYYY-MM-DD_NAME-UUID/ACTION.md` after the sensors, never replacing an existing action. Preview it by running the script directly. A failing routine writes nothing, stays due and appears under `attention` on the home page.
-1. **Usage**: once a month, read `usage` in `bf status`. Near-zero searches mean agents are not reaching the brain: check that `bf-use` is installed where they run before improving anything else. A high share of `empty` searches means notes or sensors miss what people ask.
-1. **Notes needing attention**: inspect `review_reasons`, `modified`, `review_due` and `new_links` on `bf read projects`. Reminders default to 14 days after the file's local modification time; optional `review_after` days or a `review_due` date customize them. Copies/checkouts can reset modification times. A reminder or recent edit establishes no verification. Read the note and evidence before changing its conclusion or deadline. Use `bf read tasks` for all open work and counts; keep generated summaries as plain bullets so they do not create duplicate tasks.
-1. **Incomplete retrieval**: inspect `problems` and `stale`, repair the named file or brain, then repeat the query; `eval` rejects incomplete answers.
-1. **Empty snapshot**: collection refuses to replace a non-empty catalog with an empty one, since a wrong account or an unmounted folder also looks empty. Check the sensor's scope and provider authentication; delete `memories/SOURCE/` only when the user confirms the catalog is really empty.
-1. **Duplicate records**: collection refuses a source that already contains duplicate IDs. Run `bf validate`, preserve the conflicting revisions and reconcile their evidence before retrying; never discard a revision simply to make collection succeed.
-1. **Retrieval miss**: add the question as a case in `evals/retrieval.yaml`, then improve the owning note or the sensor's projection until `bf eval` passes. Do not tune the core for one query.
-1. **Watch**: `bf status --watch --brain NAME` observes local run history without execution. With collection authority, `bf watch --brain NAME` runs due programs until exit; select specific programs with repeatable `--sensor NAME` and `--routine NAME`. If any selectors are supplied, only named programs run. Space pauses future checks, `q` cancels the active update and quits, and `?` explains the display. Do not mistake fresh local history for provider truth.
-1. **Schedule**: `bf schedule --brain NAME --sensor SENSOR --output settings/schedules` writes native files and returns installation, status and removal argv lists; omitting `--output` only previews them. Review the generated files and activate them only with recurring-execution authority. Keep the files alongside other brain-owned native jobs, outside `bf.yaml`; arbitrary scripts use native scheduler files directly. Check more often than the shortest `refresh`. Report generated, enabled and observed runs separately. See [Watch and schedule updates](https://fmind.github.io/brain-framework/docs/schedule/).
+`status` reports each brain's `cache` (`ready` or `stale`), sources (`state`, `freshness`, `last_collected`, `window`, `last_run`) and routines (`state`, `last_success`, `action`); a failed program adds `failed`, `error`, `failures` and its private `log`. `update --dry-run` lists due programs and windows without running them. Validation and evaluation check file structure and saved retrieval expectations; inspect failures and incomplete evidence before reporting success. `bf validate` lists `problems` as `{file, error}` objects, at most 200 with `problems_truncated`; fix those and validate again.
 
-Inspect active/disabled/historical coverage and `last_run` counts before interpreting freshness; `bf read memories` and `bf read memories/SOURCE` show each source's coverage and paginated latest records. Preserve `memories/.pending/` during recovery and backup; it holds durable originals for interrupted writes. Inspect the brain, then run `bf build` for explicit recovery; search and read do not apply pending journals. Keep one scheduler per machine.
+`bf collect --dry-run` **does execute provider code** and may write private stderr logs. Live collection, update, routine previews and watch need the user's authority for that scope; recurring execution needs matching authority. Reuse approval already supplied. Discovery alone grants neither.
 
-For mutable window sources, use a short `refresh` and `overlap`, plus `reconcile: {refresh: 86400, lookback: 604800}` when a daily seven-day revisit is justified. Keep reconciliation on the same source; avoid widening every sensor request internally. Preview the planned bounds with `bf update --dry-run`. Compare `last_run` change counts, `elapsed_seconds` and `output_bytes`; stdout bytes do not measure provider traffic. Failed runs remain due, and finite horizons do not guarantee discovery of older edits or deletions.
+## Choose the repair
 
-Never delete records, action inputs or outputs to fix a problem; `.bf/` is the only disposable folder (`bf build` recreates it). Collection and routines run code with the user's permissions: run live providers only within the user's authorization, and review a shared brain's `bf.yaml`, `sensors/` and `routines/` before running or scheduling updates. Registration only selects brains by name; use an explicit `--brain PATH` in schedules.
+| Need                                                              | Load                                                |
+| ----------------------------------------------------------------- | --------------------------------------------------- |
+| Implement a selected sensor, mapping or routine                   | [Integrations](references/integrations.md)          |
+| Repair collection, backfill, recover a journal, watch or schedule | [Operations and recovery](references/operations.md) |
+| Compare `AGENTS.md` with the installed version's instructions     | [Operations and recovery](references/operations.md) |
+| Resolve Git conflicts or competing identities                     | [Conflict resolution](references/conflicts.md)      |
+| Correct authored knowledge or review a decision                   | `bf-learn`, if installed                            |
 
-Shared field meanings, types, cardinality and examples live under `schema` in `bf.yaml`; sensor `fields` map explicit output paths or constants into them. Sensors emit explicit identities only (`person:email/ADDRESS`, `repo:github.com/OWNER/NAME`), never names matched by similarity. Keep technical checks in `tests/` and retrieval suites in `evals/`; `bf eval` runs all suites, while `--path evals/NAME.yaml` selects one.
+For a retrieval miss, save the question as an `evals/` case before changing the owning note or sensor; a new suite starts with `version: 5`. Keep technical regressions in `tests/`. Run `bf eval --path evals/NAME.yaml` for one suite or `bf eval` for all. Every suite is validated before retrieval: a malformed `read` ref or an empty window such as `0d` stops the whole run and names the suite and field. Never substitute empty assertions to make a case pass; see [retrieval cases](https://fmind.github.io/brain-framework/docs/checks/#suite-reference).
 
-Related brains belong in `bf.yaml` as `brains: {team: {path: ../team}}`. Maintenance commands act on the selected root only; references never grant sensor execution permission. `bf validate` reports foreign links under `unresolved` without opening them. Follow `bf-learn` to author entities and typed links.
+Use `bf schema` for the installed brain schema, or `--kind watch|registry|eval` for other configuration formats. These commands are offline and need no selected brain. Editor schemas check structure; runtime validation, evaluation and update planning check their owning semantics.
 
-For merge conflicts or competing identities, follow the [resolution guide](references/conflicts.md). Preserve both revisions until evidence supports a resolution; validate the merged result before delivery.
+Review `usage` in `bf status` when diagnosing poor adoption: few searches suggest checking agent access, while many empty searches suggest missing vocabulary or evidence. Counts indicate where to investigate; they do not establish a cause. Inspect review reminders with `bf read projects` and open work with `bf read tasks`; a reminder or recent edit is not verification.
 
-Use `bf watch` as the primary refresh mode. Keep check/display periods and desktop notifications in `settings/watch.yaml`; CLI options override it, then built-in defaults apply. Default alerts cover new failures and recovery, with a five-minute cooldown; success alerts are optional. Restart the collector after editing preferences. A second watcher observes the active collector, while timers require explicit `bf status --watch`. Keep one execution owner; `bf schedule` remains an optional generator of native files. See the [watch preferences](https://fmind.github.io/brain-framework/docs/schedule/#watch-preferences) and the runnable offline `examples/watch/` in the framework repository.
+## Verify the result
+
+Repeat the failed check, validate the changed brain, and search/read the evidence needed by the original question. Report what changed, what passed, unresolved coverage and the next step. Distinguish offline checks, fake-provider tests, live collection and observed scheduler runs. Preserve evidence; do not delete records or action artifacts to clear an error.
+
+For first use, choose `bf-setup`; for source recommendations, choose `bf-scan`. Companion skills are installed separately through the [installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md). Neither discovery nor a link to another skill installs or activates an integration.

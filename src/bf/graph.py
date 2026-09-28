@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 
 from bf import index, links
-from bf.config import load
+from bf.config import brain_name, load
 from bf.models import Error
 from bf.storage import Store
 
@@ -41,10 +42,11 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
     parsed = links.parse(value)
     matches: list[tuple[Store, int, set[str]]] = []
     problems: list[dict[str, object]] = []
+    labels: dict[Path, str] = {}
     for store in stores:
-        name = store.root.name
+        name = ""
         try:
-            name = load(store).name
+            name = labels[store.root] = load(store).name
             if parsed and parsed.brain != name:
                 continue
             with index.database(store) as (connection, state):
@@ -62,29 +64,36 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
                         raise Error("identity expansion exceeds 1001 aliases")
                     matches.append((store, row[0], names))
         except (Error, OSError, sqlite3.DatabaseError) as error:
-            problems.append(
-                {"brain": name, "error": str(error) if isinstance(error, Error) else "identity cache unavailable"}
-            )
+            # Named and worded as the page reports the same brain, so a reply lists an unloadable brain once.
+            message = str(error) if isinstance(error, Error) else "identity cache unavailable"
+            problems.append({"brain": name or brain_name(store), "error": message.replace(str(store.root), "<brain>")})
     if len(matches) > 1:
-        problems.append({"error": "ambiguous identity across selected evidence; use a brain-qualified exact ref"})
+        problems.append(
+            {"error": "ambiguous identity across selected evidence; read the owning note's bf://NAME/path.md"}
+        )
         return {value}, problems
     if not matches:
         return {value}, problems
     owner, item, names = matches[0]
     shared: set[str] = set()
     for store in stores:
+        if store.root not in labels:
+            # Its bf.yaml did not load: already reported, and it cannot share an alias.
+            continue
         try:
             with index.database(store) as (connection, _state):
+                # A record's ref already names it: a note alias repeating one is shared, never expanded.
                 shared.update(
                     row[0]
                     for row in connection.execute(
-                        "SELECT DISTINCT name FROM names WHERE name IN (SELECT value FROM json_each(?)) "
-                        "AND NOT (? AND item=?)",
+                        "SELECT name FROM names WHERE name IN (SELECT value FROM json_each(?1)) AND NOT (?2 AND item=?3) "
+                        "UNION SELECT ref FROM items WHERE ref IN (SELECT value FROM json_each(?1)) "
+                        "AND NOT (?2 AND id=?3)",
                         (json.dumps(sorted(names - {value})), store.root == owner.root, item),
                     )
                 )
         except Error, OSError, sqlite3.DatabaseError:
-            problems.append({"brain": store.root.name, "error": "identity cache unavailable"})
+            problems.append({"brain": labels[store.root], "error": "identity cache unavailable"})
     if shared:
         problems.append({"error": f"{len(shared)} aliases are also claimed elsewhere and were not expanded"})
     return {value} | (names - shared), problems

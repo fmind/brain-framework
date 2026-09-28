@@ -21,9 +21,9 @@ def test_example_collects_searches_and_resumes(tmp_path: Path) -> None:
         assert result.exit_code == code, result.output
         return json.loads(result.stdout) if result.stdout else {}
 
-    assert invoke("update", "--dry-run")["brains"][0]["sensors"][0]["status"] == "due"
+    assert invoke("update", "--dry-run")["sensors"][0]["status"] == "due"
     assert not (brain / "memories").exists()
-    assert invoke("update")["brains"][0]["sensors"][0]["status"] == "collected"
+    assert invoke("update")["sensors"][0]["status"] == "collected"
     assert invoke("validate")["valid"]
     assert invoke("eval")["passed"]
     context = invoke("read", "actions/2026-09-25_retention-review/ACTION.md#context")
@@ -37,10 +37,18 @@ def test_example_collects_searches_and_resumes(tmp_path: Path) -> None:
     found = invoke("search", "keep originals", "--scope", "actions")
     assert found["items"][0]["ref"] == "actions/2026-09-19_retention/outputs/answer.md"
     assert invoke("validate")["valid"]
-    partitions = sorted((brain / "memories/demo").glob("*.json"))
-    assert invoke("update")["brains"][0]["sensors"] == []
-    assert sorted((brain / "memories/demo").glob("*.json")) == partitions
+    record_files = sorted((brain / "memories/demo").glob("*.json"))
+    assert invoke("update")["sensors"] == []
+    assert sorted((brain / "memories/demo").glob("*.json")) == record_files
     assert (action / "inputs/request.txt").is_file()
+
+
+def test_example_suites_link_to_the_suite_reference() -> None:
+    # Editors open the header URL; it must be the page `bf init` links, which owns the suite fields.
+    suites = sorted((Path(__file__).parents[1] / "examples").glob("*/evals/*.yaml"))
+    assert len(suites) >= 3
+    for suite in suites:
+        assert suite.read_text().startswith("# https://fmind.github.io/brain-framework/docs/checks/\n"), suite
 
 
 def test_prepared_knowledge_transfer_works_without_the_source_brain(tmp_path: Path) -> None:

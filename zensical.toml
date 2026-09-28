@@ -13,26 +13,28 @@ extra_css = ["stylesheets/extra.css"]
 extra_javascript = ["javascripts/accessibility.js"]
 nav = [
   { "Overview" = "docs/index.md" },
-  { "Getting started" = "docs/getting-started.md" },
-  { "Core concepts" = "docs/concepts.md" },
-  { "Glossary" = "docs/glossary.md" },
-  { "Use your brain" = [
-    { "Files and notes" = "docs/brain.md" },
+  { "Start here" = [
+    { "Getting started" = "docs/getting-started.md" },
+    { "Core concepts" = "docs/concepts.md" },
+  ] },
+  { "Everyday use" = [
+    { "Write notes and actions" = "docs/brain.md" },
     { "Search and read" = "docs/search.md" },
     { "Linking knowledge" = "docs/links.md" },
     { "Check your brain" = "docs/checks.md" },
   ] },
-  { "Maintain your brain" = [
-    { "Sensors" = "docs/sensors.md" },
-    { "Routines" = "docs/routines.md" },
-    { "Schedule updates" = "docs/schedule.md" },
+  { "Collect and maintain" = [
+    { "Add a sensor" = "docs/sensors.md" },
+    { "Collect selected highlights" = "docs/highlights.md" },
+    { "Prepare reviews" = "docs/routines.md" },
+    { "Watch and schedule updates" = "docs/schedule.md" },
+    { "Install and update" = "docs/upgrades.md" },
+    { "Troubleshooting" = "docs/troubleshooting.md" },
   ] },
-  { "Team setup" = "docs/team.md" },
-  { "Connect agents" = [
+  { "Agents and teams" = [
     { "Agent workflows" = "docs/agents.md" },
-    { "MCP server" = "docs/mcp.md" },
-  ] },
-  { "Advanced" = [
+    { "Connect an agent with MCP" = "docs/mcp.md" },
+    { "Team setup" = "docs/team.md" },
     { "Connect context across tools" = "docs/context-hub.md" },
     { "Evaluate a team pilot" = "docs/pilot.md" },
   ] },
@@ -42,8 +44,8 @@ nav = [
     { "Record schema" = "docs/schema.md" },
     { "Link syntax" = "docs/link-reference.md" },
     { "Retrieval contract" = "docs/retrieval.md" },
-    { "Install and update" = "docs/upgrades.md" },
     { "Limits and safeguards" = "docs/limits.md" },
+    { "Glossary" = "docs/glossary.md" },
   ] },
   { "Privacy and legal" = [
     { "Privacy and security" = "docs/privacy.md" },
@@ -86,5 +88,6 @@ pymdownx.superfences = {}
 redirect_maps = { "index.md" = "docs/index.md" }
 
 [project.plugins.search]
-# Zensical 0.0.59's visible search dialog is absent from the accessibility tree.
+# Zensical 0.0.65 search still has unlabeled controls, invalid ARIA and low-contrast results.
+# Recheck keyboard use and an accessibility audit before enabling it.
 enabled = false

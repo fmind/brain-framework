@@ -24,7 +24,7 @@ def page(brain: str, ref: str = "", offset: int = 0) -> dict:
             timeout=TIMEOUT,
             check=False,
         )
-    except OSError, subprocess.TimeoutExpired:
+    except (OSError, subprocess.TimeoutExpired):
         raise SystemExit(f"weekly-review: could not read the {name} page") from None
     if result.returncode or len(result.stdout) > REPLY_BYTES:
         raise SystemExit(f"weekly-review: could not read the {name} page")

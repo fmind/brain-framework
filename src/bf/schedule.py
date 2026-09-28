@@ -11,10 +11,10 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-from bf.collect import environment
 from bf.config import load
+from bf.history import environment
 from bf.models import NAME, Error, digest
-from bf.storage import Store, writer
+from bf.storage import Store, writer, xdg_setting
 from bf.update import selection
 
 Backend = Literal["auto", "systemd", "launchd", "cron"]
@@ -85,10 +85,9 @@ def generate(
     label = f"bf-{config.name}-{digest(os.fsencode(store.root))[:8]}-{name}"
     env = {"PATH": environment().get("PATH", "/usr/local/bin:/usr/bin:/bin")}
     for key in ("XDG_CONFIG_HOME", "XDG_STATE_HOME"):
-        if value := os.environ.get(key):
-            if not Path(value).is_absolute():
-                raise Error("XDG configuration and state paths must be absolute for scheduling")
-            env[key] = value
+        # Capture the locations every command uses: expanded, and without values the runtime ignores.
+        if path := xdg_setting(key):
+            env[key] = str(path)
     for value in env.values():
         _literal(value)
     minutes = list(range(0, 60, every))
@@ -102,7 +101,8 @@ def generate(
     install: list[list[str]]
     status: list[list[str]]
     remove: list[list[str]]
-    source = output.expanduser().absolute() if output else store.root / "settings" / "schedules"
+    # Like other brain-relative options, a relative output directory resolves against the brain root.
+    source = Path(os.path.normpath(store.root / (output.expanduser() if output else "settings/schedules")))
     if backend == "systemd":
         service = label + ".service"
         timer = label + ".timer"
@@ -113,7 +113,8 @@ def generate(
             + "".join(f"Environment={_unit(key + '=' + value)}\n" for key, value in env.items())
             + "ExecStart="
             + " ".join(_unit(value, expand=position > 0) for position, value in enumerate(argv))
-            + "\nTimeoutStartSec=45min\nTimeoutStopSec=10s\n",
+            # A oneshot service has no start timeout by default; per-program BF timeouts bound each run.
+            + "\nTimeoutStopSec=10s\n",
             timer: "# https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html\n"
             f"[Unit]\nDescription=Check due Brain Framework programs every {every} minutes\n\n"
             f"[Timer]\nOnCalendar=*-*-* *:{','.join(f'{minute:02d}' for minute in minutes)}:00\n"
@@ -187,7 +188,11 @@ def generate(
             "Cron skips missed runs. Add/remove only this job's line with crontab -e; crontab FILE replaces all existing jobs."
         )
     written: list[str] = []
-    if output is not None:
+    if output is None:
+        warnings.append(
+            "Preview only: no file was written; rerun with --output settings/schedules before the install commands."
+        )
+    else:
         if source.is_symlink():
             raise Error("schedule output directory may not be a symlink")
         # Brain-local definitions use the same confined writer as other brain files.

@@ -14,17 +14,21 @@ from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
+# The headings of templates/action.md, without its sample text; tests keep the two in sync.
+SECTIONS = ("## Context {#context}", "## TODO", "## Decision {#decision}", "## Resume {#resume}", "## Outcome")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("topic", help="Lowercase topic with hyphens")
-    parser.add_argument("--brain", required=True, type=Path, help="Existing brain directory")
+    parser.add_argument("--brain", required=True, type=Path, help="Existing brain directory, not a registered name")
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", args.topic) or len(args.topic) > 64:
         parser.error("topic must be a lowercase hyphenated slug of at most 64 characters")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        root = os.open(args.brain.expanduser(), flags)
+        # Like bf, follow a linked brain root once; nothing below it is followed.
+        root = os.open(args.brain.expanduser(), os.O_RDONLY | os.O_DIRECTORY)
         try:
             config = os.open("bf.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
             try:
@@ -36,7 +40,8 @@ def main() -> None:
                 os.mkdir("actions", mode=0o700, dir_fd=root)
             actions = os.open("actions", flags, dir_fd=root)
             try:
-                folder = f"{date.today().isoformat()}_{args.topic}-{uuid4().hex}"
+                today = date.today().isoformat()
+                folder = f"{today}_{args.topic}-{uuid4().hex}"
                 # Exclusive creation is the collision guard; a failure leaves existing work untouched.
                 os.mkdir(folder, mode=0o700, dir_fd=actions)
                 action = os.open(folder, flags, dir_fd=actions)
@@ -45,10 +50,11 @@ def main() -> None:
                         "ACTION.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=action
                     )
                     with os.fdopen(entry, "w", encoding="utf-8") as stream:
+                        title = args.topic.replace("-", " ").capitalize()
                         stream.write(
-                            "---\ntype: action\nstatus: draft\n---\n\n# "
-                            + args.topic.replace("-", " ").capitalize()
-                            + "\n\n## Objective\n\n## Context\n\n## Work\n\n## Resume\n\n## Outcome\n"
+                            f"---\ntype: action\nstatus: draft\nupdated: {today}\n---\n\n# {title}\n\n"
+                            + "\n\n".join(SECTIONS)
+                            + "\n"
                         )
                 finally:
                     os.close(action)

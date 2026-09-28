@@ -3,16 +3,30 @@ severity:
   - HIGH
   - CRITICAL
 exit-code: 1
+pkg:
+  # uv.lock replaces the skipped .venv as the package source; keep development tools in the report.
+  include-dev-deps: true
 scan:
   scanners:
     - license
     - misconfig
     - secret
     - vuln
+  # Ignored generated output, as in .gitleaks.toml: local scans see what a CI checkout sees.
+  skip-dirs:
+    - .agents/tmp
+    - .cache
+    - .pytest_cache
+    - .ruff_cache
+    - .venv
+    - dist
+    - htmlcov
+    - site
 vulnerability:
   # A CRITICAL with no patch available is exactly the finding that needs a decision, so it must
   # surface rather than be filtered out into a green run.
   ignore-unfixed: false
 license:
-  # Dependency and loose-file license checks stay visible in the same fail-closed scan.
+  # Loose-file license checks stay in this fail-closed scan; uv.lock carries no license data, so
+  # scripts/notices.py reviews the licenses of distributed dependencies instead.
   full: true

@@ -2,55 +2,53 @@
   <img
     src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-framework.svg"
     alt="Brain Framework: an exposed brain in an opening shell above twin aperture eyes"
-    width="128"
-    height="128"
+    width="256"
+    height="256"
   >
 </p>
 
 # Brain Framework 🧠
 
-**🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.**
+**Reusable context for you and your AI agents.** Collect information from your tools, connect it to your decisions and pick up work with the evidence at hand.
+
+🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.
 
 [![CI](https://github.com/fmind/brain-framework/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fmind/brain-framework/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/brain-framework?color=174EA6)](https://pypi.org/project/brain-framework/) [![Python](https://img.shields.io/pypi/pyversions/brain-framework)](https://pypi.org/project/brain-framework/) [![License: MIT](https://img.shields.io/badge/license-MIT-174EA6)](https://github.com/fmind/brain-framework/blob/main/LICENSE)
 
-Brain Framework (BF) is an information hub for people working across tools. Like a nervous system, it brings selected signals into a shared context: the information you handle, the work happening in your systems, your decisions and what to do next. That **brain is an ordinary folder of Markdown notes and collected records** you own.
+Your meeting notes, issues and project decisions live in different places. Brain Framework (BF) brings selected information into a folder of Markdown notes and source records you own. Search it across sessions, trace decisions to their sources and use the same context with different agents.
 
-Collect useful evidence once and reuse it across questions and sessions. Map different sources into a common schema so your agent can reason across them. Add a source with a small script using its CLI, API or files, without waiting for a BF-specific provider integration. Agents perform authorized work through your tools, then retain verified outcomes and next steps in the brain.
-
-[Try it](https://github.com/fmind/brain-framework#try-it) · [Advanced demo](https://fmind.github.io/brain-framework/docs/context-hub/) · [Connect an agent](https://github.com/fmind/brain-framework#agents) · [Documentation](https://fmind.github.io/brain-framework/)
-
-Independent team contributions stay in separate record files and uniquely named action sessions. [Team collaboration](https://fmind.github.io/brain-framework/docs/team/) explains the merge rules; [run the two-contributor example](https://github.com/fmind/brain-framework/tree/main/examples/team) to verify them locally.
+[Try it](https://github.com/fmind/brain-framework#try-it) · [Connect an agent](https://github.com/fmind/brain-framework#agents) · [Four-tool demo](https://fmind.github.io/brain-framework/docs/context-hub/) · [Documentation](https://fmind.github.io/brain-framework/)
 
 ## What can you do with it?
 
-| Ask…                               | The brain provides…                                 |
-| ---------------------------------- | --------------------------------------------------- |
-| “Why did we choose this approach?” | A project decision and the evidence linked to it.   |
-| “Where did we stop?”               | An action's last verified state and next step.      |
-| “What can we reuse?”               | A concept with its supporting sources and limits.   |
-| “What changed this week?”          | Saved notes and collected records from that period. |
+**Turn meeting notes into GitHub issues.** Collect Calendar event descriptions, then ask your agent:
 
-For example, **“Is the website ready to launch?”** needs the Google Workspace brief, Jira's remaining work, GitHub's implementation and Gcloud's deployment state. The [runnable four-tool demo](https://github.com/fmind/brain-framework/tree/main/examples/context-hub) connects fictional records from all four: implementation is merged and deployed to preview, but Jira still blocks launch on accessibility review. Exact reads show the evidence behind that conclusion. The demo uses local fixtures, not live integrations or measured customer outcomes.
+> Turn today's meeting notes into GitHub issues in my chosen repository. Cite the source event for each issue.
 
-BF collects, validates and retrieves evidence. **You and your agents decide what it means and what to do.**
+BF supplies the saved notes; your agent uses `gh` to create the issues you authorize. Follow the [Calendar-to-issues example](https://fmind.github.io/brain-framework/docs/sensors/#from-meeting-notes-to-github-issues) for setup and prerequisites.
 
-Use `bf watch` as the primary refresh mode: visible collection, configurable timing and quiet desktop alerts through `settings/watch.yaml`. A second watcher observes the active collector; use `bf status --watch` for explicit observation. Generate optional native scheduler files with `bf schedule`; select individual sensors or routines without adding OS settings to `bf.yaml`. See [Watch and schedule updates](https://fmind.github.io/brain-framework/docs/schedule/) and the [offline terminal demo](https://github.com/fmind/brain-framework/tree/main/examples/watch).
+| When you need to…       | BF helps you…                                                       |
+| ----------------------- | ------------------------------------------------------------------- |
+| Resume a project        | Find the last verified outcome and next step.                       |
+| Explain a decision      | Read the original reasoning and linked evidence.                    |
+| Check work across tools | Follow explicit connections between briefs, issues and deployments. |
+| Reuse what worked       | Keep lessons in notes that any editor or agent can read.            |
+
+See the [runnable four-tool demo](https://github.com/fmind/brain-framework/tree/main/examples/context-hub): GitHub says the implementation is merged and Gcloud shows a healthy preview, but Jira still blocks launch on accessibility review. Reading all four sources explains what remains. The records are fictional; the collection and retrieval are runnable locally. The [examples index](https://github.com/fmind/brain-framework/tree/main/examples) also covers decision reviews, retrieval checks, hooks, routines, monitoring and team collaboration.
 
 ## Try it
 
-Follow the [terminal-agent walkthrough](https://fmind.github.io/brain-framework/docs/context-hub/) to try the connected example, or start your own brain with one useful note below. No model or provider account is required for either CLI walkthrough.
-
-Ask your agent to follow these steps, or try them yourself on Linux or macOS. Install [uv](https://docs.astral.sh/uv/getting-started/installation/); it supplies a compatible Python version if needed.
+Start with one decision you can find again. This walkthrough needs Linux or macOS and [uv](https://docs.astral.sh/uv/getting-started/installation/), which installs the tested Python 3.14 if needed ([install details](https://fmind.github.io/brain-framework/docs/upgrades/#install)). No model or provider account is required.
 
 ```bash
-uv tool install brain-framework
+uv tool install --python 3.14 brain-framework
 bf init ~/brain
 cd ~/brain
 ```
 
-If `bf` is not on PATH, run `uv tool update-shell` and open a new shell. `~/brain` is the recommended starting location; choose another folder if you prefer, such as `~/team-brain` or `~/brains/default`. See [folder and naming choices](https://fmind.github.io/brain-framework/docs/getting-started/#choose-a-location) before changing the examples.
+If `bf` is not on PATH, run `uv tool update-shell` and open a new shell. You can choose another empty folder instead of `~/brain`.
 
-Create `projects/new-website.md` yourself or ask your agent to save this fictional decision. Use today's date for `updated`:
+Create `projects/new-website.md` in your editor, or ask your agent to save this fictional decision. Use today's date for `updated`:
 
 ```markdown
 ---
@@ -71,7 +69,7 @@ Start with a single product page because visitors need a clear explanation befor
 - [ ] Draft the product page.
 ```
 
-Find the reason, read the source, then check the brain:
+Find the reason, read its source and check the brain:
 
 ```bash
 bf search "visitors clear explanation"
@@ -79,158 +77,86 @@ bf read projects/new-website.md#decision
 bf validate
 ```
 
-Search returns `projects/new-website.md#decision` in `items`. Reading that ref returns the original section; these are selected fields from the JSON replies:
+Search returns this match in `items` (other fields omitted):
 
 ```json
 { "ref": "projects/new-website.md#decision", "title": "New website — Decision" }
 ```
 
-```json
-{
-  "text": "## Decision\n\nStart with a single product page because visitors need a clear explanation before signing up.\n\n"
-}
-```
+`read` returns the original Decision section; validation reports `"valid":true`. Edit the note and search again: BF notices changes automatically. You now have a decision an agent can find and cite.
 
-Validation should report `"valid":true`. Edit the note and search again: BF notices changes automatically. You now have a decision an agent can find, explain and cite.
-
-Use `bf read` for the brain's home page, `bf read projects` for project next steps, or `bf read tasks` for open tasks and counts across notes. From another directory, add `--brain ~/brain`. The [getting-started guide](https://fmind.github.io/brain-framework/docs/getting-started/) adds a local sensor, a schema mapping and a link to its evidence.
+The [getting-started guide](https://fmind.github.io/brain-framework/docs/getting-started/) continues with a local source, a schema mapping and a link from the decision to its evidence.
 
 ## Agents
 
-**Give your agent access to the brain, then ask it to use the evidence.** [Claude Code](https://code.claude.com/docs/en/overview), [Codex](https://openai.com/codex/), [GitHub Copilot](https://github.com/features/copilot) and other hosts can use one of two routes:
+Use the same brain with [Claude Code](https://code.claude.com/docs/en/overview), [Codex](https://openai.com/codex/), [GitHub Copilot](https://github.com/features/copilot) or another agent host.
 
-A terminal agent can start with the explicit prompt below and the `bf` CLI; installing a skill is optional for that first task. Add `bf-use` when you want the retrieval procedure discovered across sessions.
+| Your agent can…       | Start with…                                                                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Run terminal commands | The `bf` CLI and the prompt below. No skill installation needed for this first task.                                                              |
+| Use MCP tools         | A stdio server running `bf mcp`, with explicit executable and brain paths. Follow [MCP setup](https://fmind.github.io/brain-framework/docs/mcp/). |
 
-| Your agent can…       | Connect it with…                                                                                                                                        |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Run terminal commands | The `bf` CLI; optionally add [bf-use](https://github.com/fmind/brain-framework/blob/main/skills/bf-use/SKILL.md) for search, exact reads and citations. |
-| Use MCP tools         | A stdio server running `bf mcp`. Follow [MCP setup](https://fmind.github.io/brain-framework/docs/mcp/) for host configuration and connection checks.    |
+After the quickstart, give your terminal agent this prompt:
 
-MCP exposes exactly two read-only tools: `search` and `read`. Set the host's executable and brain paths explicitly. Skills are installed separately from the Python package; use [skills matching your release](https://github.com/fmind/brain-framework/blob/main/skills/README.md) and your host's discovery directory.
+> Work in ~/brain and use the bf CLI. Find why we chose a single product page. Read the source, cite its ref and tell me the project's next action.
 
-After connecting, try this prompt against the decision above:
+Check that it reads the decision and next actions, cites `projects/new-website.md#decision` and identifies “Draft the product page.” as the next task.
 
-> Search my brain for why we chose a single product page. Read the matching source and cite its ref. Tell me the next action recorded for that project.
-
-Check that the agent reads `projects/new-website.md#decision` and the project's next actions, explains that visitors need a clear explanation before signing up, and cites the source. A plausible answer alone does not verify the connection.
-
-Start with `bf-use` for retrieval. Add `bf-learn` to keep notes current, `bf-action` to track a session, or `bf-setup` for guided onboarding. Use `bf-import` to incorporate a selected source as useful context and links. [All workflow skills](https://github.com/fmind/brain-framework/blob/main/skills/README.md) are optional, separately installed packages.
-
-For example, after drafting the page, ask:
-
-> Update the New website project with what we delivered and the next task. Keep the original reason for the decision. Record only what we actually checked.
-
-The [agent guide](https://fmind.github.io/brain-framework/docs/agents/) shows setup and the work → review → update cycle.
+MCP exposes two read-only tools: `search` and `read`. For ongoing use, install the optional [workflow skills](https://github.com/fmind/brain-framework/blob/main/skills/README.md): `bf-use` for retrieval, `bf-action` to track work and `bf-learn` to retain verified outcomes. See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/) for setup and examples.
 
 ## How it works
 
-The goal is the whole loop: **gather → normalize → organize and connect → act → learn**.
-
-**Context before another tool call.** Search and read reuse collected evidence offline. Check source coverage and freshness, then refresh or query the original tool when the task needs newer information. Centralizing selected context does not mean copying everything or treating old snapshots as current.
-
-**Automatic normalization into an explicit ontology.** Declare shared fields and sensor mappings once. Each collection validates and populates those fields and creates declared relationships while preserving source refs. In the demo, four differently named project fields become the same `project` relationship. Identity reconciliation follows your mappings and explicit aliases; BF does not infer identities or invent an ontology from prose.
-
-| Step                     | In the New website example…                                                                        |
-| ------------------------ | -------------------------------------------------------------------------------------------------- |
-| **Gather**               | A sensor collects the selected product brief as evidence.                                          |
-| **Normalize**            | BF validates the record and maps declared fields into a shared schema.                             |
-| **Organize and connect** | The project records the single-page decision and links to its brief and reusable lessons.          |
-| **Act**                  | An agent reads the decision and helps draft the page. A review action keeps checks and next steps. |
-| **Learn**                | You review the page, update the project and retain what you learned about explaining the product.  |
-
-Start with one useful note. Add sources when you have a recurring question they can answer; add routines when a review is worth repeating. [Review reminders](https://fmind.github.io/brain-framework/docs/brain/#review-reminders) use file modification time, optional deadlines and newer linked evidence without requiring routine acknowledgment. Learning happens through deliberate updates by you or your agent.
-
-## Bring your tools
-
-<span id="1-gather-and-shape-the-evidence"></span>
-<span id="2-declare-meaning-and-map-fields"></span>
-<span id="3-retrieve-the-value"></span>
-
-A **sensor** is a script that gathers selected evidence and prints JSON records. Use the tools you already have:
-
-| Source                          | Starting point                                                                                                                                                                                                                                                                              |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Selected highlights             | Adapt the [highlight sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/highlights.py) to retain a selected passage, its source location and a separate annotation.                                                                                                |
-| Local Git history and documents | Adapt the reviewed [Git](https://github.com/fmind/brain-framework/blob/main/examples/sensors/git-history.py) or [document](https://github.com/fmind/brain-framework/blob/main/examples/sensors/local-documents.py) sensor.                                                                  |
-| Google Calendar and Drive       | Adapt the reviewed [Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) or [Drive](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py) sensor using [`gws`](https://github.com/googleworkspace/cli). |
-| GitHub                          | Write a sensor using [`gh`](https://cli.github.com/) or the API.                                                                                                                                                                                                                            |
-| Jira and Confluence             | Write a sensor using [`acli`](https://developer.atlassian.com/cloud/acli/) or the APIs.                                                                                                                                                                                                     |
-| Google Cloud deployments        | Write a sensor using [`gcloud`](https://cloud.google.com/sdk/gcloud) or the APIs for selected revisions and service state.                                                                                                                                                                  |
-
-The [first-sensor walkthrough](https://fmind.github.io/brain-framework/docs/sensors/#your-first-sensor) collects one local product brief. After completing it, read the saved evidence:
-
-```bash
-bf read local-documents:website-demo/brief.txt
-```
-
-The reply contains the brief's text and source location. Link that ref from the project decision. Scripts own authentication and provider limits; BF validates and saves their records. [Schema mappings](https://fmind.github.io/brain-framework/docs/schema/#shared-fields-and-sensor-mappings) let different sources use the same declared field meanings.
-
-Scheduled window sensors resume incrementally. Use [periodic reconciliation](https://fmind.github.io/brain-framework/docs/sensors/#frequent-updates-and-periodic-reconciliation) to revisit older changes less often, and inspect collection duration, output bytes and change counts with `bf status`.
-
-## Why plain files?
-
-Open the brain in any editor. Use Git for history, provider tools for collection and your chosen agent for reasoning. BF stays one package and one command:
+**Gather → normalize → organize and connect → act → learn.** Sensors collect selected evidence; configured mappings give sources shared fields and explicit relationships. You and your agents use that context to do work, then keep the outcome and next step in the brain.
 
 ```text
 brain/
-├── bf.yaml      # the brain's name and configuration
+├── bf.yaml      # configuration and source mappings
 ├── projects/    # what you're working on and why
 ├── concepts/    # what you've learned and can reuse
 ├── actions/     # work to start, resume and review
 └── memories/    # evidence gathered from your sources
 ```
 
-Projects, concepts and action entry notes use Open Knowledge Format (OKF): Markdown with YAML metadata such as `type`, `status` and `sources`. Collected records use one JSON file per source item. Files are authoritative, and the SQLite search cache in `.bf/` is disposable. Optional `sensors/` and `routines/` hold your configured programs. See the [brain layout](https://fmind.github.io/brain-framework/docs/brain/) for file conventions.
+Notes are Markdown with structured metadata; each collected record is a JSON file. Open them in any editor and use Git for history. The local search cache is disposable. See the [file conventions](https://fmind.github.io/brain-framework/docs/brain/).
 
-## Links across brains
+[Links and backlinks](https://fmind.github.io/brain-framework/docs/links/) connect decisions to evidence. Keep personal and shared context in separate [team brains](https://fmind.github.io/brain-framework/docs/team/), and search related brains together. Identities and relationship meanings are explicit; BF never guesses them from similar names.
 
-Link a decision to its source with ordinary Markdown links, or use a portable BF address:
+## Bring your tools
 
-```markdown
-[New website decision](bf://brain/projects/new-website.md#decision)
-```
+A **sensor** is a small script that reads a CLI, API or file and prints JSON records. BF validates, maps and saves them. Start with the reviewed examples or write a script for another source:
 
-Read the target to see its **backlinks**: the notes and records that point to it. Declared relationships such as `depends-on` also retain the section that made the claim. Follow [Linking knowledge](https://fmind.github.io/brain-framework/docs/links/) for a working example.
+| Source                                    | Starting point                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local files, highlights and Git           | [Document](https://github.com/fmind/brain-framework/blob/main/examples/sensors/local-documents.py), [highlight](https://github.com/fmind/brain-framework/blob/main/examples/sensors/highlights.py) and [Git history](https://github.com/fmind/brain-framework/blob/main/examples/sensors/git-history.py) sensors. |
+| Google Calendar and Drive                 | [Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) and [Drive folder catalog](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py) sensors using [`gws`](https://github.com/googleworkspace/cli).                         |
+| GitHub, Jira, Confluence and Google Cloud | Write a sensor using [`gh`](https://cli.github.com/), [`acli`](https://developer.atlassian.com/cloud/acli/), [`gcloud`](https://cloud.google.com/sdk/gcloud) or their APIs.                                                                                                                                       |
 
-## Personal and team brains
+Start with [one local source](https://fmind.github.io/brain-framework/docs/getting-started/#collect-your-first-source); use [schema mappings](https://fmind.github.io/brain-framework/docs/schema/#shared-fields-and-sensor-mappings) to connect sources. Provider tools handle authentication; your script selects what to collect.
 
-Keep personal context in `~/brain` and shared decisions in a separate private repository, such as `~/team-brain`. Teammates can clone and search it. Declare related brains in `bf.yaml` to search them together; reading a clone never runs its sensors. See [team brains](https://fmind.github.io/brain-framework/docs/team/).
+After reviewing your sensors, run `bf watch` to keep sources refreshed and see recent changes. See [Watch and schedule updates](https://fmind.github.io/brain-framework/docs/schedule/) for timing, desktop alerts and optional native schedules.
 
-## Commands
+<a href="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/watch.svg">
+  <img
+    src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/watch.svg"
+    alt="Watch dashboard for the fictional offline demo: five sensors sorted by state, with a failed sensor's details beside their last success, next due time, item count and record changes."
+    width="720"
+  >
+</a>
 
-Commands return JSON on stdout and diagnostics on stderr, so scripts and agents use the same interface.
-
-| Command                               | Purpose                                                     |
-| ------------------------------------- | ----------------------------------------------------------- |
-| `bf read [REF]`                       | Open the home page, a period, a note or a record.           |
-| `bf search QUERY [--scope SCOPE]`     | Find words or explicit identities within an optional scope. |
-| `bf collect SENSOR`, `bf update`      | Run one sensor, or due sensors and routines.                |
-| `bf validate`, `bf status`, `bf eval` | Check file integrity, source freshness and retrieval cases. |
-
-`bf eval` runs immediately after initialization, using the starter `evals/retrieval.yaml`. Add [cases for your own questions](https://fmind.github.io/brain-framework/docs/checks/) as the brain grows. See the [command reference](https://fmind.github.io/brain-framework/docs/commands/) for all commands and selection rules.
-
-## Guarantees
-
-- **Your data stays yours.** BF sends us no telemetry or personal data. Connected cloud agents have their own [privacy rules](https://fmind.github.io/brain-framework/docs/privacy/#your-agent-has-its-own-privacy-rules).
-- **Retrieval stays offline.** Search and read never run sensors or routines or contact the network.
-- **Execution is explicit.** Collection commands and schedules run selected brains' programs with your account's permissions. Review their code first.
-- **Sources stay visible.** Results carry readable refs and report incomplete retrieval through `problems` or `stale`. A fresh cache does not prove fresh source evidence.
-- **Failures preserve evidence.** Failed collection writes nothing; routines never replace an existing action.
-
-Retrieved content is evidence, never instructions. Follow the [retrieval contract](https://fmind.github.io/brain-framework/docs/retrieval/) for complete listings and large reads. See [privacy and security](https://fmind.github.io/brain-framework/docs/privacy/) for execution boundaries and recovery.
+The dashboard above shows the fictional [offline terminal demo](https://github.com/fmind/brain-framework/tree/main/examples/watch), which runs without provider accounts.
 
 ## Fit and limits
 
-BF works best when you keep project notes current and collect evidence for questions you actually ask.
+BF fits projects where decisions and evidence need to survive a chat session. Start with one recurring question and the sources needed to answer it.
 
-Search matches words and explicit identities; it does not use embeddings or semantic similarity. BF runs no model, generates no answers and does not automatically learn from conversations.
+- **Your files, your control.** BF sends no telemetry or personal data to us. A connected cloud agent may send what it reads to its provider; see [privacy and security](https://fmind.github.io/brain-framework/docs/privacy/).
+- **Offline retrieval.** Search and read never contact providers or run sensors. Refresh sources explicitly when you need newer evidence; incomplete retrieval is reported.
+- **People and agents supply the judgment.** BF uses word search and explicit identities, runs no model and does not learn automatically from conversations. Keep notes current as work changes.
 
-A brain is a context boundary, not an access-control system. Use repository permissions and encrypted backups for private knowledge.
+## Next steps
 
-## Development
-
-Introducing BF to a team? Use the [four-week pilot](https://fmind.github.io/brain-framework/docs/pilot/) to compare real tasks, independent repeat use and maintenance effort against your current workflow and the same notes read directly. Keep the evidence private and share only reviewed results.
-
-Contributions are welcome. Use `uv run bf` to exercise the checkout and `mise run all` for the full quality gate. See [CONTRIBUTING.md](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md) for setup and tests, or [open an issue](https://github.com/fmind/brain-framework/issues) with a question or bug report.
+- [Browse the commands](https://fmind.github.io/brain-framework/docs/commands/) for home pages, tasks, freshness and retrieval checks.
+- [Share a team brain](https://fmind.github.io/brain-framework/docs/team/) or [run a pilot](https://fmind.github.io/brain-framework/docs/pilot/) on your own work.
+- [Report an issue](https://github.com/fmind/brain-framework/issues) or [contribute](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md).
 
 [MIT licensed](https://github.com/fmind/brain-framework/blob/main/LICENSE) · [Third-party notices](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md)

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from contextlib import nullcontext
+from typing import Literal
 
 import pytest
 
@@ -25,6 +27,9 @@ def test_settings_defaults_precedence_and_file_validation(brain: Store) -> None:
         "off",
         60,
     )
+    # YAML 1.2 reads an unquoted off as the string it looks like.
+    brain.write("settings/watch.yaml", b"notifications: off\n")
+    assert settings(brain).notifications == "off"
     brain.write("settings/watch.yaml", b"interval: 0\n")
     with pytest.raises(Error, match=r"settings/watch\.yaml"):
         settings(brain, interval=60)
@@ -38,7 +43,6 @@ def test_settings_defaults_precedence_and_file_validation(brain: Store) -> None:
         b"interval: '60'",
         b"poll_interval: .nan",
         b"notification_cooldown: -1",
-        b"secret-value: bad",
         b"interval: 60\ninterval: 30",
         b"- bad",
     ],
@@ -47,7 +51,16 @@ def test_invalid_settings_fail_closed(brain: Store, data: bytes) -> None:
     brain.write("settings/watch.yaml", data)
     with pytest.raises(Error, match=r"watch\.yaml") as caught:
         settings(brain)
-    assert "secret-value" not in str(caught.value)
+    # Values are never quoted.
+    assert not {"email", "bad", "30"} & set(re.findall(r"\w+", str(caught.value)))
+
+
+def test_unknown_settings_keys_are_named_like_bf_yaml_keys(brain: Store) -> None:
+    # The brain's owner writes this file: naming a typo, never its value, points at the line to fix.
+    brain.write("settings/watch.yaml", b"intervall: private-value\n")
+    with pytest.raises(Error) as caught:
+        settings(brain)
+    assert str(caught.value) == "invalid settings/watch.yaml: intervall: Extra inputs are not permitted"
 
 
 def test_settings_reject_redirected_files(brain: Store, tmp_path) -> None:
@@ -87,7 +100,9 @@ def test_notifications_deduplicate_failures_defer_recovery_and_ignore_idle(monke
         ("all", ["completed", "failed", "recovered"]),
     ],
 )
-def test_notification_modes(monkeypatch: pytest.MonkeyPatch, mode: str, expected: list[str]) -> None:
+def test_notification_modes(
+    monkeypatch: pytest.MonkeyPatch, mode: Literal["off", "failure", "success", "all"], expected: list[str]
+) -> None:
     sent = []
     monkeypatch.setattr("bf.watch_settings.desktop", lambda title, _: sent.append(title.split()[-1]) or True)
     notices = Notifications(Settings(notifications=mode, notification_cooldown=0))

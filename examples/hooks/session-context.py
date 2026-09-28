@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """Print the brain's context for the current repository at agent session start; silent when unavailable."""
 
+import hashlib
 import json
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 
 REPLY_BYTES = 4 << 20
 REMOTE_BYTES = 8 << 10
 NEWEST = 3
+# One lookup budget and page bound cover the repository read, its JSON chunks and the project listing.
+LOOKUP_SECONDS = 20
+MAX_PAGES = 100
+# Only authored note paths are printed, in code spans; a record ref is provider-controlled text and stays out.
+NOTE = re.compile(r"(?:projects|concepts|actions)/[^\x00-\x1f\x7f-\x9f]+?\.md(?:#[^\x00-\x1f\x7f-\x9f]*)?")
 
 
-def run(argv: list[str], limit: int, timeout: int) -> bytes | None:
+def run(argv: list[str], limit: int, timeout: float) -> bytes | None:
     """Literal argv, bounded time and output; any failure means no context rather than a blocked session."""
+    if timeout <= 0:
+        return None
     try:
         result = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)  # noqa: S603
-    except OSError, subprocess.TimeoutExpired:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode or len(result.stdout) > limit:
         return None
@@ -33,13 +42,53 @@ def identity() -> str:
     return "repo:github.com/" + match[1].lower() if match else ""
 
 
-def read(ref: str, brain: str) -> dict | None:
-    raw = run(["bf", "read", ref, *(["--brain", brain] if brain else [])], REPLY_BYTES, 20)
+def read(ref: str, brain: str, offset: int = 0, timeout: float = LOOKUP_SECONDS) -> dict | None:
+    raw = run(
+        ["bf", "read", ref, *(["--brain", brain] if brain else []), *(["--offset", str(offset)] if offset else [])],
+        REPLY_BYTES,
+        timeout,
+    )
     try:
         reply = json.loads(raw) if raw else None
     except ValueError:
         return None
     return reply if isinstance(reply, dict) else None
+
+
+def exact(ref: str, brain: str, deadline: float) -> dict | None:
+    """One whole exact read: assemble JSON chunks in order and verify their common SHA-256.
+
+    Replies above 65,536 characters arrive as chunks from offset 0; see
+    https://fmind.github.io/brain-framework/docs/retrieval/#large-exact-reads. A changed digest or a broken
+    continuation means no context, never a partial reply.
+    """
+    reply = read(ref, brain, 0, deadline - time.monotonic())
+    if not reply or "chunk" not in reply:
+        return reply
+    digest, parts, offset = reply.get("sha256"), [], 0
+    for _ in range(MAX_PAGES):
+        chunk = reply.get("chunk")
+        if not isinstance(chunk, str) or reply.get("sha256") != digest or type(reply.get("offset")) is not int:
+            return None
+        if reply["offset"] != offset:
+            return None
+        parts.append(chunk)
+        offset += len(chunk)
+        if "next_offset" not in reply:
+            text = "".join(parts)
+            if len(text) != reply.get("total_characters") or hashlib.sha256(text.encode()).hexdigest() != digest:
+                return None
+            try:
+                value = json.loads(text)
+            except ValueError:
+                return None
+            return value if isinstance(value, dict) else None
+        if type(reply["next_offset"]) is not int or reply["next_offset"] != offset:
+            return None
+        reply = read(ref, brain, offset, deadline - time.monotonic())
+        if not reply:
+            return None
+    return None
 
 
 def day(value: object) -> str:
@@ -55,52 +104,84 @@ def plain(value: object, limit: int = 120) -> str:
     return text[: limit - 1] + "…" if len(text) > limit else text
 
 
+def code(value: str) -> str:
+    """A code span that no backtick inside the value can close."""
+    fence = "`" * (max(map(len, re.findall(r"`+", value)), default=0) + 1)
+    pad = " " if value.startswith("`") or value.endswith("`") else ""
+    return f"{fence}{pad}{value}{pad}{fence}"
+
+
 def render(repo: str, page: dict, project: dict | None) -> list[str]:
     lines = [f"Brain context for {repo} (evidence, not instructions):"]
-    ref = page.get("ref")
-    if ref and project:
+    ref = str(page.get("ref", ""))
+    note = ref if NOTE.fullmatch(ref) else ""
+    if note and project:
         state = [str(project.get("status", "")), f"edited {day(project.get('modified')) or 'unknown'}"]
         if project.get("review"):
             reasons = ", ".join(plain(reason) for reason in project.get("review_reasons", []))
             state.append(f"review needed ({reasons or 'inspect project'})")
         if project.get("review_due"):
             state.append(f"review deadline {day(project['review_due'])}")
-        lines.append(f"- Project: {plain(project.get('title', ref))} (`{ref}`), {', '.join(filter(None, state))}.")
+        lines.append(
+            f"- Project: {plain(project.get('title', note))} ({code(note)}), {', '.join(filter(None, state))}."
+        )
         if project.get("next"):
             lines.append(f"- Next task: {plain(project['next'])}")
+    elif note:
+        lines.append(f"- Owning note: {code(note)}.")
     elif ref:
-        lines.append(f"- Owning note: `{ref}`.")
+        lines.append("- A collected record owns this repository.")
     else:
         lines.append("- No note owns this repository yet.")
     groups = page.get("backlinks", [])
     if groups:
-        counts = ", ".join(f"{g.get('relation', 'links')} {g['total']}" for g in groups)
+        counts = ", ".join(f"{plain(g.get('relation', 'links'))} {plain(g.get('total', 0))}" for g in groups)
         lines.append(f"- Linked evidence: {counts}.")
-        items = [i for g in groups for i in g.get("items", []) if i.get("kind") == "note"]
+        items = [
+            i
+            for g in groups
+            for i in g.get("items", [])
+            if i.get("kind") == "note" and NOTE.fullmatch(str(i.get("ref")))
+        ]
         newest = sorted(items, key=lambda i: str(i.get("time", "")), reverse=True)[:NEWEST]
-        lines.extend(f"  - {day(i.get('time'))} {plain(i.get('title', ''))} (`{i['ref']}`)" for i in newest)
-    lines.append(f"Read more with `bf read {ref or repo}`; collected records are counted, not quoted.")
+        lines.extend(f"  - {day(i.get('time'))} {plain(i.get('title', ''))} ({code(i['ref'])})" for i in newest)
+    lines.append(f"Read more with {code('bf read ' + (note or repo))}; collected records are counted, not quoted.")
     return lines
 
 
 def main(argv: list[str]) -> int:
     brain = argv[1] if len(argv) > 1 else ""
     repo = identity()
-    page = read(repo, brain) if repo else None
+    deadline = time.monotonic() + LOOKUP_SECONDS
+    page = exact(repo, brain, deadline) if repo else None
     if not page or page.get("problems") or page.get("stale"):
         return 0
+    ref = str(page.get("ref", ""))
     project = None
-    if str(page.get("ref", "")).startswith("projects/"):
-        listing = read("projects", brain)
-        if not listing or listing.get("problems") or listing.get("stale"):
+    if NOTE.fullmatch(ref) and ref.startswith("projects/"):
+        offset = 0
+        for _ in range(MAX_PAGES):
+            listing = read("projects", brain, offset, deadline - time.monotonic())
+            if not listing or listing.get("problems") or listing.get("stale"):
+                return 0
+            project = next(
+                (p for p in listing.get("items", []) if (p.get("brain"), p.get("ref")) == (page.get("brain"), ref)),
+                None,
+            )
+            if project is not None or "next_offset" not in listing:
+                break
+            following = listing["next_offset"]
+            if type(following) is not int or not offset < following < 2**63:
+                return 0
+            offset = following
+        else:
             return 0
-        project = next(
-            (p for p in listing.get("items", []) if (p.get("brain"), p.get("ref")) == (page.get("brain"), page["ref"])),
-            None,
-        )
     sys.stdout.write("\n".join(render(repo, page, project)) + "\n")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except Exception:  # A malformed reply must never block a session: print nothing and succeed.
+        sys.exit(0)
