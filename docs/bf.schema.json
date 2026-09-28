@@ -257,6 +257,45 @@
       "then": { "properties": { "mode": { "const": "window" } } },
       "title": "Sensor",
       "type": "object"
+    },
+    "WatchSettings": {
+      "additionalProperties": false,
+      "description": "Optional watch preferences; CLI values override bf.yaml, then defaults apply. Restart to reload.",
+      "properties": {
+        "interval": {
+          "default": 60,
+          "description": "Seconds between checks for due programs.",
+          "maximum": 86400,
+          "minimum": 5,
+          "title": "Interval",
+          "type": "integer"
+        },
+        "notification_cooldown": {
+          "default": 300,
+          "description": "Minimum seconds between notification attempts.",
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Notification Cooldown",
+          "type": "integer"
+        },
+        "notifications": {
+          "default": "failure",
+          "description": "Desktop alert policy. Recovery alerts accompany enabled modes.",
+          "enum": ["off", "failure", "success", "all"],
+          "title": "Notifications",
+          "type": "string"
+        },
+        "poll_interval": {
+          "default": 2,
+          "description": "Seconds between local history reads and JSON snapshots.",
+          "maximum": 60,
+          "minimum": 0.2,
+          "title": "Poll Interval",
+          "type": "number"
+        }
+      },
+      "title": "WatchSettings",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -308,6 +347,10 @@
       "description": "Brain storage format of bf.yaml, the memories/<source>/<sha256>.json layout and the record envelope; independent of the package version.",
       "title": "Version",
       "type": "integer"
+    },
+    "watch": {
+      "$ref": "#/$defs/WatchSettings",
+      "description": "Watch timing and desktop alerts; CLI options override these values."
     }
   },
   "required": ["version", "name"],

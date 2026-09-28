@@ -24,7 +24,6 @@ Linked or special folders are named in errors, such as `settings: expected a dir
 | Resource                                | Limit                                                           |
 | --------------------------------------- | --------------------------------------------------------------- |
 | `bf.yaml`, machine registry, eval suite | 1 MiB each                                                      |
-| `settings/watch.yaml`                   | 64 KiB                                                          |
 | YAML structure, including frontmatter   | 32 nesting levels and 20,000 parser events                      |
 | Authored note                           | 4 MiB                                                           |
 | Note title                              | 4,096 characters                                                |

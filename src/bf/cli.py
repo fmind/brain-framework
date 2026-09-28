@@ -34,7 +34,7 @@ app = typer.Typer(
     add_completion=False,
     context_settings={"help_option_names": ["-h", "--help"]},
     pretty_exceptions_show_locals=False,
-    help="🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.",
+    help="🧠 Brain Framework: from information to informed actions.",
     epilog=(
         "Start: bf init ~/brain, then cd ~/brain and bf read. "
         'Find evidence: bf search "your topic", then bf read REF. '
@@ -97,7 +97,8 @@ remain offline; fetching linked sources is a separate authorized agent operation
   `ACTION.md#context` and `#resume` sections first when they exist.
 - `memories/` holds one JSON file per collected item; `sensors/` holds the collectors declared in `bf.yaml`.
 - `routines/` holds deterministic programs declared in `bf.yaml`; their OKF Markdown becomes the day's action.
-- `settings/` holds local preferences such as `watch.yaml`; `skills/` holds versioned agent procedures, never searched.
+- `bf.yaml` holds brain configuration, including optional `watch` timing and notification preferences.
+- `skills/` holds versioned agent procedures, never searched.
 - `tests/` holds technical tests for sensors, routines and other brain code.
 - `evals/` holds this brain's retrieval YAML suites, run by `bf eval` without an LLM.
   `evals/retrieval.yaml` starts with welcome-note checks. Extend or replace them with your own
@@ -424,7 +425,7 @@ def scheduling(
 @app.command("schema", rich_help_panel="Set up")
 def schema(
     kind: Annotated[
-        Literal["brain", "watch", "registry", "eval"], typer.Option(help="Configuration format to describe.")
+        Literal["brain", "registry", "eval"], typer.Option(help="Configuration format to describe.")
     ] = "brain",
 ) -> None:
     """Print a configuration JSON Schema; defaults to bf.yaml. No brain selection or network access."""
@@ -517,7 +518,7 @@ def monitor(
     routine: RoutineOption = None,
     interval: Annotated[
         int | None,
-        typer.Option(min=5, max=86400, help="Seconds between cycles; overrides settings/watch.yaml (default 60)."),
+        typer.Option(min=5, max=86400, help="Seconds between cycles; overrides bf.yaml watch.interval (default 60)."),
     ] = None,
     poll_interval: Annotated[
         float | None, typer.Option(min=0.2, max=60, help="Seconds between local history reads (default 2).")

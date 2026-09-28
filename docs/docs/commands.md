@@ -17,22 +17,22 @@ For recovery steps, use [Troubleshooting](troubleshooting.md). Examples below as
 
 ## Commands
 
-| Command                                                                      | Purpose                                                                                     |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `build`                                                                      | Recover interrupted record writes and rebuild the disposable search cache.                  |
-| `collect SENSOR [--since TIME] [--until TIME] [--dry-run] [--allow-removal]` | Run one sensor now. Dry-run executes it and previews three samples without saving records.  |
-| `eval [--path evals]`                                                        | Run retrieval acceptance cases.                                                             |
-| `init PATH [--name NAME] [--full]`                                           | Create a brain in a new, empty or freshly cloned directory. `--full` adds optional folders. |
-| `mcp`                                                                        | Serve `search` and `read` over MCP stdio.                                                   |
-| `read [REF] [--offset N]`                                                    | Open home, a page, note, section, record or identity.                                       |
-| `register [PATH]`                                                            | Add a brain's name and path to the optional machine registry.                               |
-| `schedule [--backend NAME] [--every N] [--output DIR]`                       | Generate optional native scheduling files and installation commands.                        |
-| `schema [--kind brain\|watch\|registry\|eval]`                               | Print an offline editor schema; defaults to `bf.yaml`.                                      |
-| `search QUERY [--scope SCOPE] [--limit N] [--offset N]`                      | Find words or an identity, optionally within one scope.                                     |
-| `status [--check] [--watch]`                                                 | Report cache, evidence counts, source and routine health, logs and local usage.             |
-| `update [--dry-run] [--sensor NAME] [--routine NAME]`                        | Run due sensors, then routines, then refresh the cache. Dry-run executes nothing.           |
-| `validate`                                                                   | Check notes, concepts, actions, links and record files.                                     |
-| `watch [--interval N] [--poll-interval N] [--notify MODE] [--json]`          | Refresh due information and show a live dashboard; settings live in `settings/watch.yaml`.  |
+| Command                                                                      | Purpose                                                                                         |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `build`                                                                      | Recover interrupted record writes and rebuild the disposable search cache.                      |
+| `collect SENSOR [--since TIME] [--until TIME] [--dry-run] [--allow-removal]` | Run one sensor now. Dry-run executes it and previews three samples without saving records.      |
+| `eval [--path evals]`                                                        | Run retrieval acceptance cases.                                                                 |
+| `init PATH [--name NAME] [--full]`                                           | Create a brain in a new, empty or freshly cloned directory. `--full` adds optional folders.     |
+| `mcp`                                                                        | Serve `search` and `read` over MCP stdio.                                                       |
+| `read [REF] [--offset N]`                                                    | Open home, a page, note, section, record or identity.                                           |
+| `register [PATH]`                                                            | Add a brain's name and path to the optional machine registry.                                   |
+| `schedule [--backend NAME] [--every N] [--output DIR]`                       | Generate optional native scheduling files and installation commands.                            |
+| `schema [--kind brain\|registry\|eval]`                                      | Print an offline editor schema; defaults to `bf.yaml`.                                          |
+| `search QUERY [--scope SCOPE] [--limit N] [--offset N]`                      | Find words or an identity, optionally within one scope.                                         |
+| `status [--check] [--watch]`                                                 | Report cache, evidence counts, source and routine health, logs and local usage.                 |
+| `update [--dry-run] [--sensor NAME] [--routine NAME]`                        | Run due sensors, then routines, then refresh the cache. Dry-run executes nothing.               |
+| `validate`                                                                   | Check notes, concepts, actions, links and record files.                                         |
+| `watch [--interval N] [--poll-interval N] [--notify MODE] [--json]`          | Refresh due information and show a live dashboard; preferences live under `watch` in `bf.yaml`. |
 
 `watch` runs due programs in a keyboard-driven terminal dashboard; `status --watch` observes local program history without executing anything. Both dashboards [sort in-session](schedule.md#sort-the-dashboard). `schedule` previews native scheduler files and installation commands as JSON; `--output DIR` writes those files without activating them. All three use one brain. See [Watch and schedule updates](schedule.md).
 

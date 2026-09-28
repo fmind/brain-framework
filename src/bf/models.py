@@ -551,6 +551,24 @@ class BrainReference(Model):
     _clean = field_validator("path")(clean)
 
 
+class WatchSettings(Model):
+    """Optional watch preferences; CLI values override bf.yaml, then defaults apply. Restart to reload."""
+
+    model_config = ConfigDict(frozen=True)
+
+    interval: int = Field(default=60, ge=5, le=86400, description="Seconds between checks for due programs.")
+    poll_interval: float = Field(
+        default=2, ge=0.2, le=60, description="Seconds between local history reads and JSON snapshots."
+    )
+    notifications: Literal["off", "failure", "success", "all"] = Field(
+        default="failure",
+        description="Desktop alert policy. Recovery alerts accompany enabled modes.",
+    )
+    notification_cooldown: int = Field(
+        default=300, ge=0, le=86400, description="Minimum seconds between notification attempts."
+    )
+
+
 class Config(Model):
     """One brain: its name, related brains, shared schema, and the sensors and routines it may run."""
 
@@ -581,6 +599,9 @@ class Config(Model):
         default_factory=dict,
         json_schema_extra={"additionalProperties": False},
         description="Reviewed evidence collectors.",
+    )
+    watch: WatchSettings = Field(
+        default_factory=WatchSettings, description="Watch timing and desktop alerts; CLI options override these values."
     )
     # A routine name is the slug of the action folder it writes.
     routines: dict[Slug, Routine] = Field(

@@ -45,6 +45,20 @@ ROOT = Path(__file__).resolve().parents[1]
             "name": "brain",
             "sensors": {"demo": {"command": ["echo"], "mode": "snapshot", "reconcile": {"refresh": 1, "lookback": 1}}},
         },
+        *(
+            {"version": 6, "name": "brain", "watch": watch}
+            for watch in (
+                None,
+                [],
+                {"interval": 0},
+                {"interval": "60"},
+                {"poll_interval": 61},
+                {"notifications": False},
+                {"notifications": "email"},
+                {"notification_cooldown": -1},
+                {"intervall": 60},
+            )
+        ),
         {"name": "brain"},
         {"version": 5, "name": "brain"},
         *(
@@ -128,7 +142,7 @@ def test_starter_keeps_roles_without_serializing_redundant_defaults(tmp_path: Pa
     assert result.exit_code == 0, result.output
     document = yaml_object((root / "bf.yaml").read_bytes())
     assert document["version"] == 6
-    assert not {"brains", "sensors", "routines"} & document.keys()
+    assert not {"brains", "sensors", "routines", "watch"} & document.keys()
     assert "examples:" not in (root / "bf.yaml").read_text()
     config = load(Store(root))
     assert set(config.ontology) == {"author", "owner", "depends-on", "related-to"}
@@ -299,35 +313,34 @@ def test_schema_generation_detects_drift_without_overwriting_it(tmp_path: Path) 
     assert "generate:schema" in missing.stderr
     assert run("--write").returncode == 0
     assert run().returncode == 0
-    changed = docs / "watch.schema.json"
+    changed = docs / "bf.schema.json"
     generated = changed.read_text()
     changed.write_text('{"title": "altered"}\n')
     drift = run()
     assert drift.returncode == 1
-    assert "watch.schema.json: schema drift" in drift.stderr
+    assert "bf.schema.json: schema drift" in drift.stderr
     assert json.loads(changed.read_text()) == {"title": "altered"}
     # A last-key-wins JSON parser would miss this ambiguity and report no drift.
-    changed.write_text('{"title":"Settings",' + generated[1:])
+    changed.write_text('{"title":"Config",' + generated[1:])
     duplicate = run()
     assert duplicate.returncode == 1
-    assert "watch.schema.json: missing or invalid schema" in duplicate.stderr
+    assert "bf.schema.json: missing or invalid schema" in duplicate.stderr
 
 
-def test_schema_rejects_unknown_kind_before_selection() -> None:
-    result = CliRunner().invoke(app, ["schema", "--kind", "missing"])
+@pytest.mark.parametrize("kind", ["missing", "watch"])
+def test_schema_rejects_unknown_kind_before_selection(kind: str) -> None:
+    result = CliRunner().invoke(app, ["schema", "--kind", kind])
     assert result.exit_code == 2
     assert not result.stdout
     assert "--kind" in plain(result.stderr)
 
 
-@pytest.mark.parametrize("kind", ["watch", "registry", "eval"])
+@pytest.mark.parametrize("kind", ["registry", "eval"])
 def test_other_configuration_examples_match_their_schemas(kind: Kind) -> None:
     from bf.models import UserConfig
-    from bf.watch_settings import Settings
 
-    model = {"watch": Settings, "registry": UserConfig, "eval": Suite}[kind]
+    model = {"registry": UserConfig, "eval": Suite}[kind]
     paths = {
-        "watch": [ROOT / "examples/watch/settings/watch.yaml"],
         "registry": [],
         "eval": sorted((ROOT / "examples").rglob("evals/*.yaml")),
     }[kind]

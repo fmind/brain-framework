@@ -22,7 +22,7 @@ version: 6
 name: brain
 ```
 
-Add [sensors](sensors.md), [routines](routines.md), shared `schema` fields and related `brains` only as needed. Unknown keys, duplicate keys, anchors and aliases are rejected. Sensor and routine names must be distinct; routine names are action slugs: lowercase letters and digits separated by single hyphens, starting with a letter.
+Add [sensors](sensors.md), [routines](routines.md), shared `schema` fields, related `brains` and [watch preferences](schedule.md#watch-preferences) only as needed. Unknown keys, duplicate keys, anchors and aliases are rejected. Sensor and routine names must be distinct; routine names are action slugs: lowercase letters and digits separated by single hyphens, starting with a letter.
 
 `version` is required. It identifies the brain storage format: `bf.yaml`, the `memories/<source>/<sha256-id>.json` layout and the record envelope, independent of the package version. A missing or different version fails before any other field with one diagnostic naming the supported format, such as `bf.yaml declares version 7; this release reads version: 6`; a referenced brain reports the same message under `problems`. Evaluation suites have their own required `version: 5`. `bf init` writes the version and the starter relationship definitions but omits empty collections and redundant defaults; omitted settings retain their documented behavior.
 
@@ -34,17 +34,15 @@ Print the schema for an installed format without selecting a brain, reading its 
 
 ```bash
 bf schema
-bf schema --kind watch
 bf schema --kind registry
 bf schema --kind eval
 ```
 
-Each command prints one JSON Schema object; their `title` values are `Config`, `Settings`, `UserConfig` and `Suite`, respectively. Unknown kinds fail with exit 2. The schemas contain their own definitions, so validation needs no external references. Save the relevant output and associate that local file with your editor's YAML validation for the installed version.
+Each command prints one JSON Schema object; their `title` values are `Config`, `UserConfig` and `Suite`, respectively. Unknown kinds fail with exit 2. The schemas contain their own definitions, so validation needs no external references. Save the relevant output and associate that local file with your editor's YAML validation for the installed version.
 
 | Configuration                     | Published schema                    |
 | --------------------------------- | ----------------------------------- |
 | `bf.yaml`                         | [Brain](../bf.schema.json)          |
-| `settings/watch.yaml`             | [Watch](../watch.schema.json)       |
 | Machine registry `bf/config.yaml` | [Registry](../registry.schema.json) |
 | `evals/*.yaml`                    | [Evaluation](../eval.schema.json)   |
 

@@ -1,4 +1,4 @@
-"""🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies."""
+"""🧠 Brain Framework: from information to informed actions."""
 
 import os
 

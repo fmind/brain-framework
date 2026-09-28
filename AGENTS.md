@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Brain Framework is one Python package (`brain-framework`) and command (`bf`) for a brain kept in plain files its owner can inspect, edit and share. It provides collection, validation, a knowledge graph and offline retrieval; people and agents supply interpretation, judgment and action.
+Brain Framework is one Python package (`brain-framework`) and command (`bf`) for a brain kept in plain files its owner can inspect, edit and share. It provides collection, validation, a knowledge graph and offline retrieval; humans and agents supply interpretation, judgment and action.
 
 Start contribution work with [bf-contribute](.agents/skills/bf-contribute/SKILL.md). [README.md](README.md) explains the product's value and fit, [docs/docs/](docs/docs/) owns user-facing contracts, [CONTRIBUTING.md](CONTRIBUTING.md) owns development tasks and the [release checklist](.agents/skills/bf-contribute/references/release.md) owns publication.
 
@@ -61,7 +61,7 @@ Non-obvious constraints:
 - `README.md` is also the PyPI page, so its links must be absolute (`tests/test_readme.py`).
 - `tests/test_guides.py` follows `docs/docs/getting-started.md` and `sensors.md#your-first-sensor`: each code block must be a command, a documented reply or a file change its prose names.
 - `skills/*/scripts/*.py` run with the agent's `python3`: standard library only, Python 3.11 syntax.
-- `docs/*.schema.json` describe brain, watch, registry and evaluation configuration; `generate:schema` refreshes them from the runtime models and `check:schema` fails on drift.
+- `docs/*.schema.json` describe brain (including watch), registry and evaluation configuration; `generate:schema` refreshes them from the runtime models and `check:schema` fails on drift.
 - `THIRD_PARTY_NOTICES.md` and the site's license copies come from the synced environment; `generate:notices` refreshes them after a dependency change and `check:notices` fails on drift.
 
 ## Contribution checks

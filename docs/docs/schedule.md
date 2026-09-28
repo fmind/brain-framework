@@ -28,19 +28,21 @@ The dashboard shows each program's last success, next due time, item count and r
 
 This is the fictional [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch) 42 seconds after its first cycle, sorted by state: `unavailable` failed, `calendar` updated its record, `git` added one, and the manual and disabled sensors stay idle. Your dashboard lists your own sensors and routines.
 
-| Key                   | Effect                                                                                      |
-| --------------------- | ------------------------------------------------------------------------------------------- |
-| `j` / `k`, arrows     | Select a program and inspect its details.                                                   |
-| `g` / `G`, Home / End | Jump to the first / last visible program.                                                   |
-| `s`                   | Cycle sort fields in the order listed below.                                                |
-| `n` / `t` / `i`       | Sort directly by name / last successful update / item count.                                |
-| `r`                   | Reverse the current sort direction; unknown values stay last.                               |
-| Tab                   | Toggle programs needing attention: failed, never collected or due.                          |
-| `u`                   | Check for due work now; respects refresh, selection and pause. An observer rereads history. |
-| Space                 | Pause/resume future updates; an active update finishes. Observers have nothing to pause.    |
-| `?`                   | Toggle the guide and explain counts and timing.                                             |
-| `q`                   | Cancel any active update and quit successfully. An observer quits without stopping others.  |
-| Ctrl-C                | Cancel and exit 130; terminal settings are restored.                                        |
+| Key                   | Effect                                                                                           |
+| --------------------- | ------------------------------------------------------------------------------------------------ |
+| `j` / `k`, arrows     | Select a program and inspect its details.                                                        |
+| `g` / `G`, Home / End | Jump to the first / last visible program.                                                        |
+| `s`                   | Cycle sort fields in the order listed below.                                                     |
+| `n` / `t` / `i`       | Sort directly by name / last successful update / item count.                                     |
+| `r`                   | Reverse the current sort direction; unknown values stay last.                                    |
+| Tab                   | Toggle programs needing attention: failed, never collected or due.                               |
+| `f` (or `u`)          | Reload sources and check due work now; queue one check if updating. An observer rereads history. |
+| Space                 | Pause/resume future updates; an active update finishes. Observers have nothing to pause.         |
+| `?`                   | Toggle the guide and explain counts and timing.                                                  |
+| `q`                   | Cancel any active update and quit successfully. An observer quits without stopping others.       |
+| Ctrl-C                | Cancel and exit 130; terminal settings are restored.                                             |
+
+Press `f` after adding a reviewed source to `bf.yaml`: its row appears immediately and it runs if eligible. Refresh respects selectors, pause, each program's refresh interval and failure backoff; disabled and manual programs stay idle. Repeated refreshes during an update queue one follow-up check. While paused, resume with Space to run the pending check. Invalid configuration blocks new updates until corrected; use `bf status` for diagnostics. Changes to `watch` preferences in `bf.yaml` still require a restart.
 
 Keys typed faster than the screen redraws, such as a held arrow or a paste, are applied in order.
 
@@ -74,7 +76,7 @@ bf status --watch   # observe only; never executes programs
 bf watch --json     # execute due work and emit JSON Lines
 ```
 
-Use observation alongside a native scheduler. It shows local program history, cannot be combined with `--check` and never probes provider health. Its footer offers `u reread` instead of `u check` and has no pause. Without an interactive terminal, `bf status --watch` fails and suggests `bf status`, which never executes programs. Try the [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch) for a runnable success/failure exercise.
+Use observation alongside a native scheduler. It shows local program history, cannot be combined with `--check` and never probes provider health. Its footer offers `u reread` instead of `f refresh` and has no pause. Without an interactive terminal, `bf status --watch` fails and suggests `bf status`, which never executes programs. Try the [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch) for a runnable success/failure exercise.
 
 <details markdown="1">
 <summary>Dashboard details and JSON output</summary>
@@ -87,7 +89,7 @@ The screen reads small local history files every `poll_interval` (2 seconds by d
 
 ## Watch preferences
 
-**No settings file is required.** By default, watch checks due work every 60 seconds, reads local history every 2 seconds and alerts on failures and recovery.
+**The `watch` section is optional.** By default, watch checks due work every 60 seconds, reads local history every 2 seconds and alerts on failures and recovery.
 
 For a quieter session:
 
@@ -95,12 +97,13 @@ For a quieter session:
 bf watch --interval 300 --notify off
 ```
 
-To keep those preferences, create `settings/watch.yaml`:
+To keep those preferences, add a `watch` section to your existing `bf.yaml` (or edit that section if present):
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schedule/#watch-preferences
-interval: 300
-notifications: off
+watch:
+  interval: 300
+  notifications: off
 ```
 
 | You want to…              | Change…                                                                       |
@@ -110,9 +113,9 @@ notifications: off
 | Choose desktop alerts     | `notifications`: `off`, `failure`, `success` or `all`.                        |
 | Space out alerts          | `notification_cooldown` (seconds).                                            |
 
-CLI options override the file; omitted settings use defaults. Restart watch after editing preferences. Sensor `enabled` and `refresh` belong in `bf.yaml` and reload each cycle.
+CLI options override `bf.yaml` → `watch`; omitted settings use defaults. Restart watch after editing preferences. Sensor `enabled` and `refresh` belong in `bf.yaml` and reload each cycle.
 
-`bf schema --kind watch` prints the installed preferences schema (`title: Settings`), including defaults, units and limits. Use it for [editor validation](schema.md#editor-schemas); watch still validates the file before execution, including values overridden on the CLI.
+`bf schema` prints the brain schema (`title: Config`), including the `watch` section's defaults, units and limits. Use it for [editor validation](schema.md#editor-schemas). Every command loading `bf.yaml`, including `bf validate`, validates these preferences; invalid values fail even when overridden on the CLI. Fix the named `watch` key in `bf.yaml` and retry.
 
 <details markdown="1">
 <summary>Defaults, validation and notification behavior</summary>

@@ -6,46 +6,23 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Literal
 
-from pydantic import Field, ValidationError
+from pydantic import ValidationError
 
-from bf.config import yaml_object
+from bf.config import load
 from bf.history import environment
-from bf.models import Error, Model, explain
+from bf.models import Error, WatchSettings, explain
 from bf.storage import Store
 
 
-class Settings(Model):
-    """Optional watch preferences; CLI values override the file, then defaults apply. Restart to reload."""
-
-    interval: int = Field(default=60, ge=5, le=86400, description="Seconds between checks for due programs.")
-    poll_interval: float = Field(
-        default=2, ge=0.2, le=60, description="Seconds between local history reads and JSON snapshots."
-    )
-    notifications: Literal["off", "failure", "success", "all"] = Field(
-        default="failure",
-        description="Desktop alert policy. Recovery alerts accompany enabled modes.",
-    )
-    notification_cooldown: int = Field(
-        default=300, ge=0, le=86400, description="Minimum seconds between notification attempts."
-    )
-
-
-def settings(store: Store, **overrides: object) -> Settings:
-    """CLI values override settings/watch.yaml, then defaults; reread on restart."""
-    name = "settings/watch.yaml"
+def settings(store: Store, **overrides: object) -> WatchSettings:
+    """CLI values override bf.yaml's watch section, then defaults; reread on restart."""
+    # Load the whole configuration first so CLI overrides cannot hide invalid saved values.
+    result = load(store).watch
     try:
-        values = yaml_object(store.read(name, 65536), name)
-    except FileNotFoundError:
-        values = {}
-    try:
-        # Validate the file even when a CLI override would hide an invalid value.
-        result = Settings.model_validate(values)
-        return Settings.model_validate(result.model_dump() | {k: v for k, v in overrides.items() if v is not None})
+        return WatchSettings.model_validate(result.model_dump() | {k: v for k, v in overrides.items() if v is not None})
     except ValidationError as error:
-        # The brain's owner writes this file, like bf.yaml: name each invalid key so it can be fixed.
-        raise Error(f"invalid {name}: " + explain(error)) from error
+        raise Error("invalid watch overrides: " + explain(error)) from error
 
 
 def desktop(title: str, body: str) -> bool:
@@ -107,7 +84,7 @@ def desktop(title: str, body: str) -> bool:
 
 @dataclass
 class Notifications:
-    preferences: Settings
+    preferences: WatchSettings
     failure: tuple[str, ...] = ()
     last_sent: float = float("-inf")
     warned: bool = False

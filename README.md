@@ -9,9 +9,9 @@
 
 # Brain Framework 🧠
 
-**Reusable context for you and your AI agents.** Collect information from your tools, connect it to your decisions and pick up work with the evidence at hand.
+**🧠 Brain Framework: from information to informed actions.**
 
-🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.
+Collect information from your tools, connect it to your decisions and pick up work with the evidence at hand. Reusable context for you and your AI agents.
 
 [![CI](https://github.com/fmind/brain-framework/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fmind/brain-framework/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/brain-framework?color=174EA6)](https://pypi.org/project/brain-framework/) [![Python](https://img.shields.io/pypi/pyversions/brain-framework)](https://pypi.org/project/brain-framework/) [![License: MIT](https://img.shields.io/badge/license-MIT-174EA6)](https://github.com/fmind/brain-framework/blob/main/LICENSE)
 
@@ -21,7 +21,7 @@ Your meeting notes, issues and project decisions live in different places. Brain
 
 ## What can you do with it?
 
-**Turn meeting notes into GitHub issues.** Collect Calendar event descriptions, then ask your agent:
+**Example: Turn meeting notes into GitHub issues.** Collect Calendar event descriptions, then ask your agent:
 
 > Turn today's meeting notes into GitHub issues in my chosen repository. Cite the source event for each issue.
 

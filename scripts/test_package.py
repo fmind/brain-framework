@@ -127,7 +127,7 @@ from bf.watch import Dashboard
 from bf.schemas import document
 
 assert Dashboard("package-smoke").render(80, 24)
-for kind, title in [("brain", "Config"), ("watch", "Settings"), ("registry", "UserConfig"), ("eval", "Suite")]:
+for kind, title in [("brain", "Config"), ("registry", "UserConfig"), ("eval", "Suite")]:
     assert document(kind)["title"] == title
 installed = distribution("brain-framework")
 assert installed.metadata["Name"] == "brain-framework"

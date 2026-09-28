@@ -2,14 +2,15 @@
 
 Standalone sensors for common providers. Copy the ones you need into a brain's `sensors/`, declare them in `bf.yaml`, and adapt and test them there; they then belong to the brain. The Python package neither bundles nor installs them.
 
-| Sensor                                         | Arguments                                 | Saves                                                                                 |
-| ---------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------- |
-| `git-history.py`                               | `ROOT START END [--skip REPO]...`         | Commits on branches, tags and remote branches, with author and repository identities. |
-| `local-documents.py`                           | `LABEL ROOT [--exclude GLOB]...`          | A snapshot of supported documents in the chosen folder.                               |
-| `highlights.py`                                | `LABEL EXPORT.json`                       | Selected passages, annotations and precise source locations.                          |
-| `google-calendar.py`                           | `CALENDAR START END [--agenda-days N]`    | Calendar events, organizer/invitee identities and an optional agenda.                 |
-| `google-drive-folders.py`                      | `[START END]`                             | My Drive and shared-with-me folders with parent links; shared drives are excluded.    |
-| [Context demo](../context-hub/sensors/demo.py) | `workspace`, `jira`, `github` or `gcloud` | Fictional adapter records for the shared-schema walkthrough; no provider access.      |
+| Sensor                                         | Arguments                                                     | Saves                                                                                 |
+| ---------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `git-history.py`                               | `ROOT START END [--skip REPO]...`                             | Commits on branches, tags and remote branches, with author and repository identities. |
+| [`github-history.py`](github-history.md)       | `OWNER/REPO commits\|issues\|pulls START END [--branch NAME]` | GitHub branch commits and all-age issues/PRs, with incremental refresh.               |
+| `local-documents.py`                           | `LABEL ROOT [--exclude GLOB]...`                              | A snapshot of supported documents in the chosen folder.                               |
+| `highlights.py`                                | `LABEL EXPORT.json`                                           | Selected passages, annotations and precise source locations.                          |
+| `google-calendar.py`                           | `CALENDAR START END [--agenda-days N]`                        | Calendar events, organizer/invitee identities and an optional agenda.                 |
+| `google-drive-folders.py`                      | `[START END]`                                                 | My Drive and shared-with-me folders with parent links; shared drives are excluded.    |
+| [Context demo](../context-hub/sensors/demo.py) | `workspace`, `jira`, `github` or `gcloud`                     | Fictional adapter records for the shared-schema walkthrough; no provider access.      |
 
 Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). For other sources, copy the selected script and merge its configuration below into `bf.yaml`. Review paths and account scope first; do not copy all sources unless you intend to run them.
 
@@ -39,6 +40,8 @@ sensors:
     mode: snapshot
     refresh: 86400
 ```
+
+For a bounded GitHub backfill, follow [GitHub history](github-history.md): one year of `main` commits, all available issues and PRs, then incremental refresh. This is separate from the broader local Git sensor.
 
 ## Preview one source
 

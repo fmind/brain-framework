@@ -4,6 +4,33 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+### Breaking changes (next major release)
+
+- Watch preferences now live in the optional `watch` mapping in `bf.yaml`. `settings/watch.yaml` is no longer read, and `bf schema --kind watch` and `watch.schema.json` are removed; `bf schema` includes watch preferences. Defaults and CLI precedence are unchanged. All commands loading `bf.yaml` validate the section, even when CLI options override it.
+
+Manual upgrade: stop the watcher, move the keys from `settings/watch.yaml` beneath `watch:` in your existing `bf.yaml` (indent them two spaces), remove the old file, run `bf validate` and restart the watcher. Remove the empty `settings/` directory only if nothing else uses it. Brains without custom watch preferences need no change; the brain storage format remains `version: 6`. Package versions will change at release time.
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/schedule/#watch-preferences
+watch:
+  interval: 300
+  notifications: off
+```
+
+### Added
+
+- Add an explicit `f` refresh shortcut to `bf watch` (`u` remains an alias): reload configured sources and check due work now, retaining one follow-up request during an active update while respecting pause, selectors and retry timing.
+
+- Add a reviewed GitHub history sensor and backfill walkthrough: selected-branch commits (one year of `main` by example), all-age issues and pull requests, incremental refresh and bounded pagination that preserves evidence on failure.
+
+### Changed
+
+- Synchronize the project description across the README, documentation, package metadata, CLI help and GitHub About to “🧠 Brain Framework: from information to informed actions.”
+
+### Fixed
+
+- Reject ambiguous GitHub pagination and PR details that move outside the requested window, preserving saved evidence instead of accepting an incomplete or out-of-scope collection.
+
 ## [v14.0.0](https://github.com/fmind/brain-framework/releases/tag/v14.0.0) - 2026-09-28
 
 Brain Framework 14 is the first stable release. It settles the brain format, the CLI and MCP reply contracts and the execution boundaries so that later releases can extend them without breaking them. Collection only runs in one explicitly selected brain, stored evidence resists partial provider failures, retrieval replies share one shape, and the guides, skills and examples are tested against the release they document.

@@ -2,7 +2,7 @@
 [project]
 name = "brain-framework"
 version = "14.0.0"
-description = "🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies."
+description = "🧠 Brain Framework: from information to informed actions."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"

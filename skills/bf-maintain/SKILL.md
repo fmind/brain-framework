@@ -36,7 +36,7 @@ bf eval
 
 For a retrieval miss, save the question as an `evals/` case before changing the owning note or sensor; a new suite starts with `version: 5`. Keep technical regressions in `tests/`. Run `bf eval --path evals/NAME.yaml` for one suite or `bf eval` for all. Every suite is validated before retrieval: a malformed `read` ref or an empty window such as `0d` stops the whole run and names the suite and field. Never substitute empty assertions to make a case pass; see [retrieval cases](https://fmind.github.io/brain-framework/docs/checks/#suite-reference).
 
-Use `bf schema` for the installed brain schema, or `--kind watch|registry|eval` for other configuration formats. These commands are offline and need no selected brain. Editor schemas check structure; runtime validation, evaluation and update planning check their owning semantics.
+Use `bf schema` for the installed brain schema, including `watch` preferences, or `--kind registry|eval` for other configuration formats. These commands are offline and need no selected brain. Editor schemas check structure; runtime validation, evaluation and update planning check their owning semantics.
 
 Review `usage` in `bf status` when diagnosing poor adoption: few searches suggest checking agent access, while many empty searches suggest missing vocabulary or evidence. Counts indicate where to investigate; they do not establish a cause. Inspect review reminders with `bf read projects` and open work with `bf read tasks`; a reminder or recent edit is not verification.
 

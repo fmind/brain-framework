@@ -12,7 +12,9 @@ import pytest
 from conftest import ROOT
 
 
-@pytest.mark.parametrize("adapter", ["google-calendar.py", "google-drive-folders.py", "git-history.py"])
+@pytest.mark.parametrize(
+    "adapter", ["google-calendar.py", "google-drive-folders.py", "git-history.py", "github-history.py"]
+)
 @pytest.mark.parametrize("mode", ["overflow", "timeout"])
 def test_provider_output_is_bounded_and_child_is_reaped(adapter: str, mode: str, tmp_path: Path) -> None:
     run = runpy.run_path(str(ROOT / "examples/sensors" / adapter))["run"]

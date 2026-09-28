@@ -29,10 +29,10 @@ from rich.text import Text
 from bf.collect import next_due
 from bf.config import load
 from bf.history import ROUTINES, environment, log_path, state
-from bf.models import Error, decode, encode, terminal, timestamp
+from bf.models import Error, WatchSettings, decode, encode, terminal, timestamp
 from bf.storage import BusyError, Store, collecting
 from bf.update import selection
-from bf.watch_settings import Notifications, Settings, settings
+from bf.watch_settings import Notifications, settings
 
 
 class State(StrEnum):
@@ -221,7 +221,7 @@ class Dashboard:
     running: bool = False
     message: str = "Ready"
     next_check: float = 0
-    preferences: Settings = field(default_factory=Settings)
+    preferences: WatchSettings = field(default_factory=WatchSettings)
     sort: Sort = Sort.NAME
     descending: bool = False
 
@@ -269,7 +269,7 @@ class Dashboard:
             self.cursor = 0
         elif key == "?":
             self.help = not self.help
-        elif key == "u":
+        elif key in {"f", "u"}:
             return "refresh"
         elif key in {"s", "n", "t", "i", "r"}:
             selected = self.selected()
@@ -303,8 +303,10 @@ class Dashboard:
             mode = [
                 f"Check: {duration(self.preferences.interval)} · history: {poll} · alerts: "
                 + self.preferences.notifications,
-                "Configure settings/watch.yaml; restart to apply.",
-                "u checks enabled, due programs. refresh: 0 stays manual.",
+                "Configure watch in bf.yaml; restart to apply.",
+                "f (or u) reloads bf.yaml and checks due programs now.",
+                "While updating, refresh queues one check; pause still applies.",
+                "Selection, refresh intervals and retry backoff still apply.",
                 "Space pauses future checks; q cancels an active update.",
             ]
         lines = [
@@ -424,7 +426,7 @@ class Dashboard:
             detail = Text("Add a reviewed sensor or routine in bf.yaml. Press ? for controls and timing.")
         keys = (
             "s sort  r reverse  n name  t last OK  i items  ? help  q quit\nj/k ↑/↓ select  g/G first/last  Tab attention  "
-            + ("u reread" if self.observe else "u check  Space pause")
+            + ("u reread" if self.observe else "f refresh  Space pause")
         )
         boundary = "Local run history · no provider text · " + (
             "observation only" if self.observe else "closing watch stops its collection"
@@ -600,6 +602,7 @@ def _loop(
     notifications = Notifications(preferences)
     previous: dict[tuple[str, str], str] = {}
     completed: int | None = None
+    refresh_requested = False
     while True:
         now = time.monotonic()
         if dashboard.running and (code := job.poll()) is not None:
@@ -654,10 +657,11 @@ def _loop(
                 and not dashboard.observe
                 and not dashboard.paused
                 and not dashboard.running
-                and now >= dashboard.next_check
+                and (refresh_requested or now >= dashboard.next_check)
             ):
                 previous = {(row.kind, row.name): row.success for row in dashboard.rows}
                 job.start()
+                refresh_requested = False
                 dashboard.running = True
                 dashboard.message = "Running due sensors, then routines; existing per-program limits apply"
             if live is None:
@@ -690,6 +694,15 @@ def _loop(
             if action == "quit":
                 return
             if action == "refresh":
-                dashboard.next_check = 0
+                refresh_requested = True
                 next_read = 0
+                dashboard.message = (
+                    "Rereading configuration and history"
+                    if dashboard.observe
+                    else "Refresh queued; resume with Space to check due programs"
+                    if dashboard.paused
+                    else "Refresh queued after the active update"
+                    if dashboard.running
+                    else "Reloading bf.yaml and checking due programs"
+                )
             next_frame = 0

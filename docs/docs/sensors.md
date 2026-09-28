@@ -125,7 +125,7 @@ For example, a feedback sensor could emit this fictional record linking an obser
 
 Finish all source pages before printing the array, and fail if any page is missing. Test that failure with a fake provider so partial evidence cannot appear to be a successful collection.
 
-The [reviewed examples](https://github.com/fmind/brain-framework/tree/main/examples/sensors) cover local documents, selected highlights, local Git history, Google Calendar and Drive folders. Copy them from the tag matching `bf --version`, as in [Your first sensor](#your-first-sensor). Provider integrations need their CLI, authentication and a deliberately selected scope. Keep your copied sensor under review and test it with a fake provider before scheduling it.
+The [reviewed examples](https://github.com/fmind/brain-framework/tree/main/examples/sensors) cover local documents, selected highlights, local Git history, [GitHub commits and issues/PRs](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md), Google Calendar and Drive folders. Copy them from the tag matching `bf --version`, as in [Your first sensor](#your-first-sensor). Provider integrations need their CLI, authentication and a deliberately selected scope. Keep your copied sensor under review and test it with a fake provider before scheduling it.
 
 ## From meeting notes to GitHub issues
 
@@ -178,6 +178,8 @@ Both reconciliation values are required positive integers, bounded to 365 days. 
 `bf update --dry-run` lists the requested `start`, `end` and `reconcile` flag without executing anything. Sensors should honor these bounds rather than silently widening every request. Catalog sensors may deliberately ignore time bounds; document their actual scope. A finite reconciliation horizon cannot discover every older edit or disappearance. Provider change cursors need explicit recovery and commit semantics; they are not provided by these time windows.
 
 ### Backfills and coverage
+
+For selected GitHub repositories, the [history walkthrough](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) backfills one year of commits reachable from `main` and all available open/closed issues and PRs, then refreshes incrementally. The year bounds initial commit collection, not retention; issues and PRs are selected by modification time. Large backfills use adjacent windows with a checklist of completed intervals. Comments, reviews and historical revisions are separate scope.
 
 `bf status` separates indexed totals from `last_run` counts: added, updated, unchanged and removed. Backfilling an older window does not claim a fresh collection or fill a gap between windows. A window touching existing coverage extends it; a future `--until` never claims coverage beyond the run time.
 

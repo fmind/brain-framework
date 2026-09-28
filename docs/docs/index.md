@@ -1,12 +1,12 @@
 ---
-description: Save decisions and selected evidence in plain files, then find and reuse their context with Brain Framework.
+description: "🧠 Brain Framework: from information to informed actions."
 ---
 
 ![Brain Framework Iris logo](../assets/brain-framework.svg){ width="256" height="256" }
 
 # Brain Framework 🧠
 
-**🧠 AI Brain Factory: from information to informed action. Not for 🐙 mindflayers or 🧟 zombies.**
+**🧠 Brain Framework: from information to informed actions.**
 
 Keep selected evidence, decisions and next steps in a folder you can inspect and edit. Brain Framework (BF) makes those files searchable and connects them through explicit links. You and your agents use the same evidence; no BF account or model is required.
 

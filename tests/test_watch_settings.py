@@ -8,18 +8,25 @@ from contextlib import nullcontext
 from typing import Literal
 
 import pytest
+from typer.testing import CliRunner
 
-from bf.models import Error
+from bf.cli import app
+from bf.models import Error, WatchSettings
 from bf.storage import Store, collecting
 from bf.watch import Job, watch
-from bf.watch_settings import Notifications, Settings, desktop, settings
+from bf.watch_settings import Notifications, desktop, settings
+
+
+def write_watch(brain: Store, data: bytes) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 6\nname: fixture\nwatch:\n" + b"\n".join(b"  " + line for line in data.splitlines()) + b"\n",
+    )
 
 
 def test_settings_defaults_precedence_and_file_validation(brain: Store) -> None:
-    assert settings(brain) == Settings()
-    brain.write(
-        "settings/watch.yaml", b"interval: 300\npoll_interval: 1\nnotifications: all\nnotification_cooldown: 60\n"
-    )
+    assert settings(brain) == WatchSettings()
+    write_watch(brain, b"interval: 300\npoll_interval: 1\nnotifications: all\nnotification_cooldown: 60\n")
     result = settings(brain, interval=10, notifications="off")
     assert (result.interval, result.poll_interval, result.notifications, result.notification_cooldown) == (
         10,
@@ -28,10 +35,10 @@ def test_settings_defaults_precedence_and_file_validation(brain: Store) -> None:
         60,
     )
     # YAML 1.2 reads an unquoted off as the string it looks like.
-    brain.write("settings/watch.yaml", b"notifications: off\n")
+    write_watch(brain, b"notifications: off\n")
     assert settings(brain).notifications == "off"
-    brain.write("settings/watch.yaml", b"interval: 0\n")
-    with pytest.raises(Error, match=r"settings/watch\.yaml"):
+    write_watch(brain, b"interval: 0\n")
+    with pytest.raises(Error, match=r"bf\.yaml.*watch.interval"):
         settings(brain, interval=60)
 
 
@@ -48,8 +55,8 @@ def test_settings_defaults_precedence_and_file_validation(brain: Store) -> None:
     ],
 )
 def test_invalid_settings_fail_closed(brain: Store, data: bytes) -> None:
-    brain.write("settings/watch.yaml", data)
-    with pytest.raises(Error, match=r"watch\.yaml") as caught:
+    write_watch(brain, data)
+    with pytest.raises(Error, match=r"bf\.yaml") as caught:
         settings(brain)
     # Values are never quoted.
     assert not {"email", "bad", "30"} & set(re.findall(r"\w+", str(caught.value)))
@@ -57,25 +64,40 @@ def test_invalid_settings_fail_closed(brain: Store, data: bytes) -> None:
 
 def test_unknown_settings_keys_are_named_like_bf_yaml_keys(brain: Store) -> None:
     # The brain's owner writes this file: naming a typo, never its value, points at the line to fix.
-    brain.write("settings/watch.yaml", b"intervall: private-value\n")
+    write_watch(brain, b"intervall: private-value\n")
     with pytest.raises(Error) as caught:
         settings(brain)
-    assert str(caught.value) == "invalid settings/watch.yaml: intervall: Extra inputs are not permitted"
+    assert str(caught.value) == "invalid bf.yaml: watch.intervall: Extra inputs are not permitted"
 
 
 def test_settings_reject_redirected_files(brain: Store, tmp_path) -> None:
     target = tmp_path / "outside.yaml"
     target.write_text("interval: 5\n")
-    (brain.root / "settings").mkdir()
-    (brain.root / "settings/watch.yaml").symlink_to(target)
+    (brain.root / "bf.yaml").unlink()
+    (brain.root / "bf.yaml").symlink_to(target)
     with pytest.raises(Error, match="symlink"):
         settings(brain)
+
+
+def test_invalid_override_and_cached_preferences(brain: Store) -> None:
+    write_watch(brain, b"interval: 300\n")
+    assert settings(brain, interval=10).interval == 10
+    assert settings(brain).interval == 300
+    with pytest.raises(Error, match="invalid watch overrides: interval"):
+        settings(brain, interval=0)
+
+
+def test_watch_validates_before_starting_even_with_cli_override(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_watch(brain, b"interval: 0\n")
+    monkeypatch.setattr(Job, "start", lambda _: pytest.fail("invalid configuration executed"))
+    with pytest.raises(Error, match=r"bf\.yaml.*watch.interval"):
+        watch(brain, interval=60, json_output=True)
 
 
 def test_notifications_deduplicate_failures_defer_recovery_and_ignore_idle(monkeypatch: pytest.MonkeyPatch) -> None:
     sent = []
     monkeypatch.setattr("bf.watch_settings.desktop", lambda *args: sent.append(args) or True)
-    notices = Notifications(Settings())
+    notices = Notifications(WatchSettings())
     for now in (0, 60, 300):
         assert not notices.completed(failures=("private-error",), worked=False, now=now)
     assert len(sent) == 1
@@ -105,7 +127,7 @@ def test_notification_modes(
 ) -> None:
     sent = []
     monkeypatch.setattr("bf.watch_settings.desktop", lambda title, _: sent.append(title.split()[-1]) or True)
-    notices = Notifications(Settings(notifications=mode, notification_cooldown=0))
+    notices = Notifications(WatchSettings(notifications=mode, notification_cooldown=0))
     for now, (failures, worked) in enumerate(
         [((), False), ((), True), (("failed",), False), (("failed",), False), ((), True)]
     ):
@@ -115,7 +137,7 @@ def test_notification_modes(
 
 def test_unavailable_desktop_warns_once_and_does_not_stop_collection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("bf.watch_settings.desktop", lambda *_: False)
-    notices = Notifications(Settings(notification_cooldown=0))
+    notices = Notifications(WatchSettings(notification_cooldown=0))
     assert "unavailable" in notices.completed(failures=("failed",), worked=False, now=0)
     assert not notices.completed(failures=(), worked=True, now=10)
 
@@ -158,20 +180,51 @@ def test_native_delivery_errors_are_nonfatal(monkeypatch: pytest.MonkeyPatch, fa
 
 
 def test_second_watcher_observes_without_running(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_watch(brain, b"poll_interval: 1\n")
     observed = []
     monkeypatch.setattr("bf.watch.sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("bf.watch.sys.stdout.isatty", lambda: True)
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr("bf.watch.keyboard", lambda _: nullcontext(-1))
     monkeypatch.setattr(
-        "bf.watch._loop", lambda _store, dashboard, *_args, **_kwargs: observed.append(dashboard.observe)
+        "bf.watch._loop",
+        lambda _store, dashboard, *_args, **_kwargs: observed.append(
+            (dashboard.observe, dashboard.preferences.poll_interval)
+        ),
     )
     monkeypatch.setattr(Job, "start", lambda _: pytest.fail("second watcher executed"))
     with collecting(brain, ".watch"):
         watch(brain)
-    assert observed == [True]
+    assert observed == [(True, 1)]
 
 
 def test_noninteractive_watcher_fails_when_busy_for_supervisor_retry(brain: Store) -> None:
     with collecting(brain, ".watch"), pytest.raises(Error, match="another watcher"):
         watch(brain, json_output=True)
+
+
+@pytest.mark.parametrize("command", [["watch", "--json", "--interval", "10", "--notify", "off"], ["watch", "--json"]])
+def test_cli_uses_integrated_preferences(brain: Store, monkeypatch: pytest.MonkeyPatch, command: list[str]) -> None:
+    write_watch(brain, b"interval: 300\npoll_interval: 1\nnotifications: all\nnotification_cooldown: 60\n")
+    seen = []
+    monkeypatch.setattr("bf.watch.sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("bf.watch.sys.stdout.isatty", lambda: True)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr("bf.watch.keyboard", lambda _: nullcontext(-1))
+    monkeypatch.setattr("bf.watch._loop", lambda _store, dashboard, *_args, **_kwargs: seen.append(dashboard))
+    result = CliRunner().invoke(app, [*command, "--brain", str(brain.root)])
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1
+    expected = WatchSettings(interval=300, poll_interval=1, notifications="all", notification_cooldown=60)
+    if "--interval" in command:
+        expected = expected.model_copy(update={"interval": 10, "notifications": "off"})
+    assert seen[0].preferences == expected
+    assert not seen[0].observe
+
+
+def test_validate_reports_invalid_watch_settings(brain: Store) -> None:
+    write_watch(brain, b"interval: 0\n")
+    result = CliRunner().invoke(app, ["validate", "--brain", str(brain.root)])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, Error)
+    assert "watch.interval" in str(result.exception)

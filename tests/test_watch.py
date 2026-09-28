@@ -185,6 +185,7 @@ def test_empty_many_rows_and_controls() -> None:
     assert dashboard.key("q") == "quit"
     assert dashboard.key("Q") == "quit"
     assert dashboard.key("u") == "refresh"
+    assert dashboard.key("f") == "refresh"
     assert dashboard.key("j") == ""
     assert dashboard.cursor == 0
     dashboard.rows = [
@@ -460,7 +461,7 @@ def test_ties_stay_alphabetical_in_both_directions_and_help_is_visible() -> None
     assert "Programs · 1-2/2 · items ↓" in output
     assert "Items" in output
     assert "s sort" in output
-    assert "u check  Space pause" in output
+    assert "f refresh  Space pause" in output
     dashboard.key("?")
     output = screen(dashboard, 80, 24)
     assert "not total stored" in output
@@ -753,6 +754,24 @@ def test_shipped_offline_watch_example(tmp_path: Path) -> None:
     second: dict = update(store, sensors=("calendar", "git"))
     assert second["ok"]
     assert second["sensors"] == []
+    # Follow the README's source-addition command, then reuse watch's actual update subprocess.
+    example = (source / "README.md").read_text().split("```bash\npython3 - <<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
+    subprocess.run(  # noqa: S603 - repository-owned example, isolated fictional brain
+        [sys.executable, "-c", example], cwd=store.root, check=True
+    )
+    job = Job(store, (), ())
+    job.start()
+    try:
+        assert job.process is not None
+        assert job.process.wait(timeout=10) == 0
+        assert job.reply is not None
+        job.reply.seek(0)
+        refreshed = json.load(job.reply)
+        assert [entry["sensor"] for entry in refreshed["sensors"]] == ["new-calendar"]
+        assert refreshed["sensors"][0]["added"] == 1
+        assert {row.name: row for row in snapshot(store)}["new-calendar"].records == 1
+    finally:
+        job.close()
 
 
 @pytest.mark.parametrize("delivered", [True, False])
@@ -821,3 +840,93 @@ def test_status_watch_routes_to_observation(brain: Store, monkeypatch: pytest.Mo
 def fixed_action_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("bf.watch_settings.desktop", lambda *_args: True)
     monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=1))
+
+
+@pytest.mark.parametrize("key", ["f", "u"])
+@pytest.mark.parametrize("mode", ["collect", "paused", "observe", "selected"])
+def test_refresh_reloads_sources_and_preserves_execution_boundaries(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, key: str, mode: str
+) -> None:
+    brain.write("bf.yaml", CONFIG)
+    sensors = ("calendar",) if mode == "selected" else ()
+    dashboard = Dashboard("fixture", observe=mode == "observe", paused=mode == "paused", next_check=600)
+    starts: list[set[str]] = []
+    clock = [1.0]
+    steps = 0
+
+    def start(_job: Job) -> None:
+        starts.append({row.name for row in dashboard.rows if row.included})
+
+    def keys(_descriptor: int, _wait: float) -> list[str]:
+        nonlocal steps
+        steps += 1
+        clock[0] += 0.25
+        if steps == 1:
+            brain.write(
+                "bf.yaml",
+                CONFIG.replace(b"sensors:\n", b"sensors:\n  new-source:\n    command: [echo]\n    refresh: 60\n"),
+            )
+            return [key]
+        assert "new-source" in {row.name for row in dashboard.rows}
+        if mode == "paused" and steps == 2:
+            assert not starts
+            assert "resume with Space" in dashboard.message
+            return [" "]
+        if mode == "paused" and not starts:
+            return []
+        return ["q"]
+
+    monkeypatch.setattr(Job, "start", start)
+    monkeypatch.setattr("bf.watch.read_keys", keys)
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
+    _loop(brain, dashboard, Job(brain, sensors, ()), sensors, (), live=cast("Live", FakeLive()))
+    if mode == "observe":
+        assert not starts
+    else:
+        assert len(starts) == 1
+        assert ("new-source" in starts[0]) == (mode != "selected")
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_refresh_during_update_coalesces_and_waits_for_valid_configuration(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, invalid: bool
+) -> None:
+    brain.write("bf.yaml", CONFIG)
+    dashboard = Dashboard("fixture")
+    starts: list[set[str]] = []
+    clock = [1.0]
+    steps = 0
+    changed = CONFIG.replace(b"sensors:\n", b"sensors:\n  new-source:\n    command: [echo]\n    refresh: 60\n")
+
+    def start(_job: Job) -> None:
+        starts.append({row.name for row in dashboard.rows})
+
+    def keys(_descriptor: int, _wait: float) -> list[str]:
+        nonlocal steps
+        steps += 1
+        clock[0] += 0.25
+        if steps == 1:
+            brain.write("bf.yaml", b"invalid: [" if invalid else changed)
+            return ["f", "f", "u"]
+        if steps == 2:
+            assert len(starts) == 1  # The active update must finish before another starts.
+            return []
+        if invalid and steps == 3:
+            assert len(starts) == 1
+            assert "Cannot read" in dashboard.message
+            brain.write("bf.yaml", changed)
+            return []  # The pending request survives the error without pressing f again.
+        if len(starts) == 1:
+            assert steps < 20
+            return []
+        assert len(starts) == 2
+        assert "new-source" in starts[1]
+        # Finish the follow-up; no third update should be queued by the repeated keys.
+        return ["q"] if not dashboard.running else []
+
+    monkeypatch.setattr(Job, "start", start)
+    monkeypatch.setattr(Job, "poll", lambda _: 0 if steps >= 2 else None)
+    monkeypatch.setattr("bf.watch.read_keys", keys)
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
+    _loop(brain, dashboard, Job(brain, (), ()), (), (), live=cast("Live", FakeLive()))
+    assert len(starts) == 2

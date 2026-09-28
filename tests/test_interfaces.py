@@ -202,7 +202,8 @@ def test_console_errors_are_private_and_on_stderr(
 @pytest.mark.usefixtures("brain")
 def test_forced_color_keeps_replies_and_failures_plain() -> None:
     """CI terminals force Typer and Rich colors; JSON replies and `bf:` failure lines must stay plain there."""
-    env = {**os.environ, "GITHUB_ACTIONS": "true", "FORCE_COLOR": "1"}
+    # Rich disables colors for TERM=dumb even when forced; choose the terminal this case exercises.
+    env = {**os.environ, "TERM": "xterm-256color", "GITHUB_ACTIONS": "true", "FORCE_COLOR": "1"}
 
     def bf(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(  # noqa: S603 - synthetic CLI boundary

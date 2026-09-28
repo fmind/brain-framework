@@ -1,6 +1,11 @@
 # https://fmind.github.io/brain-framework/docs/schedule/
 version: 6
 name: watch-demo
+watch:
+  interval: 5
+  poll_interval: 1
+  notifications: off
+  notification_cooldown: 30
 sensors:
   calendar:
     command: [python3, sensors/demo.py, calendar]

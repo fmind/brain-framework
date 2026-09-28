@@ -405,7 +405,7 @@ def test_yaml_follows_the_1_2_core_schema(brain: Store) -> None:
     brain.write("bf.yaml", b"version: 6\nname: fixture\nsensors:\n  on:\n    command: [echo]\n    timeout: 1:30\n")
     with pytest.raises(Error, match=r"sensors\.on\.timeout"):
         load(brain)
-    brain.write("settings/watch.yaml", b"notifications: off\n")
+    brain.write("bf.yaml", b"version: 6\nname: fixture\nwatch:\n  notifications: off\n")
     assert settings(brain).notifications == "off"
 
 
