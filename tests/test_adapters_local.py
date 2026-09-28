@@ -294,7 +294,11 @@ def test_git_history_skips_unreadable_and_unnameable_folders(provider: Provider,
     root = tmp_path / "home"
     (root / "code/project/.git").mkdir(parents=True)
     # A Latin-1 folder name is not UTF-8: Python reads it with a lone surrogate that JSON cannot carry.
-    (root / os.fsdecode(b"code/caf\xe9/.git")).mkdir(parents=True)
+    skipped = 2
+    try:
+        (root / os.fsdecode(b"code/caf\xe9/.git")).mkdir(parents=True)
+    except OSError:
+        skipped -= 1  # APFS stores only UTF-8 names
     (root / "code/bad\x01name/.git").mkdir(parents=True)
     private = root / "private"
     private.mkdir()
@@ -313,7 +317,7 @@ def test_git_history_skips_unreadable_and_unnameable_folders(provider: Provider,
         private.chmod(0o700)
     assert result.returncode == 0, result.stderr
     assert [record["id"] for record in json.loads(result.stdout)] == ["code/project@abc"]
-    assert "skipped 3 " in result.stderr
+    assert f"skipped {skipped + 1} " in result.stderr
     assert "caf" not in result.stderr
 
 

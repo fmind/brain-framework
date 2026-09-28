@@ -94,8 +94,14 @@ def test_local_documents_keep_legacy_text_and_skip_unnameable_entries(provider: 
     (root / "legacy.csv").write_bytes(b"caf\xe9;prix\n")
     (root / "notes.txt").write_text("Keep evidence")
     # Names BF cannot store in a record id: not UTF-8 (a lone surrogate), or with a control character.
-    (root / os.fsdecode(b"caf\xe9")).mkdir()
-    (root / os.fsdecode(b"caf\xe9/inside.txt")).write_text("hidden by its folder")
+    skipped = 1
+    try:
+        (root / os.fsdecode(b"caf\xe9")).mkdir()
+    except OSError:
+        pass  # APFS stores only UTF-8 names
+    else:
+        (root / os.fsdecode(b"caf\xe9/inside.txt")).write_text("hidden by its folder")
+        skipped += 1
     (root / "tab\tname.txt").write_text("unnameable")
     result = provider.run("local-documents.py", "work", str(root))
     assert result.returncode == 0, result.stderr
@@ -104,7 +110,7 @@ def test_local_documents_keep_legacy_text_and_skip_unnameable_entries(provider: 
     assert records["work/legacy.csv"].text == "caf�;prix\n"
     assert records["work/legacy.csv"].attributes["partial"] is True
     assert records["work/notes.txt"].attributes["partial"] is False
-    assert "skipped 2 entries" in result.stderr
+    assert f"skipped {skipped} entr" in result.stderr
 
 
 def test_local_documents_name_the_file_that_fails(provider: Provider, tmp_path: Path) -> None:

@@ -131,7 +131,8 @@ def test_shell_completion_in_fresh_process(
     )
     assert result.returncode == 0, result.stderr
     assert expected in result.stdout
-    assert not result.stderr
+    # Typer still emits the script when the host's bash (3.2 on macOS) is too old to use it, and says so.
+    assert not result.stderr or result.stderr == "Shell completion is not supported for Bash versions older than 4.4.\n"
 
 
 def test_console_errors_are_private_and_on_stderr(
