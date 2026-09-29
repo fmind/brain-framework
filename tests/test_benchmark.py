@@ -23,6 +23,6 @@ def test_benchmark_reports_every_measurement_on_a_tiny_corpus(tmp_path: Path) ->
     report = json.loads(result.stdout)
     assert report["corpus"] == {"records": 30, "body_chars": 1024, "notes": 2, "repeats": 1, "batch": 5}
     writes = {"upsert_add", "upsert_update", "upsert_remove"}
-    assert {"build", "note_edit", "exact_read", *writes} <= set(report["seconds"])
+    assert {"build", "note_edit", "question", "exact_read", *writes} <= set(report["seconds"])
     # The temporary brain is removed; only its parent directory remains.
     assert list((tmp_path / "benchmark").iterdir()) == []

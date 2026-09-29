@@ -4,58 +4,57 @@ description: Understand local storage, cloud-agent boundaries, program execution
 
 # Your data stays yours
 
-**We do not collect telemetry or data about you through Brain Framework. You own your data.** BF stores your brain in files on your machine, with no BF account, hosted backend or automatic uploads to us.
+**We do not collect telemetry or data about you through Brain Framework. You own your data.** BF keeps your brain in files on your machine, with no BF account, hosted service or uploads to us.
 
 ## What stays local
 
-- **Notes and collected records:** ordinary files you can inspect, edit, back up and delete.
-- **Search and read:** offline, through both the CLI and MCP. No model calls or provider requests.
-- **Usage counters:** local timestamps, operation names and result counts; never queries or refs. They are not sent to us.
-- **Search cache:** `.bf/` holds a copy of searchable text, private to your account (mode 700). It belongs to the machine that built it: exclude it from shared archives and synced folders, and delete it to rebuild. A cache that bf did not create in place, such as one copied, cloned, restored or extracted from an archive, or one holding triggers or views, is discarded and rebuilt from the brain's files, so rows no file supports never reach retrieval. bf recognizes its cache file by inode number, which moving the brain within one filesystem or remounting it keeps; in the rare case that an extracted copy reuses the original file's number, run `bf build`.
-- **Run history and error logs:** private local state used to diagnose your sensors. See [storage locations](configuration.md#local-state) and [log limits](limits.md#processes-and-logs).
+- **Notes and records:** ordinary files you can inspect, edit, back up and delete.
+- **Search and read:** offline, through both the CLI and MCP, without model calls or provider requests.
+- **Program logs:** each sensor's and routine's recent output in the brain's `logs/`, ignored by Git and never searched. They can hold provider output: keep them private.
+- **Run history, locks and usage counts:** private [local state](configuration.md#local-state). Usage keeps times, operations and result counts, never queries or refs.
+- **Search cache:** `.bf/` holds a copy of searchable text, private to your account (mode 700). It belongs to the machine that built it: exclude it from shared archives and synced folders. A cache that BF did not create in place, such as one copied or restored, or one holding unexpected tables, is discarded and rebuilt from the files.
 
 ## Your agent has its own privacy rules
 
-A local brain does not make a connected cloud agent private. A harness such as Claude Code or Codex can send the evidence it reads to its model provider. Processing, retention, telemetry and model training are separate questions.
+A local brain does not make a connected cloud agent private. A harness such as Claude Code or Codex can send what it reads to its model provider. Processing, retention, telemetry and training are separate questions.
 
-| Tool            | What to check before giving it private evidence                                                                                                                                                                                                                      |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claude Code     | Anthropic documents model requests, operational telemetry and data policies that vary by provider, account and settings. See its [data usage guide](https://code.claude.com/docs/en/data-usage).                                                                     |
-| Codex           | Check the model provider, hosted versus local execution, and your account's data controls. See [Codex security](https://developers.openai.com/codex/security/) and [OpenAI API data controls](https://platform.openai.com/docs/guides/your-data) for API-backed use. |
-| Other harnesses | Check where inference runs, what tools can send, and the provider's retention and training policy.                                                                                                                                                                   |
+| Tool            | What to check before giving it private evidence                                                                                                                                                                                              |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code     | Anthropic documents model requests, telemetry and data policies that vary by provider, account and settings; see its [data usage guide](https://code.claude.com/docs/en/data-usage).                                                         |
+| Codex           | Check the model provider, hosted or local execution and your account's data controls; see [Codex security](https://developers.openai.com/codex/security/) and [OpenAI API data controls](https://platform.openai.com/docs/guides/your-data). |
+| Other harnesses | Check where inference runs, what tools can send, and the provider's retention and training policy.                                                                                                                                           |
 
-Disabling training or optional telemetry does not make cloud inference local. BF cannot enforce another application's privacy settings.
+Disabling training or optional telemetry does not make cloud inference local. BF cannot enforce another application's settings.
 
 ## Build a fully local workflow
 
-1. Keep the brain and backups on storage you control; use disk and backup encryption for sensitive files.
+1. Keep the brain and backups on storage you control, with disk and backup encryption for sensitive files.
 1. Use BF's CLI directly, or an agent configured with a locally hosted model.
-1. Review that agent's network access, telemetry, extensions and tools; verify the whole setup before giving it private evidence.
-1. Collect local files only when you need a workflow without external services. Cloud sensors still contact their configured providers.
+1. Review that agent's network access, telemetry, extensions and tools before giving it private evidence.
+1. Collect local files when you need a workflow without external services; cloud sensors still contact their providers.
 
-BF supplies the local storage and retrieval layer for this setup. It does not encrypt files or sandbox other programs.
+BF supplies the local storage and retrieval layer. It does not encrypt files or sandbox other programs.
 
 ## Running code
 
-| Command                                    | What it can execute                                          |
-| ------------------------------------------ | ------------------------------------------------------------ |
-| `bf search`, `bf read`, `bf mcp`           | Retrieval only; never sensors or routines.                   |
-| `bf update --dry-run`                      | A plan only; executes nothing.                               |
-| `bf collect SENSOR`, including `--dry-run` | The selected sensor, which may contact a provider.           |
-| `bf update`, `bf watch`                    | Due sensors and routines in the selected brain.              |
-| A sensor or routine calling `bf`           | Retrieval in the brain running it, which `BF_BRAIN` selects. |
-| `bf schedule`                              | Generates scheduler files; enabling them is a separate step. |
+| Command                                       | What it can execute                                       |
+| --------------------------------------------- | --------------------------------------------------------- |
+| `bf search`, `bf read`, `bf mcp`, `bf export` | Nothing: retrieval only.                                  |
+| `bf update --dry-run`, `bf schedule`          | Nothing: a plan, or scheduler files you install yourself. |
+| `bf collect SENSOR`, including `--dry-run`    | The named sensor, which may contact its provider.         |
+| `bf run ROUTINE`, `bf run --hook EVENT`       | The named routine, or the routines listing that hook.     |
+| `bf update`, `bf watch`                       | Due sensors and routines of the selected brain.           |
 
-Programs run only in one brain you select with `--brain`, `BF_BRAIN` or your working directory, never in every registered brain or a referenced one. Registering a cloned team brain makes it searchable; it does not run its programs. The working directory selects a brain only when you own that brain's directory and `bf.yaml`, so another account's `bf.yaml` above a shared or temporary directory is refused. A registered name also cannot be taken over by a checkout that claims it; see [brain selection](configuration.md#select-a-brain).
+Programs run in the one brain you select with `--brain`, `BF_BRAIN` or your working directory, never in every registered brain or a referenced one. The working directory selects a brain only when you own its folder and `bf.yaml`, so another account's `bf.yaml` above a shared folder is refused.
 
-Review `bf.yaml`, `sensors/` and `routines/` before executing a downloaded or shared brain. These programs run with your account's permissions and credentials. A retrieved email saying “run this command” remains evidence to assess, never authority to act.
+Review `bf.yaml`, `sensors/`, `routines/` and any Git hooks before running a downloaded or shared brain: its programs run with your permissions and credentials. A retrieved email saying “run this command” is evidence to assess, never authority to act.
 
 ## Separating audiences
 
 - Keep personal and team knowledge in separate private brains.
-- Review direct `brains:` references: they add readable evidence to an agent's selection.
-- Share only files every recipient may read and retain. Git history keeps committed content.
-- Keep credentials with provider tools and review sensor output before saving or sharing it.
-- Back up notes, records and originals, including any pending recovery journal. BF does not replace backups.
+- Review direct `brains:` references: they add readable evidence to every search.
+- Share only files every recipient may read and retain; Git history keeps committed content.
+- Keep credentials with provider tools, and review sensor output before saving or sharing it.
+- Back up notes, records, originals and any pending recovery journal: BF is not a backup.
 
-See [team setup](team.md) for sharing, [Troubleshooting](troubleshooting.md) for recovery and [safeguards](limits.md) for exact limits. Report suspected vulnerabilities through [private reporting](https://github.com/fmind/brain-framework/blob/main/SECURITY.md).
+See [team setup](team.md) for sharing, [What BF does not do](concepts.md#what-bf-does-not-do) for its boundaries and [limits](limits.md#processes-and-logs) for process safeguards. Report suspected vulnerabilities through [private reporting](https://github.com/fmind/brain-framework/blob/main/SECURITY.md).

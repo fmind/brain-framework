@@ -6,7 +6,7 @@ updated: 2026-09-15
 
 # Cobalt
 
-Cobalt onboards new partner teams.
+Cobalt onboards new partner teams. Its welcome kit describes the accessibility settings of the partner portal.
 
 ## Next actions
 

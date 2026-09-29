@@ -20,10 +20,12 @@ def test_retrieval_example_validates_and_answers_its_questions(tmp_path: Path) -
         reply = json.loads(result.stdout)
         assert reply[field] is True, reply
         if command == "eval":
-            assert (reply["score"], reply["mrr"]) == ("17/17", 0.95), reply
+            assert (reply["score"], reply["mrr"]) == ("23/23", 1.0), reply
             ranks = {case["name"]: case.get("rank") for case in reply["cases"]}
             # Before 15.0.0 three other projects' Next actions sections mentioning Atlas ranked first.
             assert ranks["project-next-actions-first"] == {"projects/atlas.md#next-actions": 1}
+            # Before 16.0.0 a glossary definition sharing two of the three words ranked first.
+            assert ranks["one-result-per-document-url"] == {"documents:atlas-launch-plan": 1}
             baseline.write_text(result.stdout)
     # The low-priority catalog copy of the launch plan collapses into the full document.
     result = runner.invoke(app, ["search", "Atlas launch plan", "--limit", "3", "--brain", str(brain)])

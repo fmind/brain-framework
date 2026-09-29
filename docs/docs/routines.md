@@ -1,23 +1,52 @@
 ---
-description: Configure an offline routine that turns saved evidence into a review action.
+description: Run deterministic brain programs now, on a schedule or from Git hooks, and turn their output into logs or review actions.
 ---
 
-# Prepare reviews
+# Run routines
 
-A registered routine prepares a review action from local evidence. For example, the weekly review reads your projects and recent activity, then creates an `ACTION.md` with tasks for you or your agent. It uses no model and makes no decisions for you.
+A routine is any deterministic program your brain runs: a validation, a backup, a weekly review. It uses no model and makes no decisions for you. Declare it under `routines:` in `bf.yaml`, then run it three ways:
 
-`bf update` runs due routines, validates their OKF Markdown output and saves each nonempty result as a new action. General upkeep scripts such as backups can also live in `routines/`; run those directly or through your own scheduler.
+| Run it…     | With                                                 | For example                                |
+| ----------- | ---------------------------------------------------- | ------------------------------------------ |
+| Now         | `bf run ROUTINE [ARGS]...`                           | Prepare this week's review.                |
+| On an event | `bf run --hook EVENT`                                | Validate the brain before each Git commit. |
+| When due    | `refresh` with `bf update`, `bf watch` or a schedule | A review every seven days.                 |
 
-## Configure a routine
+A routine's `output` decides what its stdout becomes. `log`, the default, keeps it in `logs/NAME.log`. `action` turns nonempty Markdown into a dated action for you or your agent to work through.
 
-Complete [Getting started](getting-started.md) and work inside `~/brain`. Copy the [weekly review example](https://github.com/fmind/brain-framework/blob/main/examples/routines/weekly-review.py) from the release matching your installation, then review it. The Python package does not install these scripts.
+## Run routines from hooks
+
+A Git pre-commit hook can refuse a commit while the brain has validation problems. The routine is `bf validate` itself. Add it to `bf.yaml`:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/routines/
+routines:
+  validate:
+    command: [bf, validate]
+    hooks: [pre-commit]
+```
+
+Then create the executable file `.git/hooks/pre-commit` in the brain:
+
+```sh
+#!/bin/sh
+exec bf run --hook pre-commit
+```
+
+`bf run --hook pre-commit` runs every enabled routine listing that hook, in name order. On a valid brain, Git shows `{"dry_run":false,"hook":"pre-commit","ok":true,"routines":[{"routine":"validate","status":"ran"}]}` and commits. When a note links to a missing file, the routine reports `"status":"failed"`, `bf run` exits 1 and Git refuses the commit. The validation reply, naming the file to repair, is in `logs/validate.log`. The [routine examples](https://github.com/fmind/brain-framework/tree/main/examples/routines#validate-before-each-commit) run this walkthrough in a disposable Git repository.
+
+A hook that no routine lists runs nothing and succeeds, so the Git hook can exist before its routines. `bf validate` checks the working tree, including unstaged edits. For `pre-push`, write `exec bf run --hook pre-push "$@"`: Git's arguments and the ref lines it pipes reach each routine.
+
+## Prepare a weekly review
+
+The reviewed [weekly review](https://github.com/fmind/brain-framework/blob/main/examples/routines/weekly-review.py) reads your projects and recent activity and prints an action with review tasks. Copy it from the release tag matching `bf --version`, then review it:
 
 ```bash
 mkdir -p routines
 curl -fsSLo routines/weekly-review.py "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/routines/weekly-review.py"
 ```
 
-A new brain has no `routines:` key. Add this one at the top level of `bf.yaml`, keeping the rest of your configuration:
+Add it under `routines:` in `bf.yaml`:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/routines/
@@ -25,61 +54,53 @@ routines:
   weekly-review:
     command: [uv, run, --no-project, --python, "3.14", routines/weekly-review.py, "{{brain}}", "{{end}}"]
     refresh: 604800
+    output: action
 ```
 
-This invocation supplies Python 3.14 and does not require an executable bit on the script. Both `uv` and `bf` must be on PATH; uv may obtain the interpreter on its first run. The routine itself reads local evidence without contacting providers.
-
-The name becomes the action's slug: start with a lowercase letter, then use lowercase letters and digits separated by single hyphens. Sensor and routine names must be distinct.
-
-| Setting     | Default  | Meaning                                                                  |
-| ----------- | -------- | ------------------------------------------------------------------------ |
-| `command`   | required | A command on PATH or a `routines/` executable, then up to 127 arguments. |
-| `enabled`   | `true`   | Whether the routine may run.                                             |
-| `refresh`   | `0`      | Seconds between runs, up to 365 days; zero leaves it out of updates.     |
-| `lookback`  | `86400`  | Seconds covered by the first run; up to 365 days.                        |
-| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                             |
-| `max_bytes` | 1 MiB    | Maximum stdout; configurable up to 4 MiB.                                |
-
-Arguments support `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. After the first run, `start` is the end of the last window that produced an action or found nothing to review; `end` is now.
-
-## Run and review
-
-`bf update` runs due routines after the selected brain's sensors. Preview the due list, then create the review:
-
 ```bash
-bf update --dry-run
-bf update
+bf run weekly-review
 bf read actions
 bf validate
 ```
 
-If there are projects due for review, open tasks or dated items from the last seven days, the update reply names the new `actions/YYYY-MM-DD_weekly-review-UUID/ACTION.md`. Read that returned path to see the review tasks; the date is the day you ran it. If there is nothing to review, the routine succeeds without creating an action. An immediate second update leaves existing work intact.
+When projects need review, tasks are open or items are dated in the last seven days, the reply names the new `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, with a random 8-character suffix. The action lists open-task counts, up to ten open tasks with their sections, and recent activity by source. Empty output creates nothing. With `refresh: 604800`, `bf update` and `bf watch` also run it weekly.
 
-To preview the Markdown without saving an action, run the script directly with your review timestamp:
+An action routine writes at most one action per day in a brain: a second run that day reports `"status":"skipped"` and keeps the existing action, even one another clone wrote. BF validates the Markdown's OKF metadata and links before writing; invalid or excessive output, or a failure, creates nothing. Preview without writing with `bf run weekly-review --dry-run`: the reply includes the Markdown as `text`.
+
+## Routine settings
+
+| Setting     | Default  | Meaning                                                                                |
+| ----------- | -------- | -------------------------------------------------------------------------------------- |
+| `command`   | required | A program on PATH or in `routines/`, then up to 127 arguments.                         |
+| `output`    | `log`    | `log` keeps stdout in `logs/NAME.log`; `action` writes nonempty Markdown as an action. |
+| `hooks`     | `[]`     | Up to 16 events, such as `pre-commit`, that `bf run --hook EVENT` runs.                |
+| `enabled`   | `true`   | A disabled routine never runs.                                                         |
+| `refresh`   | `0`      | Seconds between due runs, up to 365 days; zero leaves it out of updates.               |
+| `lookback`  | `86400`  | Seconds covered by the first run.                                                      |
+| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                                           |
+| `max_bytes` | 1 MiB    | Maximum stdout; configurable up to 4 MiB.                                              |
+
+Names start with a lowercase letter and use lowercase letters and digits joined by single hyphens; sensor and routine names must differ. Arguments support `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. `start` is the end of the last reviewed window, or `lookback` before the first run; `end` is now.
+
+## Run a routine now
+
+`bf run ROUTINE ARGS...` appends the arguments to the routine's command; put `--` before arguments that start with a dash. Piped input reaches the routine, up to 1 MiB, and a pipe must close within 10 seconds:
 
 ```bash
-uv run --no-project --python 3.14 routines/weekly-review.py ~/brain 2026-09-27T12:00:00Z
+echo "release notes" | bf run summarize -- --verbose
 ```
 
-The action includes open/completed task counts across notes and a preview of up to ten open tasks with their source sections and lines. Follow `bf read tasks` continuations for the complete list. Summarized tasks use plain bullets, so generating a review does not duplicate their checkboxes or add graph claims. The counts exclude deprecated notes and action attachments; incomplete task replies stop the routine before it writes.
+The reply lists each routine with its `status`: `ran`, `skipped` or `failed` with an `error` naming its log. One failure never stops the other routines of a hook. `--dry-run` runs the routines but writes no action and records no run; logs still grow. `bf run` acts on one brain, like `bf update`.
 
-The timestamp sets the note's date; the example reads the brain's current home, project, task and last-seven-days pages. It does not recreate the brain as it was on a past date.
+## Logs
 
-A successful routine produces one of three outcomes:
+Each sensor and routine appends to `logs/NAME.log` in the brain, newest entry last, and keeps the latest 1 MiB. An entry starts with a `== TIME OUTCOME ==` line, followed by a log routine's stdout and any stderr. Status and errors name these brain-relative paths. `bf init` ignores `/logs/` in Git, and search never reads logs. Logs can hold provider output: keep them private and never paste them into a public issue.
 
-| Output or existing state               | Result                                                                  |
-| -------------------------------------- | ----------------------------------------------------------------------- |
-| Valid OKF Markdown                     | A new `actions/YYYY-MM-DD_NAME-UUID/ACTION.md`, using the local date.   |
-| Empty output                           | Success with no action.                                                 |
-| Today's action for this routine exists | Skipped; existing work stays intact and the review window remains open. |
+## Write a routine
 
-The routine recognizes today's action by its folder name, `actions/YYYY-MM-DD_NAME-UUID`, not by run history: a retry after an action was written but its history was not saved skips too, and so does an action another clone wrote and shared. Today's action counts while its folder holds any file, even an editor's `.#ACTION.md` lock, so a rerun never writes beside unsaved edits. Failures, invalid OKF metadata or Markdown, and excessive output create no action. The routine retries with the same [failure backoff](sensors.md#collect-and-update) as a sensor, and the failure appears in `bf status` and the home page's `attention`.
+Read the brain with `bf read` and `bf search` using literal arguments. Programs receive `BF_BRAIN` set to the brain running them, so a nested `bf` call reads that brain whatever your shell selected. Keep routines offline and deterministic; do not edit notes or call a model. Name collected evidence by ref so a reviewer chooses what to open.
 
-## Write a review routine
-
-Use `bf read` and `bf search` with literal arguments to read the brain. Programs receive `BF_BRAIN` set to the brain running them, so a nested `bf` call without `--brain` reads that brain even when your shell selected another one. The weekly review makes this explicit by passing its `{{brain}}` argument to `bf read --brain`. Keep routines offline and deterministic; do not edit existing notes or call a model. Name collected evidence by ref so a reviewer can choose what to open.
-
-For example, a routine reviewing the New website decision can print this complete action:
+An `output: action` routine prints one complete OKF note with a nonempty `type`, such as:
 
 ```markdown
 ---
@@ -90,23 +111,9 @@ summary: Review the New website project before the next work session.
 
 # New website review
 
-## Objective
-
-Review the [project decision](../../projects/new-website.md#decision).
-
 ## Tasks
 
 - [ ] Check whether the product page now explains the product before signup.
-
-## Resume
-
-Read the project and its evidence, then record the review outcome.
 ```
 
-Every nonempty output needs a nonempty `type`. Optional `status` must be `draft`, `stable` or `deprecated`; keep review progress in the task list. Relative links resolve from the resulting `ACTION.md`, two levels below the brain root. The routine emits the complete note, including its metadata.
-
-Test the script with a fake `bf`. It runs with the same [process safeguards](limits.md#processes-and-logs) as a sensor. `bf status` reports its `state`, `freshness`, `last_success` and latest `action`, plus `failed`, `error`, `failures` and `log` after a failure; see [status fields](commands.md#status-sources-and-routines).
-
-To run updates automatically, see [Watch and schedule updates](schedule.md).
-
-Routine action folders follow the [action folder convention](brain.md#actions): a fresh UUID hex suffix. Independent clones create distinct sessions; this avoids filename conflicts but does not deduplicate overlapping reviews. Use one scheduler for a shared routine when only one team review is wanted. A clone remembers its last action in private run state and never replaces it.
+Relative links resolve from the new `ACTION.md`, two folders below the brain root. Test the script with a fake `bf`; it runs with the same [process safeguards](limits.md#processes-and-logs) as a sensor. A failed routine retries with the sensors' [failure backoff](sensors.md#collect-and-update). `bf status` reports each routine's `state`, `freshness`, `last_success`, latest `action`, and `failed`, `error`, `failures` and `log` after a failure; see [status fields](commands.md#status-sources-and-routines).

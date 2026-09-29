@@ -11,7 +11,7 @@ from typing import cast
 import pytest
 
 from bf import index, pages
-from bf.models import Error, Record
+from bf.models import MAX_OFFSET, Error, Record
 from bf.retrieve import read
 from bf.storage import Store
 from bf.validate import validate
@@ -39,10 +39,10 @@ def test_tasks_include_source_sections_lines_and_counts_for_canonical_notes(brai
         "note": "projects/tasks.md",
         "title": "Plan",
         "line": 8,
-        "text": "Read the source.",
+        "text": "Read [the source](concepts/evidence.md).",
     }
     assert "- [ ] Read" in str(read([brain], str(found["ref"]))["text"])
-    assert [item["text"] for item in items] == ["Resume.", "Read the source.", "Numbered."]
+    assert [item["text"] for item in items] == ["Resume.", "Read [the source](concepts/evidence.md).", "Numbered."]
     assert read([brain], "bf://fixture/tasks")["summary"] == result["summary"]
 
 
@@ -50,7 +50,7 @@ def test_tasks_continue_in_one_stable_order_across_brains(brain: Store, tmp_path
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     for store in (brain, team):
         store.write("projects/work.md", ("# Work\n\n" + "\n".join(f"- [ ] Task {n}." for n in range(63))).encode())
     stores = [team, brain]
@@ -68,7 +68,7 @@ def test_tasks_continue_in_one_stable_order_across_brains(brain: Store, tmp_path
         offset = cast("int", result["next_offset"])
     assert results == [(line, name) for line in range(3, 66) for name in ("fixture", "team")]
     assert read(list(reversed(stores)), "tasks")["items"] == read(stores, "tasks")["items"]
-    assert read(stores, "tasks", offset=2**63 - 1)["items"] == []
+    assert read(stores, "tasks", offset=MAX_OFFSET)["items"] == []
 
 
 def test_tasks_refresh_changed_deleted_and_invalid_notes_and_report_incompleteness(brain: Store) -> None:
@@ -77,7 +77,7 @@ def test_tasks_refresh_changed_deleted_and_invalid_notes_and_report_incompletene
     assert read([brain], "tasks")["total"] == 2
     brain.write(path, b"# Change\n\n- [x] First.\n")
     assert read([brain], "tasks")["summary"] == {"open": 0, "done": 1, "notes": 1}
-    brain.write(path, b"---\nreview_after: invalid\n---\n# Change\n\n- [ ] First.\n")
+    brain.write(path, b"---\nstale_after: invalid\n---\n# Change\n\n- [ ] First.\n")
     result = read([brain], "tasks")
     assert result["total"] == 0
     assert path in str(result["problems"])

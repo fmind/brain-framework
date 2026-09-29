@@ -21,7 +21,7 @@ From the framework checkout after `uv sync --locked`, run this subshell. It isol
   git config user.name Example
   git config user.email example@example.invalid
   # Share the reviewed issues source through Git, as the team guide describes.
-  printf '%s\n' /.bf/ '/memories/*' '!/memories/issues/' /originals/ /inputs/ > .gitignore
+  printf '%s\n' /.bf/ /logs/ '/memories/*' '!/memories/issues/' /originals/ /inputs/ > .gitignore
   mkdir sensors inputs
   printf '#!/bin/sh\nexec cat inputs/issues.json\n' > sensors/issues.sh
   chmod +x sensors/issues.sh
@@ -60,4 +60,4 @@ From the framework checkout after `uv sync --locked`, run this subshell. It isol
 
 Each collection reports `"records":1`. After the independent merge, validation returns `{"notes":4,"problems":[],"records":3,"valid":true}`: the `shared`, `alice` and `bob` records, the two starter concepts and both action sessions. The same-record merge prints `CONFLICT (content): Merge conflict in memories/issues/SHA256.json`, where `SHA256` is the digest of the `shared` id. Validation then returns `"valid":false` with the problem `{"error":"invalid JSON document","file":"memories/issues/SHA256.json"}` and exits 1.
 
-Each record has one stable source/ID-derived JSON filename, so different ids never collide. Actions use `YYYY-MM-DD_topic-UUID/ACTION.md`, with a fresh UUID for every independent session. Only competing revisions require judgment: preserve both sides, reconcile them from evidence, then validate. See the [team guide](../../docs/docs/team.md) and the [resolution procedure](../../skills/bf-maintain/references/conflicts.md).
+Each record has one stable source/ID-derived JSON filename, so different ids never collide. Each session here gets its own `actions/YYYY-MM-DD_topic-SUFFIX/ACTION.md` folder, with a random suffix, so independent sessions on the same topic and day never share one. Only competing revisions require judgment: preserve both sides, reconcile them from evidence, then validate. See the [team guide](../../docs/docs/team.md) and the [resolution procedure](../../src/bf/skills/bf-maintain/references/conflicts.md).

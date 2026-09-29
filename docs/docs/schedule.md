@@ -1,18 +1,18 @@
 ---
-description: Run or observe collection, set watch preferences and generate native schedules.
+description: Run or observe due sensors and routines, set watch preferences and generate native schedules.
 ---
 
 # Watch and schedule updates
 
-Keep reviewed sensors and routines up to date using their `enabled` and `refresh` settings in `bf.yaml`. Start inside your brain directory.
+Keep reviewed sensors and routines current with their `enabled` and `refresh` settings in `bf.yaml`. A program is due when it is enabled, has a nonzero `refresh` and has not succeeded within it. Start inside your brain.
 
-| You want to…                        | Use                                                           |
-| ----------------------------------- | ------------------------------------------------------------- |
-| Collect while a terminal stays open | `bf watch`; runs due programs immediately.                    |
-| Observe another collector           | `bf status --watch`; executes nothing.                        |
-| Run unattended on a running host    | `bf schedule`; review and install the generated native files. |
+| You want to…                              | Use                                                                       |
+| ----------------------------------------- | ------------------------------------------------------------------------- |
+| Run due programs while a terminal is open | `bf watch`                                                                |
+| Observe another collector                 | `bf status --watch`; it executes nothing.                                 |
+| Run unattended on a running machine       | `bf schedule`, then install the generated systemd, launchd or cron files. |
 
-BF installs no background service. [Check your programs](#check-before-scheduling) before starting collection; defaults need no watch preferences file.
+BF installs no background service. [Check your programs](#check-before-scheduling) before starting collection.
 
 ## Watch collection
 
@@ -20,84 +20,51 @@ BF installs no background service. [Check your programs](#check-before-schedulin
 bf watch
 ```
 
-This starts due sensors and routines immediately and checks again 60 seconds after each completed cycle. It can contact providers. `--interval SECONDS` changes the check interval (minimum 5); each program's `refresh` still decides when it is due. A failed program retries after 1 minute, then waits twice as long after each consecutive failure, up to its `refresh`, so a persistent failure such as expired credentials does not call its provider every cycle. See [update rules](sensors.md#collect-and-update). Closing the collecting watch stops its collection; it installs nothing. A second interactive watcher observes the existing collector. See [collector ownership](#collector-ownership) before running watch alongside a scheduler.
+Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. It can contact providers. A failed program retries after 1 minute, then waits twice as long per consecutive failure, up to its `refresh`. Closing watch stops its collection.
 
-The dashboard shows each program's last success, next due time, item count and record changes. Items counts records returned by the last successful sensor run, including unchanged records; for window sensors this covers only that run's window, not the total stored catalog. `never` means no success is recorded on this machine; `failed` means the last attempt failed. Manual and disabled programs stay visible without running. Use `bf status --check` for full cache and evidence health.
+The dashboard shows each program's state, last success, next due time, returned items and record changes. `never` means no success on this machine; `failed` means the last attempt failed. Items counts the records the last successful run returned, not the stored total. Manual and disabled programs stay visible without running. Use `bf status --check` for full health.
 
 [![Watch dashboard for the fictional offline demo: five sensors sorted by state, with a failed sensor's details beside their last success, next due time, item count and record changes.](../assets/watch.svg)](../assets/watch.svg)
 
-This is the fictional [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch) 42 seconds after its first cycle, sorted by state: `unavailable` failed, `calendar` updated its record, `git` added one, and the manual and disabled sensors stay idle. Your dashboard lists your own sensors and routines.
+This is the fictional [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch), sorted by state: `unavailable` failed, `calendar` updated its record, `git` added one, and the manual and disabled sensors stay idle.
 
-| Key                   | Effect                                                                                           |
-| --------------------- | ------------------------------------------------------------------------------------------------ |
-| `j` / `k`, arrows     | Select a program and inspect its details.                                                        |
-| `g` / `G`, Home / End | Jump to the first / last visible program.                                                        |
-| `s`                   | Cycle sort fields in the order listed below.                                                     |
-| `n` / `t` / `i`       | Sort directly by name / last successful update / item count.                                     |
-| `r`                   | Reverse the current sort direction; unknown values stay last.                                    |
-| Tab                   | Toggle programs needing attention: failed, never collected or due.                               |
-| `f` (or `u`)          | Reload sources and check due work now; queue one check if updating. An observer rereads history. |
-| Space                 | Pause/resume future updates; an active update finishes. Observers have nothing to pause.         |
-| `?`                   | Toggle the guide and explain counts and timing.                                                  |
-| `q`                   | Cancel any active update and quit successfully. An observer quits without stopping others.       |
-| Ctrl-C                | Cancel and exit 130; terminal settings are restored.                                             |
+| Key               | Effect                                                                      |
+| ----------------- | --------------------------------------------------------------------------- |
+| `j` / `k`, arrows | Select a program and show its details, including its log and latest action. |
+| Tab               | Show only programs needing attention: failed, never collected or due.       |
+| `f` (or `u`)      | Reload `bf.yaml` and check due work now; queues one check during an update. |
+| Space             | Pause or resume future checks; an active update finishes.                   |
+| `?`               | Toggle the guide: every key, sort field and count explained.                |
+| `q`               | Cancel any active update and quit. Ctrl-C exits 130.                        |
 
-Press `f` after adding a reviewed source to `bf.yaml`: its row appears immediately and it runs if eligible. Refresh respects selectors, pause, each program's refresh interval and failure backoff; disabled and manual programs stay idle. Repeated refreshes during an update queue one follow-up check. While paused, resume with Space to run the pending check. Invalid configuration blocks new updates until corrected; use `bf status` for diagnostics. Changes to `watch` preferences in `bf.yaml` still require a restart.
-
-Keys typed faster than the screen redraws, such as a held arrow or a paste, are applied in order.
+Press `f` after adding a reviewed program to `bf.yaml`: its row appears and it runs if due. Refresh respects selectors, pause, `refresh` and failure backoff. Changes to the `watch` preferences need a restart.
 
 ### Sort the dashboard
 
-The default is name ascending across sensors and routines. The Programs panel title shows the active field and direction, for example `Programs · 1-5/5 · items ↓`: `↑` ascends and `↓` descends. Switching fields chooses its default direction; `r` reverses it. Sorting also works in `bf status --watch` and while the attention filter is active.
-
-| Field (`s` cycle order) | Default order  | Meaning                                                                                               |
-| ----------------------- | -------------- | ----------------------------------------------------------------------------------------------------- |
-| Name                    | A–Z            | Program name.                                                                                         |
-| Last OK                 | Newest first   | Last successful collection or routine update.                                                         |
-| Items                   | Largest first  | Records returned by the last successful sensor run.                                                   |
-| State                   | Failures first | Failed, never, due, fresh, manual, disabled; uses the underlying state even for excluded programs.    |
-| Next due                | Earliest first | Scheduled due time, or a failed program's backoff retry time; manual and disabled programs have none. |
-| Changes                 | Largest first  | Added + updated + removed records from the last successful run.                                       |
-| Duration                | Slowest first  | Last successful sensor run's elapsed seconds.                                                         |
-| Output bytes            | Largest first  | Last successful sensor run's output size.                                                             |
-| Refresh                 | Shortest first | Configured interval in seconds; manual (`0`) comes first.                                             |
-| Kind                    | Routines first | Routine or sensor.                                                                                    |
-
-Missing values (`—`) always sort last, including routines without sensor metrics; zero is a known value. Failures retain prior successful-run counts. Ties stay alphabetical by name, then kind. The selected program stays selected when sorting or polling moves its row; if it disappears, selection moves to the nearest remaining row. Tab resets selection to the first matching row.
-
-Sort choices last for the current session only and do not change `bf.yaml`, watch preferences, collection order or JSON snapshot order. For example, press `i` to find the largest returned batches, `r` to show the smallest known batches, then `n` to return to alphabetical order. Press `s` until the panel title says `duration` to find slow sensors; select one to inspect its exact timing.
+`s` cycles the sort field, `n`, `t` and `i` sort by name, last success and items, and `r` reverses. The panel title shows the field and direction, such as `Programs · 1-5/5 · items ↓`. Unknown values sort last, and ties stay alphabetical. The selected program stays selected as rows move. Sorting lasts for the session and changes nothing in `bf.yaml`; it also works in `bf status --watch`.
 
 ### Terminal and observation
 
-Use an ordinary color terminal of at least 80 columns by 24 rows. From 120 columns, details appear beside the table; narrower terminals put them below, where a failure's error and private log path or a routine's latest action come first. Terminals too short for both keep the program rows. Long program names shorten with `…` so state, ages, due times and counts stay whole; the header, message and key lines shorten instead of wrapping. Colors follow terminal support and `NO_COLOR`; fonts come from your terminal. Text labels remain meaningful without color.
+Use a color terminal of at least 80 columns by 24 rows; from 120 columns, details appear beside the table. Colors follow `NO_COLOR`, and labels stay meaningful without color.
 
 ```bash
-bf status --watch   # observe only; never executes programs
-bf watch --json     # execute due work and emit JSON Lines
+bf status --watch   # observe only; never runs programs
+bf watch --json     # run due work and stream JSON Lines
 ```
 
-Use observation alongside a native scheduler. It shows local program history, cannot be combined with `--check` and never probes provider health. Its footer offers `u reread` instead of `f refresh` and has no pause. Without an interactive terminal, `bf status --watch` fails and suggests `bf status`, which never executes programs. Try the [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch) for a runnable success/failure exercise.
+Observation shows local history alongside a native scheduler. It offers `u` to reread and has no pause. Without an interactive terminal, it fails and suggests `bf status`.
 
-<details markdown="1">
-<summary>Dashboard details and JSON output</summary>
-
-The screen reads small local history files every `poll_interval` (2 seconds by default) without repeatedly indexing the brain or exposing provider text. It redraws after a key, a history read or a resize, and otherwise once a second for relative ages. Sensor details show the last successful run's elapsed seconds, output bytes and reconciliation flag when available. Routines have `*` before their name and show their latest action.
-
-`watch --json` writes a snapshot every `poll_interval` with `brain`, `running`, `message` and `programs`. Each program row has these keys: `kind` (`sensor` or `routine`), `name`, `status`, `included` (in this watch's selection), `refresh`, `success` (last success), `next_due`, `added`, `updated`, `removed`, `elapsed_seconds`, `output_bytes`, `reconcile`, `error`, `log` (its private log path), `action` (a routine's latest action) and `records`, the last successful sensor run's returned item count. `status` is the dashboard state: `failed`, `never` (no success yet), `due`, `fresh`, `manual` (`refresh: 0`) or `disabled`; it differs from the `state` and `freshness` fields of `bf status`. Unknown counts are null; `success` and `next_due` are canonical UTC timestamps ending in `Z`, or empty strings when absent, as for a program that never succeeded, a manual or a disabled one; `error`, `log` and `action` are also empty strings when absent. When an update fails only because the search cache skipped files, `message` says `Search cache skipped N files; run bf validate` and no collection-failure alert is sent. The `running` flag refers to this watch process, which always collects: a JSON watcher never observes, and fails while another watcher owns the brain. A desktop-alert delivery failure also writes one `{"warning": …}` line to stderr.
-
-</details>
+`bf watch --json` writes a snapshot every `poll_interval` with `brain`, `running`, `message` and one row per program. A row's `status` is the dashboard state: `failed`, `never`, `due`, `fresh`, `manual` or `disabled`. Times show your local offset, and absent values are empty strings or null. The [`Row` class](https://github.com/fmind/brain-framework/blob/main/src/bf/watch.py) defines every row field. A JSON watcher always collects and fails while another watcher owns the brain.
 
 ## Watch preferences
 
-**The `watch` section is optional.** By default, watch checks due work every 60 seconds, reads local history every 2 seconds and alerts on failures and recovery.
-
-For a quieter session:
+**The `watch` section is optional.** By default, watch checks due work every 60 seconds, rereads local history every 2 seconds and alerts on failures and recovery. For a quieter session:
 
 ```bash
 bf watch --interval 300 --notify off
 ```
 
-To keep those preferences, add a `watch` section to your existing `bf.yaml` (or edit that section if present):
+To keep those preferences, add a `watch` section to `bf.yaml`:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schedule/#watch-preferences
@@ -106,34 +73,14 @@ watch:
   notifications: off
 ```
 
-| You want to…              | Change…                                                                       |
-| ------------------------- | ----------------------------------------------------------------------------- |
-| Check due work less often | `interval` (seconds). Each sensor's `refresh` still determines when it runs.  |
-| Change history polling    | `poll_interval` (seconds) for history reads and JSON snapshots, not requests. |
-| Choose desktop alerts     | `notifications`: `off`, `failure`, `success` or `all`.                        |
-| Space out alerts          | `notification_cooldown` (seconds).                                            |
+| Setting                 | Default   | Accepted values                                           |
+| ----------------------- | --------- | --------------------------------------------------------- |
+| `interval`              | 60        | Seconds between checks for due work, 5–86400.             |
+| `poll_interval`         | 2         | Seconds between history reads and JSON snapshots, 0.2–60. |
+| `notifications`         | `failure` | `off`, `failure`, `success` or `all`.                     |
+| `notification_cooldown` | 300       | Seconds between alerts, 0–86400.                          |
 
-CLI options override `bf.yaml` → `watch`; omitted settings use defaults. Restart watch after editing preferences. Sensor `enabled` and `refresh` belong in `bf.yaml` and reload each cycle.
-
-`bf schema` prints the brain schema (`title: Config`), including the `watch` section's defaults, units and limits. Use it for [editor validation](schema.md#editor-schemas). Every command loading `bf.yaml`, including `bf validate`, validates these preferences; invalid values fail even when overridden on the CLI. Fix the named `watch` key in `bf.yaml` and retry.
-
-<details markdown="1">
-<summary>Defaults, validation and notification behavior</summary>
-
-| Setting                 | Default   | Accepted values                     |
-| ----------------------- | --------- | ----------------------------------- |
-| `interval`              | 60        | Integer 5–86400 seconds.            |
-| `poll_interval`         | 2         | Number 0.2–60 seconds.              |
-| `notifications`         | `failure` | `off`, `failure`, `success`, `all`. |
-| `notification_cooldown` | 300       | Integer 0–86400 seconds.            |
-
-- Unknown keys or invalid values fail before execution, even if overridden on the CLI.
-- `failure` alerts on new or changed failures and recovery. `success` alerts on completed cycles with work and recovery. `all` includes both.
-- Identical failures and idle cycles stay quiet. Cooldown may coalesce transient states; notification state resets on restart.
-- Alerts contain generic status, never source names, paths or provider text. `bf status --watch` sends no alerts.
-- Desktop notifications need `osascript` on macOS or a Linux notification service with `notify-send` or `gdbus`. ChromeOS/WSL need a working bridge. Delivery failure warns once without stopping collection; desktop settings may suppress display.
-
-</details>
+Command-line options override `bf.yaml`, then defaults apply. Every command loading `bf.yaml` validates the section, even when an option overrides it. `failure` alerts on new failures and recovery; `success` on completed cycles with work; `all` on both. Alerts never name sources or quote provider text. Desktop alerts need `osascript` on macOS, or `notify-send` or `gdbus` on Linux; a delivery failure warns once and collection continues.
 
 ## Select programs
 
@@ -145,71 +92,54 @@ bf watch --sensor git-commits --routine weekly-review
 bf schedule --sensor git-commits --name git-only
 ```
 
-Substitute names from your `bf.yaml`. With no selectors, all configured programs are eligible, including programs added later. With any selector, **only named programs** are eligible; for example `--sensor git-commits` excludes every routine and every other sensor. Unknown names fail before execution; disabled programs and `refresh: 0` stay excluded. Selectors never force a run or modify configuration. Referenced brains never execute.
+With no selector, every configured program is eligible, including programs added later. With any selector, **only the named programs** are. Unknown names fail before anything runs. Selectors never force a disabled or manual program to run.
 
 ## Generate a native schedule
 
 ```bash
-bf schedule --every 15 --output settings/schedules
+bf schedule --every 15 --output ~/.config/bf-schedules
 ```
 
-The result contains `files`, `written` paths, the command `argv`, and literal argv lists named `install`, `status` and `remove`. It writes native files; it does not run those commands. Without `--output`, it only previews the result as JSON: `written` is empty, its install commands name the files `--output settings/schedules` would write, and a `Preview only` warning says to write them first. A relative `--output`, such as `settings/schedules`, resolves against the brain root, not the current directory. Existing identical files are safe to regenerate; differing files are preserved and generation fails, so review your edits or generate to a fresh directory. An output directory can live outside the brain too.
+The reply lists the generated `files`, the `written` paths and literal argument lists to `install`, check the `status` of and `remove` the job. BF runs none of them. Without `--output`, the reply previews the files and warns that nothing was written. A relative `--output` resolves against the brain folder. Differing existing files are kept and generation fails, so your edits survive.
 
-Generated files capture this machine's `PATH`, home and brain paths, and are useless on another machine. Keep them out of a shared brain's Git history, for example with a `/settings/schedules/` line in its `.gitignore`, or generate them outside the brain.
+The files hold this machine's `PATH`, home and brain paths: keep them out of a shared brain's Git history. Credentials and other environment variables are not copied.
 
-| Option/default         | Meaning                                                                                                                                                                                                         |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--backend auto`       | launchd on macOS; systemd on Linux when `systemctl` is on PATH; otherwise cron. Detection does not prove the scheduler is running.                                                                              |
-| `--every 15`           | Check every 15 minutes. Supported minute intervals divide an hour: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60.                                                                                                    |
-| `--name update`        | Job suffix; use different names for different selections. Brain identity and path also distinguish generated jobs.                                                                                              |
-| `--executable PATH`    | Absolute installed `bf`; default is beside the running Python. Regenerate if that installation moves.                                                                                                           |
-| PATH and XDG locations | Capture absolute PATH entries and a set `XDG_CONFIG_HOME`/`XDG_STATE_HOME` with `~` expanded; like every command, ignore empty and relative values. Credentials and other environment variables are not copied. |
+| Option or default   | Meaning                                                                                               |
+| ------------------- | ----------------------------------------------------------------------------------------------------- |
+| `--backend auto`    | launchd on macOS; systemd on Linux when `systemctl` is present; otherwise cron.                       |
+| `--every 15`        | Check every 15 minutes; the interval must divide an hour: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60. |
+| `--name update`     | Job name; use different names for different selections.                                               |
+| `--executable PATH` | The installed `bf`; the default sits beside the running Python. Regenerate if it moves.               |
 
-Generation rejects control characters in paths/environment values, quotes or backslashes in a systemd executable path, and combined backslashes/percent signs that cron cannot safely represent. Use a simpler installation path or another backend in those cases.
-
-Review the programs and generated environment, then follow the returned installation commands when you want recurring execution. Configure provider authentication separately. Those argv arrays are data: quote arguments if translating them to shell commands. For cron, copy the single generated job line into `crontab -e`; **do not run `crontab FILE`**, which replaces existing jobs. For systemd, verify with `systemd-analyze --user verify FILE.service FILE.timer`; for launchd use `plutil -lint FILE.plist` before installation.
+Review the programs and the generated environment, then follow the returned commands. For cron, copy the single job line into `crontab -e`; **never run `crontab FILE`**, which replaces your existing jobs. Check systemd files with `systemd-analyze --user verify` and launchd files with `plutil -lint` before installing.
 
 <details markdown="1">
-<summary>Scheduler limits and host lifecycle</summary>
+<summary>Scheduler behavior and host lifecycle</summary>
 
-Systemd definitions use calendar triggers, missed-trigger catch-up and up to 30 seconds of jitter. LaunchAgents use calendar minute triggers so sleep-time occurrences coalesce on wake; missed power-off runs are not replayed. Cron skips missed occurrences. Every backend relies on per-program BF `timeout` settings; none adds a total-job timeout, so a cycle of several long programs is not killed midway. An enabled schedule does not prove collection success: inspect native job results and `bf status --check` on the collecting machine.
+Systemd timers catch up missed triggers and add up to 30 seconds of jitter. LaunchAgents coalesce occurrences missed during sleep; neither replays runs missed while powered off, and cron skips them. Stopping a job allows 60 seconds for an update to roll back an interrupted record write. Each program's `timeout` bounds its run; there is no total job timeout.
 
-On Linux use a working systemd user manager when available; macOS uses a logged-in user's LaunchAgent. ChromeOS runs BF inside its Linux environment, whose processes stop at logout. WSL needs a running distribution; systemd services do not keep it alive. Generation supports these native formats, but cannot guarantee an always-running host. See the [ChromeOS lifecycle documentation](https://www.chromium.org/chromium-os/developer-library/guides/containers/containers-and-vms/#lifecycles), [WSL systemd documentation](https://learn.microsoft.com/en-us/windows/wsl/systemd) and [Apple scheduling guidance](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html).
+Use a running systemd user manager on Linux and a logged-in user's LaunchAgent on macOS. ChromeOS stops its Linux environment at logout, and WSL needs a running distribution. See the [ChromeOS lifecycle](https://www.chromium.org/chromium-os/developer-library/guides/containers/containers-and-vms/#lifecycles), [WSL systemd](https://learn.microsoft.com/en-us/windows/wsl/systemd) and [Apple scheduling](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html) guides.
 
 </details>
 
-Keep arbitrary backup scripts or other non-BF jobs in their own native files beside these definitions. Edit those files directly using the native scheduler's rules; BF does not add a generic task schema or execute arbitrary schedule commands.
-
 ## Collector ownership
 
-If another watcher owns this physical brain, a second interactive `bf watch` observes it. Its selectors mark other programs `excluded` in this view only; the active collector keeps its own selection and settings. The observer does not take over when the collector exits: restart watch to collect. A competing `watch --json` fails visibly so a supervisor can retry.
+Use one execution owner per program. A second interactive `bf watch` on the same brain observes the first instead of collecting, and does not take over when it exits. Timers cannot be detected by watch: use `bf status --watch` while a timer owns collection.
 
-Use one execution owner per selected program. Concurrent `update` cycles on the same brain run one at a time: named schedules for different selections fire at the same minutes, so the second cycle waits up to 10 minutes for the first, then computes its own due list. If the first is still running after that, the second fails visibly with `another update is still active` instead of duplicating a due list. Manual `collect` retains its own per-program lock. Use `bf status --watch` when a timer owns collection; timer ownership cannot be detected by the watch lock. Removing a schedule requires both stopping future triggers and accounting for an active update; the returned removal commands cover both for systemd/launchd. Removing a cron line stops future triggers only.
+Updates of one brain run one at a time. A second update waits up to 10 minutes, then computes its own due list, or fails with `another update is still active`. `bf collect` keeps its own lock per sensor. Removing a systemd or launchd job with the returned commands also stops an active update; removing a cron line stops future runs only.
 
 ## Check before scheduling
 
-From `~/brain`, check the programs before installing a timer:
-
 ```bash
-bf update --dry-run    # list due work; execute nothing
+bf update --dry-run    # list due work; run nothing
 bf update              # run due sensors, then routines
 bf status --check
 ```
 
-The preview lists due sensors and routines without executing them. The next command runs them; a healthy `bf status --check` exits 0. Review the configured programs before that run. Set `enabled: false` to stop one program, or `refresh: 0` to keep a sensor manual. Updates act on the one selected brain, never its referenced brains.
-
-## macOS and CI
-
-On macOS, use `bf schedule --backend launchd` and follow the [generated schedule](#generate-a-native-schedule) workflow. It supplies calendar triggers and absolute program arguments. Keep CI for offline validation and evaluation without provider credentials.
-
-For a shared source, designate one collecting laptop. See [team collection](team.md#collect-on-a-laptop).
+The dry run lists due programs with their windows, and names under `manual` the enabled programs with `refresh: 0` that updates skip. A healthy `bf status --check` exits 0. Set `enabled: false` to stop a program, or `refresh: 0` to keep it manual. Keep CI for offline `bf validate` and `bf eval`; for a shared source, designate one [collecting laptop](team.md#collect-on-a-laptop).
 
 ## Timing and health
 
-After a backward clock correction, a success timestamp in the future is stale and the program is due again. Reconciliation also retries if its last timestamp is in the future. Long pauses catch up at most 30 days before any configured reconciliation window is applied.
+A scheduled program is `fresh` when its last success on this machine is within twice its `refresh`, and `overdue` after that; `never` means no local success. `bf status --check` exits 1 for an enabled scheduled program that is `overdue`, `never` succeeded or last failed. Run it on the collecting machine: run history is local, even when records are shared.
 
-Choose a timer interval shorter than the smallest nonzero `refresh`. With an hourly sensor and a 15-minute timer, a check 59 minutes after the last success skips the sensor; the next check at 74 minutes runs it. An hourly timer could leave it waiting until minute 119.
-
-`Persistent=true` catches up missed calendar triggers when the user manager returns; it does not keep a sleeping laptop awake. A failed program is due again after its failure backoff. With a 15-minute timer and an hourly sensor, each retry runs at the first check at least 1, 2, 4, 8, 16, 32 and then 60 minutes after the previous failure; the first four retries therefore wait only for the next check.
-
-`bf status --check` exits 1 for an enabled scheduled program that failed, never succeeded locally, has a future success timestamp, or last succeeded more than twice its `refresh` ago. Run this check on the collecting machine: run history is local, even when records are shared.
+Choose a timer interval shorter than the smallest nonzero `refresh`. With an hourly sensor and a 15-minute timer, a check 59 minutes after the last success skips the sensor, and the next check, at 74 minutes, runs it. A success timestamp in the future, after a clock correction, makes the program due at once. Long pauses catch up at most 30 days.

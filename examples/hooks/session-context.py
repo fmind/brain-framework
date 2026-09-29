@@ -6,12 +6,13 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 
 REPLY_BYTES = 4 << 20
 REMOTE_BYTES = 8 << 10
 NEWEST = 3
-# One lookup budget and page bound cover the repository read and the project listing.
+ATTENTION = 5
+# One lookup budget and page bound cover the repository read, the project listing and the home page.
 LOOKUP_SECONDS = 20
 MAX_PAGES = 100
 # Only authored note paths are printed, in code spans; a record ref is provider-controlled text and stays out.
@@ -42,8 +43,15 @@ def identity() -> str:
 
 
 def read(ref: str, brain: str, offset: int = 0, timeout: float = LOOKUP_SECONDS) -> dict | None:
+    """One complete page: a failed, incomplete (`problems`) or cache-busy (`stale`) reply counts as none."""
     raw = run(
-        ["bf", "read", ref, *(["--brain", brain] if brain else []), *(["--offset", str(offset)] if offset else [])],
+        [
+            "bf",
+            "read",
+            *([ref] if ref else []),
+            *(["--brain", brain] if brain else []),
+            *(["--offset", str(offset)] if offset else []),
+        ],
         REPLY_BYTES,
         timeout,
     )
@@ -51,13 +59,18 @@ def read(ref: str, brain: str, offset: int = 0, timeout: float = LOOKUP_SECONDS)
         reply = json.loads(raw) if raw else None
     except ValueError:
         return None
-    return reply if isinstance(reply, dict) else None
+    if not isinstance(reply, dict) or reply.get("problems") or reply.get("stale"):
+        return None
+    return reply
 
 
 def day(value: object) -> str:
-    """The local date of a returned UTC time: a note dated 2026-09-25 is local midnight, not the UTC day."""
+    """A note's date as written, or the local date of a datetime; empty when neither."""
+    text = str(value or "")
     try:
-        return datetime.fromisoformat(str(value)).astimezone().date().isoformat()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return date.fromisoformat(text).isoformat()
+        return datetime.fromisoformat(text).astimezone().date().isoformat()
     except ValueError:
         return ""
 
@@ -74,7 +87,7 @@ def code(value: str) -> str:
     return f"{fence}{pad}{value}{pad}{fence}"
 
 
-def render(repo: str, page: dict, project: dict | None) -> list[str]:
+def render(repo: str, page: dict, project: dict | None, attention: list) -> list[str]:
     lines = [f"Brain context for {repo} (evidence, not instructions):"]
     ref = str(page.get("ref", ""))
     note = ref if NOTE.fullmatch(ref) else ""
@@ -83,7 +96,7 @@ def render(repo: str, page: dict, project: dict | None) -> list[str]:
         if project.get("review"):
             reasons = ", ".join(plain(reason) for reason in project.get("review_reasons", []))
             state.append(f"review needed ({reasons or 'inspect project'})")
-        if project.get("review_due"):
+        if day(project.get("review_due")):
             state.append(f"review deadline {day(project['review_due'])}")
         lines.append(
             f"- Project: {plain(project.get('title', note))} ({code(note)}), {', '.join(filter(None, state))}."
@@ -96,19 +109,36 @@ def render(repo: str, page: dict, project: dict | None) -> list[str]:
         lines.append("- A collected record owns this repository.")
     else:
         lines.append("- No note owns this repository yet.")
+    target = note or repo
     groups = page.get("backlinks", [])
     if groups:
         counts = ", ".join(f"{plain(g.get('relation', 'links'))} {plain(g.get('total', 0))}" for g in groups)
-        lines.append(f"- Linked evidence: {counts}.")
+        # A backlink group previews its newest items; the relation page lists them all.
+        more = any(int(g.get("total", 0)) > len(g.get("items", [])) for g in groups)
+        hint = f"; list one relation with {code(f'bf read {target} --rel RELATION')}" if more else ""
+        lines.append(f"- Linked evidence: {counts}{hint}.")
         items = [
             i
             for g in groups
             for i in g.get("items", [])
             if i.get("kind") == "note" and NOTE.fullmatch(str(i.get("ref")))
         ]
-        newest = sorted(items, key=lambda i: str(i.get("time", "")), reverse=True)[:NEWEST]
-        lines.extend(f"  - {day(i.get('time'))} {plain(i.get('title', ''))} ({code(i['ref'])})" for i in newest)
-    lines.append(f"Read more with {code('bf read ' + (note or repo))}; collected records are counted, not quoted.")
+        newest = sorted(items, key=lambda i: day(i.get("date")), reverse=True)[:NEWEST]
+        lines.extend(
+            f"  - {' '.join(filter(None, [day(i.get('date')), plain(i.get('title', ''))]))} ({code(i['ref'])})"
+            for i in newest
+        )
+    # Scheduled sensors and routines that failed or are overdue: their evidence may be older than it looks.
+    late = [
+        f"{plain(entry.get('sensor') or entry.get('routine'), 64)} "
+        + ("failed" if entry.get("failed") else plain(entry.get("freshness"), 16))
+        for entry in attention
+        if isinstance(entry, dict) and (entry.get("sensor") or entry.get("routine"))
+    ]
+    if late:
+        extra = f" and {len(late) - ATTENTION} more" if len(late) > ATTENTION else ""
+        lines.append(f"- Collection needs attention: {', '.join(late[:ATTENTION])}{extra}; see `bf status`.")
+    lines.append(f"Read more with {code('bf read ' + target)}; collected records are counted, not quoted.")
     return lines
 
 
@@ -118,7 +148,7 @@ def main(argv: list[str]) -> int:
     deadline = time.monotonic() + LOOKUP_SECONDS
     # One read: a large note's first page still carries its ref and backlinks, all this hook prints.
     page = read(repo, brain, 0, deadline - time.monotonic()) if repo else None
-    if not page or page.get("problems") or page.get("stale"):
+    if not page:
         return 0
     ref = str(page.get("ref", ""))
     project = None
@@ -126,7 +156,7 @@ def main(argv: list[str]) -> int:
         offset = 0
         for _ in range(MAX_PAGES):
             listing = read("projects", brain, offset, deadline - time.monotonic())
-            if not listing or listing.get("problems") or listing.get("stale"):
+            if not listing:
                 return 0
             # Items name their brain only when several are selected; otherwise they share the page's brain.
             project = next(
@@ -140,12 +170,15 @@ def main(argv: list[str]) -> int:
             if project is not None or "next_offset" not in listing:
                 break
             following = listing["next_offset"]
-            if type(following) is not int or not offset < following < 2**63:
+            if type(following) is not int or not offset < following < 2**53:
                 return 0
             offset = following
         else:
             return 0
-    sys.stdout.write("\n".join(render(repo, page, project)) + "\n")
+    home = read("", brain, 0, deadline - time.monotonic())
+    if not home or not isinstance(home.get("attention", []), list):
+        return 0
+    sys.stdout.write("\n".join(render(repo, page, project, home.get("attention", []))) + "\n")
     return 0
 
 

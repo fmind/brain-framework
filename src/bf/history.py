@@ -1,6 +1,7 @@
-"""Private run history of sensors and routines, and the environment programs inherit.
+"""Run history and logs of sensors and routines, and the environment programs inherit.
 
-Status, retrieval and dashboards read this history without importing the process runner.
+Status, retrieval and dashboards read this history without importing the process runner. History stays on this
+machine outside the brain; logs live in the brain's logs/ folder, which Git ignores and retrieval never reads.
 """
 
 from __future__ import annotations
@@ -101,5 +102,29 @@ def remember(store: Store, name: str, file: str = SENSORS, /, **values: object) 
     state_store(store.root).write(file, encode(current))
 
 
-def log_path(store: Store, name: str) -> Path:
-    return state_store(store.root).root / f"{name}.log"
+# A program's log keeps its newest whole entries within this size.
+LOG_LIMIT = 1 << 20
+_ENTRY = b"\n== "
+
+
+def log_path(name: str) -> str:
+    """A sensor's or routine's log in the brain, newest run last; Git ignores logs/ and retrieval never reads it."""
+    return f"logs/{name}.log"
+
+
+def append_log(store: Store, name: str, heading: str, body: bytes = b"") -> None:
+    """Add one entry, `== heading ==` then its output, and drop the oldest whole entries beyond LOG_LIMIT.
+
+    A log is a diagnostic: when it cannot be read, such as after a hand edit made it too large, it starts again.
+    """
+    path = log_path(name)
+    try:
+        previous = store.read(path, LOG_LIMIT)
+    except Error, OSError:
+        previous = b""
+    entry = f"== {heading} ==\n".encode() + body + (b"" if not body or body.endswith(b"\n") else b"\n")
+    data = previous + entry
+    if len(data) > LOG_LIMIT:
+        cut = data.find(_ENTRY, len(data) - LOG_LIMIT)
+        data = data[cut + 1 :] if cut >= 0 else entry[-LOG_LIMIT:]
+    store.write(path, data, durable=False)

@@ -1,14 +1,17 @@
 # Example routines
 
-Standalone, deterministic routines. Copy the ones you need into a brain's `routines/`, declare them in `bf.yaml`, and adapt and test them there; they then belong to the brain. The Python package neither bundles nor installs them.
+Standalone, deterministic brain programs. Copy the ones you need into a brain, declare them under `routines:` in `bf.yaml`, and adapt and test them there; they then belong to the brain. The Python package neither bundles nor installs them.
 
-| Routine            | Arguments   | Action                                                                                                                                                                                 |
-| ------------------ | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `weekly-review.py` | `BRAIN END` | Projects due for review across the paginated project listing, a counted open-task preview, the last seven days' activity by source, changed notes, recent actions and the coming week. |
+| Routine            | Configuration                            | Result                                                                                                                          |
+| ------------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `weekly-review.py` | `output: action`, weekly `refresh`       | A draft action listing projects due for review, a counted open-task preview, the last seven days by source and the coming week. |
+| `bf validate`      | `hooks: [pre-commit]`, no script to copy | A Git commit stops while the brain has validation problems; the reply stays in `logs/validate.log`.                             |
 
-## Try it locally
+Both walkthroughs run from the framework checkout after `uv sync --locked`, in a subshell that isolates configuration and state and removes its temporary files on exit.
 
-From the framework checkout after `uv sync --locked`, prepare a review from the fictional example brain. This subshell isolates configuration and state, runs only the local demo sensor and routine, and removes the copy on exit:
+## Prepare a weekly review
+
+This review uses the fictional example brain and runs only its local demo sensor and the routine:
 
 ```bash
 (
@@ -28,6 +31,7 @@ routines:
   weekly-review:
     command: [routines/weekly-review.py, "{{brain}}", "{{end}}"]
     refresh: 604800
+    output: action
 EOF
   bf() { uv run --project "$bf_checkout" bf "$@"; }
   bf update --dry-run
@@ -38,45 +42,75 @@ EOF
 )
 ```
 
-The dry run lists due work. The update collects one fictional record and reports `"status":"ran"` with an `action` ref at `actions/YYYY-MM-DD_weekly-review-UUID/ACTION.md`. Its body includes open-task counts and source refs; validation returns `"valid":true`. The two existing fixture actions remain present. A second update within the refresh interval creates nothing. Read the returned action ref to continue the review; the routine does not complete its tasks for you.
+The dry run lists the due sensor and routine. The update collects one fictional record, then reports the routine with `"status":"ran"` and an `action` at `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, where `XXXXXXXX` is a random suffix. The action lists open-task counts and source refs; validation returns `"valid":true`. A second update within the week creates nothing. Read the returned action to continue the review: the routine completes no task for you.
 
-## Use in your brain
+## Validate before each commit
+
+This routine is `bf validate` itself, run by a Git pre-commit hook. The hook calls `bf` from PATH, so the subshell puts the checkout's `bf` first:
+
+```bash
+(
+  set -eu
+  hook_demo=$(mktemp -d)
+  hook_demo=$(cd "$hook_demo" && pwd -P)
+  trap 'rm -rf -- "$hook_demo"' EXIT
+  unset BF_BRAIN
+  export PATH="$PWD/.venv/bin:$PATH" XDG_CONFIG_HOME="$hook_demo/config" XDG_STATE_HOME="$hook_demo/state"
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+  bf init "$hook_demo/brain"
+  cd "$hook_demo/brain"
+  git init --quiet --initial-branch=main
+  git config user.name Example
+  git config user.email example@example.invalid
+  cat >> bf.yaml <<'EOF'
+routines:
+  validate:
+    command: [bf, validate]
+    hooks: [pre-commit]
+EOF
+  printf '#!/bin/sh\nexec bf run --hook pre-commit\n' > .git/hooks/pre-commit
+  chmod +x .git/hooks/pre-commit
+  git add --all
+  git commit --quiet --message "Create the brain" && echo "The first commit passed."
+  printf -- '---\ntype: project\nstatus: draft\n---\n\n# Launch\n\nSee [the plan](plan.md).\n' > projects/launch.md
+  git add projects/launch.md
+  git commit --quiet --message "Add the launch project" || echo "The hook refused the second commit."
+  bf run validate || tail -n 2 logs/validate.log
+)
+```
+
+Git shows the hook's reply. The first commit passes with `{"dry_run":false,"hook":"pre-commit","ok":true,"routines":[{"routine":"validate","status":"ran"}]}`. The second note links to a missing `plan.md`, so the hook reports `"status":"failed"`, exits 1 and Git refuses the commit. `bf run validate` fails the same way; the log's last entries hold the validation reply, with the problem `{"error":"broken link: plan.md","file":"projects/launch.md"}`, then the failure line.
+
+`bf validate` checks the working tree, including unstaged edits, not only the staged snapshot. A routine with `output: log`, the default, keeps its output in `logs/NAME.log`; `bf init` ignores `logs/` in Git. For a `pre-push` hook, use `exec bf run --hook pre-push "$@"`: Git's arguments and the ref lines it pipes reach each routine.
+
+## Use the weekly review in your brain
 
 ```yaml
-# https://fmind.github.io/brain-framework/
-version: 6
-name: brain
+# https://fmind.github.io/brain-framework/docs/routines/
 routines:
   weekly-review:
     command: [routines/weekly-review.py, "{{brain}}", "{{end}}"]
     refresh: 604800
+    output: action
 ```
 
-After reviewing and configuring the script, preview it without creating an action. Run from the brain directory with Python 3.11 or later as `python3`; replace the timestamp with the review time:
+Preview the review before creating an action. Run from the brain folder with Python 3.11 or later as `python3`, replacing the timestamp with the review time:
 
 ```bash
 routines/weekly-review.py "$PWD" 2026-09-27T12:00:00Z
 ```
 
-If there is something to review, the output starts with OKF action metadata (`type: action`, `status: draft`), followed by project checkboxes and recent activity. Empty output means there is no review to prepare. The timestamp sets the note's date; page reads use the current brain state.
-
-```bash
-bf update --dry-run
-bf update
-bf read actions
-```
-
-`update --dry-run` lists due work without running it. A due routine runs after sensors and, when its output is nonempty, creates `actions/YYYY-MM-DD_weekly-review-UUID/ACTION.md`. Read the path returned by the update; each new action gets a distinct suffix so independent sessions can merge through Git. A repeated run in the same clone on the same day preserves the existing action.
+Output starting with OKF metadata (`type: action`, `status: draft`) is the review; empty output means there is nothing to review. The timestamp sets the note's date; page reads use the current brain. `bf run weekly-review` creates the action now, and `bf update` creates it when due. A second run on the same day keeps the existing action.
 
 ## Contract
 
-`tests/test_adapters_routines.py` checks every example with a fake `bf` executable.
+`tests/test_adapters_routines.py` checks every script with a fake `bf` executable.
 
 - Python 3.11+ standard library only, `#!/usr/bin/env python3`, executable bit set, no shell.
-- Deterministic: the same pages produce the same Markdown. No model, network or provider call; read the brain through `bf read` and `bf search` with literal argv.
-- Stdout is one OKF action or empty. BF validates its metadata and declared links before writing. Use `status: draft|stable|deprecated` for note maturity and checkboxes for work progress.
-- Link only notes needing review, using returned `uri` values or, when one brain is selected and items omit them, paths relative to the action: links from a dated action count as newer evidence for their targets. Name other notes and collected records by ref; do not copy record titles into authored context.
-- A failed or incomplete page (`problems`, `stale`) exits nonzero with nothing on stdout and one generic sentence on stderr; Brain Framework then writes nothing and retries after the [failure backoff](../../docs/docs/sensors.md#collect-and-update).
-- Project review follows every `next_offset`, up to 100 pages (20,000 projects). A stalled continuation or exceeded limit fails before writing; the home page alone cannot establish that all projects are current. Other home-page sections remain previews.
-- Task counts cover the eligible note selection; up to ten open tasks are previewed with source refs and lines. Plain bullets and code-span refs avoid duplicating tasks or triggering new-evidence reminders. Follow `bf read tasks` continuations for the complete list.
+- Deterministic: the same pages produce the same Markdown. No model, network or provider call; read the brain through `bf read` and `bf search` with literal arguments.
+- An `output: action` routine prints one OKF action or nothing. BF validates its metadata and declared links before writing. Use `status: draft|stable|deprecated` for note maturity and checkboxes for work progress.
+- Link only notes needing review, using returned `uri` values or, when items omit them, paths relative to the action: links from a dated action count as newer evidence for their targets. Name other notes and records by ref; do not copy record titles into authored notes.
+- A failed or incomplete page (`problems`, `stale`) exits nonzero with nothing on stdout and one generic sentence on stderr; BF then writes nothing and retries after the [failure backoff](../../docs/docs/sensors.md#collect-and-update).
+- Project review follows every `next_offset`, up to 100 pages (20,000 projects), and fails before writing when a continuation stalls.
+- Task counts cover the selected notes; up to ten open tasks are previewed with source refs and lines, as plain bullets that duplicate no checkbox. Follow `bf read tasks` for the complete list.
 - A routine never edits notes: people and agents read its action and update the owning notes.

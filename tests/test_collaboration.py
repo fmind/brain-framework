@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
 
@@ -85,7 +86,9 @@ def test_same_routine_on_two_clones_creates_distinct_actions(tmp_path: Path) -> 
         root = tmp_path / clone
         root.mkdir()
         store = Store(root)
-        store.write("bf.yaml", b"version: 6\nname: team\nroutines:\n  review:\n    command: [fake]\n")
+        store.write(
+            "bf.yaml", b"version: 7\nname: team\nroutines:\n  review:\n    command: [fake]\n    output: action\n"
+        )
         result = routine(
             store,
             "review",
@@ -100,18 +103,23 @@ def test_same_routine_on_two_clones_creates_distinct_actions(tmp_path: Path) -> 
 
 
 def test_action_helper_creates_two_sessions_without_replacing_work(brain: Store) -> None:
-    script = Path(__file__).parents[1] / "skills/bf-action/scripts/new-action.py"
+    script = Path(__file__).parents[1] / "src/bf/skills/bf-use/scripts/new-action.py"
     created = []
-    for _ in range(2):
+    for options in ((), (), ("--unique",)):
         reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
-            [sys.executable, str(script), "review", "--brain", str(brain.root)],
+            [sys.executable, str(script), "review", "--brain", str(brain.root), *options],
             capture_output=True,
             text=True,
             check=True,
             timeout=10,
         )
         created.append(json.loads(reply.stdout)["action"])
-    assert len(set(created)) == 2
+    # The first session takes the plain name; a later one on the same day, or --unique, adds a suffix.
+    today = date.today().isoformat()
+    assert created[0] == f"actions/{today}_review/ACTION.md"
+    for path in created[1:]:
+        assert re.fullmatch(rf"actions/{today}_review-[0-9a-f]{{8}}/ACTION\.md", path)
+    assert len(set(created)) == 3
     assert validate(brain)["valid"]
     assert all(brain.read(path).startswith(b"---\ntype: action") for path in created)
 
@@ -120,7 +128,7 @@ def test_action_helper_refuses_redirected_actions(brain: Store, tmp_path: Path) 
     outside = tmp_path / "outside"
     outside.mkdir()
     (brain.root / "actions").symlink_to(outside, target_is_directory=True)
-    script = Path(__file__).parents[1] / "skills/bf-action/scripts/new-action.py"
+    script = Path(__file__).parents[1] / "src/bf/skills/bf-use/scripts/new-action.py"
     reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
         [sys.executable, str(script), "review", "--brain", str(brain.root)],
         capture_output=True,
@@ -136,7 +144,7 @@ def test_action_helper_follows_a_linked_brain_root_only(brain: Store, tmp_path: 
     # bf itself accepts a linked root, such as ~/brain pointing at a synced folder; links below it stay refused.
     linked = tmp_path / "linked-brain"
     linked.symlink_to(brain.root, target_is_directory=True)
-    script = Path(__file__).parents[1] / "skills/bf-action/scripts/new-action.py"
+    script = Path(__file__).parents[1] / "src/bf/skills/bf-use/scripts/new-action.py"
     reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
         [sys.executable, str(script), "review", "--brain", str(linked)],
         capture_output=True,

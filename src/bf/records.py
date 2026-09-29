@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import stat
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from typing import Annotated, Literal
 
 from pydantic import Field, ValidationError
 
 from bf.models import MAX_FILES, MAX_RECORD, NAME, Error, Model, Record, decode, digest, encode, explain
-from bf.storage import Store, reader
+from bf.storage import BusyError, Store, reader
 
 _PENDING = "memories/.pending"
 _MANIFEST = _PENDING + "/manifest.json"
 _MANIFEST_LIMIT = 16 << 20
+# Link failures of filesystems or mounts without hard links: backups and restores copy the bytes instead.
+_UNLINKABLE = frozenset({errno.EXDEV, errno.EPERM, errno.EMLINK, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS})
+# Seconds an exact read waits for a writer before reading one whole file without the brain lock.
+WAIT = 3
 
 
 class _Change(Model):
@@ -42,6 +47,20 @@ def _pending(store: Store) -> bool:
             return True
     except FileNotFoundError:
         return False
+
+
+def interrupted(store: Store) -> bool:
+    """Whether a pending journal may describe half-changed records.
+
+    A completed manifest proves every record was committed or restored: only cleanup remains, which the next writer
+    finishes, so reads need not wait for it. A missing or invalid manifest proves nothing.
+    """
+    if not _pending(store):
+        return False
+    try:
+        return not _Journal.model_validate(decode(store.read(_MANIFEST, _MANIFEST_LIMIT))).complete
+    except FileNotFoundError, Error, ValidationError:
+        return True
 
 
 def _clear(store: Store) -> None:
@@ -82,17 +101,17 @@ def recover(store: Store) -> None:
     if not journal.complete:
         # Check all backups before restoring any source file.
         for number, change in enumerate(journal.changes):
-            if change.existed:
-                store.read(f"{_PENDING}/{number}.before", MAX_RECORD)
-        # Like a commit, each restored file's bytes are synced as it is written; one directory sync then makes
+            if change.existed and store.lstat(f"{_PENDING}/{number}.before").st_size > MAX_RECORD:
+                raise Error(f"{_PENDING}/{number}.before: file exceeds {MAX_RECORD} bytes")
+        # Only files the commit reached change back, as their backups were made; one directory sync then makes
         # every restored entry durable before the completion marker.
         for number, change in enumerate(journal.changes):
             target = f"{directory}/{change.name}"
-            if change.existed:
-                store.write(target, store.read(f"{_PENDING}/{number}.before", MAX_RECORD), durable=False)
-            else:
+            if not change.existed:
                 with suppress(FileNotFoundError):
                     store.delete(target, durable=False)
+            elif not _kept(store, target, f"{_PENDING}/{number}.before"):
+                _copy(store, f"{_PENDING}/{number}.before", target)
         with suppress(FileNotFoundError):
             # A commit interrupted before creating its source directory changed nothing there.
             store.sync(directory)
@@ -102,9 +121,31 @@ def recover(store: Store) -> None:
     _clear(store)
 
 
+def _kept(store: Store, target: str, backup: str) -> bool:
+    """Whether a commit left a file as its backup holds it: the same inode, or the same bytes for a copied backup."""
+    try:
+        current = store.lstat(target)
+    except FileNotFoundError:
+        return False
+    kept = store.lstat(backup)
+    if os.path.samestat(current, kept):
+        return True
+    return current.st_size == kept.st_size and store.read(target, MAX_RECORD) == store.read(backup, MAX_RECORD)
+
+
+def _copy(store: Store, name: str, target: str) -> None:
+    """Give `target` the bytes of `name`: a hard link where the filesystem allows one, otherwise a synced copy."""
+    try:
+        store.link(name, target)
+    except OSError as error:
+        if error.errno not in _UNLINKABLE:
+            raise
+        store.write(target, store.read(name, MAX_RECORD), durable=False)
+
+
 def require_ready(store: Store) -> None:
     """Keep read operations from applying an untrusted on-disk recovery journal."""
-    if _pending(store):
+    if interrupted(store):
         raise Error(
             "records contain an interrupted transaction; run bf build or bf update to recover it before reading"
         )
@@ -135,11 +176,12 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
         raise Error("record transaction exceeds its manifest limit")
     try:
         # Each file's bytes are synced as it is written; one sync per directory then makes its entries
-        # durable. Backups are durable before the manifest names them, and records before completion.
+        # durable. Backups are durable before the manifest names them, and records before completion. A backup
+        # links the replaced file's inode, whose bytes a commit never changes, instead of copying and syncing them.
         backups = False
         for number, (name, change) in enumerate(zip(replacements, changes, strict=True)):
             if change.existed:
-                store.write(f"{_PENDING}/{number}.before", store.read(name, MAX_RECORD), durable=False)
+                _copy(store, name, f"{_PENDING}/{number}.before")
                 backups = True
         if backups:
             store.sync(_PENDING)
@@ -287,11 +329,15 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
     return counts
 
 
-def find(store: Store, source: str, record_id: str, *, complete: bool = False) -> tuple[str, Record, bytes, int] | None:
+def find(
+    store: Store, source: str, record_id: str, *, complete: bool = False
+) -> tuple[str, Record, bytes, int, bool] | None:
     """Exact identities resolve directly by their SHA-256 filename, with the file's bytes and modification time.
 
     Malformed or misnamed evidence never proves absence: a missing file is confirmed by parsing the source,
     unless `complete` states that a ready search cache has already parsed all of it without a problem.
+    The last value is true when a writer kept the brain lock past WAIT seconds: the file was then read whole
+    without it, since writes rename complete files into place, but it may be changing, and absence fails instead.
     """
     if not re.fullmatch(NAME, source):
         return None
@@ -304,11 +350,20 @@ def find(store: Store, source: str, record_id: str, *, complete: bool = False) -
         return None
     except OSError as error:
         raise Error(f"source {source} is unreadable; run bf validate") from error
-    with reading(store):
-        name = path(source, record_id)
+    name = path(source, record_id)
+    with ExitStack() as locked:
+        try:
+            locked.enter_context(reader(store, wait=WAIT))
+        except BusyError:
+            try:
+                data, modified = store.stamped(name, MAX_RECORD)
+            except FileNotFoundError:
+                raise BusyError("another writer is changing this brain's records; retry the read shortly") from None
+            return name, parse(name, data), data, modified, True
+        require_ready(store)
         try:
             data, modified = store.stamped(name, MAX_RECORD)
-            return name, parse(name, data), data, modified
+            return name, parse(name, data), data, modified, False
         except FileNotFoundError:
             if complete:
                 return None

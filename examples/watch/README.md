@@ -52,7 +52,7 @@ Try the sorting controls after that first cycle:
 | `t`                 | Most recent successful update first; programs without a success follow.                                     |
 | `n`, then `G` / `g` | Alphabetical order; jump to the last / first row.                                                           |
 
-The selected program stays selected as sorting or new history moves it. Items means records returned in the last successful sensor run, not the total stored catalog. See [dashboard sorting](../../docs/docs/schedule.md#sort-the-dashboard) for every field; view choices last only for the session and also work in the observation dashboard below.
+The selected program stays selected as sorting or new history moves it. Items means records returned in the last successful sensor run, not the total stored catalog. Press `?` for every sort field, or see [dashboard sorting](../../docs/docs/schedule.md#sort-the-dashboard); view choices last only for the session and also work in the observation dashboard below.
 
 Choose only the successful sensors and generate a one-minute native schedule without activating it:
 
@@ -60,7 +60,7 @@ Choose only the successful sensors and generate a one-minute native schedule wit
 env -u BF_BRAIN XDG_CONFIG_HOME="$watch_demo/config" XDG_STATE_HOME="$watch_demo/state" \
   bf schedule --brain "$watch_demo/brain" \
   --sensor calendar --sensor git --every 1 \
-  --output "$watch_demo/brain/settings/schedules"
+  --output "$watch_demo/schedules"
 ```
 
 The JSON reply contains the native files and literal argv lists for installation, status and removal. Inspect the files; this example does not require installing them. Their PATH, XDG paths and executable point to the environment used to generate them, so regenerate a real schedule from the installation you intend to keep. One-minute checks can collect the 30-second calendar less frequently than its refresh; the scheduler checks eligibility, it does not override it.

@@ -29,12 +29,11 @@ def test_initialization_creates_the_layout_and_private_namespaces(tmp_path: Path
         "projects",
         "actions",
         "concepts",
-        "tests",
         "evals",
     }
     store = Store(target)
     config = load(store)
-    assert config.version == 6
+    assert config.version == 7
     assert config.routines == {}
     assert config.name == "fresh"
     assert set(config.ontology) == {"author", "owner", "depends-on", "related-to"}
@@ -56,9 +55,7 @@ def test_initialization_creates_the_layout_and_private_namespaces(tmp_path: Path
         "assets",
         "sensors",
         "routines",
-        "settings",
         "skills",
-        "tests",
         "evals",
     }
 
@@ -111,7 +108,7 @@ def test_attachments_keep_their_own_status_words(brain: Store) -> None:
 def test_disabled_sensor_keeps_source_identity_and_memories_readable(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n  meetings:\n    command: [unavailable-provider]\n    enabled: false\n",
+        b"version: 7\nname: fixture\nsensors:\n  meetings:\n    command: [unavailable-provider]\n    enabled: false\n",
     )
     reply = read([brain], "meetings:decision-1")
     assert reply["brain"] == "fixture"

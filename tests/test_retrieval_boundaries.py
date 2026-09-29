@@ -22,7 +22,7 @@ from bf.collect import collect
 from bf.config import user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
-from bf.models import Error, NotFoundError, Query, Record, digest, encode
+from bf.models import MAX_OFFSET, Error, NotFoundError, Query, Record, digest, encode
 from bf.records import path as record_path
 from bf.storage import Store
 from bf.validate import validate
@@ -33,7 +33,7 @@ def corpus(brain: Store, tmp_path: Path) -> list[Store]:
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     for n, store in enumerate([brain, team]):
         records_file(
             store,
@@ -68,7 +68,7 @@ def test_pages_visit_every_record_across_brains(brain: Store, tmp_path: Path, re
         offset = cast("int", reply["next_offset"])
     assert len(refs) == len(set(refs)) == 123
     assert [ref.rsplit(":", 1)[1] for ref in refs] == [f"{i:03}" for i in reversed(range(123))]
-    assert retrieve.read(stores, ref, offset=2**63 - 1)["items"] == []
+    assert retrieve.read(stores, ref, offset=MAX_OFFSET)["items"] == []
 
 
 @pytest.mark.parametrize("query", ["incident", "topic:incident"])
@@ -87,7 +87,7 @@ def test_search_continues_lexical_and_identity_results(brain: Store, tmp_path: P
             break
         offset = cast("int", reply["next_offset"])
     assert len(refs) == len(set(refs)) == 123
-    assert retrieve.search(stores, Query(text=query, offset=2**63 - 1))["items"] == []
+    assert retrieve.search(stores, Query(text=query, offset=MAX_OFFSET))["items"] == []
 
 
 def test_authored_folder_continuation(brain: Store) -> None:
@@ -102,7 +102,7 @@ def test_authored_folder_continuation(brain: Store) -> None:
 
 
 def test_empty_search_describes_failed_and_never_collected_sources(brain: Store) -> None:
-    brain.write("bf.yaml", b'version: 6\nname: fixture\nsensors:\n  mail:\n    command: ["fake"]\n    refresh: 3600\n')
+    brain.write("bf.yaml", b'version: 7\nname: fixture\nsensors:\n  mail:\n    command: ["fake"]\n    refresh: 3600\n')
 
     def failed(*_args: object) -> bytes:
         raise Error("synthetic failure")
@@ -214,7 +214,7 @@ def test_evaluation_assembles_paged_exact_reads_before_checking_them(brain: Stor
     records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000 + "closing clause")])
     brain.write(
         "evals/large.yaml",
-        b"version: 5\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n  text: [closing clause]\n",
+        b"version: 7\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n  text: [closing clause]\n",
     )
     assert "closing clause" not in str(retrieve.read([brain], "docs:large"))
     reply = evaluate(brain)
@@ -225,7 +225,7 @@ def test_evaluation_rejects_a_paged_read_that_changes_between_pages(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000)])
-    brain.write("evals/large.yaml", b"version: 5\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n")
+    brain.write("evals/large.yaml", b"version: 7\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n")
     original = retrieve.read
 
     def changing(stores: list[Store], ref: str = "", *, offset: int = 0, counted: bool = True) -> dict[str, object]:
@@ -266,16 +266,34 @@ def test_linked_transaction_directory_still_blocks_reads(brain: Store, tmp_path:
         retrieve.search([brain], Query(text="retention"))
 
 
-def test_claim_preview_reports_truncation(brain: Store) -> None:
+def test_claim_preview_keeps_every_relation_and_reports_truncation(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nschema:\n  depends-on:\n    description: Needs context.\n"
-        b"    type: identity\n    cardinality: many\n    relation: true\n",
+        b"version: 7\nname: fixture\nfields:\n"
+        + b"".join(
+            f"  {role}:\n    description: A role.\n    type: identity\n    cardinality: many\n    relation: true\n".encode()
+            for role in ("attendee", "depends-on", "organizer")
+        ),
     )
-    links = "\n".join(f"[Evidence {n}](bf://fixture/concepts/target-{n}?rel=depends-on)" for n in range(51))
-    brain.write("projects/many.md", f"# Many claims\n\n{links}\n".encode())
+    links = "\n".join(f"[Person {n}](bf://fixture/concepts/person-{n}?rel=attendee)" for n in range(62))
+    brain.write(
+        "projects/meeting.md",
+        f"# Meeting\n\n{links}\n[Host](bf://fixture/concepts/host?rel=organizer)\n".encode(),
+    )
+    reply = retrieve.read([brain], "projects/meeting.md")
+    claims = cast("list[dict[str, str]]", reply["claims"])
+    # A crowded relation keeps its first RELATION claims and never hides another relation.
+    assert [claim["relation"] for claim in claims].count("attendee") == graph.RELATION
+    assert [claim["target"] for claim in claims if claim["relation"] == "organizer"] == ["bf://fixture/concepts/host"]
+    assert reply["claims_truncated"] is True
+    many = "\n".join(
+        f"[{role} {n}](bf://fixture/concepts/{role}-{n}?rel={role})"
+        for role in ("attendee", "depends-on", "organizer")
+        for n in range(graph.RELATION)
+    )
+    brain.write("projects/many.md", f"# Many claims\n\n{many}\n".encode())
     reply = retrieve.read([brain], "projects/many.md")
-    assert len(cast("list", reply["claims"])) == 50
+    assert len(cast("list", reply["claims"])) == graph.CLAIMS
     assert reply["claims_truncated"] is True
 
 
@@ -335,7 +353,7 @@ def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(b
 def test_typed_links_read_their_unowned_target_identity(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nschema:\n  owner:\n    description: Owner.\n    type: identity\n    relation: true\n",
+        b"version: 7\nname: fixture\nfields:\n  owner:\n    description: Owner.\n    type: identity\n    relation: true\n",
     )
     brain.write("projects/a.md", b"---\ntype: project\n---\n# A\n\n[Alice](bf://fixture/people/alice?rel=owner)\n")
     plain = retrieve.read([brain], "bf://fixture/people/alice")
@@ -353,7 +371,7 @@ def test_identity_problems_name_the_configured_brain(
     root = tmp_path / "team-folder"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     original = index.database
     opened: list[Path] = []
 
@@ -393,7 +411,7 @@ sys.addaudithook(_audit)
 def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n  mail:\n    command: [sensors/marker.sh]\n    refresh: 60\n"
+        b"version: 7\nname: fixture\nsensors:\n  mail:\n    command: [sensors/marker.sh]\n    refresh: 60\n"
         b"routines:\n  digest:\n    command: [routines/marker.sh]\n    refresh: 60\n",
     )
     marker = brain.root / "ran"
@@ -404,7 +422,7 @@ def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> N
         script.chmod(0o700)
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 5\ncases:\n- name: decision\n  query: retention\n  expect: [projects/offline.md]\n",
+        b"version: 7\ncases:\n- name: decision\n  query: retention\n  expect: [projects/offline.md]\n",
     )
     mcp = server([brain])
     events: set[str] = set()

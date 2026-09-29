@@ -11,7 +11,7 @@ from typing import cast
 import pytest
 from typer.testing import CliRunner
 
-from bf import index
+from bf import index, records
 from bf.cli import app
 from bf.collect import collect, routine
 from bf.config import register
@@ -20,12 +20,13 @@ from bf.history import log_path
 from bf.models import Error, Query, encode
 from bf.retrieve import read, search
 from bf.storage import Store, state_store
+from bf.update import update
 
 
 def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n"
+        b"version: 7\nname: fixture\nsensors:\n"
         b"  mail:\n    command: [echo]\n    refresh: 3600\n    reconcile: {refresh: 86400, lookback: 604800}\n"
         b"  folders:\n    command: [echo]\n    mode: snapshot\n    refresh: 86400\n"
         b"routines:\n  review:\n    command: [review]\n    refresh: 86400\n",
@@ -48,11 +49,11 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
         "last_collected",
         "window",
         "records",
+        "bytes",
         "last_run",
         "reconciled",
-        "stale",
     }
-    assert (mail["state"], mail["freshness"], mail["stale"], mail["records"]) == ("active", "fresh", False, 1)
+    assert (mail["state"], mail["freshness"], mail["records"]) == ("active", "fresh", 1)
     assert (mail["last_collected"], mail["reconciled"], mail["window"]) == (at, at, {"since": week, "until": at})
     assert mail["last_run"]["added"] == 1
     assert status["sources"]["folders"] == {
@@ -60,13 +61,13 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
         "mode": "snapshot",
         "freshness": "never",
         "records": 0,
+        "bytes": 0,
         "failed": True,
-        "error": "invalid JSON document",
+        "error": "invalid JSON document; nothing was written",
         "failures": 1,
-        "log": str(log_path(brain, "folders")),
-        "stale": True,
+        "log": log_path("folders"),
     }
-    assert status["routines"]["review"] == {"state": "active", "freshness": "fresh", "last_success": at, "stale": False}
+    assert status["routines"]["review"] == {"state": "active", "freshness": "fresh", "last_success": at}
     # Every reply instant uses one canonical UTC form, so clients can compare them as strings.
     instants = re.findall(r'"(\d{4}-\d\d-\d\dT[^"]*)"', json.dumps(status))
     assert instants
@@ -76,7 +77,7 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
 def test_history_offsets_read_back_as_canonical_utc_in_status_and_home(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n"
+        b"version: 7\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n"
         b"routines:\n  review:\n    command: [review]\n    refresh: 60\n",
     )
     local = "2026-09-23T15:00:00+02:00"
@@ -115,7 +116,7 @@ def test_invalid_usage_counts_do_not_break_health_or_hide_valid_events(brain: St
 def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n"
+        b"version: 7\nname: fixture\nsensors:\n"
         b"  current:\n    command: [echo]\n    refresh: 3600\n"
         b"  missing:\n    command: [echo]\n    refresh: 3600\n"
         b"  paused:\n    command: [echo]\n    enabled: false\n"
@@ -143,7 +144,7 @@ def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> 
     assert report["paused"]["state"] == "disabled"
     assert report["archive"] == {"state": "historical", "freshness": "unknown"}
     assert report["manual"]["freshness"] == "manual"
-    assert source_health(brain, now=datetime(2026, 9, 23, 15, tzinfo=UTC))["current"]["freshness"] == "stale"
+    assert source_health(brain, now=datetime(2026, 9, 23, 15, tzinfo=UTC))["current"]["freshness"] == "overdue"
 
 
 def test_init_quotes_yaml_names_and_keeps_private_evidence_out_of_git(tmp_path) -> None:
@@ -155,7 +156,7 @@ def test_init_quotes_yaml_names_and_keeps_private_evidence_out_of_git(tmp_path) 
 
 
 def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 6\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
+    brain.write("bf.yaml", b"version: 7\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
     brain.write(
         "memories/current/ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb.json",
         b'{"id":"a","title":"First"}\n',
@@ -176,7 +177,7 @@ def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store)
 def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failures_are_inactive(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
+        b"version: 7\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
     )
     state_store(brain.root).write(
         "sensors.json",
@@ -191,7 +192,7 @@ def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failure
 
 def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 6\nname: fixture\nsensors:\n  meetings:\n    command: [echo]\n    refresh: 3600\n"
+        "bf.yaml", b"version: 7\nname: fixture\nsensors:\n  meetings:\n    command: [echo]\n    refresh: 3600\n"
     )
     record = cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])
     found = cast("list[dict[str, object]]", search([brain], Query(text="offline retrieval"))["sources"])
@@ -208,9 +209,9 @@ def test_status_reports_a_broken_brain_and_still_reports_the_others(tmp_path: Pa
     # The broken brain keeps its registered name, not its directory's.
     (tmp_path / "other-dir").mkdir()
     other = Store(tmp_path / "other-dir")
-    other.write("bf.yaml", b"version: 6\nname: other\n")
+    other.write("bf.yaml", b"version: 7\nname: other\n")
     register(other)
-    other.write("bf.yaml", b"version: 6\nname: [broken\n")
+    other.write("bf.yaml", b"version: 7\nname: [broken\n")
     result = CliRunner().invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     brains = json.loads(result.stdout)["brains"]
@@ -242,3 +243,34 @@ def test_status_warns_without_failing_when_a_scanned_tree_nears_the_scan_limit(
         {"warning": "directory nears the scan limit", "directory": "memories/meetings", "entries": 2, "limit": 100_000}
     ]
     assert json.loads(result.stdout)["healthy"]
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_status_reports_an_interrupted_transaction_instead_of_failing(brain: Store, *, cached: bool) -> None:
+    if cached:
+        index.refresh(brain)
+    decision = records.path("meetings", "decision-1")
+    brain.write("memories/.pending/0.before", brain.read(decision))
+    brain.write(
+        "memories/.pending/manifest.json",
+        json.dumps({"source": "meetings", "changes": [{"name": decision.rsplit("/", 1)[1], "existed": True}]}).encode(),
+    )
+    command = ["status", "--check", "--brain", str(brain.root)]
+    result = CliRunner().invoke(app, command)
+    assert result.exit_code == 1
+    entry = json.loads(result.stdout)["brains"][0]
+    # Status never applies the journal: it describes the last generation and names the recovery.
+    assert entry["pending_transaction"] is True
+    assert entry["problems"][0]["error"].endswith("run bf update or bf build to recover it")
+    assert (entry["cache"], entry["notes"]) == (("stale", 2) if cached else ("missing", 0))
+    assert brain.read("memories/.pending/manifest.json")
+    assert update(brain)["ok"]
+    recovered = json.loads(CliRunner().invoke(app, command).stdout)["brains"][0]
+    assert "pending_transaction" not in recovered
+    assert (recovered["cache"], recovered["problems"]) == ("ready", [])
+
+
+def test_status_reports_the_bytes_each_source_holds(brain: Store) -> None:
+    sizes = [(brain.root / records.path("meetings", key)).stat().st_size for key in ("decision-1", "lunch")]
+    entry = cast("dict", report([brain]))["brains"][0]
+    assert entry["sources"]["meetings"]["bytes"] == sum(sizes)

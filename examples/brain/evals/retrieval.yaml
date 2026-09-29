@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/docs/checks/
-version: 5
+version: 7
 cases:
   - name: retention-concept
     query: why keep original evidence

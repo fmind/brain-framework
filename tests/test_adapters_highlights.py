@@ -172,7 +172,7 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
         "bf.yaml",
         json.dumps(
             {
-                "version": 6,
+                "version": 7,
                 "name": "fixture",
                 "sensors": {
                     "highlights": {
@@ -186,7 +186,7 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
                         "fields": {"source-document": {"path": "/url"}},
                     }
                 },
-                "schema": {
+                "fields": {
                     "source-document": {
                         "description": "The document containing this selected passage.",
                         "type": "identity",
@@ -216,7 +216,7 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
     assert "because visitors need clarity" in str(read([brain], decision_ref)["text"])
     brain.write(
         "evals/highlights.yaml",
-        b"version: 5\ncases:\n  - name: recover-decision-reason\n    query: clarity before signup\n"
+        b"version: 7\ncases:\n  - name: recover-decision-reason\n    query: clarity before signup\n"
         b"    scope: projects/website.md\n    expect: [projects/website.md#decision]\n"
         b"  - name: locate-source-passage\n    read: highlights:reading/brief-clarity\n"
         b"    text: [https://example.com/website-brief, Audience, Visitors need a clear product explanation]\n",

@@ -18,6 +18,8 @@ from bf.retrieve import read, search
 from bf.storage import Store
 
 Nonblank = Annotated[str, Field(pattern=r"\S")]
+# A search case ranks its expected refs this deep, past its limit, so MRR still sees a drop below the limit.
+DEPTH = 50
 
 
 def _query(text: str, value: str = "", limit: int = 10) -> Query:
@@ -131,7 +133,7 @@ class Case(Model):
 class Suite(Model):
     """A bounded collection of retrieval assertions; evaluated offline without executing programs."""
 
-    version: Literal[5] = Field(description="Evaluation format, independent of the brain and package versions.")
+    version: Literal[7] = Field(description="Brain format, shared with bf.yaml; independent of the package version.")
     cases: Annotated[list[Case], Field(min_length=1, max_length=200)]
 
     @model_validator(mode="after")
@@ -191,8 +193,8 @@ def _whole(store: Store, ref: str) -> dict[str, object]:
     return whole
 
 
-def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], list[str], str]:
-    """The reply, its refs, its portable addresses and the text it delivers."""
+def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], list[str], str, list[tuple[str, str]]]:
+    """The reply, its refs, its portable addresses, the text it delivers and a search's refs and addresses to DEPTH."""
     if case.read is not None:
         try:
             reply = _whole(store, case.read)
@@ -208,16 +210,21 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
             [value for key, value in pairs if key == "uri"]
             + [address(str(entry.get("brain", name)), entry) for entry in _entries(reply)],
             "\n".join(value for _, value in pairs),
+            [],
         )
-    reply = search([store], _query(case.query, case.scope, case.limit), counted=False)
-    items = cast("list[dict[str, object]]", reply["items"])
+    # The case's results are the leading items of a deeper search: continuing a search never reorders it.
+    reply = search([store], _query(case.query, case.scope, max(case.limit, DEPTH)), counted=False)
+    found = cast("list[dict[str, object]]", reply["items"])
     name = load(store).name
+    # With one selected brain, items omit their address: every item is the evaluated brain's.
+    ranking = [(str(item["ref"]), str(item.get("uri") or address(name, item))) for item in found]
+    items = found[: case.limit]
     return (
         reply,
-        [str(item["ref"]) for item in items],
-        # With one selected brain, items omit their address: every item is the evaluated brain's.
-        [str(item.get("uri") or address(name, item)) for item in items],
+        [ref for ref, _ in ranking[: case.limit]],
+        [uri for _, uri in ranking[: case.limit]],
         "\n".join(f"{item.get('title', '')}\n{item.get('excerpt', '')}" for item in items),
+        ranking,
     )
 
 
@@ -227,12 +234,9 @@ def _matches(expected: str, refs: list[str]) -> bool:
     return any(ref == expected or (whole_note and split_ref(ref)[0] == expected) for ref in refs)
 
 
-def _ranks(expect: list[str], refs: list[str], uris: list[str]) -> dict[str, int | None]:
-    """Each expected ref's 1-based position among the returned search items, or None when it is missing."""
-    return {
-        ref: next((n for n, item in enumerate(zip(refs, uris, strict=True), 1) if _matches(ref, list(item))), None)
-        for ref in expect
-    }
+def _ranks(expect: list[str], ranking: list[tuple[str, str]]) -> dict[str, int | None]:
+    """Each expected ref's 1-based position among up to DEPTH search items, or None when it is missing."""
+    return {ref: next((n for n, item in enumerate(ranking, 1) if _matches(ref, list(item))), None) for ref in expect}
 
 
 class _Outcome(BaseModel):
@@ -311,7 +315,7 @@ def evaluate(
     for name in paths:
         try:
             value = yaml_object(store.read(name, 1 << 20), name)
-            check_version(value, 5, name)
+            check_version(value, name)
             suite = Suite.model_validate(value)
         except FileNotFoundError:
             raise Error(f"{name} does not exist; add retrieval cases before running bf eval") from None
@@ -319,12 +323,13 @@ def evaluate(
             raise Error(f"invalid {name}: " + explain(error)) from error
         cases.extend((name, case) for case in suite.cases)
     results: list[dict[str, object]] = []
-    # Each ranked search case's reciprocal rank of its best-placed expected ref; a miss or failure counts zero.
+    # Each ranked search case's reciprocal rank of its best-placed expected ref within DEPTH results, even below its
+    # limit; a miss or an error counts zero.
     reciprocal: list[float] = []
     for path, case in cases:
         ranked = case.read is None and bool(case.expect)
         try:
-            reply, refs, uris, delivered = _answer(store, case)
+            reply, refs, uris, delivered, ranking = _answer(store, case)
         except Error as error:
             results.append({"suite": path, "name": case.name, "passed": False, "error": str(error)})
             reciprocal.extend([0.0] if ranked else [])
@@ -338,7 +343,7 @@ def evaluate(
         )
         result: dict[str, object] = {"suite": path, "name": case.name, "passed": passed}
         if ranked:
-            result["rank"] = ranks = _ranks(case.expect, refs, uris)
+            result["rank"] = ranks = _ranks(case.expect, ranking)
             reciprocal.append(max((1 / n for n in ranks.values() if n), default=0.0))
         if not passed:
             result.update(missing=missing, forbidden=forbidden, absent=absent, returned=refs)

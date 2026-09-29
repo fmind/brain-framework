@@ -65,7 +65,7 @@ def test_prepared_knowledge_transfer_works_without_the_source_brain(tmp_path: Pa
     store.write(manifest["files"][0], candidate)
     store.write(
         "evals/retrieval.yaml",
-        b"version: 5\ncases:\n  - name: shared-procedure\n    read: concepts/selected-evidence.md\n"
+        b"version: 7\ncases:\n  - name: shared-procedure\n    read: concepts/selected-evidence.md\n"
         b"    text: [draft, Partial evidence remains partial, No successful outcome]\n"
         b"  - name: no-private-history\n    query: unverified belief\n    empty: true\n",
     )
@@ -82,8 +82,8 @@ def test_example_graph_export_and_broader_role_match_the_readme(tmp_path: Path) 
     brain = tmp_path / "example"
     shutil.copytree(Path(__file__).parents[1] / "examples/brain", brain)
     readme = (Path(__file__).parents[1] / "examples/brain/README.md").read_text()
-    documented = readme.split("the first three lines are:\n\n```text\n", 1)[1].split("```", 1)[0].splitlines()
-    result = CliRunner().invoke(app, ["export", "edges", "--brain", str(brain)])
+    documented = readme.split("The first three lines are:\n\n```text\n", 1)[1].split("```", 1)[0].splitlines()
+    result = CliRunner().invoke(app, ["export", "--brain", str(brain)])
     assert result.exit_code == 0, result.output
     assert result.stdout.splitlines()[:3] == documented
     policy = "bf://example/concepts/archive-policy.md"

@@ -20,9 +20,9 @@ from pydantic import TypeAdapter, ValidationError
 
 from bf import ontology, records
 from bf.config import load
-from bf.history import ROUTINES, SENSORS, environment, log_path, remember, state
+from bf.history import ROUTINES, SENSORS, append_log, environment, log_path, remember, state
 from bf.markdown import note, validate_okf
-from bf.models import Config, Error, Program, Record, Sensor, decode, explain, timestamp
+from bf.models import Config, Error, Program, Record, Routine, Sensor, decode, explain, local, suggest, timestamp
 from bf.storage import Store, collecting, relative, writer
 
 _LOG = 256 << 10
@@ -40,11 +40,18 @@ LIMIT = 200
 
 
 class Runner(Protocol):
-    def __call__(self, argv: list[str], sensor: Program, store: Store, log: Path, /) -> bytes: ...
+    def __call__(self, argv: list[str], program: Program, store: Store, name: str, stdin: bytes, /) -> bytes: ...
 
 
-def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
-    """Execute one sensor or routine from the brain root; stderr goes to a bounded private log, never to errors."""
+def _now() -> str:
+    return local(timestamp(datetime.now(UTC).isoformat()))
+
+
+def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes = b"", /) -> bytes:
+    """Execute one sensor or routine from the brain root, feeding it `stdin`; returns its stdout.
+
+    Its stderr, and a `log` routine's stdout, go to the program's bounded log in logs/, never to errors.
+    """
     # A nested bf call without --brain reads the executing brain, never an inherited selection.
     env = {**environment(), "BF_BRAIN": str(store.root)}
     executable = argv[0]
@@ -59,23 +66,26 @@ def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
         raise Error(f"{executable} is not on PATH")
     else:
         executable = found
+    started = time.monotonic()
     try:
         child = subprocess.Popen(  # noqa: S603
-            # Direct argv from the owner's bf.yaml; no shell interprets it.
+            # Direct argv from the owner's bf.yaml, plus a `bf run` caller's arguments; no shell interprets them.
             [executable, *argv[1:]],
             cwd=store.root,
             env=env,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
     except OSError as error:
+        append_log(store, name, f"{_now()} could not start {executable}")
         raise Error("could not start the program; check its executable bit and interpreter") from error
     stdout, stderr = child.stdout, child.stderr
     output, errors = bytearray(), bytearray()
-    deadline = time.monotonic() + sensor.timeout
+    deadline = started + sensor.timeout
     exited: float | None = None
+    outcome = "failed"
     try:
         if stdout is None or stderr is None:
             raise Error("program pipes were not created")
@@ -83,6 +93,10 @@ def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
             for pipe, buffer in ((stdout, output), (stderr, errors)):
                 os.set_blocking(pipe.fileno(), False)
                 selector.register(pipe, selectors.EVENT_READ, buffer)
+            if child.stdin is not None:
+                # Written as the program reads it, so a large input never blocks its output.
+                os.set_blocking(child.stdin.fileno(), False)
+                selector.register(child.stdin, selectors.EVENT_WRITE, memoryview(stdin))
             # A run ends with the program's exit and the end of its stdout. Stderr only feeds the log,
             # so a background descendant holding it cannot delay or fail a finished program.
             while stdout in selector.get_map() or child.poll() is None:
@@ -91,22 +105,33 @@ def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
                     exited = now
                 if exited is not None and now >= exited + _DRAIN:
                     raise Error(
-                        "program exited but a background process kept its stdout open; "
-                        "redirect its descendants' output; nothing was written"
+                        "program exited but a background process kept its stdout open; redirect its descendants' output"
                     )
                 if now >= deadline:
-                    raise Error(f"program timed out after {sensor.timeout}s; nothing was written")
+                    raise Error(f"program timed out after {sensor.timeout}s")
                 if stdout not in selector.get_map():
                     with suppress(subprocess.TimeoutExpired):
                         child.wait(timeout=0.05)
-                for key, _ in selector.select(0.05):
+                for key, events in selector.select(0.05):
+                    if events & selectors.EVENT_WRITE:
+                        try:
+                            written = os.write(key.fd, key.data[:65536])
+                        except BrokenPipeError:
+                            # The program ended or closed its input without reading all of it.
+                            written = len(key.data)
+                        if written < len(key.data):
+                            selector.modify(key.fileobj, selectors.EVENT_WRITE, key.data[written:])
+                        elif child.stdin is not None:
+                            selector.unregister(child.stdin)
+                            child.stdin.close()
+                        continue
                     chunk = os.read(key.fd, 65536)
                     if not chunk:
                         selector.unregister(key.fileobj)
                         continue
                     key.data.extend(chunk)
                     if len(output) > sensor.max_bytes:
-                        raise Error("program output exceeded max_bytes; nothing was written")
+                        raise Error("program output exceeded max_bytes")
                     del errors[:-_LOG]
         # Keep diagnostics written before the exit; a bounded read never waits for descendants.
         with suppress(BlockingIOError):
@@ -115,19 +140,27 @@ def run(argv: list[str], sensor: Program, store: Store, log: Path) -> bytes:
                     break
                 errors.extend(chunk)
         code = child.wait()
+        outcome = f"exited with status {code}"
         if code:
-            raise Error(f"program exited with status {code}; nothing was written")
+            raise Error(f"program exited with status {code}")
         return bytes(output)
+    except Error as error:
+        outcome = str(error)
+        raise
     finally:
         # Descendants can keep pipes open after their leader exits; end the whole session.
         with suppress(ProcessLookupError):
             os.killpg(child.pid, signal.SIGKILL)
         child.wait()
-        for pipe in (child.stdout, child.stderr):
-            if pipe is not None:
+        for pipe in (child.stdin, child.stdout, child.stderr):
+            if pipe is not None and not pipe.closed:
                 pipe.close()
-        # Use the same confined atomic writer as other private state.
-        Store(log.parent).write(log.name, bytes(errors[-_LOG:]))
+        shown = bytes(output[-_LOG:]) if isinstance(sensor, Routine) and sensor.output == "log" else b""
+        diagnostics = bytes(errors[-_LOG:])
+        body = shown + (b"-- stderr --\n" + diagnostics if shown and diagnostics else diagnostics)
+        # A log is a diagnostic: failing to write it never changes the run's own outcome.
+        with suppress(Error, OSError):
+            append_log(store, name, f"{_now()} {outcome} after {time.monotonic() - started:.1f}s", body)
 
 
 def _window(start: str, end: str) -> tuple[str, str]:
@@ -143,7 +176,9 @@ def _window(start: str, end: str) -> tuple[str, str]:
 def _failed(
     store: Store, name: str, file: str, started: datetime, message: str, cause: BaseException, *, dry_run: bool
 ) -> NoReturn:
-    """Remember a failed run, then name its private log; provider output never enters the message."""
+    """Remember a failed run, then name its log; provider output never enters the message."""
+    with suppress(Error, OSError):
+        append_log(store, name, f"{_now()} failed: {message}")
     if not dry_run:
         try:
             with writer(store, wait=120):
@@ -151,7 +186,7 @@ def _failed(
                 remember(store, name, file, run=timestamp(started.isoformat()), error=message, failures=failures)
         except (Error, OSError) as history_error:
             raise Error(f"{name}: {message}; run history could not be saved") from history_error
-    raise Error(f"{name}: {message}; see {log_path(store, name)}") from cause
+    raise Error(f"{name}: {message}; see {log_path(name)}") from cause
 
 
 def _coverage(
@@ -225,7 +260,7 @@ def collect(
     config = load(store)
     sensor = config.sensors.get(name)
     if sensor is None or not sensor.enabled:
-        raise Error(f"sensor {name} is unknown or disabled")
+        raise Error(f"sensor {name} is unknown or disabled{suggest(name, config.sensors)}")
     if reconcile and sensor.reconcile is None:
         raise Error("reconciliation requires the sensor's reconcile setting")
     argv = _argv(store, sensor, start, end)
@@ -238,7 +273,7 @@ def collect(
                 raise Error("reconciliation must cover its lookback through the current run")
         committed = False
         try:
-            raw = runner(argv, sensor, store, log_path(store, name))
+            raw = runner(argv, sensor, store, name, b"")
             try:
                 incoming = TypeAdapter(list[Record]).validate_python(decode(raw))
             except ValidationError as error:
@@ -296,9 +331,16 @@ def collect(
                 if isinstance(error, Error)
                 else "collector files are inaccessible; check its executable, record permissions and free space"
             )
-            if committed:
-                message = "records were committed but local run history could not be saved; retry is safe"
+            # A failed collection never changes evidence: say so, unless the records were already committed.
+            message = (
+                "records were committed but local run history could not be saved; retry is safe"
+                if committed
+                else f"{message}; nothing was written"
+            )
             _failed(store, name, SENSORS, started, message, error, dry_run=dry_run)
+        counts = ", ".join(f"{result.get(key, 0)} {key}" for key in ("added", "updated", "unchanged", "removed"))
+        with suppress(Error, OSError):
+            append_log(store, name, f"{_now()} collected {result['records']} records: {counts}")
         return result
 
 
@@ -358,7 +400,7 @@ def _argv(store: Store, program: Program, start: str, end: str) -> list[str]:
 
 
 def _written(store: Store, prefix: str) -> bool:
-    """Whether an `actions/{prefix}UUID` folder holds anything, such as an ACTION.md or an editor's `.#ACTION.md` lock.
+    """Whether an `actions/{prefix}SUFFIX` folder holds anything, such as an ACTION.md or an editor's `.#ACTION.md` lock.
 
     Folder names, not run history, find it: a retry counts an action whose run history was never saved. A linked
     folder or a link or unaddressable name inside also counts, so nothing is written beside it; a linked `actions/`
@@ -368,7 +410,7 @@ def _written(store: Store, prefix: str) -> bool:
     found = store.files("actions", skipped=skipped)
     if "actions" in skipped:
         raise Error("actions: expected a directory; symlinks and special files are forbidden")
-    today = re.compile(re.escape(f"actions/{prefix}") + r"[0-9a-f]{32}(?:/|$)")
+    today = re.compile(re.escape(f"actions/{prefix}") + r"[0-9a-f]{8}(?:/|$)")
     return any(today.match(name) for name in (*found, *skipped))
 
 
@@ -379,35 +421,42 @@ def routine(
     start: str,
     end: str,
     dry_run: bool = False,
+    args: tuple[str, ...] = (),
+    stdin: bytes = b"",
     runner: Runner = run,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
-    """Run one routine over [start, end); its Markdown becomes today's action, written only after success.
+    """Run one routine over [start, end), appending `args` to its command and feeding it `stdin`.
 
-    Empty output means there is nothing to review. An existing action folder is never overwritten,
-    so a routine writes at most one action per local day in this brain and never replaces a person's edits.
+    A `log` routine keeps its output in its log. An `action` routine's Markdown becomes today's action, written only
+    after success; empty output means there is nothing to review. An existing action folder is never overwritten,
+    so an action routine writes at most one action per local day in this brain and never replaces a person's edits.
     """
     start, end = _window(start, end)
-    program = load(store).routines.get(name)
+    config = load(store)
+    program = config.routines.get(name)
     if program is None or not program.enabled:
-        raise Error(f"routine {name} is unknown or disabled")
+        raise Error(f"routine {name} is unknown or disabled{suggest(name, config.routines)}")
     with collecting(store, name):
         started = clock()
         day = started.astimezone().date().isoformat()
-        folder = f"actions/{day}_{name}-{uuid4().hex}"
+        # A short random suffix keeps actions written the same day by different clones apart.
+        folder = f"actions/{day}_{name}-{uuid4().hex[-8:]}"
         path = f"{folder}/ACTION.md"
         try:
-            raw = runner(_argv(store, program, start, end), program, store, log_path(store, name))
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeError as error:
-                raise Error("routine must print UTF-8 Markdown") from error
+            raw = runner([*_argv(store, program, start, end), *args], program, store, name, stdin)
             result: dict[str, object] = {"routine": name}
-            if text.strip():
-                # Validate the action's OKF metadata and declared links before anything is written.
-                ontology.note_claims(note(path, raw), load(store))
-                validate_okf(path, raw)
-                result["action"] = path
+            text = ""
+            if program.output == "action":
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeError as error:
+                    raise Error("routine must print UTF-8 Markdown") from error
+                if text.strip():
+                    # Validate the action's OKF metadata and declared links before anything is written.
+                    ontology.note_claims(note(path, raw), config, strict=True)
+                    validate_okf(path, raw)
+                    result["action"] = path
             if dry_run:
                 return {**result, **({"text": text} if text.strip() else {})}
             with writer(store, wait=120):
@@ -430,14 +479,33 @@ def routine(
                     failures=0,
                     **({"action": path} if "action" in result else {}),
                 )
+            outcome = f"wrote {path}" if "action" in result else str(result.get("skipped", "succeeded"))
+            with suppress(Error, OSError):
+                append_log(store, name, f"{_now()} {outcome}")
         except (Error, OSError, UnicodeError) as error:
             message = (
                 str(error)
                 if isinstance(error, Error)
                 else "routine files are inaccessible; check its executable, action folder permissions and free space"
             )
+            if program.output == "action":
+                message += "; no action was written"
             _failed(store, name, ROUTINES, started, message, error, dry_run=dry_run)
         return result
+
+
+def hooked(config: Config, hook: str) -> list[str]:
+    """The enabled routines a hook runs, in name order."""
+    return sorted(name for name, program in config.routines.items() if program.enabled and hook in program.hooks)
+
+
+def window(store: Store, name: str, now: datetime) -> tuple[str, str]:
+    """The window a routine run covers now: since the end of its last reviewed window, else its lookback."""
+    program, last = load(store).routines[name], state(store, ROUTINES).get(name, {})
+    start = now - timedelta(seconds=program.lookback)
+    if last.get("end") and (reviewed := datetime.fromisoformat(str(last["end"]))) < now:
+        start = reviewed
+    return timestamp(start.isoformat()), timestamp(now.isoformat())
 
 
 def next_due(program: Program, last: dict[str, object], now: datetime) -> datetime | None:
@@ -467,16 +535,11 @@ def _due(program: Program, last: dict[str, object], now: datetime) -> bool:
 def due_routines(store: Store, now: datetime) -> list[tuple[str, str, str]]:
     """Due routines; each covers the time since the end of its last reviewed window."""
     config, history = load(store), state(store, ROUTINES)
-    windows = []
-    for name, program in sorted(config.routines.items()):
-        last = history.get(name, {})
-        if not _due(program, last, now):
-            continue
-        start = now - timedelta(seconds=program.lookback)
-        if last.get("end") and (reviewed := datetime.fromisoformat(str(last["end"]))) < now:
-            start = reviewed
-        windows.append((name, timestamp(start.isoformat()), timestamp(now.isoformat())))
-    return windows
+    return [
+        (name, *window(store, name, now))
+        for name, program in sorted(config.routines.items())
+        if _due(program, history.get(name, {}), now)
+    ]
 
 
 def due(store: Store, now: datetime) -> list[tuple[str, str, str, bool]]:

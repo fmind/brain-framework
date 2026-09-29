@@ -11,9 +11,9 @@ You can contribute without extending the core:
 - **A source adapter:** name the recurring question it answers, selected scope, shared-field mappings and fake-provider tests for complete success and failure. Keep provider access in the existing sensor pattern.
 - **An experience report:** share a useful outcome or why you stopped using BF through the [usage form](https://github.com/fmind/brain-framework/issues/new?template=usage.yml). Include repeated use and maintenance effort when observed; label estimates.
 
-The [team pilot](docs/docs/pilot.md) compares the current workflow, the same curated files accessed directly and BF retrieval. Present task counts, failures, versions and measurement limits with any claimed improvement. A passing fixture, installation, download or star is not adoption evidence. Keep support in repository issues until actual needs justify another channel.
+The [team pilot](docs/docs/team.md#evaluate-a-pilot) compares the current workflow, the same curated files accessed directly and BF retrieval. Present task counts, failures, versions and measurement limits with any claimed improvement. A passing fixture, installation, download or star is not adoption evidence. Keep support in repository issues until actual needs justify another channel.
 
-For a public demonstration, start with the [four-tool example](examples/context-hub/README.md): run collection, show the shared project relationships, read all four sources and explain the unresolved launch blocker. It is a reproducible fictional demonstration, not a customer case study. Publish real pilot results only with the relevant permission and privacy review.
+For a public demonstration, follow the [four-tool walkthrough](docs/docs/context-hub.md): collect the four fixtures, show their shared project relation, record the launch conclusion, then change the Jira fixture and show the project flagged with `newer_evidence`. It is a reproducible fictional demonstration, not a customer case study. Publish real pilot results only with the relevant permission and privacy review.
 
 ## Set up and check a change
 
@@ -32,16 +32,17 @@ Use `uv run bf` to exercise checkout code on a disposable brain. `mise run test:
 
 Use a focused check while editing, then run the full gate:
 
-| Changed area                   | Focused check                                                                 | What to verify                                                                                   |
-| ------------------------------ | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Search                         | `uv run pytest -q tests/test_search.py`                                       | Results and realistic failure cases.                                                             |
-| Retrieval quality              | [Run the retrieval example's test](examples/retrieval/README.md#run-the-test) | Questions still find the expected source, rank and answer fragment.                              |
-| Documentation                  | `mise run check:docs` and `mise run check:links`                              | Strict build, rendered anchors and local repository links.                                       |
-| Getting started, first sensor  | `uv run pytest -q tests/test_guides.py`                                       | Commands return the documented replies; the test applies each other block as its prose says.     |
-| Configuration model or reply   | `mise run generate:schema`                                                    | Generated `docs/*.schema.json` match their loaders and replies; test valid and invalid inputs.   |
-| Watch dashboard                | `mise run generate:screenshot`                                                | `docs/assets/watch.svg` shows the current dashboard; regenerate after dashboard or Rich changes. |
-| Dependencies                   | `mise run generate:notices`                                                   | `THIRD_PARTY_NOTICES.md` and the site's license copies match the synced environment.             |
-| Indexing, retrieval or storage | `mise run benchmark` before and after                                         | Comparable timings with valid, complete results.                                                 |
+| Changed area                   | Focused check                                                                   | What to verify                                                                                      |
+| ------------------------------ | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Search                         | `uv run pytest -q tests/test_search.py`                                         | Results and realistic failure cases.                                                                |
+| Retrieval quality              | [Run the retrieval example's test](examples/retrieval/README.md#run-the-test)   | Questions still find the expected source, rank and answer fragment.                                 |
+| Documentation                  | `mise run check:docs` and `mise run check:links`                                | Strict build, rendered anchors and local repository links.                                          |
+| Getting started, first sensor  | `uv run pytest -q tests/test_guides.py`                                         | Commands return the documented replies; the test applies each other block as its prose says.        |
+| Walkthroughs and examples      | `uv run pytest -q tests/test_example_walkthroughs.py tests/test_context_hub.py` | Each README block and the four-tool page run on disposable copies and print the documented results. |
+| Configuration model or reply   | `mise run generate:schema`                                                      | Generated `docs/*.schema.json` match their loaders and replies; test valid and invalid inputs.      |
+| Watch dashboard                | `mise run generate:screenshot`                                                  | `docs/assets/watch.svg` shows the current dashboard; regenerate after dashboard or Rich changes.    |
+| Dependencies                   | `mise run generate:notices`                                                     | `THIRD_PARTY_NOTICES.md` and the site's license copies match the synced environment.                |
+| Indexing, retrieval or storage | `mise run benchmark` before and after                                           | Comparable timings with valid, complete results.                                                    |
 
 For example, if a query finds the wrong project's budget, add that question and both competing project notes to the [retrieval example](examples/retrieval/README.md). Reproduce the miss before changing ranking and rerun its test after the fix; keep the expected answer tied to its source. A passing retrieval case checks that case, not source truth or arbitrary answer quality. Evaluating a real brain requires authorization; work on a copy and report only aggregate results.
 
@@ -51,15 +52,19 @@ Tests belong in `tests/`; runnable brains and their question-to-evidence cases l
 
 For a sensor change, test a valid response and a realistic failure such as an incomplete provider page. Confirm that failure leaves saved evidence intact and diagnostics contain no provider text. Keep the 95% branch-coverage floor and all existing safety checks.
 
-For onboarding or workflow changes, follow the actual commands in a disposable brain with isolated configuration and state: save a decision, search its reason, read its ref, validate and evaluate. Show the expected result beside the example. Keep the README focused on first use, `docs/` on user contracts and `skills/` on agent procedures. Check host discovery separately from copying a skill or installing the package.
+For onboarding or workflow changes, follow the actual commands in a disposable brain with isolated configuration and state: save a decision, search its reason, read its ref, validate and evaluate. Show the expected result beside the example. Keep the README focused on first use, `docs/` on user contracts and `src/bf/skills/` on agent procedures. Check host discovery separately from installing the skills with `bf skills DIR`.
 
-Update the owning docs, skills and examples with public behavior. An adapter change needs a fake-provider test and an entry in `examples/sensors/README.md`. Regenerate the schema when configuration models change and the notices when dependencies change. Record user-visible outcomes under `Unreleased` in `CHANGELOG.md`; change versions and tags only for an authorized release.
+Update the owning docs, skills and examples with public behavior. An adapter change needs a fake-provider test and an entry in `examples/sensors/README.md`. Regenerate the schemas when configuration models or replies change and the notices when dependencies change. Record user-visible outcomes under `Unreleased` in `CHANGELOG.md`; change versions and tags only for an authorized release.
+
+### Keep the contract
+
+`tests/contract/` holds the configuration and reply schemas of the current major release, and `tests/test_contract.py` compares every generated `docs/*.schema.json` with them. A minor release may only add optional fields: removing a field, changing its type, narrowing accepted values or requiring a new configuration key fails the gate. Such a change waits for the next major release, which refreshes `tests/contract/` from `docs/*.schema.json` and lists the manual upgrade steps in the changelog.
 
 ## Write documentation people can follow
 
 Keep tutorials focused on one working result, task guides on a practical goal, concepts on why the model works and reference pages on exact contracts ([Diátaxis](https://diataxis.fr/start-here/)). Put prerequisites before commands and observable results beside them. Label fictional evidence and optional steps; link to the canonical explanation instead of repeating it.
 
-Use descriptive links, one page title, logical heading levels and text alternatives for images ([W3C guidance](https://www.w3.org/WAI/tutorials/page-structure/)). Preserve published documentation-site paths and heading anchors when reorganizing; `tests/test_readme.py` checks the README's deep links. Keep all guides in `zensical.toml`; after layout changes, check narrow screens, keyboard navigation, code copying and search when enabled.
+Use descriptive links, one page title, logical heading levels and text alternatives for images ([W3C guidance](https://www.w3.org/WAI/tutorials/page-structure/)). Preserve published documentation-site paths and heading anchors when reorganizing: redirect a merged page to its new section in `zensical.toml`. `tests/test_readme.py` checks the README's deep links and `tests/test_skills.py` the skills' links. Keep all guides in `zensical.toml`; after layout changes, check narrow screens, keyboard navigation, code copying and search when enabled.
 
 ## Read check output
 

@@ -27,7 +27,7 @@ def refs(reply: dict[str, object], key: str = "items") -> list[str]:
 
 def populate(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 6\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n    refresh: 3600\n"
+        "bf.yaml", b"version: 7\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n    refresh: 3600\n"
     )
     brain.write(
         "projects/fresh.md",
@@ -68,7 +68,8 @@ def test_home_lists_what_needs_attention(brain: Store) -> None:
     fresh = projects["projects/fresh.md"]
     assert "review" not in fresh
     assert fresh["tasks"] == {"open": 1, "done": 1}
-    assert fresh["next"] == "Ship the plan."
+    # The next step keeps its link, resolved to the ref `bf read` opens.
+    assert fresh["next"] == "Ship the [plan](actions/2026-09-24_second/ACTION.md)."
     assert fresh["uri"] == "bf://fixture/projects/fresh.md"
     assert refs(home, "actions") == ["actions/2026-09-24_second/ACTION.md", "actions/2026-09-20_first/ACTION.md"]
     assert refs(home, "changed") == ["projects/fresh.md", "projects/closed.md"]
@@ -164,6 +165,34 @@ def test_period_pages_list_dated_items_and_link_neighbours(brain: Store) -> None
     for invalid in ("2026-13", "2026-02-30", "9999-12"):
         with pytest.raises(Error, match="invalid period"):
             pages.period(invalid, NOW)
+
+
+def test_date_ranges_are_inclusive_local_days_as_pages_and_scopes(brain: Store) -> None:
+    # Before 16.0.0 a range was neither a period nor a scope: a week took one read per day.
+    week = pages.period("2026-09-10..2026-09-14", NOW)
+    assert week == pages.Period(
+        "2026-09-10T00:00:00.000000Z", "2026-09-15T00:00:00.000000Z", "2026-09-05..2026-09-09", "2026-09-15..2026-09-19"
+    )
+    assert pages.period("2026-09-10..2026-09-10", NOW) == pages.Period(
+        "2026-09-10T00:00:00.000000Z", "2026-09-11T00:00:00.000000Z", "2026-09-09..2026-09-09", "2026-09-11..2026-09-11"
+    )
+    reply = read([brain], "2026-08-30..2026-08-31")
+    assert refs(reply) == ["meetings:decision-1", "meetings:lunch"]
+    assert (reply["previous"], reply["next"]) == ("2026-08-28..2026-08-29", "2026-09-01..2026-09-02")
+    assert refs(read([brain], "2026-08-31..2026-09-01")) == ["projects/offline.md", "meetings:decision-1"]
+    day = pages.scope("2026-08-30..2026-08-30")
+    assert refs(search([brain], Query(text="lunch offline", **day))) == ["meetings:lunch"]
+    assert pages.scope("memories/meetings/2026-08-30..2026-08-31") == {
+        "prefix": "memories/meetings",
+        "since": "2026-08-30T00:00:00.000000Z",
+        "until": "2026-09-01T00:00:00.000000Z",
+    }
+    assert refs(read([brain], "memories/meetings/2026-08-30..2026-08-30")) == ["meetings:lunch"]
+    for invalid in ("2026-09-14..2026-09-10", "2026-09-10..2026-02-30", "2026-09-10..9999-12-31"):
+        with pytest.raises(Error, match="invalid period"):
+            pages.period(invalid, NOW)
+    for other in ("2026-09..2026-10", "2026-09-10..", "7d..today"):
+        assert pages.period(other, NOW) is None
 
 
 def test_low_priority_sources_are_counted_but_not_listed_on_period_and_home_pages(brain: Store) -> None:
@@ -264,6 +293,8 @@ def test_note_reads_carry_backlinks_grouped_by_relationship(brain: Store) -> Non
                     "time": "2026-08-31T12:00:00.000000Z",
                     "kind": "record",
                     "source": "meetings",
+                    # A short excerpt says what the linking item holds without reading it.
+                    "excerpt": "The team chose offline retrieval.",
                 }
             ],
         }
@@ -278,7 +309,7 @@ def test_pages_combine_selected_brains_and_count_reads(brain: Store, tmp_path: P
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     team.write("projects/shared.md", b"---\ntype: project\nstatus: stable\nupdated: 2026-09-20\n---\n# Shared\n")
     team.write("projects/cite.md", b"# Cite\n\nSee [offline](bf://fixture/projects/offline.md).\n")
     register(team)
@@ -314,7 +345,7 @@ def test_retrieval_cases_read_pages_and_treat_missing_ones_as_empty(brain: Store
 
     brain.write(
         "evals/pages.yaml",
-        b"version: 5\ncases:\n"
+        b"version: 7\ncases:\n"
         b"- name: home\n  read: ''\n  expect: [projects/offline.md]\n"
         b"- name: august\n  read: 2026-08\n  expect: ['meetings:lunch']\n  forbid: [projects/offline.md]\n"
         b"- name: unknown-source\n  read: memories/unknown\n  empty: true\n",
@@ -325,7 +356,7 @@ def test_retrieval_cases_read_pages_and_treat_missing_ones_as_empty(brain: Store
 def test_records_have_excerpts_without_trust_labels(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n  git:\n    command: [git-cli]\n",
+        b"version: 7\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n  git:\n    command: [git-cli]\n",
     )
     records_file(
         brain,
@@ -358,7 +389,7 @@ def test_tasks_come_from_task_list_items_only() -> None:
         b"# X\n\n- [ ] Open [link](y.md)\n- [X] Done\n- plain item\n\n```\n- [ ] in code\n```\n\n1. [ ] Numbered\n",
     )
     assert parsed.tasks == [
-        Task(False, "Open link", "x", 3),
+        Task(False, "Open [link](projects/y.md)", "x", 3),
         Task(True, "Done", "x", 4),
         Task(False, "Numbered", "x", 11),
     ]
@@ -383,7 +414,7 @@ def test_home_and_review_use_okf_project_status(brain: Store, status: str) -> No
 
 
 def test_period_pages_report_each_problem_and_stale_brain_once(brain: Store) -> None:
-    brain.write("projects/bad.md", b"---\nreview_after: soon\n---\n# Bad\n")
+    brain.write("projects/bad.md", b"---\nstale_after: soon\n---\n# Bad\n")
     for ref in ("2026-08", "memories/meetings", "memories/meetings/2026-08"):
         problems = cast("list[dict[str, object]]", read([brain], ref)["problems"])
         assert [problem["file"] for problem in problems] == ["projects/bad.md"]
@@ -466,7 +497,7 @@ def test_page_summaries_share_the_reply_budget(brain: Store, monkeypatch: pytest
 
 
 def test_missing_pages_are_not_mistaken_for_unreadable_brains(brain: Store) -> None:
-    brain.write("projects/bad.md", b"---\nreview_after: soon\n---\n# Bad\n")
+    brain.write("projects/bad.md", b"---\nstale_after: soon\n---\n# Bad\n")
     for ref in ("memories/gmial", "memories/gmial/2026-09"):
         with pytest.raises(Error, match="not found in the readable evidence") as raised:
             read([brain], ref)
@@ -483,7 +514,7 @@ def test_a_file_in_one_brain_does_not_hide_a_folder_note_in_another(brain: Store
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     team.write("projects/archive/old.md", b"# Old\n\nKiwi evidence.\n")
     brain.write("projects/archive", b"a plain file\n")
     found = search([brain, team], Query(text="kiwi"))
@@ -499,10 +530,10 @@ def test_a_file_in_one_brain_does_not_hide_a_folder_note_in_another(brain: Store
         read([brain, team], "projects/archive/old.md")
 
 
-def test_role_pages_list_every_link_of_one_relationship(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_relation_pages_list_every_link_of_one_relation(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nschema:\n"
+        b"version: 7\nname: fixture\nfields:\n"
         b"  depends-on: {description: Needs it., type: identity, cardinality: many, relation: true}\n"
         b"  owner: {description: Owns it., type: identity, cardinality: many, relation: true}\n",
     )
@@ -528,6 +559,7 @@ def test_role_pages_list_every_link_of_one_relationship(brain: Store, monkeypatc
         "kind": "note",
         "title": "D2",
         "time": "2026-09-03T00:00:00.000000Z",
+        "date": "2026-09-03",
         "type": "concept",
         "excerpt": "Needs it.",
     }
@@ -545,7 +577,7 @@ def test_role_pages_list_every_link_of_one_relationship(brain: Store, monkeypatc
     assert read([brain], "projects/offline.md", rel="owner")["total"] == 0
     assert refs(read([brain], "meetings:decision-1", rel="links")) == ["projects/offline.md"]
     assert refs(read([brain], "repo:example/unowned", rel="links")) == ["mail:u"]
-    with pytest.raises(RelationError, match=r"^undeclared relationship; use links, cites, depends-on, owner$"):
+    with pytest.raises(RelationError, match=r"^undeclared relation; use links, cites, depends-on, owner$"):
         read([brain], "projects/offline.md", rel="author")
     for ref, message in (
         ("projects", "not a page"),
@@ -559,14 +591,14 @@ def test_role_pages_list_every_link_of_one_relationship(brain: Store, monkeypatc
     for ref in ("repo:example/nothing", "projects/absent.md"):
         with pytest.raises(NotFoundError):
             read([brain], ref, rel="links")
-    with pytest.raises(Error, match="page a role with rel"):
+    with pytest.raises(Error, match="page a relation with rel"):
         read([brain], "repo:example/unowned", offset=1)
 
 
 def test_a_read_names_an_undeclared_link_relationship_without_failing(brain: Store) -> None:
     reply = read([brain], "bf://fixture/projects/offline.md?rel=nope")
     assert reply["text"] == read([brain], "projects/offline.md")["text"]
-    assert reply["problems"] == [{"error": "undeclared relationship nope; declare it in bf.yaml schema"}]
+    assert reply["problems"] == [{"error": "undeclared relation nope; declare it in bf.yaml fields"}]
     assert "problems" not in read([brain], "bf://fixture/projects/offline.md")
 
 
@@ -582,8 +614,8 @@ def test_backlink_previews_keep_the_newest_items_and_name_brains_only_when_sever
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
-    brain.write("bf.yaml", f"version: 6\nname: fixture\nbrains:\n  team:\n    path: {root}\n".encode())
+    team.write("bf.yaml", b"version: 7\nname: team\n")
+    brain.write("bf.yaml", f"version: 7\nname: fixture\nbrains:\n  team:\n    path: {root}\n".encode())
     team.write("projects/cite.md", b"---\nupdated: 2026-09-30\n---\n# Cite\n\n[o](bf://fixture/projects/offline.md)\n")
     # A referenced brain is selected: every entry names its brain and address again.
     group = cast("list[dict[str, object]]", read([brain], "projects/offline.md")["backlinks"])[0]
@@ -593,8 +625,10 @@ def test_backlink_previews_keep_the_newest_items_and_name_brains_only_when_sever
         "uri": "bf://team/projects/cite.md",
         "title": "Cite",
         "time": "2026-09-30T00:00:00.000000Z",
+        "date": "2026-09-30",
         "kind": "note",
         "type": "project",
+        "excerpt": "o",
     }
     team.write("projects/offline.md", b"# Team copy\n")
     with pytest.raises(Error, match="several brains"):
@@ -612,7 +646,7 @@ def test_a_broader_role_page_also_lists_its_narrower_roles(brain: Store) -> None
     role = "{description: Took part., type: identity, cardinality: many, relation: true"
     brain.write(
         "bf.yaml",
-        f"version: 6\nname: fixture\nschema:\n  participant: {role}}}\n"
+        f"version: 7\nname: fixture\nfields:\n  participant: {role}}}\n"
         f"  organizer: {role}, broader: participant}}\n  attendee: {role}, broader: participant}}\n".encode(),
     )
     alice = "person:alice"
@@ -641,3 +675,42 @@ def test_a_broader_role_page_also_lists_its_narrower_roles(brain: Store) -> None
         ("organizer", 1),
         ("participant", 1),
     ]
+
+
+def test_backlinks_show_each_source_s_facts_side_by_side(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 7\nname: fixture\nfields:\n"
+        b"  status: {description: Workflow state., type: string, cardinality: optional}\n"
+        b"  labels: {description: Labels., type: string, cardinality: many}\n"
+        b"  mirrors: {description: Same work item., type: identity, cardinality: many, relation: true}\n",
+    )
+    long = "x" * 300
+    records_file(
+        brain,
+        "jira",
+        [Record(id="WEB-7", title="Accessibility review", text="Open.", fields={"status": "In Progress"})],
+    )
+    records_file(
+        brain,
+        "linear",
+        [
+            Record(
+                id="LIN-3",
+                title="Accessibility review",
+                text=long,
+                links=["bf://fixture/jira:WEB-7?rel=mirrors"],
+                fields={"status": "Done", "labels": ["a11y"]},
+            )
+        ],
+    )
+    group = cast("list[dict[str, object]]", read([brain], "jira:WEB-7")["backlinks"])[0]
+    item = cast("list[dict[str, object]]", group["items"])[0]
+    # Only single-value facts appear, and the preview stays short: disagreement is visible in one read.
+    assert (group["relation"], item["fields"]) == ("mirrors", {"status": "Done"})
+    assert len(cast(str, item["excerpt"])) == pages.GLIMPSE
+    found = cast("list[dict[str, object]]", search([brain], Query(text="accessibility"))["items"])
+    assert {entry["ref"]: entry["fields"] for entry in found} == {
+        "jira:WEB-7": {"status": "In Progress"},
+        "linear:LIN-3": {"status": "Done"},
+    }

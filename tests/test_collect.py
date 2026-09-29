@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -22,7 +23,7 @@ from bf import records
 from bf.cli import app
 from bf.collect import Runner, collect, due, run
 from bf.health import source_health
-from bf.history import environment, log_path, state
+from bf.history import LOG_LIMIT, environment, log_path, state
 from bf.models import Error, Program, Sensor, timestamp
 from bf.storage import BusyError, Store, state_store, writer
 from bf.update import update
@@ -31,7 +32,7 @@ from bf.watch import snapshot
 START = "2026-09-01T00:00:00.000000Z"
 END = "2026-09-02T00:00:00.000000Z"
 NOW = datetime(2026, 9, 2, tzinfo=UTC)
-CONFIG = b"""version: 6
+CONFIG = b"""version: 7
 name: fixture
 sensors:
   sample:
@@ -63,11 +64,11 @@ def configured(brain: Store) -> Store:
 def test_collect_dry_run_then_upsert(configured: Store) -> None:
     output = emit({"id": "x", "title": "Decision", "text": "Keep evidence", "time": "2026-09-01T10:00:00Z"})
 
-    def fake(argv: list[str], source: Program, store: Store, log: Path) -> bytes:
+    def fake(argv: list[str], source: Program, store: Store, name: str, stdin: bytes) -> bytes:
         assert argv[1:] == [START, END, str(configured.root), str(Path.home())]
         assert source.refresh == 3600
         assert store.root == configured.root
-        assert log == log_path(configured, "sample")
+        assert (name, stdin) == ("sample", b"")
         return output
 
     preview = collect(configured, "sample", start=START, end=END, runner=fake, dry_run=True)
@@ -123,7 +124,7 @@ def test_invalid_output_writes_nothing_and_is_remembered(
 ) -> None:
     with pytest.raises(Error, match=match) as failure:
         collect(configured, "sample", start=START, end=END, runner=lambda *_: output, dry_run=dry_run)
-    assert str(log_path(configured, "sample")) in str(failure.value)
+    assert log_path("sample") in str(failure.value)
     assert records.files(configured, "sample") == []
     if dry_run:
         # A failed preview saves no run history either, so it cannot make a source failed or due.
@@ -237,26 +238,41 @@ def test_failed_programs_back_off_exponentially_up_to_their_refresh(configured: 
 def test_real_process_boundary(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setenv("LD_PRELOAD", "/bad.so")
-    log = log_path(configured, "sample")
+    log = configured.root / log_path("sample")
     source = Sensor(command=["sh"], timeout=1, max_bytes=128)
-    assert run(["sh", "-c", 'printf "[]"; printf "$LD_PRELOAD note" >&2'], source, configured, log) == b"[]"
-    assert log.read_text() == " note"
+    assert run(["sh", "-c", 'printf "[]"; printf "$LD_PRELOAD note" >&2'], source, configured, "sample") == b"[]"
+    # One entry per run: a heading with the local time, outcome and duration, then the program's stderr.
+    assert re.fullmatch(r"== \S+ exited with status 0 after [0-9.]+s ==\n note\n", log.read_text())
     assert log.stat().st_mode & 0o077 == 0
+    assert log.parent.stat().st_mode & 0o077 == 0
     for script, match in [
         ("printf private-secret >&2; exit 7", "status 7"),
         ("sleep 5", "timed out"),
         ("while :; do printf abc; done", "max_bytes"),
     ]:
         with pytest.raises(Error, match=match) as failure:
-            run(["sh", "-c", script], source, configured, log)
+            run(["sh", "-c", script], source, configured, "sample")
+        # Provider output reaches the private log, never the error.
         assert "private-secret" not in str(failure.value)
-    assert log.read_text() == ""
-    run(["sh", "-c", "head -c 400000 /dev/zero >&2; printf '[]'"], source, configured, log)
-    assert log.stat().st_size == 256 << 10
+    entries = log.read_text().split("== ")[1:]
+    assert [entry.split(" ", 1)[1].split("==")[0].rsplit(" after ", 1)[0] for entry in entries] == [
+        "exited with status 0",
+        "program exited with status 7",
+        "program timed out after 1s",
+        "program output exceeded max_bytes",
+    ]
+    assert "private-secret" in entries[1]
+    run(["sh", "-c", "head -c 400000 /dev/zero >&2; printf '[]'"], source, configured, "sample")
+    # Each entry keeps the last 256 KiB of stderr; the log keeps whole newer entries within 1 MiB.
+    assert log.read_bytes().endswith(b"==\n" + b"\0" * (256 << 10) + b"\n")
+    for _ in range(4):
+        run(["sh", "-c", "head -c 400000 /dev/zero >&2; printf '[]'"], source, configured, "sample")
+    assert log.stat().st_size <= LOG_LIMIT
+    assert log.read_bytes().startswith(b"== ")
     with pytest.raises(Error, match="not on PATH"):
-        run(["no-such-bf-command"], source, configured, log)
+        run(["no-such-bf-command"], source, configured, "sample")
     with pytest.raises(Error, match="bare command"):
-        run(["/bin/sh"], source, configured, log)
+        run(["/bin/sh"], source, configured, "sample")
 
 
 def test_programs_select_the_executing_brain(
@@ -266,7 +282,7 @@ def test_programs_select_the_executing_brain(
     monkeypatch.setenv("BF_BRAIN", str(tmp_path / "other"))
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     source = Sensor(command=["sh"])
-    output = run(["sh", "-c", 'printf "%s" "$BF_BRAIN"'], source, configured, log_path(configured, "sample"))
+    output = run(["sh", "-c", 'printf "%s" "$BF_BRAIN"'], source, configured, "sample")
     assert output == str(configured.root).encode()
 
 
@@ -274,22 +290,22 @@ def test_background_descendants_cannot_hold_a_finished_program(
     configured: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    log = log_path(configured, "sample")
+    log = configured.root / log_path("sample")
     source = Sensor(command=["sh"], timeout=30)
     started = time.monotonic()
     # A helper that inherits only stderr, such as an SSH master, holds diagnostics, not the result.
     script = 'sleep 30 >/dev/null & printf "[]"; printf note >&2'
-    assert run(["sh", "-c", script], source, configured, log) == b"[]"
-    assert log.read_text() == "note"
+    assert run(["sh", "-c", script], source, configured, "sample") == b"[]"
+    assert log.read_text().endswith("==\nnote\n")
     # Output still open after the program exited may be incomplete: fail quickly with the cause.
     with pytest.raises(Error, match="kept its stdout open"):
-        run(["sh", "-c", 'sleep 30 & printf "[]"'], source, configured, log)
+        run(["sh", "-c", 'sleep 30 & printf "[]"'], source, configured, "sample")
     assert time.monotonic() - started < 10
 
 
 def test_brain_collectors_run_from_the_brain_root(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
-    log = log_path(configured, "sample")
+    log = "sample"
     configured.write("sensors/where.sh", b"#!/bin/sh\npwd\n")
     (configured.root / "sensors/where.sh").chmod(0o700)
     assert (
@@ -320,7 +336,7 @@ def test_placeholders_are_expanded_once(configured: Store, monkeypatch: pytest.M
 def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n"
+        b"version: 7\nname: fixture\nsensors:\n"
         b"  a-missing:\n    command: [sensors/missing.py]\n    refresh: 3600\n"
         b'  b-good:\n    command: [echo, "[]"]\n    refresh: 3600\n',
     )
@@ -510,7 +526,7 @@ def test_interpreter_startup_injection_is_removed(
     (configured.root / "bin/tool").chmod(0o700)
     monkeypatch.setenv("PATH", "bin:/usr/bin:/bin")
     source = Sensor(command=["bash"])
-    log = log_path(configured, "sample")
+    log = "sample"
     output = run(
         ["bash", "-c", 'printf "%s|%s" "$PATH" "' + "".join(f"${key}" for key in variables) + '"'],
         source,
@@ -532,7 +548,7 @@ def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_pat
         "bf.yaml",
         json.dumps(
             {
-                "version": 6,
+                "version": 7,
                 "name": "fixture",
                 "sensors": {"sample": {"command": ["sensors/wait.sh", str(marker)]}},
             }

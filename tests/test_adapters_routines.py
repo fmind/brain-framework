@@ -71,7 +71,10 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     assert [(task.done, task.text) for task in parsed.tasks] == [
         (
             False,
-            "Archive draft (draft, edited 2026-09-01, 3 newer linked items). Next: Document the retention policy.",
+            (
+                "[Archive draft](bf://brain/projects/archive.md) (draft, edited 2026-09-01, 3 newer linked items). "
+                "Next: Document the retention policy."
+            ),
         )
     ]
     assert provider.calls("bf") == [

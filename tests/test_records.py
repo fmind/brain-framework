@@ -191,8 +191,8 @@ def test_a_commit_syncs_each_directory_once(brain: Store, monkeypatch: pytest.Mo
     records.upsert(brain, "bulk", [Record(id=str(n), title="Old") for n in range(20)], snapshot=False)
     monkeypatch.setattr(os, "fsync", counted)
     records.upsert(brain, "bulk", [Record(id=str(n), title="New") for n in range(20)], snapshot=False)
-    # One sync per backup and per record file, plus a few directory and manifest syncs, not one per entry.
-    assert calls <= 2 * 20 + 8
+    # One sync per record file, plus a few directory and manifest syncs: backups link the replaced files.
+    assert calls <= 20 + 8
     assert all(records.load(brain, records.path("bulk", str(n))).title == "New" for n in range(20))
 
 
@@ -296,8 +296,14 @@ with writer(store):
     assert child.returncode == 73, child.stderr.decode()
     assert (brain.root / "memories/.pending/manifest.json").is_file()
     interrupted = {name: brain.read(name) for name in brain.files("memories")}
-    with pytest.raises(Error, match="run bf build"):
-        records.find(brain, "meetings", "decision-1")
+    if completed:
+        # A completed manifest leaves only cleanup: reads see the committed records while the journal waits.
+        found = records.find(brain, "meetings", "decision-1")
+        assert found is not None
+        assert found[1].title == "Moved"
+    else:
+        with pytest.raises(Error, match="run bf build"):
+            records.find(brain, "meetings", "decision-1")
     assert {name: brain.read(name) for name in brain.files("memories")} == interrupted
     index.refresh(brain, full=True)
     found = records.find(brain, "meetings", "decision-1")
@@ -378,8 +384,15 @@ def test_failed_rollback_keeps_originals_for_explicit_build(brain: Store, monkey
         if name == DECISION:
             changed = True
 
+    def unrestorable(self: Store, name: str, target: str) -> None:
+        if target == DECISION:
+            raise OSError(errno.ENOSPC, "synthetic full disk during rollback")
+        link(self, name, target)
+
+    link = Store.link
     with monkeypatch.context() as patch:
         patch.setattr(Store, "write", exhausted)
+        patch.setattr(Store, "link", unrestorable)
         with pytest.raises(Error, match="needs recovery"):
             records.upsert(
                 brain,

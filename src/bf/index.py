@@ -15,20 +15,38 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import cast
 
+from pydantic import JsonValue
+
 from bf import links as bf_links
 from bf import ontology, records
 from bf.config import load
 from bf.markdown import LEAD, authored, editor_lock, entry_note, note
-from bf.models import AUTHORED, IDENTITY, LINKS, MAX_FILES, MAX_NOTE, Error, Query, Record, digest, encode, fold, moment
+from bf.models import (
+    AUTHORED,
+    IDENTITY,
+    LINKS,
+    MAX_FILES,
+    MAX_NOTE,
+    Config,
+    Error,
+    Query,
+    Record,
+    digest,
+    encode,
+    fold,
+    moment,
+)
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, writer
 
-SCHEMA = 27
+SCHEMA = 30
 CACHE = ".bf/index.sqlite"
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
 _SIDECARS = ("", "-wal", "-shm", "-journal")
 # Seconds a finished build waits for connections to the generation it replaces to close.
 _PUBLISH = 30
+# Seconds a read that found a damaged generation waits for other connections to it before leaving it to the next one.
+_DISCARD = 5
 # `bf status` warns about a scanned tree once it holds more entries than this.
 CROWDED = MAX_FILES * 4 // 5
 # `file` binds a generation to the database file bf created: a cache copied, cloned or extracted from
@@ -45,13 +63,15 @@ CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT N
                    status TEXT NOT NULL, lead TEXT NOT NULL, url TEXT NOT NULL,
                    updated TEXT NOT NULL, observed TEXT NOT NULL, partial INTEGER NOT NULL,
                    tasks_open INTEGER NOT NULL, tasks_done INTEGER NOT NULL, next TEXT NOT NULL,
-                   weight INTEGER NOT NULL, review_after INTEGER NOT NULL, review_due TEXT NOT NULL);
+                   weight INTEGER NOT NULL, stale_after TEXT NOT NULL,
+                   fields TEXT NOT NULL);
 CREATE TABLE tasks(item INTEGER NOT NULL, line INTEGER NOT NULL, fragment TEXT NOT NULL,
                    text TEXT NOT NULL, done INTEGER NOT NULL, PRIMARY KEY(item,line)) WITHOUT ROWID;
 -- `search` holds folded words; `original` keeps a passage's text only when folding changed it, for excerpts.
+-- `names` holds identity words; `context` the headings a passage ranks under: a note's tags, a section's parents.
 CREATE TABLE passages(id INTEGER PRIMARY KEY, item INTEGER NOT NULL, fragment TEXT NOT NULL, title TEXT NOT NULL,
                       original TEXT NOT NULL);
-CREATE VIRTUAL TABLE search USING fts5(title, text, names, tokenize='porter unicode61 remove_diacritics 2');
+CREATE VIRTUAL TABLE search USING fts5(title, text, names, context, tokenize='porter unicode61 remove_diacritics 2');
 CREATE TABLE names(name TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY(name, item)) WITHOUT ROWID;
 CREATE TABLE links(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
 CREATE TABLE tags(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
@@ -76,20 +96,30 @@ _INDEXES = (
 # Only English and French function words are dropped: a subject such as "resume" or "active" stays literal.
 _STOP = frozenset(
     """
-    a an and are as at be by can could did do does for from how i in is it me my of on or please that the their
-    this to was we were what when where which who why with would you your
-    au aux avec ce ces cet cette comment d dans de des du elle elles en est et eux il ils je l la le les leur leurs
-    lui mais mes mon nos notre nous où par pour pourquoi qu que quel quelle quelles quels qui sa se ses son sur tes
-    toi ton tu un une vos votre vous à
+    a about am an and any are as at be been being but by can could did do does for from had has have he her him his how
+    i if in into is it its me might must my not of on or our please shall she should so than that the their them
+    there these they this those to us was we were what when where which who whom whose why will with would yet you
+    your
+    ai au aux avec c ce ces cet cette comment d dans de des donc du elle elles en est et eu eux il ils j je l la le les
+    leur leurs lui m mais me mes moi mon n ne nos notre nous on ont ou où par pas pour pourquoi qu quand que quel
+    quelle quelles quels qui quoi s sa se ses si son sont sur t te tes toi ton tu un une vos votre vous y à été être
     """.split()  # noqa: SIM905 - one readable word list, grouped by language
 )
 _IDENTITY = re.compile(IDENTITY)
-# A word query matches any of its first 32 distinct words; later words are ignored.
+# A quoted phrase, or a word with an optional trailing `*` for a prefix; other characters only separate terms.
+_TERM = re.compile(r'["“”]([^"“”]*)["“”]|([^\W_]+)(\*?)')
+# A word query matches any of its first 32 distinct terms; later terms are ignored.
 WORDS = 32
 # A lexical result names at most this many other matching records that share its URL.
 ALSO = 5
+# A lexical result names at most this many other matching sections of its note.
+SECTIONS = 3
+# A passage matching all of a query's several terms gains this fraction of its score; one matching a single term, none.
+COVERAGE = 0.2
 # Result and listing titles are previews of at most this many characters; exact reads keep the whole title.
 TITLE = 200
+# A listed field value longer than this stays in the exact read: listings show short facts only.
+FACT = 200
 # SQL twins of markdown.action_note and markdown.entry_note over `items i`, for page builders.
 ACTION = (
     "i.kind='note' AND substr(i.path,1,8)='actions/' AND substr(i.path,-10)='/ACTION.md' "
@@ -182,7 +212,7 @@ def _open(store: Store) -> sqlite3.Connection | None:
                 "SELECT path,size,mtime,ctime,inode,error FROM files LIMIT 0",
                 (
                     "SELECT ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-                    "tasks_open,tasks_done,next,weight,review_after,review_due FROM items LIMIT 0"
+                    "tasks_open,tasks_done,next,weight,stale_after,fields FROM items LIMIT 0"
                 ),
                 "SELECT id,item,fragment,title,original FROM passages LIMIT 0",
                 "SELECT item,line,fragment,text,done FROM tasks LIMIT 0",
@@ -190,7 +220,7 @@ def _open(store: Store) -> sqlite3.Connection | None:
                 "SELECT item,target FROM links LIMIT 0",
                 "SELECT item,target FROM tags LIMIT 0",
                 "SELECT item,subject,relation,target,origin FROM edges LIMIT 0",
-                "SELECT title,text,names FROM search LIMIT 0",
+                "SELECT title,text,names,context FROM search LIMIT 0",
             ):
                 connection.execute(statement)
             if tuple(connection.execute("SELECT signature,file FROM ontology").fetchone() or ()) == expected:
@@ -214,7 +244,7 @@ def _signature(store: Store) -> str:
     """The configuration a generation's rows depend on; documentation, such as a field's description, is not."""
     config = load(store)
     schema = {n: f.model_dump(exclude={"description", "examples"}) for n, f in config.ontology.items()}
-    return digest(encode({"name": config.name, "schema": schema}))
+    return digest(encode({"name": config.name, "fields": schema}))
 
 
 def _file(path: Path) -> str:
@@ -272,7 +302,7 @@ class _Rows:
         ).fetchone()
         self.items: list[dict[str, str | int]] = []
         self.passages: list[tuple[int, int, str, str, str]] = []
-        self.search: list[tuple[int, str, str, str]] = []
+        self.search: list[tuple[int, str, str, str, str]] = []
         self.names: list[tuple[str, int]] = []
         self.links: list[tuple[int, str]] = []
         self.edges: dict[tuple[int, str, str, str, str], None] = {}
@@ -280,7 +310,7 @@ class _Rows:
     def add(
         self,
         values: dict[str, str | int],
-        passages: list[tuple[str, str, str, str, str]],
+        passages: list[tuple[str, str, str, str, str, str]],
         names: list[str],
         links: list[str],
         edges: Sequence[bf_links.Claim] = (),
@@ -294,16 +324,16 @@ class _Rows:
                 "tasks_done": 0,
                 "next": "",
                 "weight": 1,
-                "review_after": 0,
-                "review_due": "",
+                "stale_after": "",
+                "fields": "",
                 **values,
             }
         )
         # `heading` is what ranks; `title` is what readers see, such as "Note — Section".
-        for fragment, title, heading, text, extra in passages:
+        for fragment, title, heading, text, identity, context in passages:
             folded = fold(text)
             self.passages.append((self.passage, item, fragment, title, "" if folded == text else text))
-            self.search.append((self.passage, fold(heading), folded, fold(extra)))
+            self.search.append((self.passage, fold(heading), folded, fold(identity), fold(context)))
             self.passage += 1
         self.names.extend((name, item) for name in names)
         self.links.extend((item, link) for link in links)
@@ -313,15 +343,33 @@ class _Rows:
     def write(self, connection: sqlite3.Connection) -> None:
         connection.executemany(
             "INSERT INTO items(id,ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-            "tasks_open,tasks_done,next,weight,review_after,review_due) VALUES(:id,:ref,:path,:kind,:source,:title,:time,:type,:status,"
-            ":lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,:review_after,:review_due)",
+            "tasks_open,tasks_done,next,weight,stale_after,fields) VALUES(:id,:ref,:path,:kind,:source,:title,"
+            ":time,:type,:status,:lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,"
+            ":stale_after,:fields)",
             self.items,
         )
         connection.executemany("INSERT INTO passages(id,item,fragment,title,original) VALUES(?,?,?,?,?)", self.passages)
-        connection.executemany("INSERT INTO search(rowid,title,text,names) VALUES(?,?,?,?)", self.search)
+        connection.executemany("INSERT INTO search(rowid,title,text,names,context) VALUES(?,?,?,?,?)", self.search)
         connection.executemany("INSERT OR IGNORE INTO names VALUES(?,?)", self.names)
         connection.executemany("INSERT OR IGNORE INTO links VALUES(?,?)", self.links)
         connection.executemany("INSERT INTO edges VALUES(?,?,?,?,?)", self.edges)
+
+
+def _facts(values: Mapping[str, JsonValue], config: Config) -> str:
+    """Declared single-value fields, such as a status or an assignee, each at most FACT characters.
+
+    Listings show them beside each item, so sources that disagree appear side by side without another read.
+    """
+    facts = {}
+    for name, value in sorted(values.items()):
+        definition = config.ontology.get(name)
+        if definition is None or definition.cardinality == "many":
+            continue
+        with suppress(ValueError):
+            normalized = definition.normalize(value)
+            if isinstance(normalized, str | int | float | bool) and len(str(normalized)) <= FACT:
+                facts[name] = normalized
+    return json.dumps(facts, ensure_ascii=False, sort_keys=True) if facts else ""
 
 
 def _index(connection: sqlite3.Connection, store: Store, path: str) -> None:
@@ -339,7 +387,11 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> None:
         projection = note(path, store.read(path, MAX_NOTE))
         knowledge = projection.knowledge
         edges = ontology.note_claims(projection, config)
-        metadata = " ".join([knowledge.type, *knowledge.tags, *knowledge.aliases, *projection.links])
+        # Declared field values are searchable words, like a record's.
+        values = [
+            str(v) for value in knowledge.fields.values() for v in (value if isinstance(value, list) else [value])
+        ]
+        metadata = " ".join([knowledge.type, *knowledge.aliases, *projection.links, *values])
         rows = _Rows(connection)
         rows.add(
             {
@@ -360,12 +412,19 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> None:
                 "tasks_open": sum(not task.done for task in projection.tasks),
                 "tasks_done": sum(task.done for task in projection.tasks),
                 "next": next((task.text for task in projection.tasks if not task.done), ""),
-                "review_after": knowledge.review_after or 0,
-                "review_due": knowledge.review_due,
+                "stale_after": knowledge.stale_after,
+                "fields": _facts(knowledge.fields, config),
             },
-            # A section's `names` hold only its note's title: _lexical ranks them like a heading.
+            # The whole note ranks under its tags and each section under its parents, like headings (see _lexical).
             [
-                (p.fragment, p.title, p.heading, p.text, projection.title if p.fragment else metadata)
+                (
+                    p.fragment,
+                    p.title,
+                    p.heading,
+                    p.text,
+                    "" if p.fragment else metadata,
+                    " ".join(p.parents or knowledge.tags),
+                )
                 for p in projection.passages
             ],
             sorted(
@@ -411,8 +470,9 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> None:
             "updated": record.updated,
             "observed": record.observed,
             "partial": int(record.attributes.get("partial") is True),
+            "fields": _facts(record.fields, config),
         },
-        [("", record.title, record.title, record.text, identity)],
+        [("", record.title, record.title, record.text, identity, "")],
         sorted({ontology.qualify(config, ref), *(bf_links.target(v) for v in record.aliases)}),
         sorted({*(bf_links.target(v) for v in record.links), *(e.target for e in edges)}),
         edges,
@@ -438,11 +498,53 @@ def refresh(store: Store, *, full: bool = False, wait: float = 30, recover: bool
 
     `full`, or a cache that is missing or incompatible, builds a new generation. `full` and `recover` first roll
     back an interrupted record transaction, as build and update do; reads refuse to apply its journal instead.
+    `recover` also checks every page of the live generation: a damaged one is discarded and built again.
     """
     try:
+        try:
+            return _refresh(store, full=full, wait=wait, recover=full or recover)
+        except sqlite3.DatabaseError as error:
+            if not _damaged(error):
+                raise
+        # SQLite never repairs a damaged file in place, and the cache holds nothing the brain's files do not.
+        _discard(store, wait)
         return _refresh(store, full=full, wait=wait, recover=full or recover)
     except sqlite3.DatabaseError as error:
         raise Error("could not refresh the search cache; check free space and run bf build") from error
+
+
+class _DamagedError(sqlite3.DatabaseError):
+    """A page check found damage that no query has read yet."""
+
+
+def _damaged(error: sqlite3.DatabaseError) -> bool:
+    """Whether SQLite found the cache file damaged or not a database, rather than busy, full or unreadable."""
+    code = getattr(error, "sqlite_errorcode", None)
+    # Extended codes, such as SQLITE_CORRUPT_VTAB for FTS5 damage, keep the primary code in their low byte.
+    return isinstance(error, _DamagedError) or (
+        isinstance(code, int) and code & 0xFF in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}
+    )
+
+
+def _discard(store: Store, wait: float) -> None:
+    """Delete a damaged generation so the next freshness check builds another, once its connections close.
+
+    Only a generation whose own page check fails goes: the error may have come from another brain's cache in the
+    same reply. A build in progress replaces it anyway; a busy writer or reader leaves it to the next one to fail.
+    """
+    with (
+        suppress(BusyError),
+        building(store, 0),
+        writer(store, wait),
+        generation(store, shared=False, wait=wait),
+    ):
+        connection = _open(store)
+        if connection is not None:
+            # No other connection can be open here: any database error means this file cannot serve.
+            with closing(connection), suppress(sqlite3.DatabaseError):
+                if connection.execute("PRAGMA quick_check(1)").fetchone()[0] == "ok":
+                    return
+        _remove(store, CACHE)
 
 
 def _refresh(store: Store, *, full: bool, wait: float, recover: bool) -> dict[str, object]:
@@ -469,6 +571,9 @@ def _incremental(store: Store, *, wait: float, recover: bool) -> dict[str, objec
         if connection is None:
             return None
         with closing(connection):
+            # Refreshes read only the pages of changed files: damage elsewhere would fail every later search.
+            if recover and connection.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok":
+                raise _DamagedError("the search cache is damaged")
             return _fill(store, connection, new=False)
 
 
@@ -569,7 +674,7 @@ def _fill(store: Store, connection: sqlite3.Connection, *, new: bool) -> dict[st
 
 
 def fresh(store: Store) -> str:
-    """Refresh a stale cache, or keep serving it as `stale` while another writer holds the brain.
+    """Refresh a changed cache, or keep serving it as `busy` while another writer or build holds the brain.
 
     Never call it while holding the generation lock: its refresh may publish a rebuilt generation.
     """
@@ -590,12 +695,17 @@ def fresh(store: Store) -> str:
                     connection.close()
     except BusyError:
         if connection is not None:
-            return "stale"
+            return "busy"
+    except sqlite3.DatabaseError as error:
+        if not _damaged(error):
+            raise
+        # Nothing to serve: the refresh below discards the damaged generation and builds another.
+        connection = None
     try:
         # Without any usable generation there is nothing to serve, so wait for the other writer or build.
         refresh(store, wait=0 if connection is not None else 120)
     except BusyError:
-        return "stale"
+        return "busy"
     return "ready"
 
 
@@ -624,29 +734,40 @@ def database(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
             state = fresh(store)
             if checked is not None:
                 checked[store.root] = state
-        with generation(store, shared=True, wait=_PUBLISH):
-            connection = _open(store)
-            if connection is None:
-                continue
-            with closing(connection):
-                connection.execute("PRAGMA query_only=ON")
-                # Counts, rows, snippets and claims must see one generation even while a WAL writer
-                # commits between their queries. Closing the connection releases this read snapshot.
-                connection.execute("BEGIN")
-                yield connection, state
-            return
+        try:
+            with generation(store, shared=True, wait=_PUBLISH):
+                connection = _open(store)
+                if connection is None:
+                    continue
+                with closing(connection):
+                    connection.execute("PRAGMA query_only=ON")
+                    # Counts, rows, snippets and claims must see one generation even while a WAL writer
+                    # commits between their queries. Closing the connection releases this read snapshot.
+                    connection.execute("BEGIN")
+                    yield connection, state
+        except Exception as error:
+            # This reply fails; without the damaged generation, the next freshness check builds another. Callers
+            # may already have named the cache in an Error raised from the database error.
+            cause = error if isinstance(error, sqlite3.DatabaseError) else error.__cause__
+            if isinstance(cause, sqlite3.DatabaseError) and _damaged(cause):
+                _discard(store, _DISCARD)
+            raise
+        return
     raise Error("the search cache is unavailable; run bf build")
 
 
 def terms(text: str) -> list[str]:
-    """Distinct query words in the indexed form; function words drop unless they are the whole query.
+    """Distinct query terms in the indexed form: words, `word*` prefixes and phrases as space-separated words.
 
-    FTS5 folds case itself. Python's casefold would turn ß into ss, a spelling the index never holds.
+    Function words drop unless they are the whole query; a phrase keeps its own. FTS5 folds case itself.
+    Python's casefold would turn ß into ss, a spelling the index never holds.
     """
-    words: dict[str, str] = {}
-    for word in re.findall(r"[^\W_]+", fold(text)):
-        words.setdefault(word.lower(), word)
-    return ([word for key, word in words.items() if key not in _STOP] or list(words.values()))[:WORDS]
+    found: dict[str, str] = {}
+    for match in _TERM.finditer(fold(text)):
+        term = match[2] + match[3] if match[2] else " ".join(re.findall(r"[^\W_]+", match[1]))
+        if term:
+            found.setdefault(term.lower(), term)
+    return ([term for key, term in found.items() if key not in _STOP] or list(found.values()))[:WORDS]
 
 
 def identity(text: str) -> bool:
@@ -665,6 +786,8 @@ def _note_time(value: str) -> str:
 
 # Fixed SQL expressions over `items i`, shared with page builders: event time and last modification.
 TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE i.time END"
+# A note's date as written: replies state it instead of the local midnight that orders it.
+DATE = "CASE WHEN i.kind='note' THEN substr(i.time,1,10) ELSE '' END"
 UPDATED = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i.updated,''),i.time) END"
 # Event time within [:since, :until), both given. Records compare their stored instants as a range on
 # items(kind,time); only the few notes resolve their dates one by one.
@@ -678,7 +801,10 @@ MODIFIED = (
     "AND coalesce(nullif(i.updated,''),i.time)<:until) "
     "OR (i.kind='note' AND i.time!='' AND note_time(i.time)>=:since AND note_time(i.time)<:until))"
 )
-_FIELDS = f"i.ref,i.kind,i.source,({TIME}) AS time,i.type,i.status,i.url,i.updated,i.observed,i.partial"
+_FIELDS = (
+    f"i.ref,i.kind,i.source,({TIME}) AS time,({DATE}) AS date,i.type,i.status,i.url,i.updated,i.observed,i.partial,"
+    "i.fields"
+)
 _ROW = f"{_FIELDS},'' AS fragment,i.title,i.lead AS excerpt,i.tasks_open,i.tasks_done,i.next"
 # An item links to a target when it names it exactly, or names a section of a target note.
 # Two index lookups: exact targets, then the sections of targets. One OR across both would scan every link,
@@ -710,48 +836,78 @@ def _parameters(targets: set[str]) -> dict[str, object]:
     return {"targets": json.dumps(sorted(targets)), "sections": json.dumps(sections(targets))}
 
 
+def _string(term: str) -> str:
+    """One quoted FTS5 string per term, so no query text is FTS5 syntax; only a prefix adds its `*` outside."""
+    words = term.removesuffix("*")
+    return '"' + words.replace('"', '""') + '"' + ("*" if words != term else "")
+
+
 def _match(text: str) -> str:
-    return " OR ".join('"' + word.replace('"', '""') + '"' for word in terms(text))
+    return " OR ".join(map(_string, terms(text)))
+
+
+def unmatched(connection: sqlite3.Connection, text: str) -> list[str]:
+    """The query's terms that match nothing in this brain, whatever the scope; a phrase is shown quoted."""
+    return [
+        f'"{term}"' if " " in term else term
+        for term in terms(text)
+        if connection.execute("SELECT 1 FROM search WHERE search MATCH ? LIMIT 1", (_string(term),)).fetchone() is None
+    ]
 
 
 def _lexical(connection: sqlite3.Connection, params: dict[str, object]) -> Iterator[dict[str, object]]:
-    """One ranked any-word query: BM25 adds the weight of each matched term, so fuller matches rank higher.
+    """One ranked any-term query: BM25 adds the weight of each matched term, so fuller matches rank higher.
+
+    `hits` counts the distinct `:terms` each passage matches, when there are several: matching them all adds
+    COVERAGE to its score. That tips near ties; a long record holding every word still ranks below a note whose
+    headings hold most of them.
 
     Every match is ranked on narrow rows; only the returned items read their display fields. Each row
     names its best passage: snippets cost far more than ranking, so only a reply's items get an excerpt.
 
-    A section's `names` column holds only its note's title (see _index). Weighted like a heading, "Atlas" and
-    "Next actions" outrank another note's "Next actions" that merely mentions Atlas in its text. A section
-    matching through that inherited title alone repeats the whole note, which answers instead.
+    `context` ranks like a heading: a note's tags, and a section's note title and enclosing headings (see _index).
+    "Atlas" and "Next actions" outrank another note's "Next actions" that merely mentions Atlas in its text. A
+    section matching through its context alone repeats its parent, which answers instead. Equal scores list the
+    newest item first, then by ref.
 
     One window keeps each note's best passage and, for each URL, the records of its best-ranked record's source,
     before the window is cut: a record has one passage and a note no URL, and an item number never equals a URL
     string. Another source's record of that URL, such as a catalog entry for a collected file, becomes the kept
-    record's `also`; one source's records stay distinct, such as several highlights of one document. A ROWS
-    frame spares first_value the default frame's scan of tied rows.
+    record's `also`; one source's records stay distinct, such as several highlights of one document. A note's
+    next-best sections become its `sections`. A ROWS frame spares first_value the default frame's scan of tied rows.
     """
     rows = connection.execute(
-        f"""WITH matches AS MATERIALIZED (
+        f"""WITH hits AS MATERIALIZED (
+             SELECT s.rowid AS passage,count(*) AS n
+             FROM json_each(:terms) t CROSS JOIN search s ON s.search MATCH t.value GROUP BY s.rowid),
+           matches AS MATERIALIZED (
              SELECT p.item,p.id AS passage,p.fragment,i.ref,i.url,i.source,i.status='deprecated' AS closed,
-                    -(CASE WHEN p.fragment='' THEN bm25(search,10.0,1.0,0.5) ELSE bm25(search,10.0,1.0,10.0) END)
-                    *i.weight*(CASE WHEN i.source IN (SELECT value FROM json_each(:low)) THEN 0.5 ELSE 1.0 END) AS score
+                    ({TIME}) AS time,-bm25(search,10.0,1.0,0.5,10.0)*i.weight
+                    *(CASE WHEN i.source IN (SELECT value FROM json_each(:low)) THEN 0.5 ELSE 1.0 END)
+                    *(1+{COVERAGE}*(coalesce(h.n,1)-1)/max(json_array_length(:terms)-1,1)) AS score
              FROM search JOIN passages p ON p.id=search.rowid JOIN items i ON i.id=p.item
-             WHERE search MATCH :match AND {_FILTERS} AND (p.fragment='' OR bm25(search,10.0,1.0,0.0)<0)),
+             LEFT JOIN hits h ON h.passage=p.id
+             WHERE search MATCH :match AND {_FILTERS} AND (p.fragment='' OR bm25(search,10.0,1.0,0.0,0.0)<0)),
            ranked AS MATERIALIZED (
              SELECT *,row_number() OVER copy AS position,first_value(source) OVER copy AS lead FROM matches
              WINDOW copy AS (PARTITION BY CASE WHEN url='' THEN item ELSE url END
-                             ORDER BY closed,score DESC,fragment,ref ROWS UNBOUNDED PRECEDING)),
+                             ORDER BY closed,score DESC,time DESC,fragment,ref ROWS UNBOUNDED PRECEDING)),
            top AS (SELECT * FROM ranked WHERE position=1 OR (url!='' AND source=lead)
-                   ORDER BY closed,score DESC,ref LIMIT :limit),
+                   ORDER BY closed,score DESC,time DESC,ref LIMIT :limit),
            copies AS (
              SELECT url,json_group_array(ref) AS refs
              FROM (SELECT url,ref,row_number() OVER (PARTITION BY url ORDER BY ref) AS n FROM ranked
                    WHERE source!=lead AND url IN (SELECT url FROM top WHERE position=1 AND url!=''))
-             WHERE n<={ALSO} GROUP BY url)
-           SELECT {_FIELDS},t.fragment,p.title,t.passage AS _passage,c.refs AS also FROM top t
+             WHERE n<={ALSO} GROUP BY url),
+           others AS (
+             SELECT item,json_group_array(json_array(position,fragment)) AS fragments
+             FROM (SELECT item,position,fragment,row_number() OVER (PARTITION BY item ORDER BY position) AS n
+                   FROM ranked WHERE position>1 AND fragment!='' AND item IN (SELECT item FROM top WHERE url=''))
+             WHERE n<={SECTIONS} GROUP BY item)
+           SELECT {_FIELDS},t.fragment,p.title,t.passage AS _passage,c.refs AS also,o.fragments AS sections FROM top t
            JOIN items i ON i.id=t.item JOIN passages p ON p.id=t.passage
-           LEFT JOIN copies c ON c.url=t.url AND t.position=1
-           ORDER BY t.closed,t.score DESC,t.ref""",  # noqa: S608 - fixed SQL
+           LEFT JOIN copies c ON c.url=t.url AND t.position=1 LEFT JOIN others o ON o.item=t.item
+           ORDER BY t.closed,t.score DESC,t.time DESC,t.ref""",  # noqa: S608 - fixed SQL
         params,
     )
     return (dict(row) for row in rows)
@@ -762,15 +918,19 @@ _ELLIPSIS = " … "
 
 
 def excerpt(connection: sqlite3.Connection, text: str, passage: int) -> str:
-    """The query's words in context within one ranked passage, as a one-line preview in the evidence's characters."""
+    """The query's words in context within one ranked passage, as a one-line preview in the evidence's characters.
+
+    A whole note without introduction text, such as one matching by its title, previews its lead instead.
+    """
     row = connection.execute(
-        "SELECT snippet(search,1,'','',?,48),p.original FROM search JOIN passages p ON p.id=search.rowid "
+        "SELECT snippet(search,1,'','',?,48),p.original,CASE WHEN p.fragment='' THEN i.lead ELSE '' END "
+        "FROM search JOIN passages p ON p.id=search.rowid JOIN items i ON i.id=p.item "
         "WHERE search MATCH ? AND search.rowid=?",
         (_ELLIPSIS, _match(text), passage),
     ).fetchone()
     if row is None:
         return ""
-    return re.sub(r"\s+", " ", _verbatim(row[0], row[1]) if row[1] else row[0]).strip()
+    return re.sub(r"\s+", " ", _verbatim(row[0], row[1]) if row[1] else row[0]).strip() or row[2]
 
 
 def _verbatim(snippet: str, original: str) -> str:
@@ -849,8 +1009,9 @@ def search(
     """An exact identity or tag returns its owners, then what links to it; other text ranks lexically, within the scope.
 
     `limit` bounds this brain's rows, such as enough to fill a continued multi-brain window; -1 is unbounded.
-    Lexical rows name their `_passage` for `excerpt`, and `also` other matching records of their URL; records
-    of `low` sources rank at half weight there. Identity rows carry their owner `_rank`.
+    Lexical rows name their `_passage` for `excerpt`, `also` other matching records of their URL and `sections`
+    other matching sections of their note; records of `low` sources rank at half weight there. Identity rows carry
+    their owner `_rank`.
     """
     text = query.text.strip()
     if bf_links.tag(text) is not None:
@@ -866,10 +1027,26 @@ def search(
     }
     if exact:
         return ({**_clean(dict(row)), "_rank": row["score"]} for row in _identity(connection, params))
-    if not terms(text):
+    strings = [_string(term) for term in terms(text)]
+    if not strings:
         return iter(())
-    rows = _lexical(connection, {**params, "match": _match(text), "low": json.dumps(sorted(low))})
-    return (_clean({**row, "also": sorted(json.loads(str(row["also"]))) if row["also"] else None}) for row in rows)
+    # One term has nothing to count: its query need not run twice.
+    counted = json.dumps(strings if len(strings) > 1 else [])
+    values = {**params, "match": " OR ".join(strings), "terms": counted, "low": json.dumps(sorted(low))}
+    rows = _lexical(connection, values)
+    return (
+        _clean(
+            {
+                **row,
+                "also": sorted(json.loads(str(row["also"]))) if row["also"] else None,
+                # Best first: each entry pairs a section's position within its note with its fragment.
+                "sections": [f"{row['ref']}#{f}" for _, f in sorted(json.loads(str(row["sections"])))]
+                if row["sections"]
+                else None,
+            }
+        )
+        for row in rows
+    )
 
 
 def listing(
@@ -911,7 +1088,7 @@ _ROLE_ROWS = f"""{_INCOMING} SELECT {_ROW},k.relation FROM linked k JOIN items i
 def incoming(
     connection: sqlite3.Connection, targets: set[str], *, exclude: str = "", limit: int = 20
 ) -> list[dict[str, object]]:
-    """Items linking to any target, grouped by explicit relationship; links without a role come last as LINKS."""
+    """Items linking to any target, grouped by explicit relation; links without one come last as LINKS."""
     values = {**_parameters(targets), "exclude": exclude, "limit": limit}
     groups = []
     for relation, total in connection.execute(_GROUPS, values).fetchall():
@@ -923,10 +1100,10 @@ def incoming(
 def linking(
     connection: sqlite3.Connection, targets: set[str], relations: list[str], *, exclude: str = ""
 ) -> tuple[Iterator[dict[str, object]], int]:
-    """Stream the items linking to any target through these relationships, newest first, with their total.
+    """Stream the items linking to any target through these relations, newest first, with their total.
 
-    Each row names its `relation`, LINKS for an untyped link; an item linking through two of the relationships
-    appears once per relationship.
+    Each row names its `relation`, LINKS for an untyped link; an item linking through two of the relations
+    appears once per relation.
     """
     values = {
         **_parameters(targets),
@@ -974,6 +1151,8 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
         row["partial"] = True
     else:
         row.pop("partial", None)
+    if isinstance(facts := row.get("fields"), str) and facts:
+        row["fields"] = json.loads(facts)
     if row["kind"] == "note":
         row.pop("source", None)
         row.pop("updated", None)
@@ -1030,16 +1209,57 @@ def capacity(store: Store) -> list[dict[str, object]]:
 
 
 def status(store: Store) -> dict[str, object]:
-    """Cache state, note and record counts, skipped files, and trees nearing the scan limit."""
-    with database(store) as (connection, state):
+    """Cache state, note and record counts, bytes per source, skipped files, and trees nearing the scan limit.
+
+    An interrupted record transaction keeps the cache from refreshing until a writer recovers it: status then
+    describes the last generation as `stale`, or an empty `missing` one, instead of failing.
+    """
+    pending = _abandoned(store)
+    with _last(store) if pending else database(store) as (connection, state):
         counts = sources(connection)
         notes = connection.execute("SELECT count(*) FROM items WHERE kind='note'").fetchone()[0]
         skipped = problems(connection)
+        # The sizes the last refresh fingerprinted: bytes on disk below each source, invalid files included.
+        sizes = dict(
+            connection.execute(
+                "SELECT substr(path,10,instr(substr(path,10),'/')-1),sum(size) FROM files "
+                "WHERE path GLOB 'memories/?*/*' GROUP BY 1"
+            ).fetchall()
+        )
+    for source, entry in counts.items():
+        entry["bytes"] = sizes.get(source, 0)
+    if pending:
+        issue = "memories/.pending holds an interrupted record transaction; run bf update or bf build to recover it"
+        skipped.insert(0, {"error": issue})
     crowded = capacity(store)
     return {
         "cache": state,
+        **({"pending_transaction": True} if pending else {}),
         "notes": notes,
         "sources": counts,
         "problems": skipped,
         **({"warnings": crowded} if crowded else {}),
     }
+
+
+def _abandoned(store: Store) -> bool:
+    """Whether an interrupted record transaction waits for recovery; a live writer's own journal does not."""
+    try:
+        with reader(store, wait=0):
+            return records.interrupted(store)
+    except BusyError:
+        return False
+
+
+@contextmanager
+def _last(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
+    """The last generation as it is, never refreshed, since that would index half-changed records."""
+    _path(store)
+    with generation(store, shared=True, wait=_PUBLISH):
+        connection, state = _open(store), "stale"
+        if connection is None:
+            connection, state = sqlite3.connect(":memory:"), "missing"
+            connection.row_factory = sqlite3.Row
+            connection.executescript(_DDL)
+        with closing(connection):
+            yield connection, state

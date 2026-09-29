@@ -37,9 +37,10 @@ def test_tags_distinguish_membership_from_mentions_and_links(brain: Store) -> No
         assert relations[0]["relation"] == "tagged-with"
     assert validate(brain)["valid"]
     claims = cast("list[dict[str, object]]", read([brain], "projects/offline.md")["claims"])
-    # A claim carries the time of the note asserting it.
+    # A claim carries the date of the note asserting it.
     assert {
         "time": "2026-09-01T00:00:00.000000Z",
+        "date": "2026-09-01",
         "subject": "bf://fixture/projects/offline.md",
         "relation": "tagged-with",
         "target": tag,
@@ -64,7 +65,7 @@ def test_tag_counts_refresh_deduplicate_and_rebuild(brain: Store) -> None:
 def test_tag_pages_paginate_without_merging_brain_identities(brain: Store, tmp_path: Path) -> None:
     (tmp_path / "team").mkdir()
     other = Store(tmp_path / "team")
-    other.write("bf.yaml", b"version: 6\nname: team\n")
+    other.write("bf.yaml", b"version: 7\nname: team\n")
     for store in (brain, other):
         for n in range(110):
             store.write(f"projects/tagged-{n:03}.md", f"---\ntags: [retention, tag-{n:03}]\n---\n# Evidence\n".encode())
@@ -105,7 +106,7 @@ def test_invalid_tags_fail_validation_without_leaking_content(brain: Store, tag:
 
 
 def test_tag_pages_preserve_incomplete_evidence_signals(brain: Store) -> None:
-    brain.write("projects/bad.md", b"---\nreview_after: typo\n---\n# Missing\n")
+    brain.write("projects/bad.md", b"---\nstale_after: typo\n---\n# Missing\n")
     for ref in ("tags", "tags/absent"):
         assert read([brain], ref)["problems"]
     assert search([brain], Query(text="needle", **pages.scope("bf://fixture/tags/absent")))["problems"]

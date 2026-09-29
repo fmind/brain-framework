@@ -73,7 +73,7 @@ def test_problems_are_collected_not_fail_fast(brain: Store) -> None:
 
 
 def test_link_schema_and_identity_problems_name_their_file_once(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 6\nname: fixture\n")
+    brain.write("bf.yaml", b"version: 7\nname: fixture\n")
     brain.write("concepts/foreign.md", b"---\ntype: person\nentity: bf://other/people/alice\n---\n# Foreign\n")
     brain.write(
         "concepts/role.md", b"---\ntype: concept\n---\n# Role\n\n[x](bf://fixture/projects/offline.md?rel=nope)\n"
@@ -93,11 +93,14 @@ def test_link_schema_and_identity_problems_name_their_file_once(brain: Store) ->
     brain.write("projects/cites.md", b"---\ntype: project\n---\n# Cites\n\n[record](fake:fields)\n")
     result = validate(brain)
     problems = located(result)
-    assert f"{record_path('fake', 'fields')}: undeclared schema field nope" in problems
+    assert f"{record_path('fake', 'fields')}: field nope is not declared in bf.yaml fields" in problems
     assert f"{record_path('fake', 'alias')}: BF aliases must belong to their own brain namespace" in problems
     assert f"{record_path('fake', 'linked')}: unresolved BF target: bf://fixture/projects/absent.md" in problems
     assert "concepts/foreign.md: a note entity must belong to its own brain namespace" in problems
-    assert "concepts/role.md: link relation is undeclared; declare an identity relationship in schema" in problems
+    assert (
+        "concepts/role.md: link relation nope is undeclared; declare it in bf.yaml fields with relation: true"
+        in problems
+    )
     assert {p.split(": ", 1)[0] for p in problems} == {
         "concepts/dup.md",
         "concepts/foreign.md",
@@ -281,7 +284,7 @@ def test_okf_source_relationships_must_be_declared(brain: Store, path: str) -> N
         path,
         b"---\ntype: note\nsources:\n  - resource: bf://fixture/projects/offline.md?rel=undeclared\n---\n# Source\n",
     )
-    assert any(p.startswith(f"{path}: ") and "declare an identity relationship" in p for p in located(validate(brain)))
+    assert any(p.startswith(f"{path}: ") and "declare it in bf.yaml fields" in p for p in located(validate(brain)))
 
 
 def test_duplicate_aliases_are_reported(brain: Store) -> None:
@@ -360,7 +363,7 @@ def test_okf_status_and_reserved_files_are_valid(brain: Store, folder: str, stat
 def test_case_variant_identities_warn_without_failing(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nschema:\n"
+        b"version: 7\nname: fixture\nfields:\n"
         b"  repository: {description: Repository., type: identity, cardinality: many, relation: true}\n",
     )
     records_file(
@@ -402,3 +405,85 @@ def test_case_variant_identities_warn_without_failing(brain: Store, monkeypatch:
             "identities": [{"identity": "repo:github.com/team/x", "files": 2}],
         }
     ]
+
+
+GRAPH = (
+    b"version: 7\nname: fixture\nfields:\n"
+    b"  owner:\n    description: Responsible person.\n    type: identity\n    cardinality: many\n"
+    b'    relation: true\n    targets: ["person:email/"]\n'
+    b"sensors:\n  calendar:\n    command: [gws]\n"
+)
+
+
+def test_validation_resolves_graph_links_through_declared_identities(brain: Store) -> None:
+    brain.write("bf.yaml", GRAPH)
+    # A provider alias names its record like the record ref does.
+    records_file(brain, "calendar", [Record(id="evt-1", title="Kickoff", aliases=["calendar:primary/evt-1"])])
+    # A typed link may name its target's owner by any identity that owner declares.
+    brain.write(
+        "concepts/alice.md",
+        b"---\ntype: person\nentity: bf://fixture/people/alice\naliases: [person:email/alice@example.test]\n---\n"
+        b"# Alice\n",
+    )
+    brain.write(
+        "projects/launch.md",
+        b"---\ntype: project\nsources:\n  - resource: all pull requests in the launch repository\n---\n# Launch\n\n"
+        b"Owner: [Alice](bf://fixture/people/alice?rel=owner). Kickoff: [event](calendar:primary/evt-1).\n",
+    )
+    result = validate(brain)
+    assert result["valid"], result["problems"]
+    # An OKF source describing a population cites nothing and is no broken link.
+    claims = cast("list[dict[str, str]]", read([brain], "projects/launch.md").get("claims", []))
+    assert "cites" not in {claim["relation"] for claim in claims}
+    # A target outside the declared prefixes, through every identity its owner declares, is still reported.
+    brain.write("concepts/bob.md", b"---\ntype: person\nentity: bf://fixture/people/bob\n---\n# Bob\n")
+    brain.write("projects/other.md", b"---\ntype: project\n---\n# Other\n\n[Bob](bf://fixture/people/bob?rel=owner)\n")
+    assert "projects/other.md: owner link outside the declared targets: bf://fixture/people/bob" in located(
+        validate(brain)
+    )
+    brain.delete("projects/other.md")
+    # A relation query on another scheme would silently name a different identity.
+    brain.write(
+        "projects/typed.md", b"---\ntype: project\n---\n# Typed\n\n[Bob](person:email/bob@example.test?rel=owner)\n"
+    )
+    assert (
+        "projects/typed.md: ?rel= types bf:// links only; set the relation in fields instead: "
+        "person:email/bob@example.test?rel=owner"
+    ) in located(validate(brain))
+    brain.write("projects/typed.md", b"---\ntype: project\n---\n# Typed\n\n[Event](calendar:primary/evt-9)\n")
+    assert "projects/typed.md: missing record calendar:primary/evt-9" in located(validate(brain))
+
+
+def test_notes_type_their_claims_in_declared_fields(brain: Store) -> None:
+    brain.write("bf.yaml", GRAPH.replace(b"sensors:\n  calendar:\n    command: [gws]\n", b""))
+    brain.write(
+        "projects/launch.md",
+        b"---\ntype: project\nfields:\n  owner: [person:email/bob@example.test]\n---\n# Launch\n\nShip it.\n",
+    )
+    assert validate(brain)["valid"]
+    # The identity needs no note: its page lists the project under the declared relation.
+    page = read([brain], "person:email/bob@example.test")
+    groups = {group["relation"]: group for group in cast("list[dict]", page["backlinks"])}
+    assert [item["ref"] for item in groups["owner"]["items"]] == ["projects/launch.md"]
+    claims = cast("list[dict[str, str]]", read([brain], "projects/launch.md")["claims"])
+    assert (claims[0]["relation"], claims[0]["target"], claims[0]["origin"]) == (
+        "owner",
+        "person:email/bob@example.test",
+        "bf://fixture/projects/launch.md",
+    )
+    # Values follow their declaration; retrieval keeps the note while validation names the field.
+    for fields, error in (
+        (b"  owner: person:email/bob@example.test\n", "fields.owner: expected a list"),
+        (b"  owner: [repo:example/x]\n", "owner link outside the declared targets: repo:example/x"),
+        (b"  unknown: x\n", "fields.unknown: not declared in bf.yaml fields"),
+    ):
+        brain.write("projects/launch.md", b"---\ntype: project\nfields:\n" + fields + b"---\n# Launch\n\nShip it.\n")
+        assert any(error in problem for problem in located(validate(brain))), located(validate(brain))
+        assert [item["ref"] for item in cast("list", search([brain], Query(text="ship"))["items"])] == [
+            "projects/launch.md"
+        ]
+    # A declared relation at the top level asserts nothing: say where it belongs.
+    brain.write("projects/launch.md", b"---\ntype: project\nowner: [person:email/bob@example.test]\n---\n# Launch\n")
+    assert "projects/launch.md: owner: declared fields belong under fields:, such as fields: {owner: ...}" in located(
+        validate(brain)
+    )

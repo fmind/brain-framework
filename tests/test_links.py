@@ -23,9 +23,9 @@ from bf.validate import validate
 from conftest import records_file
 from test_interfaces import invoke
 
-CONFIG = b"""version: 6
+CONFIG = b"""version: 7
 name: fixture
-schema:
+fields:
   friend:
     description: Explicit friendship, from subject to target.
     type: identity
@@ -120,7 +120,7 @@ def test_component_encoding_and_external_urls() -> None:
     external = "https://example.test/a?rel=friend&source=x%26y#part"
     assert links.target(external) == external
     assert links.parse(external) is None
-    with pytest.raises(Error, match="relationship"):
+    with pytest.raises(Error, match="link relation"):
         links.identity("bf://team/people/marc?rel=friend")
 
 
@@ -277,8 +277,17 @@ def test_validation_and_skip_invalid_links(brain: Store) -> None:
     brain.write("projects/bad.md", b"# Broken\n[Unknown](bf://fixture/people/nobody?rel=friend)\n")
     assert not validate(brain)["valid"]
     brain.write("projects/bad.md", b"# Broken\n[Bob](bf://fixture/people/bob?rel=unmapped)\n")
-    assert search([brain], Query(text="broken")).get("problems")
-    assert not validate(brain)["valid"]
+    # One mistyped relation never hides its note: retrieval keeps the link untyped, validation names it.
+    found = search([brain], Query(text="broken"))
+    assert [item["ref"] for item in cast(list, found["items"])] == ["projects/bad.md"]
+    assert "problems" not in found
+    assert (
+        "projects/bad.md: link relation unmapped is undeclared; declare it in bf.yaml fields with relation: true"
+        in [f"{p['file']}: {p['error']}" for p in cast(list, validate(brain)["problems"])]
+    )
+    backlinks = cast(list, read([brain], "bf://fixture/people/bob")["backlinks"])
+    assert ("links", 1) in [(group["relation"], group["total"]) for group in backlinks]
+    assert "unmapped" not in [group["relation"] for group in backlinks]
     brain.write("projects/bad.md", b"---\nentity: bf://other/people/bob\n---\n# Wrong authority\n")
     assert not validate(brain)["valid"]
     brain.write("projects/bad.md", b"# Broken\n[Bob](bf://fixture/people/bob#missing)\n")
@@ -335,7 +344,7 @@ def test_cli_mcp_and_evals_expose_links(brain: Store) -> None:
     assert asyncio.run(call())["backlinks"] == cli["backlinks"]
     brain.write(
         "evals/links.yaml",
-        b"version: 5\ncases:\n- name: friend\n  read: person:bob\n  expect: [projects/alice.md]\n"
+        b"version: 7\ncases:\n- name: friend\n  read: person:bob\n  expect: [projects/alice.md]\n"
         b"- name: stranger\n  read: person:nobody\n  empty: true\n",
     )
     assert evaluate(brain)["passed"]
@@ -501,14 +510,9 @@ def test_ordinary_markdown_declares_no_identity_or_membership(brain: Store) -> N
     # Only display and lifecycle metadata apply: frontmatter links and review dates stay the document's own data.
     helper = note(
         "actions/2026-09-27_import/inputs/doc.md",
-        b'---\ndescription: Vendor summary\nlinks: ["jira:PROJ-9"]\nreview_after: 3\nreview_due: 2026-10-01\n---\n# D\n',
+        b'---\ndescription: Vendor summary\nlinks: ["jira:PROJ-9"]\nstale_after: 2026-10-01T00:00:00Z\n---\n# D\n',
     )
-    assert (helper.lead, helper.targets, helper.knowledge.review_after, helper.knowledge.review_due) == (
-        "Vendor summary",
-        [],
-        None,
-        "",
-    )
+    assert (helper.lead, helper.targets, helper.knowledge.stale_after) == ("Vendor summary", [], "")
 
 
 def test_an_overlong_or_blank_title_fails_only_okf_notes() -> None:
@@ -543,7 +547,7 @@ def test_the_same_record_in_two_brains_keeps_qualified_reads_exact(brain: Store,
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     for store in (brain, team):
         records_file(store, "jira", [Record(id="PROJ-1", title="Launch issue")])
     brain.write("projects/launch.md", b"---\ntype: project\n---\n# Launch\n\n[Issue](jira:PROJ-1)\n")
@@ -663,15 +667,15 @@ def test_folders_and_tag_membership_are_not_claimed(brain: Store) -> None:
     assert any("tagged-with is reserved for tag membership" in p for p in problems(brain))
     brain.delete("projects/tagged.md")
     records_file(brain, "mail", [Record(id="t", title="Tagged", fields={"tagged-with": "bf://fixture/tags/x"})])
-    assert any("schema field tagged-with is reserved" in p for p in problems(brain))
+    assert any("field tagged-with is reserved" in p for p in problems(brain))
     # bf.yaml cannot declare it either.
     field = "  tagged-with: {description: Tags, type: identity, relation: true}\n"
-    brain.write("bf.yaml", b"version: 6\nname: fixture\nschema:\n" + field.encode())
-    with pytest.raises(Error, match="schema field tagged-with is reserved for tag membership"):
+    brain.write("bf.yaml", b"version: 7\nname: fixture\nfields:\n" + field.encode())
+    with pytest.raises(Error, match=r"fields\.tagged-with is reserved for tag membership"):
         load(brain)
     # `links` names the backlink group and role page of untyped links.
-    brain.write("bf.yaml", b"version: 6\nname: fixture\nschema:\n" + field.replace("tagged-with", "links").encode())
-    with pytest.raises(Error, match="schema field links is reserved for untyped backlinks"):
+    brain.write("bf.yaml", b"version: 7\nname: fixture\nfields:\n" + field.replace("tagged-with", "links").encode())
+    with pytest.raises(Error, match=r"fields\.links is reserved for untyped backlinks"):
         load(brain)
 
 
@@ -701,6 +705,17 @@ def test_okf_sources_cite_their_resources(brain: Store) -> None:
     assert "problems" not in read([brain], "bf://fixture/people/bob?rel=cites")
     assert validate(brain)["valid"]
     field = "  cites: {description: Derived from, type: identity, relation: true}\n"
-    brain.write("bf.yaml", b"version: 6\nname: fixture\nschema:\n" + field.encode())
-    with pytest.raises(Error, match="schema field cites is reserved for OKF sources"):
+    brain.write("bf.yaml", b"version: 7\nname: fixture\nfields:\n" + field.encode())
+    with pytest.raises(Error, match=r"fields\.cites is reserved for OKF sources"):
         load(brain)
+
+
+def test_an_okf_resource_names_its_note(brain: Store) -> None:
+    url = "https://github.com/example/site/pull/42"
+    brain.write("concepts/pull.md", f"---\ntype: change\nresource: {url}\n---\n# Pull 42\n\nMerged.\n".encode())
+    records_file(brain, "github", [Record(id="pr-42", title="Merged", url=url)])
+    reply = read([brain], url)
+    # The URI the note describes is one of its identities: it opens the note, and records naming it link to it.
+    assert reply["ref"] == "concepts/pull.md"
+    groups = {group["relation"]: group for group in cast("list[dict]", reply["backlinks"])}
+    assert [item["ref"] for item in groups["links"]["items"]] == ["github:pr-42"]

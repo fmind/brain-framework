@@ -10,8 +10,8 @@ from functools import cache
 
 from bf import links, ontology, pages, records
 from bf.config import load
-from bf.markdown import Note, authored, broken, editor_lock, note, okf, scheme, validate_okf
-from bf.models import AUTHORED, IDENTITY, MAX_NOTE, Error
+from bf.markdown import Note, authored, broken, editor_lock, note, okf, parse, scheme, validate_okf
+from bf.models import AUTHORED, IDENTITY, MAX_NOTE, Config, Error, Knowledge
 from bf.storage import UNNAMED, Store, relative, unnamed
 
 _ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -76,6 +76,27 @@ class _Spellings:
         ]
 
 
+def _programs(store: Store, config: Config) -> list[dict[str, str]]:
+    """Each enabled program the brain holds is a regular, executable file; commands on PATH vary by machine."""
+    problems = []
+    for kind, programs in (("sensors", config.sensors), ("routines", config.routines)):
+        for name, program in sorted(programs.items()):
+            executable = program.command[0]
+            if not program.enabled or not executable.startswith(("sensors/", "routines/")):
+                continue
+            try:
+                with store.parent(executable) as (parent, leaf):
+                    mode = os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode
+                usable = stat.S_ISREG(mode) and mode & stat.S_IXUSR
+            except Error, OSError:
+                usable = False
+            if not usable:
+                problems.append(
+                    _problem("bf.yaml", f"{kind}.{name}.command: {executable} is not an executable regular file")
+                )
+    return problems
+
+
 def validate(store: Store) -> dict[str, object]:
     """Report every problem instead of stopping at the first one."""
     with records.reading(store):
@@ -84,7 +105,7 @@ def validate(store: Store) -> dict[str, object]:
 
 def _validate(store: Store) -> dict[str, object]:
     config = load(store)
-    problems: list[dict[str, str]] = []
+    problems = _programs(store, config)
     ids: dict[str, set[str]] = {}
     # Each identity's owners, note paths or record refs, with the file declaring each one.
     owners: dict[str, dict[str, str]] = {}
@@ -114,7 +135,7 @@ def _validate(store: Store) -> dict[str, object]:
             # A record's ref is one of its names: a note alias repeating it is ambiguous.
             for alias in [ref, ontology.qualify(config, ref), *record.aliases]:
                 owners.setdefault(links.target(alias), {})[ref] = name
-            claims = ontology.record_claims(record, config, ref)
+            claims = ontology.record_claims(record, config, ref, strict=True)
             for claim in claims:
                 if links.parse(claim.target):
                     written.setdefault(claim.target, set()).add(name)
@@ -140,22 +161,25 @@ def _validate(store: Store) -> dict[str, object]:
     )
     problems.extend(_actions(listed["actions"]))
     notes: list[Note] = []
+    # Typed note claims outside their relation's literal targets: the target's owner may declare a matching alias.
+    targeted: list[tuple[str, links.Claim]] = []
     for name in (n for directory in AUTHORED for n in listed[directory] if authored(n)):
         try:
             data = store.read(name, MAX_NOTE)
             parsed_note = note(name, data)
-            claims = ontology.note_claims(parsed_note, config)
+            claims = ontology.note_claims(parsed_note, config, strict=True)
             notes.append(parsed_note)
             names = [*parsed_note.knowledge.names, parsed_note.knowledge.entity]
             spellings.add({*(links.target(v) for v in names if v), *(claim.target for claim in claims)})
-            # Search keeps such a claim: the note states it, and only its author can correct it.
-            problems.extend(
-                _problem(name, f"{claim.relation} link outside the declared targets: {claim.target}")
-                for claim in claims
-                if ontology.outside(config, claim)
-            )
+            targeted.extend((name, claim) for claim in claims if ontology.outside(config, claim))
             if okf(name):
                 validate_okf(name, data)
+                # OKF ignores unknown keys: a relation named at the top level would silently assert nothing.
+                problems.extend(
+                    _problem(name, f"{key}: declared fields belong under fields:, such as fields: {{{key}: ...}}")
+                    for key in sorted(parse(name, data).attributes)
+                    if key in config.ontology and key not in Knowledge.model_fields
+                )
         except (Error, UnicodeError) as error:
             problems.append(_problem(name, str(error)))
         except OSError:
@@ -226,10 +250,30 @@ def _validate(store: Store) -> dict[str, object]:
         problems.extend(_problem(item.path, message) for message in broken(item, exists, slugs))
         for target in item.targets:
             source = scheme(item.path, target)
-            if (source in ids or source in config.sensors) and target.partition(":")[2] not in ids.get(source, set()):
+            if (
+                (source in ids or source in config.sensors)
+                and target.partition(":")[2] not in ids.get(source, set())
+                # A record's provider alias, such as calendar:primary/ID beside calendar:ID, names it too.
+                and target not in owners
+            ):
                 problems.append(_problem(item.path, f"missing record {target}"))
             if links.parse(target):
                 written.setdefault(links.target(target), set()).add(item.path)
+            elif "?rel=" in target and re.fullmatch(IDENTITY, target):
+                # Only a bf:// link carries a relation; another identity would silently become a different one.
+                problems.append(
+                    _problem(item.path, f"?rel= types bf:// links only; set the relation in fields instead: {target}")
+                )
+    # Every identity each note or record answers to: a typed link may name its owner by any of them.
+    names: dict[str, set[str]] = {}
+    for alias, claimed in owners.items():
+        for owner in claimed:
+            names.setdefault(owner, set()).add(alias)
+    for file, claim in targeted:
+        definition = config.ontology[claim.relation]
+        if not any(definition.allows(alias) for owner in owners.get(claim.target, {}) for alias in names[owner]):
+            # Search keeps such a claim: the note states it, and only its author can correct it.
+            problems.append(_problem(file, f"{claim.relation} link outside the declared targets: {claim.target}"))
     for alias, claimed in sorted(owners.items()):
         # Prefer naming an authored note: its alias is usually the claim to revisit.
         file = min(claimed.values(), key=lambda value: (not authored(value), value))

@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/docs/schedule/
-version: 6
+version: 7
 name: watch-demo
 watch:
   interval: 5

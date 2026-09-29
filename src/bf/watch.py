@@ -29,7 +29,7 @@ from rich.text import Text
 from bf.collect import next_due
 from bf.config import load
 from bf.history import ROUTINES, environment, log_path, state
-from bf.models import Error, WatchSettings, decode, encode, terminal, timestamp
+from bf.models import Error, WatchSettings, decode, encode, present, terminal, timestamp
 from bf.storage import BusyError, Store, collecting
 from bf.update import selection
 from bf.watch_settings import Notifications, settings
@@ -118,7 +118,7 @@ def snapshot(store: Store, sensors: tuple[str, ...] = (), routines: tuple[str, .
                     output_bytes=cast(int | None, entry.get("output_bytes")),
                     reconcile=bool(entry.get("reconcile", False)),
                     error=error,
-                    log=str(log_path(store, name)) if error else "",
+                    log=log_path(name) if error else "",
                     action=str(entry.get("action", "")),
                     records=cast(int | None, entry.get("records")),
                 )
@@ -207,6 +207,8 @@ PARTIAL = re.compile(rb"\x1b(?:\[[0-9;]*|O)?\Z")
 HEADER, FOOTER, FRAME, DETAILS = 2, 4, 4, 8
 # Details sit beside the table only when it keeps at least 80 columns for its six columns.
 WIDE = 120
+# Seconds a stopped update may take to roll back an interrupted record commit before it is killed.
+STOP = 60
 
 
 @dataclass
@@ -336,7 +338,7 @@ class Dashboard:
         # Diagnostics come first: details stacked below a long table show only their first lines.
         if row.error:
             detail.append(clean(row.error) + "\n", style="red")
-            detail.append("Private log: " + clean(row.log) + "\n", style="dim")
+            detail.append("Log: " + clean(row.log) + "\n", style="dim")
         elif row.action:
             detail.append("Latest action: " + clean(row.action) + "\n")
         detail.append(f"Refresh: {duration(row.refresh) if row.refresh else 'manual only'}\n")
@@ -508,7 +510,7 @@ class Job:
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()
             try:
-                self.process.wait(timeout=5)
+                self.process.wait(timeout=STOP)
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
@@ -668,12 +670,14 @@ def _loop(
                 # Bytes, like every command reply: JSON Lines stay UTF-8 whatever the terminal's locale.
                 sys.stdout.buffer.write(
                     terminal(
-                        {
-                            "brain": dashboard.brain,
-                            "running": dashboard.running,
-                            "message": dashboard.message,
-                            "programs": [asdict(row) for row in dashboard.rows],
-                        }
+                        present(
+                            {
+                                "brain": dashboard.brain,
+                                "running": dashboard.running,
+                                "message": dashboard.message,
+                                "programs": [asdict(row) for row in dashboard.rows],
+                            }
+                        )
                     )
                 )
                 sys.stdout.flush()

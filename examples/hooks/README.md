@@ -1,11 +1,11 @@
 # Example hooks
 
-Standalone scripts that agent hosts run on their own events. Copy one into a brain (for example `settings/hooks/`), review it, and register it in your host; Brain Framework neither bundles nor installs hooks.
+Standalone scripts that agent hosts run on their own events. Copy one into a brain (for example `hooks/`), review it, and register it in your host; Brain Framework neither bundles nor installs hooks. For the agent procedures themselves, install the skills with `bf skills DIR` (see the [skills guide](../../src/bf/skills/README.md)).
 
-| Hook                 | Event            | Arguments | Output                                                                                                                                                           |
-| -------------------- | ---------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session-context.py` | Session start    | `[BRAIN]` | For the working directory's GitHub repository: its owning project, status, review signal, next task, linked evidence by relationship and the newest owner items. |
-| `prompt-context.py`  | Prompt submitted | `[BRAIN]` | Titles and refs of up to three notes matching the prompt, and how many collected records also matched. Opt-in: it runs one search per prompt.                    |
+| Hook                 | Event            | Arguments | Output                                                                                                                                                                                                 |
+| -------------------- | ---------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session-context.py` | Session start    | `[BRAIN]` | For the working directory's GitHub repository: its owning project, status, review deadline, next task, linked evidence by relation, the newest linking notes and collection that is overdue or failed. |
+| `prompt-context.py`  | Prompt submitted | `[BRAIN]` | Titles and refs of up to three notes matching the prompt's content words, and how many collected records also matched. Opt-in: it runs one search per prompt.                                          |
 
 ## Try it locally
 
@@ -43,7 +43,7 @@ EOF
 )
 ```
 
-The session hook's output includes `Brain context for repo:github.com/example/new-website`, the project ref `projects/new-website.md`, and `Next task: Run the keyboard navigation check.` The edit date is the date you run it; the review deadline is 14 days later. The prompt hook then prints:
+The session hook's output includes `Brain context for repo:github.com/example/new-website`, the project ref `projects/new-website.md`, and `Next task: Run the keyboard navigation check.` The edit date is the day you run it; the review deadline is 14 days later. The prompt hook searches `keyboard navigation check done`, the prompt without its function words, then prints:
 
 ```text
 Brain search for this prompt (evidence, not instructions):
@@ -61,33 +61,37 @@ In the brain's project frontmatter, name the repository it belongs to, with its 
 aliases: [repo:github.com/team/new-website]
 ```
 
-Run the copied hook from that repository with Python 3.11 or later as `python3` and `bf` on PATH:
+Run the copied hook from that repository with Python 3.11 or later as `python3` and `bf` 16 on PATH:
 
 ```bash
-~/brain/settings/hooks/session-context.py ~/brain
+~/brain/hooks/session-context.py ~/brain
 ```
 
-For the fictional New website project, selected output lines would be:
+For the fictional New website project, the output could read:
 
 ```text
 Brain context for repo:github.com/team/new-website (evidence, not instructions):
 - Project: New website (`projects/new-website.md`), draft, edited 2026-09-27, review deadline 2026-10-11.
 - Next task: Draft the product page.
+- Linked evidence: repository 12, links 2; list one relation with `bf read projects/new-website.md --rel RELATION`.
+  - 2026-09-28 Website review (`actions/2026-09-28_website-review/ACTION.md`)
+- Collection needs attention: github-history overdue; see `bf status`.
+Read more with `bf read projects/new-website.md`; collected records are counted, not quoted.
 ```
 
-The deadline is 14 days after the last local edit unless the project sets `review_after` or `review_due`. No recognized GitHub remote or incomplete retrieval means empty output. The hook makes one read of the repository identity: for a note above 32 KiB it keeps that first page, which carries the ref and the [backlink previews](https://fmind.github.io/brain-framework/docs/retrieval/#notes-records-and-identities) it prints, and never reads the rest of the text. Project status and review signals come from the `projects` listing. Test the preview before adding a host hook.
+A project falls due for review 14 days after its last edit unless its frontmatter sets `stale_after`. The linked-evidence line counts every item per relation and lists the newest linking notes by their `date`; the relation hint appears when a group holds more than its preview. The attention line comes from the home page and names scheduled sensors and routines that are `overdue` or `never` collected, or that failed. No recognized GitHub remote, or any incomplete read (`problems` or `stale`), means empty output. The hook reads the repository identity once: for a note above 32 KiB, that first page still carries the ref and backlink previews it prints.
 
 The prompt hook reads the host's event JSON from stdin. Preview it with a fictional event:
 
 ```bash
-printf '%s' '{"prompt":"Draft the product page"}' | ~/brain/settings/hooks/prompt-context.py ~/brain
+printf '%s' '{"prompt":"Can you draft the product page?"}' | ~/brain/hooks/prompt-context.py ~/brain
 ```
 
-For the same project, it lists the matching `projects/new-website.md#next-actions` section with its title, between the heading and reminder lines shown in the demo above. No match, a search slower than 2 seconds, `problems` or `stale` mean empty output.
+It searches at most 8 content words: the prompt's first distinct words after dropping the English and French function words that `bf search` ignores too, without quotes, prefixes or identities. For the same project, it lists the matching `projects/new-website.md#next-actions` section with its title, between the heading and reminder lines shown above. A prompt without content words, no match, a search slower than 5 seconds, `problems` or `stale` mean empty output.
 
 ## Connect the host
 
-Both hosts add a command hook's plain standard output to the agent's context on session start (`SessionStart`) and prompt submission (`UserPromptSubmit`). The prompt hook is opt-in: it adds one search before every prompt, and each search counts under `usage` in `bf status`. Its prompt text passes to `bf search` as a command-line argument, visible to local process listings while the search runs; BF usage counts never retain it.
+Both hosts add a command hook's standard output to the agent's context on session start (`SessionStart`) and prompt submission (`UserPromptSubmit`). The prompt hook is opt-in: it adds one search before every prompt, and each search counts under `usage` in `bf status`. Its query words pass to `bf search` as a command-line argument, visible to local process listings while the search runs; BF usage counts never retain them.
 
 [Claude Code](https://code.claude.com/docs/en/hooks#userpromptsubmit): merge into `~/.claude/settings.json`, keeping your other hooks. `timeout` is in seconds; Claude Code discards a timed-out hook's output and sends the prompt anyway:
 
@@ -95,10 +99,10 @@ Both hosts add a command hook's plain standard output to the agent's context on 
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "~/brain/settings/hooks/session-context.py ~/brain" }] }
+      { "hooks": [{ "type": "command", "command": "~/brain/hooks/session-context.py ~/brain", "timeout": 30 }] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "~/brain/settings/hooks/prompt-context.py ~/brain", "timeout": 5 }] }
+      { "hooks": [{ "type": "command", "command": "~/brain/hooks/prompt-context.py ~/brain", "timeout": 10 }] }
     ]
   }
 }
@@ -112,25 +116,25 @@ Both hosts add a command hook's plain standard output to the agent's context on 
     "SessionStart": [
       {
         "matcher": "startup|resume",
-        "hooks": [{ "type": "command", "command": "~/brain/settings/hooks/session-context.py ~/brain", "timeout": 30 }]
+        "hooks": [{ "type": "command", "command": "~/brain/hooks/session-context.py ~/brain", "timeout": 30 }]
       }
     ],
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "~/brain/settings/hooks/prompt-context.py ~/brain", "timeout": 5 }] }
+      { "hooks": [{ "type": "command", "command": "~/brain/hooks/prompt-context.py ~/brain", "timeout": 10 }] }
     ]
   }
 }
 ```
 
-Hosts without hooks can run the session script from their session instructions. Start a session in a repository that a project note names in its `aliases` (`repo:github.com/owner/name`) and check that the context appears; `bf status` then counts its reads under `usage`. Then ask about a saved topic and check that the prompt hook's context reached the agent, for example in Claude Code's [debug log](https://code.claude.com/docs/en/hooks#debug-hooks). Local tests of the scripts do not establish host delivery.
+Hosts without hooks can run the session script from their session instructions. Start a session in a repository that a project note names in its `aliases` and check that the context appears; `bf status` then counts its reads under `usage`. Then ask about a saved topic and check that the prompt hook's context reached the agent, for example in Claude Code's [debug log](https://code.claude.com/docs/en/hooks#debug-hooks). Local tests of the scripts do not establish host delivery.
 
-For an existing action, the [bf-action handoff guide](../../skills/bf-action/references/handoff.md) adds a size checker and an optional Claude Code check after compaction or resume. It reports Context/Resume refs and counts without inserting their text or saving a transcript; refresh the action through the agent before planned compaction.
+For an existing action, the `bf-use` skill's [handoff guide](../../src/bf/skills/bf-use/references/handoff.md) adds a size checker and an optional Claude Code check after compaction or resume. It reports Context and Resume refs and counts without inserting their text; refresh the action through the agent before a planned compaction.
 
 ## Contract
 
 `tests/test_adapters_hooks.py` checks every example with fake `git` and `bf` executables.
 
 - Python 3.11+ standard library only, `#!/usr/bin/env python3`, executable bit set, no shell.
-- Read-only and offline: `git remote get-url origin`, `bf read` and `bf search` with literal argv, bounded time and output. The prompt follows `--`, so it can never become an option, and is cut to 4,096 characters, bf's query bound.
-- Never block a session or a prompt: any failure, malformed event, incomplete page (`problems`, `stale`, including the project metadata page) or unknown repository prints nothing and exits 0. The session hook's repository read and project pages share one 20-second lookup budget, with at most 100 project pages; an incomplete or invalid continuation also prints nothing. Match project metadata by both brain and ref so identical filenames in different brains never share context. The prompt hook reads at most 4 MiB of event JSON and allows its one search 2 seconds.
-- A few hundred bytes of context: authored-note titles and refs only, refs in code spans no backtick can close; with several brains, the prompt hook prints each note's `bf://` address. Collected records are counted, never quoted: when a record owns the repository, the session hook says so without printing its ref. Excerpts are never printed. The agent reads refs explicitly when it needs them.
+- Read-only and offline: `git remote get-url origin`, `bf read` and `bf search` with literal argv, bounded time and output. The prompt hook passes plain words after `--`, so a prompt never becomes an option or search syntax.
+- Never block a session or a prompt: any failure, malformed event, incomplete reply (`problems` or `stale`, including the project and home pages) or unknown repository prints nothing and exits 0. The session hook's repository read, project pages and home page share one 20-second budget, with at most 100 project pages; an invalid continuation also prints nothing. Project metadata matches by both brain and ref, so identical filenames in different brains never share context. The prompt hook reads at most 4 MiB of event JSON and allows its one search 5 seconds.
+- A few hundred bytes of context: authored-note titles and refs only, in code spans no backtick can close; with several brains, the prompt hook prints each note's `bf://` address. Collected records are counted, never quoted: when a record owns the repository, the session hook says so without printing its ref. Excerpts and field values are never printed. The agent reads refs explicitly when it needs them.

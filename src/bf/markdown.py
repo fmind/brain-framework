@@ -66,6 +66,8 @@ class Passage:
     title: str
     heading: str
     text: str
+    # A section's note title and enclosing headings, such as ("Plans", "Vega") above `### Budget`.
+    parents: tuple[str, ...] = ()
 
 
 @dataclass
@@ -196,7 +198,7 @@ def parse(path: str, data: bytes) -> Markdown:
             and (tokens[i - 1].type, tokens[i - 2].type) == ("paragraph_open", "list_item_open")
             and (task := _TASK.match(token.content.split("\n", 1)[0]))
         ):
-            tasks.append(Task(task[1] != " ", _plain(task[2])[:LEAD], fragment, token.map[0] + offset + 1))
+            tasks.append(Task(task[1] != " ", _task(path, task[2])[:LEAD], fragment, token.map[0] + offset + 1))
         for child in token.children or []:
             # An embedded image is a link too, so validation catches a missing asset; inline data names no target.
             if child.type not in {"link_open", "image"}:
@@ -215,7 +217,9 @@ def section(path: str, data: bytes, fragment: str) -> str:
     markdown = parse(path, data)
     heading = next((h for h in markdown.headings if h.slug == fragment), None)
     if heading is None:
-        raise Error(f"{path}: heading #{fragment} does not exist")
+        slugs = [f"#{h.slug}" for h in markdown.headings]
+        known = ", ".join(slugs[:20]) + (", …" if len(slugs) > 20 else "") if slugs else "none"
+        raise Error(f"{path}: heading #{fragment} does not exist; its sections: {known}")
     source_lines = lines(markdown.text)
     end = next(
         (h.line for h in markdown.headings if h.line > heading.line and h.level <= heading.level), len(source_lines)
@@ -271,7 +275,28 @@ def _sources(path: str, attributes: dict[str, object]) -> list[str]:
         for source in sources
     ):
         raise Error(f"{path}: OKF sources require mappings with a nonempty resource string")
-    return [str(source["resource"]) for source in sources]
+    # OKF lets a resource describe a population, such as "all pull requests of a repository": only a link-shaped
+    # resource, a URL, identity or path, is cited and checked.
+    return [
+        resource
+        for resource in (str(source["resource"]).strip() for source in sources)
+        if not re.search(r"\s", resource)
+        and (re.match(IDENTITY, resource) or "/" in resource or resource.endswith(".md"))
+    ]
+
+
+def _task(path: str, markdown: str) -> str:
+    """A task's words with its links kept as `[label](ref)`: a relative target becomes the brain-relative ref that
+    `bf read` opens, so the next step names what to read without another lookup."""
+
+    def kept(match: re.Match[str]) -> str:
+        try:
+            return f"[{match[1]}]({reference(path, match[2])})"
+        except Error:
+            return match[1]
+
+    text = re.sub(r"\[([^\]]*)\]\(([^)\s]+)\)", kept, markdown[: 8 * LEAD])
+    return re.sub(r"\s+", " ", re.sub(r"(?<![\w\]])[*_`]{1,3}|[*_`]{1,3}(?![\w(])", "", text)).strip()
 
 
 def _plain(markdown: str) -> str:
@@ -329,6 +354,7 @@ def note(path: str, data: bytes) -> Note:
         raise Error(f"{path}: title must be nonempty")
     # H2+ sections are separate passages, so a search can land on the answering section.
     # Headings rank through each passage's title; its text, and so its excerpt, starts below them.
+    # A section also ranks under its parents: `## Vega` then `### Budget` answers "Vega budget".
     source_lines = lines(markdown.text)
     sections = [h for h in markdown.headings if h.level >= 2]
     titled = next((h for h in markdown.headings if h.level == 1 and h.title == title), None)
@@ -339,10 +365,15 @@ def note(path: str, data: bytes) -> Note:
     passages = [
         Passage("", title, title, "\n\n".join(part.strip() for part in (summary, introduction) if part.strip()))
     ]
+    enclosing: list[Heading] = []
     for i, heading in enumerate(sections):
         end = sections[i + 1].line if i + 1 < len(sections) else len(source_lines)
         text = "".join(source_lines[heading.end : end])
-        passages.append(Passage(heading.slug, f"{title} — {heading.title}", heading.title, text))
+        while enclosing and enclosing[-1].level >= heading.level:
+            enclosing.pop()
+        parents = (title, *(h.title for h in enclosing))
+        passages.append(Passage(heading.slug, " — ".join((*parents, heading.title)), heading.title, text, parents))
+        enclosing.append(heading)
     lead = _plain(summary or introduction)
     if not lead and len(passages) > 1:
         lead = _plain(passages[1].text)

@@ -113,8 +113,9 @@ def generate(
             + "".join(f"Environment={_unit(key + '=' + value)}\n" for key, value in env.items())
             + "ExecStart="
             + " ".join(_unit(value, expand=position > 0) for position, value in enumerate(argv))
-            # A oneshot service has no start timeout by default; per-program BF timeouts bound each run.
-            + "\nTimeoutStopSec=10s\n",
+            # A oneshot service has no start timeout by default; per-program BF timeouts bound each run. A stop
+            # leaves time to roll back an interrupted record commit, as watch does.
+            + "\nTimeoutStopSec=60s\n",
             timer: "# https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html\n"
             f"[Unit]\nDescription=Check due Brain Framework programs every {every} minutes\n\n"
             f"[Timer]\nOnCalendar=*-*-* *:{','.join(f'{minute:02d}' for minute in minutes)}:00\n"
@@ -152,6 +153,8 @@ def generate(
                     "EnvironmentVariables": env,
                     "StartCalendarInterval": [{"Minute": minute} for minute in minutes],
                     "ProcessType": "Background",
+                    # Seconds between the stop request and SIGKILL: time to roll back an interrupted record commit.
+                    "ExitTimeOut": 60,
                 },
                 sort_keys=False,
             ).decode()

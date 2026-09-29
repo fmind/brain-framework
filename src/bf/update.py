@@ -6,9 +6,9 @@ from contextlib import ExitStack
 from datetime import UTC, datetime
 
 from bf import index
-from bf.collect import Runner, collect, due, due_routines, routine, run
+from bf.collect import Runner, collect, due, due_routines, hooked, routine, run, window
 from bf.config import load
-from bf.models import Config, Error
+from bf.models import Config, Error, suggest
 from bf.storage import BusyError, Store, collecting
 
 # Seconds a cycle waits for another update of the same brain before failing visibly.
@@ -78,6 +78,14 @@ def _update(
             failed = True
         ran.append(result)
     report: dict[str, object] = {"brain": config.name, "sensors": results, "routines": ran}
+    # Enabled programs with refresh: 0 never run here: name them, so an empty cycle is not mistaken for current evidence.
+    manual = sorted(
+        name
+        for name, program in (*config.sensors.items(), *config.routines.items())
+        if program.enabled and not program.refresh and name in selected_sensors | selected_routines
+    )
+    if manual:
+        report["manual"] = manual
     if not dry_run:
         try:
             report["index"] = index.refresh(store, wait=120, recover=True)
@@ -115,3 +123,52 @@ def update(
         except BusyError as error:
             raise Error("another update is still active; retry after it finishes") from error
         return _update(store, dry_run=False, now=now, runner=runner, sensors=sensors, routines=routines)
+
+
+def run_routines(
+    store: Store,
+    *,
+    names: tuple[str, ...] = (),
+    hook: str = "",
+    args: tuple[str, ...] = (),
+    stdin: bytes = b"",
+    dry_run: bool = False,
+    now: datetime | None = None,
+    runner: Runner = run,
+) -> dict[str, object]:
+    """Run named routines, or every enabled routine of a hook, now; one failure never blocks the others.
+
+    Each covers the time since its last reviewed window and receives the same arguments and input. A hook that no
+    routine lists runs nothing and succeeds, so a Git hook can call it before any routine exists.
+    """
+    now = now or datetime.now(UTC)
+    config = load(store)
+    if unknown := set(names) - config.routines.keys():
+        name = min(unknown)
+        raise Error(f"unknown routine {name}; check names in bf.yaml{suggest(name, config.routines)}")
+    selected = list(names) if names else hooked(config, hook)
+    results: list[dict[str, object]] = []
+    failed = False
+    for name in selected:
+        start, end = window(store, name, now)
+        result: dict[str, object] = {"routine": name}
+        try:
+            result.update(
+                routine(
+                    store,
+                    name,
+                    start=start,
+                    end=end,
+                    dry_run=dry_run,
+                    args=args,
+                    stdin=stdin,
+                    runner=runner,
+                    clock=lambda: now,
+                )
+            )
+            result["status"] = "skipped" if "skipped" in result else "ran"
+        except (Error, OSError, UnicodeError) as error:
+            result.update(status="failed", error=_failure(error))
+            failed = True
+        results.append(result)
+    return {"ok": not failed, "dry_run": dry_run, **({"hook": hook} if hook else {}), "routines": results}

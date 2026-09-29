@@ -1,7 +1,7 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "15.0.0"
+version = "16.0.0"
 description = "🧠 Brain Framework: from information to informed actions."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -70,7 +70,7 @@ dev = [
 line-length = 120
 src = ["src", "tests"]
 # Skill scripts and copied examples run with the host's python3, not the package interpreter.
-per-file-target-version = { "skills/*/scripts/*.py" = "py311", "examples/**/*.py" = "py311" }
+per-file-target-version = { "src/bf/skills/*/scripts/*.py" = "py311", "examples/**/*.py" = "py311" }
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -138,6 +138,8 @@ testpaths = ["tests"]
 [tool.coverage.run]
 branch = true
 source = ["bf"]
+# Skill helpers run as separate processes with the agent's python3; their tests exercise them there.
+omit = ["*/bf/skills/*"]
 
 [tool.coverage.report]
 fail_under = 95

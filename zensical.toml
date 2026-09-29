@@ -23,10 +23,9 @@ nav = [
     { "Linking knowledge" = "docs/links.md" },
     { "Check your brain" = "docs/checks.md" },
   ] },
-  { "Collect and maintain" = [
+  { "Collect and automate" = [
     { "Add a sensor" = "docs/sensors.md" },
-    { "Collect selected highlights" = "docs/highlights.md" },
-    { "Prepare reviews" = "docs/routines.md" },
+    { "Run routines" = "docs/routines.md" },
     { "Watch and schedule updates" = "docs/schedule.md" },
     { "Install and update" = "docs/upgrades.md" },
     { "Troubleshooting" = "docs/troubleshooting.md" },
@@ -36,16 +35,14 @@ nav = [
     { "Connect an agent with MCP" = "docs/mcp.md" },
     { "Team setup" = "docs/team.md" },
     { "Connect context across tools" = "docs/context-hub.md" },
-    { "Evaluate a team pilot" = "docs/pilot.md" },
   ] },
   { "Reference" = [
     { "Commands" = "docs/commands.md" },
     { "Configuration" = "docs/configuration.md" },
-    { "Record schema" = "docs/schema.md" },
-    { "Link syntax" = "docs/link-reference.md" },
-    { "Retrieval contract" = "docs/retrieval.md" },
+    { "Notes, records and fields" = "docs/schema.md" },
+    { "Links and tags" = "docs/link-reference.md" },
+    { "Retrieval" = "docs/retrieval.md" },
     { "Limits and safeguards" = "docs/limits.md" },
-    { "Glossary" = "docs/glossary.md" },
   ] },
   { "Privacy and legal" = [
     { "Privacy and security" = "docs/privacy.md" },
@@ -84,8 +81,8 @@ pymdownx.inlinehilite = {}
 pymdownx.superfences = {}
 
 [project.plugins.redirects]
-# Preserve the original Pages contract: the repository root leads to the documentation overview.
-redirect_maps = { "index.md" = "docs/index.md" }
+# Preserve published URLs: the repository root leads to the overview, and merged pages lead to their new home.
+redirect_maps = { "index.md" = "docs/index.md", "docs/glossary.md" = "docs/concepts.md#glossary", "docs/highlights.md" = "docs/sensors.md#selected-highlights", "docs/pilot.md" = "docs/team.md#evaluate-a-pilot" }
 
 [project.plugins.search]
 # Zensical 0.0.65 search still has unlabeled controls, invalid ARIA and low-contrast results.

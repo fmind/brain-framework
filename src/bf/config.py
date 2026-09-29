@@ -129,7 +129,7 @@ def load(store: Store) -> Config:
     key = digest(data)
     if (config := _LOADED.get(key)) is None:
         value = yaml_object(data, "bf.yaml")
-        check_version(value, 6, "bf.yaml")
+        check_version(value, "bf.yaml")
         try:
             config = Config.model_validate(value)
         except ValidationError as error:

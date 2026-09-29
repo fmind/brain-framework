@@ -49,7 +49,7 @@ def main() -> None:
         (root / "brain").mkdir()
         os.environ["XDG_STATE_HOME"] = str(root / "state")
         store = Store(root / "brain")
-        store.write("bf.yaml", b"version: 6\nname: benchmark\n")
+        store.write("bf.yaml", b"version: 7\nname: benchmark\n")
         background = ("Routine project background. " * args.body_chars)[: args.body_chars]
         items = [
             Record(
@@ -104,7 +104,7 @@ def main() -> None:
                 valid = refs == {"concepts/0.md"} and found[0]["title"] == f"Edited revision{note_revision}"
             elif name == "selective":
                 valid = refs == ({"benchmark:0", "concepts/0.md"} if args.notes else {"benchmark:0"})
-            elif name == "common":
+            elif name in {"common", "question"}:
                 valid = len(found) == min(10, args.records + max(0, args.notes - 1))
             elif name == "timeline":
                 since, until = str(result.get("since", "")), str(result.get("until", ""))
@@ -154,6 +154,8 @@ def main() -> None:
             ("note_edit", change_note),
             ("selective", lambda: search([store], Query(text="zirconium"))),
             ("common", lambda: search([store], Query(text="evidence"))),
+            # Several common terms: each is also counted per passage and checked for a match on its own.
+            ("question", lambda: search([store], Query(text="Why retain the decision evidence?"))),
             ("timeline", lambda: read([store], "2026-06")),
             ("home", lambda: read([store])),
             ("exact_read", lambda: read([store], "decision:0")),

@@ -11,6 +11,10 @@ from bf.config import brain_name, load
 from bf.models import Error
 from bf.storage import Store
 
+# A read lists at most CLAIMS outgoing claims, and at most RELATION of any one relation.
+CLAIMS = 50
+RELATION = 20
+
 
 def local_refs(connection: sqlite3.Connection, identities: set[str]) -> set[str]:
     """Add local readable refs only inside the brain that owns a qualified BF address.
@@ -120,15 +124,25 @@ def explanations(connection: sqlite3.Connection, ref: str, targets: set[str]) ->
 def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> tuple[list[dict[str, object]], bool]:
     """Typed claims whose explicit subject is one of these identities, wherever they were asserted.
 
-    Each claim carries the `time` of the note or record asserting it, when that item is dated.
+    Each relation keeps up to RELATION claims, so a crowded one, such as a meeting's attendees, never hides another,
+    such as its organizer; at most CLAIMS in all. Each claim carries the `time` or `date` of the asserting item.
     """
     rows = connection.execute(
-        f"SELECT e.subject,e.relation,e.target,e.origin,{index.TIME} AS time FROM edges e "  # noqa: S608 - fixed SQL
-        "JOIN items i ON i.id=e.item WHERE e.relation!='' AND e.subject IN (SELECT value FROM json_each(?)) "
-        "ORDER BY e.relation,e.target,e.origin,e.subject LIMIT 51",
-        (json.dumps(sorted(subjects)),),
+        f"""SELECT subject,relation,target,origin,time,date FROM (
+              SELECT e.subject,e.relation,e.target,e.origin,{index.TIME} AS time,{index.DATE} AS date,
+                row_number() OVER (PARTITION BY e.relation ORDER BY e.target,e.origin,e.subject) AS n
+              FROM edges e JOIN items i ON i.id=e.item
+              WHERE e.relation!='' AND e.subject IN (SELECT value FROM json_each(?)))
+            WHERE n<=? ORDER BY relation,target,origin,subject""",  # noqa: S608 - fixed SQL
+        (json.dumps(sorted(subjects)), RELATION + 1),
     ).fetchall()
-    return _claims(rows[:50]), len(rows) > 50
+    kept, seen = [], {}
+    for row in rows:
+        seen[row["relation"]] = seen.get(row["relation"], 0) + 1
+        if seen[row["relation"]] <= RELATION:
+            kept.append(row)
+    truncated = any(count > RELATION for count in seen.values()) or len(kept) > CLAIMS
+    return _claims(kept[:CLAIMS]), truncated
 
 
 def _claims(rows: list[sqlite3.Row]) -> list[dict[str, object]]:

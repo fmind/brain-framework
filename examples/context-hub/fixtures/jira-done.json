@@ -1,0 +1,8 @@
+{
+  "id": "review",
+  "title": "WEB-7 New website launch review",
+  "text": "The keyboard navigation check passed. Accessibility review is done, so launch is no longer blocked.",
+  "time": "now",
+  "url": "https://example.test/jira/WEB-7",
+  "attributes": { "workstream": "project:new-website", "status": "Done" }
+}

@@ -21,7 +21,7 @@ from bf.schedule import backend_name, generate
 from bf.storage import Store, collecting
 from bf.update import update
 
-CONFIG = b"""version: 6
+CONFIG = b"""version: 7
 name: fixture
 sensors:
   mail:
@@ -146,6 +146,8 @@ def test_systemd_quotes_arguments_and_captures_only_safe_environment(
     assert "OnCalendar=*-*-* *:00,15,30,45:00" in timer
     # Per-program timeouts bound each run; a total limit would kill long legitimate cycles.
     assert "TimeoutStartSec" not in service
+    # A stop leaves time to roll back an interrupted record commit before systemd kills the cycle.
+    assert "TimeoutStopSec=60s" in service
     assert "Persistent=true" in timer
     assert result["written"] == []
     # The install commands copy files a preview did not write: say so before anyone runs them.
@@ -164,6 +166,7 @@ def test_launchd_preserves_literal_arguments_and_calendar_catchup(scheduled: Sto
     assert plist["StartCalendarInterval"] == [{"Minute": 0}, {"Minute": 30}]
     assert "KeepAlive" not in plist
     assert "RunAtLoad" not in plist
+    assert plist["ExitTimeOut"] == 60
     assert result["install"][-1][0:2] == ["launchctl", "bootstrap"]
 
 

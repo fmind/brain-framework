@@ -50,9 +50,9 @@ bf read bf://example/projects/example
 bf read 'bf://example/projects/example.md#now'
 ```
 
-Read the concept's `backlinks` to find the project under `related-to`. Read the project's `claims` to find the same link and its origin, `projects/example.md#now`. These are two views of one declared relationship. `bf read repo:example/project` also groups the collected record under its `repository` role; `bf.yaml` restricts that role to `repo:` identities with `targets`, so a sensor mapping any other value fails without saving. Use real identities when adapting the example.
+Read the concept's `backlinks` to find the project under `related-to`. Read the project's `claims` to find the same link and its origin, `projects/example.md#now`. These are two views of one declared relation. `bf read repo:example/project` also groups the collected record under its `repository` relation; `bf.yaml` restricts that relation to `repo:` identities with `targets`, so a sensor mapping any other value fails without saving. Use real identities when adapting the example.
 
-`bf.yaml` also declares `depends-on` with `broader: related-to`, so a `related-to` role page lists dependencies too:
+`bf.yaml` also declares `depends-on` with `broader: related-to`, so a `related-to` relation page lists dependencies too:
 
 ```bash
 bf read bf://example/concepts/archive-policy.md --rel related-to
@@ -65,22 +65,22 @@ It returns `"total":1` with the decision `actions/2026-09-25_retention-review/ou
 Print every claim as one JSON object per line, for tools such as DuckDB or networkx:
 
 ```bash
-bf export edges | head -3
+bf export | head -3
 ```
 
-With `TZ=UTC`, the first three lines are:
+The first three lines are:
 
 ```text
 {"brain":"example","origin":"bf://example/actions/2026-09-19_retention/ACTION.md","relation":"tagged-with","subject":"bf://example/actions/2026-09-19_retention/ACTION.md","target":"bf://example/tags/retention"}
-{"brain":"example","origin":"bf://example/actions/2026-09-25_retention-review/ACTION.md#context","relation":"links","subject":"bf://example/actions/2026-09-25_retention-review/ACTION.md","target":"bf://example/actions/2026-09-25_retention-review/outputs/decision.md","time":"2026-09-25T00:00:00.000000Z"}
-{"brain":"example","origin":"bf://example/actions/2026-09-25_retention-review/ACTION.md#decision","relation":"links","subject":"bf://example/actions/2026-09-25_retention-review/ACTION.md","target":"bf://example/actions/2026-09-25_retention-review/outputs/decision.md","time":"2026-09-25T00:00:00.000000Z"}
+{"brain":"example","date":"2026-09-25","origin":"bf://example/actions/2026-09-25_retention-review/ACTION.md#context","relation":"links","subject":"bf://example/actions/2026-09-25_retention-review/ACTION.md","target":"bf://example/actions/2026-09-25_retention-review/outputs/decision.md"}
+{"brain":"example","date":"2026-09-25","origin":"bf://example/actions/2026-09-25_retention-review/ACTION.md#decision","relation":"links","subject":"bf://example/actions/2026-09-25_retention-review/ACTION.md","target":"bf://example/actions/2026-09-25_retention-review/outputs/decision.md"}
 ```
 
-Lines are sorted by subject, relation, target and origin. The first action has no `updated` date, so its claim has no `time`; a note's time is local midnight of its date, so another timezone shifts it. `head` closing the pipe early is expected. See [export edges](../../docs/docs/commands.md#export-the-graph).
+Lines are sorted by subject, relation, target and origin. The first action has no `updated` date, so its claim has no `date`; a note states its date as written, a record its `time` with the local offset. `head` closing the pipe early is expected. `bf export --kind identities` lists each note or record with every identity it answers to. See [export the graph](../../docs/docs/commands.md#export-the-graph).
 
 ## Review a decision
 
-All dates, policies and outcomes in these notes are fictional; the draft procedure asserts no real-world verification. `bf.yaml` declares the `depends-on` and `supersedes` roles the notes link with.
+All dates, policies and outcomes in these notes are fictional; the draft procedure asserts no real-world verification. `bf.yaml` declares the `depends-on` and `supersedes` relations the notes link with.
 
 ```bash
 bf read 'actions/2026-09-25_retention-review/ACTION.md#context'
@@ -102,7 +102,7 @@ bf read concepts/selected-evidence.md
 | Unknown         | `projects/example.md#unknown`                                   | The storage-cost question names the observation that would resolve it.                     |
 | Draft procedure | `concepts/selected-evidence.md`                                 | It stays draft until tried on a separate case.                                             |
 
-These reads expose the evidence; an agent or person performs the review. The example project uses `review_after: 7`: its reminder becomes due seven days after the local file edit, independently of its authored timeline date. Add an explicit `review_due` date when a deadline must survive copying or a Git checkout. `bf read tasks` lists the open project, concept and canonical-action checkboxes with source sections and full-selection counts; it excludes action attachments and deprecated notes.
+These reads expose the evidence; an agent or person performs the review. The example project sets `stale_after: 2026-12-18T09:00:00+01:00`: from that instant, `bf read projects` marks it `"review":true` with `"review_source":"stale_after"`, whatever its file's modification time. `bf read tasks` lists the open project, concept and canonical-action checkboxes with their sections and counts; it excludes action attachments and deprecated notes.
 
 ### Retain and compare the policy
 
@@ -112,7 +112,7 @@ Retain the exact policy section locally without inserting its body into an agent
 (
   set -o pipefail -o noclobber
   umask 077
-  helper="$bf_checkout/skills/bf-learn/scripts/evidence.py"
+  helper="$bf_checkout/src/bf/skills/bf-use/scripts/evidence.py"
   policy='bf://example/concepts/archive-policy.md#retention'
   capture=actions/2026-09-25_retention-review/inputs/policy-v1.json
   mkdir -p "${capture%/*}"
@@ -129,10 +129,10 @@ sed -i.bak 's/latest version/two latest versions/' concepts/archive-policy.md
 {
   cat actions/2026-09-25_retention-review/inputs/policy-v1.json
   bf read 'bf://example/concepts/archive-policy.md#retention'
-} | python3 "$bf_checkout/skills/bf-learn/scripts/evidence.py" compare
+} | python3 "$bf_checkout/src/bf/skills/bf-use/scripts/evidence.py" compare
 ```
 
-It returns `"state":"changed"`, while the capture retains the old body. It does not revise the dependent decision for you. Incomplete evidence yields `unknown` or an error, never permission to dismiss an intention. The helper needs Python 3.11 or later. A direct pipe suits this short section: `bf read` returns the text of replies above 32 KiB in pages, which `capture` refuses. For those, pipe the helper's `read REF --brain BRAIN` mode instead: it runs `bf` from PATH and assembles the pages, as the [evidence guide](../../skills/bf-learn/references/evidence.md#retain-a-revision) shows.
+It returns `"state":"changed"`, while the capture retains the old body. It does not revise the dependent decision for you. Incomplete evidence yields `unknown` or an error, never permission to dismiss an intention. The helper needs Python 3.11 or later. A direct pipe suits this short section: `bf read` returns the text of replies above 32 KiB in pages, which `capture` refuses. For those, pipe the helper's `read REF --brain BRAIN` mode instead: it runs `bf` from PATH and assembles the pages, as the [evidence guide](../../src/bf/skills/bf-use/references/evidence.md#retain-a-revision) shows.
 
 ### Share the procedure with a team brain
 
@@ -146,7 +146,7 @@ bf validate --brain "$bf_team"
 bf read concepts/selected-evidence.md --brain "$bf_team"
 ```
 
-The integration test exercises this isolated destination with retrieval cases. It checks this prepared fixture, not automatic redaction of arbitrary notes. For real transfers, use the [sharing guide](../../skills/bf-learn/references/share.md); review the complete candidate for its audience before an authorized write or publication.
+The integration test exercises this isolated destination with retrieval cases. It checks this prepared fixture, not automatic redaction of arbitrary notes. For real transfers, use the [sharing guide](../../src/bf/skills/bf-use/references/share.md); review the complete candidate for its audience before an authorized write or publication.
 
 ## Clean up
 

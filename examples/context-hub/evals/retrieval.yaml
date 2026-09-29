@@ -1,36 +1,37 @@
 # https://fmind.github.io/brain-framework/docs/checks/
-version: 5
+version: 7
 cases:
   - name: shared-project-connects-four-tools
     read: project:new-website
     expect: [workspace:brief, jira:review, github:implementation, gcloud:deployment]
   - name: brief-fields-normalized
     read: workspace:brief
-    text: [project:new-website, brief]
+    text: [project:new-website, brief, approved]
   - name: issue-fields-normalized
     read: jira:review
-    text: [project:new-website, issue]
+    text: [project:new-website, issue, WEB-7]
   - name: implementation-fields-normalized
     read: github:implementation
-    text: [project:new-website, demo-42, pull-request]
+    text: [project:new-website, demo-42, pull-request, merged]
   - name: deployment-fields-normalized
     read: gcloud:deployment
-    text: [project:new-website, demo-42, deployment, not a public launch]
+    text: [project:new-website, demo-42, deployment, healthy, not a public launch]
   - name: recover-the-reason
     query: visitors clear explanation
     scope: project:new-website
     expect: [workspace:brief]
-  - name: find-remaining-work
+  - name: find-the-launch-review
     query: keyboard navigation
     scope: memories/jira
     expect: [jira:review]
-    text: [Accessibility review is still open]
+    text: [keyboard navigation check]
   - name: read-the-decision
     read: projects/new-website.md#decision
-    text: [visitors need a clear explanation]
-  - name: retain-the-next-action
-    read: projects/new-website.md#next-actions
-    text: [Run the keyboard navigation check]
+    text: [single product page]
+  - name: find-the-next-action
+    query: next actions
+    scope: projects
+    expect: [projects/new-website.md#next-actions]
   - name: no-invented-evidence
     query: bfabsentevidence9c4f2a7d
     empty: true

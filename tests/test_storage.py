@@ -15,17 +15,18 @@ from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
 from bf import config, storage
 from bf.config import load, one, register, related, select, user_config, user_path, yaml_object
-from bf.history import log_path
 from bf.markdown import note
 from bf.models import Config, Error, Knowledge, Query, Record, Sensor, UserConfig, decode, digest, moment, timestamp
-from bf.storage import BusyError, Store, collecting, lock_file, reader, relative, state_store, writer
+from bf.retrieve import search
+from bf.storage import BusyError, Store, collecting, generation, lock_file, reader, relative, state_store, writer
 from bf.watch_settings import settings
 
 
@@ -247,6 +248,70 @@ def test_shared_read_locks_and_independent_collector_lock(brain: Store) -> None:
         pass
 
 
+def test_a_waiting_cache_replacement_goes_before_new_readers(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    waiting = Event()
+
+    def sleep(seconds: float) -> None:
+        waiting.set()
+        time.sleep(seconds)
+
+    monkeypatch.setattr(storage, "time", SimpleNamespace(monotonic=time.monotonic, sleep=sleep))
+    replaced = Event()
+
+    def replace() -> None:
+        with generation(brain, shared=False, wait=10):
+            replaced.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with generation(brain, shared=True, wait=0):
+            publish = executor.submit(replace)
+            assert waiting.wait(10)
+            # Overlapping readers once kept a publish waiting until it failed: a new one now waits behind it.
+            with pytest.raises(BusyError, match="being replaced"), generation(brain, shared=True, wait=0):
+                pass
+            assert not replaced.is_set()
+        publish.result(timeout=10)
+    assert replaced.is_set()
+    with generation(brain, shared=True, wait=0):
+        pass
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+def test_an_inaccessible_state_directory_is_named(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    locked = tmp_path / "read-only-state"
+    locked.mkdir()
+    locked.chmod(0o500)
+    monkeypatch.setenv("XDG_STATE_HOME", str(locked))
+    try:
+        # Locks live there too: searches name the directory instead of a generic inaccessible path.
+        for action in (lambda: state_store(brain.root), lambda: search([brain], Query(text="offline"))):
+            with pytest.raises(Error, match=r"state directory .*read-only-state/bf is inaccessible.*XDG_STATE_HOME"):
+                action()
+    finally:
+        locked.chmod(0o700)
+
+
+def test_links_share_regular_files_without_following_or_replacing_links(brain: Store, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private")
+    (brain.root / "linked").symlink_to(outside)
+    with pytest.raises(Error, match="linked: expected a regular file"):
+        brain.link("linked", "copy")
+    brain.write("original", b"bytes")
+    (brain.root / "target").symlink_to(outside)
+    with pytest.raises(Error, match="target: refusing to replace a non-regular file"):
+        brain.link("original", "target")
+    brain.link("original", "copy")
+    brain.link("original", "nested/copy")
+    assert os.path.samestat(brain.lstat("copy"), brain.lstat("original"))
+    assert brain.read("nested/copy") == b"bytes"
+    assert outside.read_text() == "private"
+    assert (brain.root / "target").is_symlink()
+    assert not [path for path in brain.root.iterdir() if path.name.startswith(".write-")]
+
+
 def test_rmdir_refuses_files_and_symlinks(brain: Store) -> None:
     brain.write("empty/item", b"data")
     with pytest.raises(Error, match="directory"):
@@ -290,7 +355,7 @@ def test_existing_state_must_be_private(brain: Store, tmp_path: Path, monkeypatc
     shared.chmod(0o700)
     folder, _name = lock_file(brain, "write.lock")
     # The shared root created with the default umask is restricted too, so others cannot list brain digests.
-    for directory in (log_path(brain, "mail").parent, folder.root, home / "bf"):
+    for directory in (state_store(brain.root).root, folder.root, home / "bf"):
         assert directory.stat().st_mode & 0o077 == 0
 
 
@@ -418,10 +483,10 @@ def test_yaml_follows_the_1_2_core_schema(brain: Store) -> None:
         "t": [True, 17, 15, 31, "1:30", 1.5, None],
     }
     assert note("concepts/x.md", b"---\ntags: [yes, 2026]\n---\n# X\n").knowledge.tags == ["yes", "2026"]
-    brain.write("bf.yaml", b"version: 6\nname: fixture\nsensors:\n  on:\n    command: [echo]\n    timeout: 1:30\n")
+    brain.write("bf.yaml", b"version: 7\nname: fixture\nsensors:\n  on:\n    command: [echo]\n    timeout: 1:30\n")
     with pytest.raises(Error, match=r"sensors\.on\.timeout"):
         load(brain)
-    brain.write("bf.yaml", b"version: 6\nname: fixture\nwatch:\n  notifications: off\n")
+    brain.write("bf.yaml", b"version: 7\nname: fixture\nwatch:\n  notifications: off\n")
     assert settings(brain).notifications == "off"
 
 
@@ -507,19 +572,19 @@ def test_relative_moments_resolve_deterministically() -> None:
             moment(bad, now)
 
 
-def test_configuration_is_strict_and_version_6(brain: Store) -> None:
+def test_configuration_is_strict_and_version_7(brain: Store) -> None:
     assert load(brain).name == "fixture"
     # One diagnostic names the supported format instead of every field a format change renamed.
     for data, problem in (
         (b"name: fixture\n", "has no version"),
-        (b"version: 5\nid: x\nname: old\n", "declares version 5"),
-        (b"version: 7\nname: fixture\nfuture: {}\n", "declares version 7"),
-        (b'version: "6"\nname: fixture\n', "declares an invalid version"),
+        (b"version: 4\nid: x\nname: old\n", "declares version 4"),
+        (b"version: 8\nname: fixture\nfuture: {}\n", "declares version 8"),
+        (b'version: "7"\nname: fixture\n', "declares an invalid version"),
     ):
         brain.write("bf.yaml", data)
-        with pytest.raises(Error, match=rf"^bf\.yaml {problem}; this release reads version: 6$"):
+        with pytest.raises(Error, match=rf"^bf\.yaml {problem}; this release reads version: 7$"):
             load(brain)
-    brain.write("bf.yaml", b"version: 6\nname: fixture\nunknown: 1\n")
+    brain.write("bf.yaml", b"version: 7\nname: fixture\nunknown: 1\n")
     with pytest.raises(Error, match="unknown"):
         load(brain)
 
@@ -529,7 +594,7 @@ def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.Mo
     other = tmp_path / "team"
     other.mkdir()
     team = Store(other)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     register(team)
     assert [s.root for s in select()] == [brain.root, team.root]
     assert one("team").root == team.root
@@ -546,10 +611,10 @@ def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.Mo
     assert [s.root for s in select()] == [brain.root]
     clone = tmp_path / "clone"
     clone.mkdir()
-    Store(clone).write("bf.yaml", b"version: 6\nname: team\n")
+    Store(clone).write("bf.yaml", b"version: 7\nname: team\n")
     with pytest.raises(Error, match="already registered as team"):
         register(Store(clone))
-    brain.write("bf.yaml", b"version: 6\nname: renamed\n")
+    brain.write("bf.yaml", b"version: 7\nname: renamed\n")
     with pytest.raises(Error, match="already registered as fixture"):
         register(brain)
     monkeypatch.chdir(tmp_path)
@@ -587,7 +652,7 @@ def test_concurrent_registrations_keep_every_brain(tmp_path: Path, monkeypatch: 
         root = tmp_path / f"brain-{number}"
         root.mkdir()
         store = Store(root)
-        store.write("bf.yaml", f"version: 6\nname: brain-{number}\n".encode())
+        store.write("bf.yaml", f"version: 7\nname: brain-{number}\n".encode())
         stores.append(store)
     original = config.user_config
     start = Barrier(len(stores))

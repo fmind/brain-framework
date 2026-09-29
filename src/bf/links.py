@@ -8,8 +8,11 @@ from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 from bf.models import AUTHORED, CITES, IDENTITY, NAME, TAGGED, Config, Error, clean, tag_name
 
-# The one period syntax, parsed by pages.period(): a day, a month or a trailing window, even an invalid date.
-PERIOD = re.compile(r"today|yesterday|[0-9]{4}-[0-9]{2}(?:-[0-9]{2})?|[0-9]{1,5}[hdw]")
+# The one period syntax, parsed by pages.period(): a day, a range of days, a month or a trailing window, even an
+# invalid date.
+PERIOD = re.compile(
+    r"today|yesterday|[0-9]{4}-[0-9]{2}(?:-[0-9]{2}(?:\.\.[0-9]{4}-[0-9]{2}-[0-9]{2})?)?|[0-9]{1,5}[hdw]"
+)
 
 
 @dataclass(frozen=True)
@@ -67,10 +70,10 @@ def parse(value: str) -> Address | None:
 
 
 def identity(value: str) -> str:
-    """An identity names no relationship; other schemes remain opaque."""
+    """An identity names no relation; other schemes remain opaque."""
     if parsed := parse(value):
         if parsed.relation:
-            raise Error("identity must not contain a link relationship")
+            raise Error("identity must not contain a link relation")
         return parsed.identity
     try:
         clean(value)
@@ -96,7 +99,7 @@ def tag(value: str) -> str | None:
         if parsed.fragment or parsed.relation:
             raise ValueError
     except ValueError:
-        raise Error("use a tag address without a section or relationship: bf://brain/tags/label") from None
+        raise Error("use a tag address without a section or relation: bf://brain/tags/label") from None
     return name
 
 
@@ -132,17 +135,26 @@ class Claim:
     origin: str
 
 
-def claim(value: str, config: Config, subject: str, origin: str) -> Claim | None:
-    """The typed claim of a `?rel=` link: a declared relationship or the built-in `cites`; other values are untyped."""
+def claim(
+    value: str, config: Config, subject: str, origin: str, *, strict: bool = False, authored: bool = False
+) -> Claim | None:
+    """The typed claim of a `?rel=` link: a declared relation or the built-in `cites`.
+
+    Retrieval keeps a link naming an undeclared or reserved relation as an untyped link, so one wrong word never
+    hides its note or record; `strict` checks, such as validation and collection, reject it instead. Only an
+    `authored` link's relation is quoted: a sensor's output controls a record's, and errors reach run history.
+    """
     parsed = parse(value)
     if not parsed or not parsed.relation:
         return None
-    if parsed.relation == TAGGED:
-        raise Error(f"link relation {TAGGED} is reserved for tag membership; add the tag to the note instead")
     if parsed.relation == CITES:
         return Claim(subject, CITES, parsed.identity, origin)
     definition = config.ontology.get(parsed.relation)
-    if not definition or not definition.relation:
-        # Never quote the relation: a sensor's output controls it, and errors reach run history and status.
-        raise Error("link relation is undeclared; declare an identity relationship in schema")
-    return Claim(subject, parsed.relation, parsed.identity, origin)
+    if parsed.relation != TAGGED and definition is not None and definition.relation:
+        return Claim(subject, parsed.relation, parsed.identity, origin)
+    if not strict:
+        return Claim(subject, "", parsed.identity, origin)
+    if parsed.relation == TAGGED:
+        raise Error(f"link relation {TAGGED} is reserved for tag membership; add the tag to the note instead")
+    named = f" {parsed.relation}" if authored else ""
+    raise Error(f"link relation{named} is undeclared; declare it in bf.yaml fields with relation: true")

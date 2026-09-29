@@ -1,121 +1,115 @@
 ---
-description: Find saved evidence, read exact sources and check whether results are complete and current.
+description: Find saved evidence, read exact sources and check whether results are complete.
 ---
 
 # Search and read
 
-Use `bf search` to find evidence and `bf read` to open it. Both work offline and notice file edits automatically. Run commands inside your brain directory.
+Use `bf search` to find evidence and `bf read` to open it. Both work offline and notice file edits automatically. Run them inside your brain.
 
-**Start with words you remember → read the returned ref → check freshness and completeness.** Use [pages](#pages) when you want to browse.
+**Search a few words → read the returned ref → check that the reply is complete.** Use [pages](#pages) to browse instead.
 
 ## Search
 
-After the [first-decision walkthrough](getting-started.md), try:
+After [Getting started](getting-started.md), try:
 
 ```bash
 bf search "visitors clear explanation"
 bf search "product page" --scope projects
 ```
 
-The first search finds the decision's reason; the second limits matches to project notes. Search matches any query word and ranks results, so `product page` can match either word. It does not generate an answer or translate your query. Use a few words the source is likely to contain. Words need spaces or punctuation between them: for Chinese, Japanese or Thai text written without spaces, search a whole run between punctuation exactly as written, a tag or an alias.
+The first search finds the decision's reason; the second searches project notes only. Any query word can match, and results matching more of the words rank higher. Put variants in one query, such as `signup "sign up" registration`: BF does not translate or expand words.
 
-Each item includes a title, excerpt and `ref`; with several selected brains, also its `brain` and brain-qualified `uri`. Records of several sources sharing a URL, such as a file and its catalog entry, appear once; `also` lists the other refs. Read a returned ref exactly:
+| Write                              | To match                                                              |
+| ---------------------------------- | --------------------------------------------------------------------- |
+| `visitors signup`                  | Either word, in any form English stemming relates, such as `visitor`. |
+| `"clear explanation"`              | The exact phrase.                                                     |
+| `synchro*`                         | Words starting with `synchro`, such as `synchronizes`.                |
+| `repo:github.com/team/new-website` | The identity's owner and every item linking to it.                    |
+
+Each item has a `title`, an `excerpt` and a `ref`. A note states its `date`; a record states its event `time` with your local offset. `sections` lists up to three other matching sections of the same note, and `unmatched` names query words found nowhere, so you can rephrase:
+
+```bash
+bf search '"clear explanation" zebra'
+```
+
+The reply returns the Decision section and `"unmatched":["zebra"]`. Section titles name their parent headings, such as `Portfolio review — Vega — Budget`, and a note's tags rank like headings. Among equal scores, the newest item comes first. Records of several sources that share a URL appear once; `also` lists the other refs.
+
+If a query misses, use the evidence's own words and drop the scope. The sample says “visitors” and “signing up”, so “customer conversion” need not find it. Unspaced Chinese, Japanese or Thai text matches only as a whole run between punctuation.
+
+### Narrow a search
+
+`--scope` takes one scope:
+
+| Scope                                 | Searches                                                               |
+| ------------------------------------- | ---------------------------------------------------------------------- |
+| `projects`, `concepts/team`           | A folder or file.                                                      |
+| `memories/brief`, `memories/brief/7d` | One source, optionally within a period.                                |
+| `today`, `7d`, `2026-09`              | A period of local time.                                                |
+| `2026-09-21..2026-09-25`              | Local days from the first through the last, inclusive.                 |
+| `repo:github.com/team/new-website`    | The identity's owner and the items linking to it.                      |
+| `bf://brain/tags/website`             | Notes carrying that tag; see [tag rules](link-reference.md#tag-rules). |
+
+## Read a ref
 
 ```bash
 bf read projects/new-website.md#decision
 ```
 
-The `text` field contains the original Decision section. To include the whole note and its backlinks, omit `#decision`. See [the walkthrough's output](getting-started.md#find-its-reason).
+The `text` field holds the original Decision section. Omit `#decision` to read the whole note with its backlinks. Use returned refs exactly:
 
-When several brains are selected, read each result's `uri` instead: a plain ref that exists in more than one brain fails and asks for a `bf://` address. See [notes, records and identities](retrieval.md#notes-records-and-identities).
+| Read     | Example                                       | Result                                                                                   |
+| -------- | --------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Note     | `bf read projects/new-website.md`             | Whole note, backlinks and the claims it makes.                                           |
+| Section  | `bf read projects/new-website.md#decision`    | That section only.                                                                       |
+| Record   | `bf read brief:website-brief`                 | The [collected brief](getting-started.md#collect-your-first-source).                     |
+| Identity | `bf read repo:github.com/team/new-website`    | Its owning note, after [declaring the alias](links.md#give-a-subject-a-stable-identity). |
+| Relation | `bf read projects/new-website.md --rel cites` | Every item citing the note: a [relation page](retrieval.md#relation-pages).              |
 
-If a query misses, try the evidence's wording and remove the scope. For example, the sample says “visitors” and “signing up”; searching for “customer conversion” need not find it. Add evidence only when the source itself lacks the answer.
+A whole read previews the five newest backlinks of each relation, each with a short `excerpt` and single-value `fields` such as a status. A note above 32 KiB opens with its `outline` of section refs, its backlinks and its first 4 KiB: read the section you need, or follow `next_offset`.
+
+With several brains selected, each result also names its `brain` and a `uri` such as `bf://brain/projects/new-website.md#decision`. Read the `uri`: a plain ref that exists in two brains fails.
 
 ## Pages
 
-Use pages when you want to browse rather than search for words:
+Pages are computed views for browsing:
 
-| Command            | Use it to…                                                         |
-| ------------------ | ------------------------------------------------------------------ |
-| `bf read`          | See projects needing attention, recent work and collection alerts. |
-| `bf read projects` | Find a project's current state and first open task.                |
-| `bf read tasks`    | Summarize open tasks and read the section owning each one.         |
-| `bf read actions`  | Find a session to resume.                                          |
-| `bf read 7d`       | Browse the last seven days of saved activity.                      |
-| `bf read memories` | Inspect sources, counts and collection coverage.                   |
+| Command                          | Use it to…                                                     |
+| -------------------------------- | -------------------------------------------------------------- |
+| `bf read`                        | See projects needing review, recent work and failing programs. |
+| `bf read projects`               | Find each project's state and first open task.                 |
+| `bf read tasks`                  | List open checkboxes with the section owning each.             |
+| `bf read actions`                | Find a session to resume.                                      |
+| `bf read 7d`                     | Browse the last seven days of dated notes and records.         |
+| `bf read 2026-09-21..2026-09-25` | Browse a range of local days.                                  |
+| `bf read memories`               | Inspect each source's records and collection coverage.         |
+| `bf read tags`                   | List topic labels and their note counts.                       |
 
-For the New website project, `bf read projects` shows `"next":"Draft the product page."`. A project's `review: true` flag is a reminder, with `review_reasons` explaining the deadline or newer evidence. File modification time supplies the default age signal; an explicit `review_due` sets a deadline. Neither means the note was verified. See [review reminders](brain.md#review-reminders).
-
-Recent-activity pages use note dates and record timestamps. They do not fetch anything from a provider. A [low-priority source](sensors.md#quiet-a-high-volume-source), such as a news feed, appears there only as a count with its page. See the [page reference](retrieval.md#pages) for all available pages and their time rules.
-
-## Summarize open tasks
-
-```bash
-bf read tasks
-bf read projects/new-website.md#next-actions
-```
-
-The first lists “Draft the product page.” with its source `ref`, `line` and counts in `summary`. The second opens its context. Checking the task off removes it from the open list and increases `summary.done`. Read before acting: a saved task is not authorization.
-
-See [task-page rules](retrieval.md#tasks) for included notes, counts and pagination.
-
-## Browse tags
-
-After adding `tags: [website, product]` to the [sample project](brain.md#notes), try:
-
-```bash
-bf read tags
-bf read bf://brain/tags/website
-bf search "product page" --scope bf://brain/tags/website
-```
-
-The directory shows counts; the tag page lists New website; the scoped search matches only explicitly tagged notes. A plain search for `website` also matches prose. See [tag authoring](brain.md#tags).
-
-## Notes, records and identities
-
-| Read     | Example                                       | Result                                                                                                     |
-| -------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Note     | `bf read projects/new-website.md`             | Whole note and backlinks.                                                                                  |
-| Section  | `bf read projects/new-website.md#decision`    | Decision text only.                                                                                        |
-| Record   | `bf read brief:website-brief`                 | Brief collected in [Getting started](getting-started.md#collect-your-first-source).                        |
-| Identity | `bf read repo:github.com/team/new-website`    | Owning note after [declaring the alias](links.md#give-a-subject-a-stable-identity).                        |
-| Role     | `bf read projects/new-website.md --rel links` | Every item linking to the note without a declared relationship; see [role pages](retrieval.md#role-pages). |
-
-Use returned refs exactly. Ordinary names do not establish identities. A whole-note read previews the 5 newest backlinks of each relationship; its role page lists them all.
+For the New website project, `bf read projects` shows `"next":"Draft the product page."` and `bf read tasks` lists that checkbox with its `ref` and `line`. A project with `"review":true` needs attention; `review_reasons` says why. Pages use saved dates and never fetch anything. The [page reference](retrieval.md#pages) lists every page and its rules.
 
 ## Incomplete answers and freshness
 
-Before concluding that evidence is absent, check the reply:
+Check the reply before concluding that evidence is absent:
 
-| Signal                       | What to do                                                                                                                                                                       |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `problems`                   | Resolve the named skipped or unreadable files and brains, then repeat the request.                                                                                               |
-| `stale`                      | Wait for the active writer to finish, then retry the cache refresh.                                                                                                              |
-| Source coverage or freshness | Check whether the collecting machine covered the period you need. Search lists the sources of returned records and those needing attention; `sources_omitted` counts the others. |
-| `next_offset`                | Continue with that offset if you need the complete listing.                                                                                                                      |
+| Signal                       | What to do                                                                       |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| `problems`                   | Repair the named files or brains, then repeat the request.                       |
+| `stale`                      | Another command is updating the cache; retry in a moment for the newest results. |
+| `sources`, `sources_omitted` | Check that the sources you need collected the period you ask about.              |
+| `next_offset`                | Repeat the same request with `--offset` for the rest.                            |
 
-A clean cache does not prove current provider data. For example, no matches for today's meeting could mean the meeting was never collected. Check locally retained coverage:
+No match for today's meeting can mean the meeting was never collected. `bf read memories` and `bf status` show local coverage without contacting providers. If the cache is damaged, `bf build` rebuilds it from the files. [What BF does not do](concepts.md#what-bf-does-not-do) lists the limits these signals guard.
 
-```bash
-bf read memories
-bf status
-```
+## Continue a listing
 
-These commands do not contact providers. If the cache is damaged, `bf build` reconstructs it from the files. See [exact completeness rules](retrieval.md#incomplete-answers-and-freshness) before automating absence checks.
-
-## Continuations
-
-When a reply contains `next_offset`, repeat the same request with that value. For example, if this first search returns `"next_offset":1`, continue with the second command:
+When a reply contains `next_offset`, repeat the request with that value:
 
 ```bash
 bf search "product" --limit 1
 bf search "product" --limit 1 --offset 1
 ```
 
-Keep the query, scope, limit and brain selection unchanged. Stop when there is no `next_offset`; restart if the files change. Listings use the same `--offset` option.
+Keep the query, scope, limit and brain selection unchanged, and stop when `next_offset` is absent. Listings and large exact reads continue the same way; see [continuations](retrieval.md#continuations).
 
-An exact read above 32 KiB returns its text in pages, from the first one. The first page's `outline` lists the note's sections: read the one you need, or follow the [text pages](retrieval.md#large-exact-reads) to the end. A preview or single page is not complete evidence.
+## Keep answers findable
 
-## Retrieval cases
-
-Save recurring questions as [retrieval cases](checks.md#retrieval-cases). When a useful question misses, improve the owning note or selected evidence and check that the answer stays reachable.
+Save recurring questions as [retrieval cases](checks.md#retrieval-cases). When a useful question misses, improve the owning note or selected evidence, then check that the answer stays reachable.

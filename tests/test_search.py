@@ -24,7 +24,7 @@ import pytest
 from mcp.types import CallToolResult
 from pydantic import ValidationError
 
-from bf import index, pages, records, storage, usage
+from bf import index, pages, records, retrieve, storage, usage
 from bf.cli import main
 from bf.config import register, user_path
 from bf.markdown import LEAD, entry_note
@@ -170,7 +170,7 @@ def test_cache_follows_edits_additions_removals_and_touches(brain: Store) -> Non
 
 
 def test_invalid_files_are_skipped_and_reported(brain: Store) -> None:
-    brain.write("projects/broken.md", b"---\nreview_after: soon\n---\n# Broken\n")
+    brain.write("projects/broken.md", b"---\nstale_after: soon\n---\n# Broken\n")
     brain.write("memories/bad/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json", b'{"id":"x"}\n')
     records_file(brain, "dupes", [Record(id="a", title="A", time="2026-09-01T00:00:00Z")])
     brain.write("memories/dupes/" + "0" * 64 + ".json", b'{"id":"a","title":"A"}\n')
@@ -179,7 +179,7 @@ def test_invalid_files_are_skipped_and_reported(brain: Store) -> None:
     assert len(problems) == 3
     # Each skipped file is one object naming it once.
     assert {"file": "projects/broken.md", "error": problems[2]["error"]} == problems[2]
-    assert problems[2]["error"].startswith("invalid frontmatter: review_after")
+    assert problems[2]["error"].startswith("invalid frontmatter: stale_after")
     assert any("record id does not match" in p["error"] for p in problems)
     reply = search([brain], Query(text="offline"))
     assert {"brain": "fixture", **problems[2]} in cast("list[dict[str, str]]", reply["problems"])
@@ -369,8 +369,8 @@ def plant(store: Store, *statements: str) -> None:
     with closing(sqlite3.connect(store.root / index.CACHE)) as connection, connection:
         connection.execute(
             "INSERT INTO items(id,ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-            "tasks_open,tasks_done,next,weight,review_after,review_due) VALUES(999,'projects/roadmap.md',"
-            "'projects/roadmap.md','note','','Roadmap','','project','','planted','','','',0,0,0,'',1,0,'')"
+            "tasks_open,tasks_done,next,weight,stale_after,fields) VALUES(999,'projects/roadmap.md',"
+            "'projects/roadmap.md','note','','Roadmap','','project','','planted','','','',0,0,0,'',1,'','')"
         )
         connection.execute("INSERT INTO passages(id,item,fragment,title,original) VALUES(999,999,'','Roadmap','')")
         connection.execute("INSERT INTO search(rowid,title,text,names) VALUES(999,'roadmap','zanzibar planted','')")
@@ -432,7 +432,14 @@ def test_a_busy_writer_serves_the_current_cache_as_stale(brain: Store) -> None:
     brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
     with writer(brain):
         reply = search([brain], Query(text="latecomer"))
-    assert reply == {"items": [], "notice": reply["notice"], "stale": ["fixture"], "sources": reply["sources"]}
+    # The stale cache does not hold the word yet: `stale` marks that answer, and its unmatched word, as outdated.
+    assert reply == {
+        "items": [],
+        "notice": reply["notice"],
+        "stale": ["fixture"],
+        "sources": reply["sources"],
+        "unmatched": ["latecomer"],
+    }
     assert cast(list[dict], reply["sources"])[0]["source"] == "meetings"
     assert refs(brain, "latecomer") == ["concepts/late.md"]
 
@@ -582,7 +589,7 @@ def test_a_build_publishes_after_readers_close_the_generation_it_replaces(
 
 
 def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
-    schema = b"version: 6\nname: fixture\nschema:\n  owner:\n    description: Who owns it.\n    type: identity\n"
+    schema = b"version: 7\nname: fixture\nfields:\n  owner:\n    description: Who owns it.\n    type: identity\n"
     brain.write("bf.yaml", schema + b"    relation: true\n")
     index.refresh(brain)
     generation = cache_file(brain)
@@ -612,7 +619,7 @@ def test_several_brains_interleave_and_reads_name_their_brain(brain: Store, tmp_
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     team.write("projects/offline.md", b"# Team offline\n\nThe team keeps offline retrieval too.\n")
     register(team)
     stores = [brain, team]
@@ -667,8 +674,14 @@ def test_oversized_notes_read_as_pages_of_their_text(brain: Store) -> None:
     assert "chunk" not in reply
     assert (reply["offset"], reply["total_characters"], reply["sha256"]) == (0, len(data), digest(data))
     assert len(encode(reply)) <= pages.BUDGET
+    # A large note's first page returns only its opening beside the outline; the next page fills the budget.
+    assert reply["outline"]
+    assert reply["next_offset"] == len(str(reply["text"]))
+    assert len(encode(reply["text"])) <= retrieve.OPENING
+    following = read([brain], "concepts/quoted.md", offset=cast(int, reply["next_offset"]))
     # No line ends within the slice, so it ends where the budget does.
-    assert reply["next_offset"] == len(str(reply["text"])) > pages.BUDGET // 4
+    assert len(encode(following)) <= pages.BUDGET
+    assert len(str(following["text"])) > pages.BUDGET // 4
     assert reply["modified"] == timestamp(
         # Exact integer division, as bf computes it: `ns / 1e9` rounds ns to a float first, off by one microsecond.
         datetime.fromtimestamp((brain.root / "concepts/quoted.md").stat().st_mtime_ns / 1_000_000_000, UTC).isoformat()
@@ -829,7 +842,7 @@ def test_changed_since_uses_modification_time_without_changing_event_time(brain:
 def test_searches_report_collection_coverage_of_their_sources(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n  meetings:\n    command: [true-command]\n    refresh: 3600\n  disabled:\n    command: [true-command]\n    enabled: false\n",
+        b"version: 7\nname: fixture\nsensors:\n  meetings:\n    command: [true-command]\n    refresh: 3600\n  disabled:\n    command: [true-command]\n    enabled: false\n",
     )
     for source in ("disabled", "historical"):
         records_file(brain, source, [Record(id="x", title="Offline retrieval")])
@@ -911,7 +924,7 @@ def test_recent_identity_keeps_owners_ahead_of_newer_relations_across_brains(bra
     folder = tmp_path / "shared"
     folder.mkdir()
     team = Store(folder)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     team.write("projects/owner.md", b'---\nupdated: 2026-08-01\naliases: ["repo:example/project"]\n---\n# Owner\n')
     result = search([team, brain], Query(text="repo:example/project"))["items"]
     assert isinstance(result, list)
@@ -931,11 +944,11 @@ def test_an_exact_record_ref_takes_precedence_over_a_colliding_alias(brain: Stor
 
 
 def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Store, tmp_path: Path) -> None:
-    brain.write("projects/broken.md", b"---\nreview_after: typo\n---\n# Hidden answer\n")
+    brain.write("projects/broken.md", b"---\nstale_after: typo\n---\n# Hidden answer\n")
     broken = tmp_path / "broken"
     broken.mkdir()
     other = Store(broken)
-    other.write("bf.yaml", b"version: 6\nname: interrupted\n")
+    other.write("bf.yaml", b"version: 7\nname: interrupted\n")
     other.write("memories/.pending/0.before", b"preserve this original")
     reply = search([brain, other], Query(text="offline retrieval"), counted=False)
     assert isinstance(reply["items"], list)
@@ -952,7 +965,7 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
     # Exact reads cannot silently assume a broken brain contains no competing identity.
     with pytest.raises(Error):
         read([brain, other], "meetings:lunch")
-    other.write("bf.yaml", b"version: 6\nname: [invalid]\n")
+    other.write("bf.yaml", b"version: 7\nname: [invalid]\n")
     assert search([brain, other], Query(text="offline"), counted=False)["items"]
     with pytest.raises(Error, match=r"invalid bf\.yaml"):
         search([other, other], Query(text="offline"), counted=False)
@@ -994,12 +1007,12 @@ def test_evaluation_names_missing_retrieval_cases(brain: Store) -> None:
     with pytest.raises(Error, match="evals has no suites"):
         evaluate(brain)
     brain.write(
-        "evals/retrieval.yaml", b"version: 5\ncases:\n  - name: later\n    query: x\n    scope: soon\n    empty: true\n"
+        "evals/retrieval.yaml", b"version: 7\ncases:\n  - name: later\n    query: x\n    scope: soon\n    empty: true\n"
     )
     with pytest.raises(Error, match=r"invalid evals/retrieval\.yaml: cases\.0\.scope: scope accepts"):
         evaluate(brain)
     for case in (b"    query: x\n    read: today\n", b"    read: today\n    scope: 7d\n", b"    since: 7d\n"):
-        brain.write("evals/retrieval.yaml", b"version: 5\ncases:\n  - name: bad\n" + case + b"    empty: true\n")
+        brain.write("evals/retrieval.yaml", b"version: 7\ncases:\n  - name: bad\n" + case + b"    empty: true\n")
         with pytest.raises(Error, match=r"case bad|since"):
             evaluate(brain)
 
@@ -1007,9 +1020,9 @@ def test_evaluation_names_missing_retrieval_cases(brain: Store) -> None:
 def test_evaluation_rejects_incomplete_empty_answers(brain: Store) -> None:
     from bf.evaluate import evaluate
 
-    brain.write("projects/broken.md", b"---\nreview_after: typo\n---\n# Lost answer\n")
+    brain.write("projects/broken.md", b"---\nstale_after: typo\n---\n# Lost answer\n")
     brain.write(
-        "evals/retrieval.yaml", b"version: 5\ncases:\n  - name: absent\n    query: lost answer\n    empty: true\n"
+        "evals/retrieval.yaml", b"version: 7\ncases:\n  - name: absent\n    query: lost answer\n    empty: true\n"
     )
     reply = evaluate(brain)
     assert not reply["passed"]
@@ -1034,7 +1047,7 @@ def test_retrieval_cases_distinguish_record_ids_from_note_sections(brain: Store)
     records_file(brain, "issues", [Record(id="item#comment", title="Hashneedle")])
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 5\ncases:\n  - name: exact-record\n    query: hashneedle\n    expect: [issues:item]\n",
+        b"version: 7\ncases:\n  - name: exact-record\n    query: hashneedle\n    expect: [issues:item]\n",
     )
     assert not evaluate(brain)["passed"]
 
@@ -1068,6 +1081,171 @@ def test_a_section_ranks_under_its_note_title_while_the_title_alone_finds_the_no
     assert refs(brain, "Atlas latency")[0] == "projects/atlas.md#next-actions"
 
 
+def test_quoted_phrases_and_word_prefixes_match_while_other_syntax_stays_literal(brain: Store) -> None:
+    brain.write("concepts/sync.md", b"# Sync\n\nThe offices synchronize field reports nightly.\n")
+    brain.write("projects/plan.md", b"# Plan\n\nThe launch budget is fixed.\n")
+    brain.write("projects/memo.md", b"# Memo\n\nThe budget covers the launch.\n")
+    # Before 16.0.0 the `*` and quotes were dropped: `synchro` matched no word, and both notes held the two words.
+    assert refs(brain, "synchro*") == ["concepts/sync.md"]
+    assert refs(brain, '"launch budget"') == ["projects/plan.md"]
+    assert refs(brain, "“launch budget”") == ["projects/plan.md"]
+    assert refs(brain, '"budget"') == refs(brain, "budget")
+    # A phrase keeps its function words; an unclosed quote leaves plain words.
+    assert refs(brain, '"covers the launch"') == ["projects/memo.md"]
+    assert set(refs(brain, '"launch budget')) == {"projects/plan.md", "projects/memo.md"}
+    assert index.terms('Synchro* "the launch  budget" the "" sync*') == ["Synchro*", "the launch budget", "sync*"]
+    # FTS5 operators, column filters and stray quotes are only words: nothing reaches SQLite as syntax.
+    for query in (
+        "NEAR(launch budget)",
+        "launch AND budget",
+        "title:launch",
+        "^launch",
+        '"launch',
+        "launch*budget",
+        "-launch",
+    ):
+        assert "projects/plan.md" in refs(brain, query), query
+    assert refs(brain, "repo:example/project") == ["projects/offline.md", "meetings:decision-1"]
+
+
+def test_search_names_query_words_that_match_nothing(brain: Store, tmp_path: Path) -> None:
+    reply = search([brain], Query(text="offline budjet"))
+    # Before 16.0.0 a misspelled word left no trace: the reply looked like an answer about both words.
+    assert reply["unmatched"] == ["budjet"]
+    assert "projects/offline.md" in refs(brain, "offline budjet")
+    assert "unmatched" not in search([brain], Query(text="offline retrieval"))
+    assert search([brain], Query(text='"retrieval offline" synchro* zzabsent'))["unmatched"] == [
+        '"retrieval offline"',
+        "synchro*",
+        "zzabsent",
+    ]
+    # Dropped function words are not reported; a scope does not make a word unknown to the brain.
+    assert search([brain], Query(text="what is the zzabsent"))["unmatched"] == ["zzabsent"]
+    assert "unmatched" not in search([brain], Query(text="lunch offline", **scope("concepts")))
+    # Identities, known or not, are never checked as words.
+    assert "unmatched" not in search([brain], Query(text="repo:example/project"))
+    # A word counts as matched when any selected brain holds it.
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("concepts/budget.md", b"# Budjet\n\nA misspelled title.\n")
+    assert "unmatched" not in search([brain, team], Query(text="offline budjet"))
+
+
+def test_tags_rank_like_headings_above_passing_mentions(brain: Store) -> None:
+    brain.write("projects/launch.md", b"---\ntype: project\ntags: [vega]\n---\n# Launch\n\nThe partner release plan.\n")
+    brain.write(
+        "concepts/stars.md", b"---\ntype: concept\n---\n# Stars\n\nSeveral stars, such as Vega, shine in autumn.\n"
+    )
+    # Before 16.0.0 tags ranked at half the weight of body text, so a passing mention came first.
+    assert refs(brain, "vega") == ["projects/launch.md", "concepts/stars.md"]
+
+
+def test_nested_sections_rank_and_read_under_their_parent_headings(brain: Store) -> None:
+    brain.write(
+        "projects/portfolio.md",
+        b"# Portfolio\n\n## Orion\n\n### Budget\n\nApproved at 2600 credits.\n\n"
+        b"## Vega\n\nA partner survey.\n\n### Budget\n\nApproved at 1300 credits.\n",
+    )
+    # Before 16.0.0 a section ranked with its own heading and note title only: `#vega` answered, without the amount.
+    item = cast("list[dict[str, str]]", search([brain], Query(text="Vega budget"))["items"])[0]
+    assert (item["ref"], item["title"]) == ("projects/portfolio.md#budget-1", "Portfolio — Vega — Budget")
+    assert item["excerpt"] == "Approved at 1300 credits."
+    assert refs(brain, "Orion budget")[0] == "projects/portfolio.md#budget"
+    # A parent heading alone never ranks a child: the parent section answers.
+    assert refs(brain, "Vega") == ["projects/portfolio.md#vega"]
+
+
+def test_whole_note_results_without_matching_text_preview_the_note_lead(brain: Store) -> None:
+    brain.write("projects/atlas.md", b"---\ntype: project\n---\n# Atlas\n\n## Decision\n\nAtlas uses SQLite.\n")
+    item = cast("list[dict[str, str]]", search([brain], Query(text="Atlas"))["items"])[0]
+    # Before 16.0.0 the note's empty introduction left the excerpt empty.
+    assert (item["ref"], item["excerpt"]) == ("projects/atlas.md", "Atlas uses SQLite.")
+
+
+def test_results_name_other_matching_sections_of_their_note(brain: Store, tmp_path: Path) -> None:
+    item = cast("list[dict[str, object]]", search([brain], Query(text="retention guide"))["items"])[0]
+    # Before 16.0.0 only the best section of a note returned; the decision was hidden.
+    assert (item["ref"], item["sections"]) == ("projects/offline.md#next-actions", ["projects/offline.md#decision"])
+    body = "# Quarters\n\n" + "".join(f"## Q{n}\n\n{'Revenue grew. ' * n}Revenue grew.\n\n" for n in range(1, 6))
+    brain.write("projects/quarters.md", body.encode())
+    item = cast("list[dict[str, object]]", search([brain], Query(text="revenue"))["items"])[0]
+    # Best first, at most three, never the result itself or the whole note.
+    assert item["ref"] == "projects/quarters.md#q5"
+    assert item["sections"] == [f"projects/quarters.md#q{n}" for n in (4, 3, 2)]
+    assert "sections" not in cast("list[dict[str, object]]", search([brain], Query(text="lunch"))["items"])[0]
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 7\nname: team\n")
+    both = cast("list[dict[str, object]]", search([brain, team], Query(text="retention guide"))["items"])
+    assert both[0]["sections"] == ["bf://fixture/projects/offline.md#decision"]
+
+
+def test_function_words_of_questions_drop_while_subjects_stay(brain: Store) -> None:
+    assert index.terms("Has there been any update on the budget, and what should we do about it?") == [
+        "update",
+        "budget",
+    ]
+    assert index.terms("Pourquoi n'y a-t-il pas de budget, et qu'ont-ils été si sûrs ?") == ["budget", "sûrs"]
+    assert index.terms("has been") == ["has", "been"]
+    brain.write("projects/budget.md", b"# Budget\n\nThe budget is final.\n")
+    brain.write("projects/noise.md", b"# Has been\n\nThere has been any number of notes about it.\n")
+    # Before 16.0.0 these auxiliary words ranked the noise first.
+    assert refs(brain, "Has there been any budget?")[0] == "projects/budget.md"
+
+
+def test_equal_scores_list_the_newest_first(brain: Store, tmp_path: Path) -> None:
+    def status(name: str, time: str = "") -> Record:
+        return Record(id=name, title="Weekly status", text="Status call.", time=time)
+
+    records_file(
+        brain,
+        "calendar",
+        [
+            status("a", "2026-09-01T09:00:00Z"),
+            status("b", "2026-09-15T09:00:00Z"),
+            status("c", "2026-09-08T09:00:00Z"),
+            status("d"),
+        ],
+    )
+    # Before 16.0.0 ties listed refs alphabetically: the oldest meeting came first.
+    assert refs(brain, "weekly status") == ["calendar:b", "calendar:c", "calendar:a", "calendar:d"]
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 7\nname: team\n")
+    records_file(team, "calendar", [status("e", "2026-09-22T09:00:00Z")])
+    both = cast("list[dict[str, object]]", search([brain, team], Query(text="weekly status"))["items"])
+    # Scores of different brains do not compare: each rank takes the newest brain's item first.
+    assert [(item["brain"], item["ref"]) for item in both][:3] == [
+        ("team", "calendar:e"),
+        ("fixture", "calendar:b"),
+        ("fixture", "calendar:c"),
+    ]
+
+
+def test_evaluation_ranks_expected_refs_beyond_the_case_limit(brain: Store) -> None:
+    from bf.evaluate import evaluate
+
+    brain.write("concepts/retention.md", b"# Retention decision\n\nA retention decision.\n")
+    brain.write(
+        "evals/retrieval.yaml",
+        b"version: 7\ncases:\n  - name: decision\n    query: retention decision\n    limit: 1\n"
+        b"    expect: [projects/offline.md#decision]\n",
+    )
+    reply = evaluate(brain)
+    case = cast("list[dict[str, object]]", reply["cases"])[0]
+    # Before 16.0.0 a ref below the limit ranked as missing: MRR could not tell rank 2 from rank 50.
+    assert (case["passed"], case["rank"], case["returned"]) == (
+        False,
+        {"projects/offline.md#decision": 2},
+        ["concepts/retention.md"],
+    )
+    assert reply["mrr"] == 0.5
+
+
 def test_records_of_several_sources_sharing_a_url_collapse_to_the_best_ranked_one(brain: Store, tmp_path: Path) -> None:
     url = "https://docs.example.test/plan"
     records_file(brain, "drive", [Record(id="plan", title="Launch plan", text="Launch after review.", url=url)])
@@ -1099,7 +1277,7 @@ def test_records_of_several_sources_sharing_a_url_collapse_to_the_best_ranked_on
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     records_file(team, "drive", [Record(id="plan", title="Launch plan", url=url)])
     both = cast("list[dict[str, object]]", search([brain, team], Query(text="launch plan"))["items"])
     assert sorted(str(item["brain"]) for item in both if item.get("url") == url) == ["fixture", "team"]
@@ -1116,7 +1294,7 @@ def test_low_priority_sources_rank_at_half_weight_without_a_rebuild(brain: Store
     assert refs(brain, "harbor bridge") == ["news:bridge", "minutes:bridge"]
     cache = (brain.root / index.CACHE).stat().st_ino
     brain.write(
-        "bf.yaml", b"version: 6\nname: fixture\nsensors:\n  news:\n    command: [news-cli]\n    priority: low\n"
+        "bf.yaml", b"version: 7\nname: fixture\nsensors:\n  news:\n    command: [news-cli]\n    priority: low\n"
     )
     assert refs(brain, "harbor bridge") == ["minutes:bridge", "news:bridge"]
     assert (brain.root / index.CACHE).stat().st_ino == cache
@@ -1151,7 +1329,7 @@ def test_a_known_identity_ignores_other_brains_words(brain: Store, tmp_path: Pat
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     team.write("projects/words.md", b"# Repo example project\n\nOnly words, no link.\n")
     reply = search([brain, team], Query(text="repo:example/project"))
     assert "identity" not in reply
@@ -1171,7 +1349,7 @@ def test_query_words_fold_like_the_indexed_text(brain: Store) -> None:
     decomposed = unicodedata.normalize("NFD", "été")
     assert decomposed != "été"
     assert refs(brain, decomposed) == refs(brain, "été") == ["concepts/summer.md"]
-    assert index.terms("Été été ETE the") == ["Été", "ETE"]
+    assert index.terms("Août août AOUT the") == ["Août", "AOUT"]
 
 
 def test_queries_without_words_are_invalid_input(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1220,7 +1398,7 @@ def test_only_returned_results_compute_excerpts(brain: Store, monkeypatch: pytes
 def test_search_coverage_names_the_sources_it_returned_or_that_need_attention(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n"
+        b"version: 7\nname: fixture\nsensors:\n"
         b"  manual:\n    command: [true-command]\n"
         b"  due:\n    command: [true-command]\n    refresh: 3600\n",
     )
@@ -1246,7 +1424,7 @@ def test_source_scopes_cover_only_brains_that_hold_the_source(brain: Store, tmp_
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 6\nname: team\n")
+    team.write("bf.yaml", b"version: 7\nname: team\n")
     team.write("projects/offline.md", b"# Team offline\n\nOffline retrieval too.\n")
     reply = search([brain, team], Query(text="offline", **scope("memories/meetings")))
     assert [(source["brain"], source["source"]) for source in cast("list[dict]", reply["sources"])] == [
@@ -1257,16 +1435,16 @@ def test_source_scopes_cover_only_brains_that_hold_the_source(brain: Store, tmp_
 
 
 def test_retired_schema_fields_keep_their_records_searchable(brain: Store) -> None:
-    field = b"schema:\n  kind:\n    description: Kind.\n    type: string\n"
-    brain.write("bf.yaml", b"version: 6\nname: fixture\n" + field)
+    field = b"fields:\n  kind:\n    description: Kind.\n    type: string\n"
+    brain.write("bf.yaml", b"version: 7\nname: fixture\n" + field)
     records_file(brain, "notes", [Record(id="a1", title="Zirconium", fields={"kind": "note"})])
     assert refs(brain, "zirconium") == ["notes:a1"]
-    brain.write("bf.yaml", b"version: 6\nname: fixture\n")
+    brain.write("bf.yaml", b"version: 7\nname: fixture\n")
     reply = search([brain], Query(text="zirconium"))
     assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == ["notes:a1"]
     assert "problems" not in reply
     # Validation still names the stored field that the schema no longer declares.
-    assert "undeclared schema field kind" in str(validate(brain)["problems"])
+    assert "field kind is not declared in bf.yaml fields" in str(validate(brain)["problems"])
 
 
 def test_brain_record_addresses_never_resolve_other_schemes_aliases(brain: Store) -> None:

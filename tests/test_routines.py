@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import errno
+import json
+import os
 import shutil
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -23,16 +27,18 @@ from bf.models import Config, Error, Program
 from bf.retrieve import read
 from bf.storage import Store
 from bf.update import update
+from conftest import plain
 
 NOW = datetime(2026, 9, 25, 8, tzinfo=UTC)
 START = "2026-09-24T08:00:00.000000Z"
 END = "2026-09-25T08:00:00.000000Z"
-CONFIG = b"""version: 6
+CONFIG = b"""version: 7
 name: fixture
 routines:
   digest:
     command: [routines/digest.py, "{{brain}}", "{{start}}", "{{end}}"]
     refresh: 86400
+    output: action
   manual:
     command: [echo]
   paused:
@@ -41,7 +47,7 @@ routines:
     refresh: 60
 """
 ACTION = b"---\ntype: action\nstatus: draft\n---\n# Digest\n\nSee [offline](../../projects/offline.md).\n"
-FOLDER = f"actions/{NOW.astimezone().date().isoformat()}_digest-00000000000000000000000000000001"
+FOLDER = f"actions/{NOW.astimezone().date().isoformat()}_digest-00000001"
 
 
 @pytest.fixture
@@ -51,7 +57,7 @@ def configured(brain: Store) -> Store:
 
 
 def printing(output: bytes, calls: list[list[str]] | None = None) -> Runner:
-    def runner(argv: list[str], program: Program, _store: Store, _log: Path) -> bytes:
+    def runner(argv: list[str], program: Program, _store: Store, _name: str, _stdin: bytes) -> bytes:
         assert program.max_bytes == 1 << 20
         if calls is not None:
             calls.append(argv)
@@ -62,18 +68,18 @@ def printing(output: bytes, calls: list[list[str]] | None = None) -> Runner:
 
 def test_configuration_names_routines_like_action_slugs() -> None:
     assert Config.model_validate(
-        {"version": 6, "name": "b", "routines": {"weekly-review": {"command": ["x"]}}}
+        {"version": 7, "name": "b", "routines": {"weekly-review": {"command": ["x"]}}}
     ).routines
     for name in ("Weekly", "weekly-", "a--b", "1st"):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 6, "name": "b", "routines": {name: {"command": ["x"]}}})
+            Config.model_validate({"version": 7, "name": "b", "routines": {name: {"command": ["x"]}}})
     with pytest.raises(ValidationError, match="distinct"):
         Config.model_validate(
-            {"version": 6, "name": "b", "sensors": {"x": {"command": ["x"]}}, "routines": {"x": {"command": ["x"]}}}
+            {"version": 7, "name": "b", "sensors": {"x": {"command": ["x"]}}, "routines": {"x": {"command": ["x"]}}}
         )
     for settings in ({"command": ["x"], "max_bytes": 5 << 20}, {"command": ["x", "{{secret}}"]}, {"command": []}):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 6, "name": "b", "routines": {"digest": settings}})
+            Config.model_validate({"version": 7, "name": "b", "routines": {"digest": settings}})
 
 
 def test_a_routine_writes_one_action_per_day_after_success(configured: Store) -> None:
@@ -171,7 +177,7 @@ def test_empty_output_means_nothing_to_review(configured: Store) -> None:
         (b"---\ntype: action\nverified: [{by: human:owner}]\n---\n# Bad\n", "require by and at"),
         (b"---\nunclosed\n", "unclosed frontmatter"),
         (b"\xff\xfe", "UTF-8"),
-        (b"# Bad\n\n[x](bf://fixture/projects/offline.md?rel=undeclared)\n", "declare an identity relationship"),
+        (b"# Bad\n\n[x](bf://fixture/projects/offline.md?rel=undeclared)\n", "declare it in bf.yaml fields"),
         (b"---\nentity: bf://other/people/x\n---\n# Foreign\n", "own brain namespace"),
         (b"---\naliases: [bf://other/people/x]\n---\n# Foreign\n", "own brain namespace"),
     ],
@@ -182,7 +188,7 @@ def test_invalid_output_writes_nothing_and_records_the_error(
 ) -> None:
     with pytest.raises(Error, match=message) as raised:
         routine(configured, "digest", start=START, end=END, runner=printing(output), clock=lambda: NOW, dry_run=dry_run)
-    assert str(log_path(configured, "digest")) in str(raised.value)
+    assert log_path("digest") in str(raised.value)
     assert not configured.files("actions")
     if dry_run:
         # A failed preview saves no run history, so the routine neither fails nor becomes due.
@@ -254,12 +260,12 @@ def test_update_runs_routines_after_sensors_and_isolates_failures(configured: St
     configured.write(
         "bf.yaml",
         CONFIG
-        + b"  broken:\n    command: [broken]\n    refresh: 60\n"
+        + b"  broken:\n    command: [broken]\n    refresh: 60\n    output: action\n"
         + b"sensors:\n  mail:\n    command: [mail]\n    refresh: 60\n",
     )
     order: list[str] = []
 
-    def runner(argv: list[str], _program: Program, _store: Store, _log: Path) -> bytes:
+    def runner(argv: list[str], _program: Program, _store: Store, _name: str, _stdin: bytes) -> bytes:
         order.append(argv[0])
         if argv[0] == "broken":
             return b"---\nupdated: soon\n---\n"
@@ -290,9 +296,9 @@ def test_status_and_home_report_failing_routines(configured: Store) -> None:
         "state": "active",
         "freshness": "never",
         "failed": True,
-        "error": "routine must print UTF-8 Markdown",
+        "error": "routine must print UTF-8 Markdown; no action was written",
         "failures": 1,
-        "log": str(log_path(configured, "digest")),
+        "log": "logs/digest.log",
     }
     assert health["manual"] == {"state": "active", "freshness": "manual"}
     assert health["paused"] == {"state": "disabled", "freshness": "unknown"}
@@ -322,3 +328,115 @@ def test_routine_executables_run_from_the_brain_root(configured: Store, monkeypa
 @pytest.fixture(autouse=True)
 def fixed_action_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=1))
+
+
+HOOKED = b"""version: 7
+name: fixture
+routines:
+  check:
+    command: [routines/check.sh, first]
+    hooks: [pre-push]
+  guard:
+    command: [routines/guard.sh]
+    hooks: [pre-push, pre-commit]
+  paused:
+    command: [routines/check.sh]
+    hooks: [pre-push]
+    enabled: false
+"""
+
+
+@pytest.fixture
+def hooked(brain: Store, monkeypatch: pytest.MonkeyPatch) -> Store:
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    brain.write("bf.yaml", HOOKED)
+    # Echo arguments and input to stdout, which a log routine keeps in its log, and a note to stderr.
+    brain.write("routines/check.sh", b'#!/bin/sh\necho "args:$*"\ncat\necho note >&2\n')
+    brain.write("routines/guard.sh", b"#!/bin/sh\nexit 3\n")
+    for name in ("check", "guard"):
+        (brain.root / f"routines/{name}.sh").chmod(0o700)
+    return brain
+
+
+def test_log_routines_keep_their_output_and_hooks_run_every_listed_routine(hooked: Store) -> None:
+    runner = CliRunner()
+    ran = runner.invoke(app, ["run", "check", "--brain", str(hooked.root), "--", "--flag", "x"], input="ref\n")
+    assert ran.exit_code == 0, ran.output
+    assert json.loads(ran.stdout) == {"ok": True, "dry_run": False, "routines": [{"routine": "check", "status": "ran"}]}
+    log = hooked.read(log_path("check")).decode()
+    # The configured arguments come first, then the caller's; piped input reaches the routine.
+    assert "args:first --flag x\nref\n-- stderr --\nnote\n" in log
+    assert log.rstrip().endswith("succeeded ==")
+    assert not hooked.root.joinpath("actions").exists() or not list(hooked.root.joinpath("actions").iterdir())
+    # A hook runs its enabled routines in name order; one failure never blocks the others.
+    pushed = runner.invoke(app, ["run", "--hook", "pre-push", "--brain", str(hooked.root)])
+    assert pushed.exit_code == 1
+    reply = json.loads(pushed.stdout)
+    assert reply["hook"] == "pre-push"
+    assert [(r["routine"], r["status"]) for r in reply["routines"]] == [("check", "ran"), ("guard", "failed")]
+    assert "status 3" in reply["routines"][1]["error"]
+    assert state(hooked, ROUTINES)["guard"]["failures"] == 1
+    # A hook that no routine lists runs nothing, so a Git hook can call it before any routine exists.
+    idle = runner.invoke(app, ["run", "--hook", "post-merge", "--brain", str(hooked.root)])
+    assert (idle.exit_code, json.loads(idle.stdout)["routines"]) == (0, [])
+
+
+@pytest.mark.parametrize("source", ["devnull", "file"])
+def test_run_reads_files_and_devices_as_input(hooked: Store, tmp_path: Path, source: str) -> None:
+    # Git runs a pre-commit hook with /dev/null as its input: epoll cannot wait on it, so it is read directly.
+    path = tmp_path / "input.txt"
+    path.write_text("from a file\n")
+    with Path(os.devnull if source == "devnull" else path).open("rb") as stdin:
+        result = subprocess.run(  # noqa: S603 - synthetic CLI boundary
+            [sys.executable, "-m", "bf", "run", "check", "--brain", str(hooked.root)],
+            stdin=stdin,
+            capture_output=True,
+            timeout=60,
+            check=False,
+            env={**os.environ, "PATH": "/usr/bin:/bin"},
+        )
+    assert result.returncode == 0, result.stderr
+    expected = "args:first\n" + ("" if source == "devnull" else "from a file\n")
+    assert expected + "-- stderr --" in hooked.read(log_path("check")).decode()
+
+
+def test_run_forwards_piped_input_from_a_real_process(hooked: Store) -> None:
+    result = subprocess.run(  # noqa: S603 - synthetic CLI boundary
+        [sys.executable, "-m", "bf", "run", "check", "--brain", str(hooked.root)],
+        input=b"line one\nline two\n",
+        capture_output=True,
+        timeout=60,
+        check=False,
+        env={**os.environ, "PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "args:first\nline one\nline two\n" in hooked.read(log_path("check")).decode()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "code", "message"),
+    [
+        ([], 2, "name a routine, or pass --hook EVENT"),
+        (["--hook", "Pre Push"], 2, "hook names are lowercase words"),
+        (["missing"], 1, "unknown routine missing"),
+        (["paused"], 1, "routine paused is unknown or disabled"),
+    ],
+)
+def test_run_rejects_missing_unknown_or_disabled_routines(
+    hooked: Store, arguments: list[str], code: int, message: str
+) -> None:
+    result = CliRunner().invoke(app, ["run", *arguments, "--brain", str(hooked.root)])
+    assert result.exit_code == code
+    assert message in plain(result.output) + str(result.exception)
+
+
+def test_hooks_are_distinct_slugs() -> None:
+    for hooks in (["pre-push", "pre-push"], ["Pre-Push"], ["pre push"]):
+        with pytest.raises(ValidationError):
+            Config.model_validate({"version": 7, "name": "b", "routines": {"x": {"command": ["x"], "hooks": hooks}}})
+
+
+def test_update_names_the_manual_programs_it_skipped(hooked: Store) -> None:
+    report = cast("Any", update(hooked, now=NOW, runner=printing(b"")))
+    assert report["ok"]
+    assert (report["sensors"], report["routines"], report["manual"]) == ([], [], ["check", "guard"])

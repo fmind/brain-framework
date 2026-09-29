@@ -14,22 +14,33 @@ ROOT = Path(__file__).parents[1]
 
 
 @pytest.mark.parametrize(
-    ("example", "expected"),
+    ("example", "block", "expected"),
     [
-        ("brain", ['"score":"16/16"', '"state":"unchanged"', '"state":"changed"', '"brain":"example-team"']),
-        ("context-hub", ['"score":"10/10"', "projects/new-website.md#launch-review", "Hold public launch"]),
-        ("retrieval", ['"score":"17/17"', '"mrr":0.95', '"valid":true']),
+        ("brain", None, ['"score":"16/16"', '"state":"unchanged"', '"state":"changed"', '"brain":"example-team"']),
+        ("retrieval", 0, ['"score":"23/23"', '"mrr":1.0', '"valid":true']),
         (
             "hooks",
+            0,
             [
                 "Brain context for repo:github.com/example/new-website",
                 "Next task: Run the keyboard navigation check.",
                 "- New website — Next actions (`projects/new-website.md#next-actions`)",
             ],
         ),
-        ("routines", ['"status":"ran"', "weekly-review-", '"valid":true']),
+        ("routines", 0, ['"status":"ran"', "weekly-review-", '"valid":true']),
+        (
+            "routines",
+            1,
+            [
+                "The first commit passed.",
+                "The hook refused the second commit.",
+                '"status":"failed"',
+                '{"error":"broken link: plan.md","file":"projects/launch.md"}',
+            ],
+        ),
         (
             "team",
+            0,
             [
                 '{"notes":4,"problems":[],"records":3,"valid":true}',
                 "CONFLICT (content): Merge conflict in memories/issues/",
@@ -39,11 +50,12 @@ ROOT = Path(__file__).parents[1]
         ),
     ],
 )
-def test_readme_walkthrough(example: str, expected: list[str], tmp_path: Path) -> None:
+def test_readme_walkthrough(example: str, block: int | None, expected: list[str], tmp_path: Path) -> None:
     readme = (ROOT / "examples" / example / "README.md").read_text()
     blocks = re.findall(r"```bash\n(.*?)\n```", readme, re.DOTALL)
     assert blocks
-    script = "set -e\n" + ("\n".join(blocks) if example == "brain" else blocks[0])
+    # Most walkthroughs are one self-contained block; the example brain's blocks share one shell.
+    script = "set -e\n" + ("\n".join(blocks) if block is None else blocks[block])
     # Dependencies are already installed by the owning test task. No resolution or download is needed.
     env = {
         **os.environ,

@@ -35,7 +35,8 @@ BUDGET = 32 << 10
 BROWSE = ["projects", "concepts", "actions", "tasks", "memories", "tags", "today", "7d"]
 CACHE = "the search cache is unavailable; run bf build"
 _SCOPE = (
-    "scope accepts a folder or file (projects, memories/gmail), a period (today, 7d, 2026-09, 2026-09-25), "
+    "scope accepts a folder or file (projects, memories/gmail), a period (today, 7d, 2026-09, 2026-09-25, "
+    "2026-09-21..2026-09-25), "
     "a source period or its undated records (memories/gmail/7d, memories/gmail/undated), an identity or a tag "
     "(bf://NAME/tags/LABEL)"
 )
@@ -73,9 +74,10 @@ def _midnight(day: date) -> str:
 
 
 def period(value: str, now: datetime | None = None) -> Period | None:
-    """A local day or month, or a trailing window ending now; None when the value names no period.
+    """A local day, inclusive range of days or month, or a trailing window ending now; None for another value.
 
-    links.PERIOD is the one period syntax, the page namespace links.reserved() keeps from entities.
+    A range's previous and next pages are the ranges of the same length around it. links.PERIOD is the one period
+    syntax, the page namespace links.reserved() keeps from entities.
     """
     if links.PERIOD.fullmatch(value) is None:
         return None
@@ -86,6 +88,17 @@ def period(value: str, now: datetime | None = None) -> Period | None:
         elif value[-1] in "hdw":
             start = now - timedelta(hours=int(value[:-1]) * {"h": 1, "d": 24, "w": 168}[value[-1]])
             return Period(timestamp(start.isoformat()), timestamp(now.isoformat()))
+        elif ".." in value:
+            first, last = (date.fromisoformat(part) for part in value.split(".."))
+            if last < first:
+                raise ValueError
+            span, following = last - first + timedelta(days=1), last + timedelta(days=1)
+            return Period(
+                _midnight(first),
+                _midnight(following),
+                f"{first - span}..{first - timedelta(days=1)}",
+                f"{following}..{last + span}",
+            )
         elif len(value) == len("YYYY-MM"):
             first = date.fromisoformat(value + "-01")
             following = (first + timedelta(days=32)).replace(day=1)
@@ -197,9 +210,12 @@ def brains(
         try:
             name = load(store).name
             with ExitStack() as local:
-                connection, state = (stack or local).enter_context(index.database(store))
+                connection, state = local.enter_context(index.database(store))
                 part = build(store, name, connection)
                 skipped = index.problems(connection)
+                if stack is not None:
+                    # The part's streams keep the connection; a failed build closes it with its error at once.
+                    stack.enter_context(local.pop_all())
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
             if strict and len(stores) == 1:
                 if isinstance(error, sqlite3.DatabaseError):
@@ -351,7 +367,7 @@ def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now:
     rows = {
         row["ref"]: row
         for row in connection.execute(
-            "SELECT i.ref,i.review_after,i.review_due,f.mtime FROM items i JOIN files f ON f.path=i.path "
+            "SELECT i.ref,i.stale_after,f.mtime FROM items i JOIN files f ON f.path=i.path "
             "WHERE i.ref IN (SELECT value FROM json_each(?))",
             (json.dumps([item["ref"] for item in items]),),
         )
@@ -363,7 +379,7 @@ def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now:
             row is None
             or item.get("status") == "deprecated"
             or not entry_note(str(item["ref"]))
-            or not (item.get("type") == "project" or row["review_after"] or row["review_due"])
+            or not (item.get("type") == "project" or row["stale_after"])
         ):
             continue
         reasons = []
@@ -376,15 +392,16 @@ def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now:
             if modified > stamp:
                 # A future clock cannot establish an age. Surface it instead of postponing forever.
                 reasons.append("future_modified")
-            if not row["review_due"]:
-                due = timestamp((instant + timedelta(days=row["review_after"] or REVIEW_DAYS)).isoformat())
+            if not row["stale_after"]:
+                due = timestamp((instant + timedelta(days=REVIEW_DAYS)).isoformat())
         except ValueError, OverflowError, OSError:
             reasons.append("unknown_modified")
-        if row["review_due"]:
-            due = _midnight(date.fromisoformat(row["review_due"]))
-        item["review_source"] = "review_due" if row["review_due"] else "modified"
+        if row["stale_after"]:
+            due = row["stale_after"]
+        item["review_source"] = "stale_after" if row["stale_after"] else "modified"
         if due:
-            item["review_due"] = due
+            # A review is due on a local day: state that date, compare its first instant.
+            item["review_due"] = datetime.fromisoformat(due).astimezone().date().isoformat()
             if due <= stamp:
                 reasons.append("due")
         # Incoming evidence keeps its event-date semantics; copying another note is not new evidence.
@@ -777,7 +794,16 @@ def readable(ref: str) -> str:
 
 
 # A backlink preview names an item; its role page and exact read hold the rest.
-_PREVIEWED = ("brain", "ref", "uri", "title", "time", "kind", "source", "status", "type")
+_PREVIEWED = ("brain", "ref", "uri", "title", "time", "date", "kind", "source", "status", "type", "fields", "excerpt")
+# A backlink preview's excerpt: enough to see what each linking item says without reading it.
+GLIMPSE = 160
+
+
+def _glimpse(item: dict[str, object]) -> dict[str, object]:
+    excerpt = item.get("excerpt")
+    if isinstance(excerpt, str) and len(excerpt) > GLIMPSE:
+        item["excerpt"] = excerpt[: GLIMPSE - 1].rstrip() + "…"
+    return item
 
 
 def _backlinks(
@@ -786,14 +812,14 @@ def _backlinks(
     groups = index.incoming(connection, targets, exclude=exclude, limit=PREVIEW)
     for group in groups:
         group["items"] = [
-            {key: item[key] for key in _PREVIEWED if key in item}
+            _glimpse({key: item[key] for key in _PREVIEWED if key in item})
             for item in (label(brain, row) for row in cast("list[dict[str, object]]", group["items"]))
         ]
     return groups
 
 
 def _merge(parts: Parts) -> list[dict[str, object]]:
-    """Combine each brain's relationship groups: declared roles by name, then untyped links, newest items first."""
+    """Combine each brain's relation groups: declared relations by name, then untyped links, newest items first."""
     merged: dict[str, dict[str, object]] = {}
     for _, part in parts:
         for group in cast("list[dict[str, object]]", part["backlinks"]):
@@ -817,9 +843,9 @@ def role(
     offset: int = 0,
     counted: bool = True,
 ) -> dict[str, object]:
-    """Every item linking to the expanded targets through one relationship, newest first, 50 per page.
+    """Every item linking to the expanded targets through one relation, newest first, 50 per page.
 
-    `relation` is a declared role, CITES or LINKS; the owning item is not its own backlink. Each brain also lists
+    `relation` is a declared relation, CITES or LINKS; the owning item is not its own backlink. Each brain also lists
     the links of its relations declaring this one `broader`; an item carries its `relation` only when it differs
     from the requested one.
     """

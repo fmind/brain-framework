@@ -10,15 +10,15 @@ Standalone sensors for common providers. Copy the ones you need into a brain's `
 | `highlights.py`                                | `LABEL EXPORT.json`                                           | Selected passages, annotations and precise source locations.                          |
 | `google-calendar.py`                           | `CALENDAR START END [--agenda-days N]`                        | Calendar events, organizer/invitee identities and an optional agenda.                 |
 | `google-drive-folders.py`                      | `[START END]`                                                 | My Drive and shared-with-me folders with parent links; shared drives are excluded.    |
-| [Context demo](../context-hub/sensors/demo.py) | `workspace`, `jira`, `github` or `gcloud`                     | Fictional adapter records for the shared-schema walkthrough; no provider access.      |
+| [Context demo](../context-hub/sensors/demo.py) | `workspace`, `jira`, `github` or `gcloud`                     | Fictional adapter records for the four-tool walkthrough; no provider access.          |
 
 Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). For other sources, copy the selected script and merge its configuration below into `bf.yaml`. Review paths and account scope first; do not copy all sources unless you intend to run them.
 
-The [four-tool example](../context-hub/README.md) shows how differently named fields become shared project relationships automatically during ingestion. Its fixtures are not live integrations. Use `gh`, `gws`, `acli` or `gcloud` to implement selected provider access in a brain-owned script, following the contract below; the [integration table](../../docs/docs/context-hub.md#use-it-on-your-work) distinguishes reviewed examples from adapters you write.
+The [four-tool example](../context-hub/README.md) shows how differently named fields become one shared project relation during collection. Its fixtures are not live integrations. Use `gh`, `gws`, `acli` or `gcloud` to implement selected provider access in a brain-owned script, following the contract below; the [integration table](../../docs/docs/context-hub.md#use-it-on-your-work) distinguishes reviewed examples from adapters you write.
 
 ```yaml
 # https://fmind.github.io/brain-framework/
-version: 6
+version: 7
 name: brain
 sensors:
   git-commits:
@@ -63,6 +63,39 @@ For scheduled window sensors, `refresh` controls the regular cadence and `overla
 - Calendar selects events overlapping the requested interval: [Google's `timeMin` bounds event end, while `timeMax` bounds event start](https://developers.google.com/workspace/calendar/api/v3/reference/events/list). It is not a modification-time feed; reconcile past windows to revisit changed events. Cancellations stay, titled `Cancelled: SUMMARY`, so they overwrite records collected earlier. Its optional agenda snapshot runs from two days before END through N days after it, using separate agenda identities; replacement removes events that leave that range. Configure it as a separate `mode: snapshot` source. An agenda that becomes empty, or loses most of its events at once, trips the [removal guard](../../docs/docs/sensors.md#define-the-scope-before-adding-a-sensor): check it, then run `bf collect AGENDA --allow-removal`. An invitee entry means the person was listed, not that they attended. Participant emails become lowercase `person:email/` links. An event with more than about 1,000 participants keeps its organizer, source, attachment and agenda links, then invitees in email order up to BF's 1,000 links, and sets `attributes.participants_truncated`; `attributes.participants` keeps every address. Limits: 10,000 events and 20 pages.
 - Drive folders lists every My Drive and shared-with-me folder (`corpora: user`); shared drives are excluded. Its time-window arguments are ignored. `mode: snapshot` removes missing folders after a successful nonempty replacement. A folder's `time` is its creation and `attributes.updated` its last modification. Limits: 10,000 folders and 20 pages.
 
+## Highlights export
+
+`highlights.py LABEL EXPORT.json` reads one complete export in this portable format. Convert exports from reading tools into it before collection:
+
+```json
+{
+  "version": 1,
+  "highlights": [{
+    "id": "brief-clarity",
+    "title": "New website brief",
+    "selection": "Visitors need a clear product explanation before signing up.",
+    "annotation": "Review whether our first page explains who the product helps.",
+    "source_url": "https://example.com/website-brief",
+    "locator": { "page": 2, "section": "Audience" },
+    "captured_at": "2026-09-27T12:00:00Z",
+    "source_date": "2026-09-25"
+  }]
+}
+```
+
+| Field         | Rule                                                                                                     |
+| ------------- | -------------------------------------------------------------------------------------------------------- |
+| `id`          | Stable across edits; 1–128 letters, digits, dots, underscores or hyphens; starts with a letter or digit. |
+| `title`       | Nonempty, single-line document title; at most 4,096 UTF-8 bytes.                                         |
+| `selection`   | The exact selected text; at most 64 KiB. It becomes the record's `text`.                                 |
+| `annotation`  | Optional interpretation, kept apart in `attributes.annotation`; at most 64 KiB.                          |
+| `source_url`  | HTTPS document URL without credentials; at most 8,192 bytes. It becomes the record's `url`.              |
+| `locator`     | A positive `page` up to 1,000,000, a nonempty `section` up to 4,096 bytes, or both.                      |
+| `captured_at` | Timestamp with seconds and a timezone; it becomes the record's `time`.                                   |
+| `source_date` | Optional document date, `YYYY-MM-DD`.                                                                    |
+
+`LABEL` is a stable, lowercase scope label of up to 64 characters, starting with a letter; it prefixes every record id, as in `highlights:reading/brief-clarity`. These fields are supplied provenance, not verified facts. Unknown fields and duplicate keys fail. As a snapshot, a new export replaces the whole source: supply the complete selection.
+
 ## Contract
 
 Each script uses the Python 3.11+ standard library, has an executable `#!/usr/bin/env python3` entry point and invokes provider CLIs with argument arrays, without a shell. Provider CLIs own credentials; sensors do not read credential files.
@@ -73,4 +106,4 @@ One invalid record fails a whole collection, so the Git, document, Calendar and 
 
 Provider output, time and pagination are bounded. Failure, overflow or incomplete pagination stops the child and exits nonzero with no stdout and one stderr line: a content-free reason written by the sensor, such as the limit reached or a document's root-relative path, or a generic sentence for provider errors. Calendar and Drive reject malformed continuation tokens; Calendar also rejects malformed event lists and duplicate event identities, so a partial catalog cannot masquerade as a complete replacement. `tests/test_adapters_*.py` checks these boundaries and preservation of saved records with fake providers.
 
-For typed relationships, map Git's `/attributes/author_refs` and `/attributes/repository_refs`, or Calendar's `/attributes/organizer_refs`, `/attributes/attendee_refs` and `/attributes/participant_refs`. Declare each target field with `type: identity`, `cardinality: many` and `relation: true`; see the [schema example](../../docs/docs/schema.md#shared-fields-and-sensor-mappings).
+For typed relations, map Git's `/attributes/author_refs` and `/attributes/repository_refs`, or Calendar's `/attributes/organizer_refs`, `/attributes/attendee_refs` and `/attributes/participant_refs`. Declare each target field with `type: identity`, `cardinality: many` and `relation: true`; see the [field mappings](../../docs/docs/schema.md#shared-fields-and-sensor-mappings).

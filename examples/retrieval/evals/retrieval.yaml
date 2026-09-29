@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/docs/checks/
-version: 5
+version: 7
 cases:
   - name: why-atlas-uses-sqlite
     query: Why does Atlas use SQLite for offline retrieval?
@@ -87,3 +87,32 @@ cases:
   - name: missing-exact-ref
     read: projects/nonexistent.md
     empty: true
+  - name: nested-section-budget
+    query: What is the Vega budget?
+    limit: 1
+    expect: [projects/portfolio.md#budget-1]
+    forbid: [projects/portfolio.md#budget]
+    text: [1300 credits]
+  - name: tag-outranks-passing-mention
+    query: accessibility
+    limit: 1
+    expect: [projects/harbor.md]
+    forbid: [projects/cobalt.md]
+  - name: whole-note-preview
+    query: What is Atlas?
+    limit: 1
+    expect: [projects/atlas.md]
+    text: [uses SQLite for offline retrieval]
+  - name: word-prefix
+    query: synchro*
+    limit: 1
+    expect: [projects/borealis.md]
+    text: [synchronizes field reports]
+  - name: newest-of-identical-meetings
+    query: Atlas weekly status
+    limit: 1
+    expect: ["calendar:atlas-status-2026-09-15"]
+  - name: date-range-page
+    read: "2026-09-10..2026-09-14"
+    expect: ["documents:atlas-launch-plan", "meetings:offline", "meetings:zephyr"]
+    forbid: ["calendar:atlas-status-2026-09-08", "calendar:atlas-status-2026-09-15"]

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import cast
 
@@ -13,25 +16,210 @@ from typer.testing import CliRunner
 from bf import index, records
 from bf.cli import app
 from bf.evaluate import evaluate
-from bf.models import Error
-from bf.retrieve import read
-from bf.storage import Store, writer
+from bf.models import Error, Query, Record
+from bf.retrieve import read, search
+from bf.storage import BusyError, Store, writer
 from bf.update import update
 from bf.validate import validate
 
+DECISION = records.path("meetings", "decision-1")
 
-def test_health_check_rejects_a_stale_cache(brain: Store) -> None:
+
+def _cross_device(*_: object, **__: object) -> None:
+    raise OSError(errno.EXDEV, "cross-device link")
+
+
+def test_health_check_passes_while_a_live_writer_holds_the_brain(brain: Store) -> None:
     index.refresh(brain)
+    brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
     with writer(brain):
         result = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
-    assert result.exit_code == 1
+        # Retrieval keeps serving the previous generation and says so.
+        assert search([brain], Query(text="latecomer"), counted=False)["stale"] == ["fixture"]
+    assert result.exit_code == 0, result.output
     reply = json.loads(result.stdout)
-    assert reply["brains"][0]["cache"] == "stale"
-    assert not reply["healthy"]
+    assert reply["brains"][0]["cache"] == "busy"
+    assert reply["healthy"]
+    assert (
+        json.loads(CliRunner().invoke(app, ["status", "--brain", str(brain.root)]).stdout)["brains"][0]["cache"]
+        == "ready"
+    )
+
+
+@pytest.mark.parametrize("linkable", [True, False])
+def test_a_cancelled_commit_restores_only_the_files_it_replaced(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, *, linkable: bool
+) -> None:
+    records.upsert(brain, "bulk", [Record(id=str(n), title="Old") for n in range(10)], snapshot=False)
+    before = {name: brain.read(name) for name in records.files(brain, "bulk")}
+    if not linkable:
+        monkeypatch.setattr(os, "link", _cross_device)
+    write, link = Store.write, Store.link
+    replaced: list[str] = []
+    restored: list[str] = []
+
+    def committing(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
+        if name.startswith("memories/bulk/"):
+            if len(replaced) == 3 and not restored:
+                # Ctrl-C, or watch's SIGTERM, after three of ten replacements.
+                restored.append("")
+                raise KeyboardInterrupt
+            (restored or replaced).append(name)
+        write(self, name, data, durable=durable)
+
+    def linking(self: Store, name: str, target: str) -> None:
+        link(self, name, target)
+        if target.startswith("memories/bulk/"):
+            restored.append(target)
+
+    monkeypatch.setattr(Store, "write", committing)
+    monkeypatch.setattr(Store, "link", linking)
+    with pytest.raises(KeyboardInterrupt):
+        records.upsert(brain, "bulk", [Record(id=str(n), title="New") for n in range(10)], snapshot=False)
+    # Files the commit never reached stay as they were: a large cancelled commit rolls back only its progress.
+    assert sorted(restored[1:]) == sorted(replaced)
+    assert len(replaced) == 3
+    assert {name: brain.read(name) for name in records.files(brain, "bulk")} == before
+    assert not (brain.root / "memories/.pending").exists()
+
+
+@pytest.mark.parametrize("linkable", [True, False])
+def test_commit_backups_link_the_replaced_file_unless_the_filesystem_cannot(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, *, linkable: bool
+) -> None:
+    original, data = (brain.root / DECISION).stat(), brain.read(DECISION)
+    if not linkable:
+        monkeypatch.setattr(os, "link", _cross_device)
+    write = Store.write
+    backups: list[tuple[bool, bytes]] = []
+
+    def observed(self: Store, name: str, content: bytes, *, durable: bool = True) -> None:
+        if name == DECISION:
+            backup = brain.root / "memories/.pending/0.before"
+            backups.append((os.path.samestat(backup.stat(), original), backup.read_bytes()))
+        write(self, name, content, durable=durable)
+
+    monkeypatch.setattr(Store, "write", observed)
+    records.upsert(brain, "meetings", [Record(id="decision-1", title="Moved")], snapshot=False)
+    # A link keeps the replaced inode, which the commit renames a new file over and never writes.
+    assert backups == [(linkable, data)]
+    assert records.load(brain, DECISION).title == "Moved"
+    assert not (brain.root / "memories/.pending").exists()
+
+
+def test_exact_reads_do_not_wait_out_a_writer(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(records, "WAIT", 0)
+    index.refresh(brain)
+    with writer(brain):
+        # One file reads whole without the lock, marked like a busy brain's cache.
+        reply = read([brain], "meetings:decision-1", counted=False)
+        assert cast("dict[str, object]", reply["record"])["title"] == "Preserve durable evidence"
+        assert reply["stale"] == ["fixture"]
+        # A missing file proves nothing while records change: fail at once instead of claiming absence.
+        with pytest.raises(BusyError, match="retry the read shortly"):
+            read([brain], "meetings:absent", counted=False)
+    assert "stale" not in read([brain], "meetings:decision-1", counted=False)
+    with pytest.raises(Error, match="not found"):
+        read([brain], "meetings:absent", counted=False)
+
+
+def _damage(brain: Store, table: str) -> None:
+    """Overwrite the root page of one cache table, as a bad disk block would."""
+    path = brain.root / index.CACHE
+    with closing(sqlite3.connect(path)) as connection:
+        size = connection.execute("PRAGMA page_size").fetchone()[0]
+        page = connection.execute("SELECT rootpage FROM sqlite_master WHERE name=?", (table,)).fetchone()[0]
+    with path.open("r+b") as stream:
+        stream.seek((page - 1) * size)
+        stream.write(b"\xff" * size)
+
+
+@pytest.mark.parametrize("table", ["items", "files"])
+def test_a_damaged_cache_is_discarded_and_rebuilt(brain: Store, table: str) -> None:
+    index.refresh(brain)
+    damaged = (brain.root / index.CACHE).stat().st_ino
+    _damage(brain, table)
+    if table == "items":
+        # Freshness reads only file fingerprints: the first query to meet the damage fails and discards it.
+        with pytest.raises(Error, match="search cache is unavailable"):
+            search([brain], Query(text="offline"), counted=False)
+        assert not (brain.root / index.CACHE).exists()
+    reply = search([brain], Query(text="offline retrieval"), counted=False)
+    assert cast("list[dict[str, object]]", reply["items"])[0]["ref"] == "projects/offline.md"
+    assert "stale" not in reply
+    assert (brain.root / index.CACHE).stat().st_ino != damaged
+
+
+def test_damage_in_one_brain_discards_only_its_own_cache(brain: Store, tmp_path: Path) -> None:
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("concepts/team.md", b"---\ntype: concept\nstatus: stable\n---\n# Team offline notes\n")
+    for store in (brain, team):
+        index.refresh(store)
+    kept = (brain.root / index.CACHE).stat().st_ino
+    _damage(team, "items")
+    reply = search([brain, team], Query(text="offline"), counted=False)
+    assert reply["problems"] == [{"brain": "team", "error": "inaccessible brain or cache; run bf status"}]
+    assert not (team.root / index.CACHE).exists()
+    assert (brain.root / index.CACHE).stat().st_ino == kept
+    # An intact generation survives a discard request, as when another brain's error reached it.
+    index._discard(brain, 0)  # noqa: SLF001 - the guard every damage report passes through
+    assert (brain.root / index.CACHE).stat().st_ino == kept
+    found = search([brain, team], Query(text="offline"), counted=False)["items"]
+    refs = [item["ref"] for item in cast("list[dict[str, object]]", found)]
+    assert "concepts/team.md" in refs
+
+
+def test_recovery_refuses_an_oversized_backup_before_restoring(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    before = brain.read(DECISION)
+    brain.write(DECISION, b'{"id":"decision-1","title":"Half committed"}\n')
+    brain.write("memories/.pending/0.before", b"x" * 64)
+    brain.write(
+        "memories/.pending/manifest.json",
+        json.dumps({"source": "meetings", "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": True}]}).encode(),
+    )
+    monkeypatch.setattr(records, "MAX_RECORD", 32)
+    with writer(brain), pytest.raises(Error, match=r"0\.before: file exceeds 32 bytes"):
+        records.recover(brain)
+    assert brain.read(DECISION) != before
+    assert brain.read("memories/.pending/0.before") == b"x" * 64
+
+
+@pytest.mark.parametrize("table", ["items", "search_data"])
+def test_update_rebuilds_a_damaged_cache_instead_of_reporting_ok(brain: Store, table: str) -> None:
+    index.refresh(brain)
+    damaged = (brain.root / index.CACHE).stat().st_ino
+    _damage(brain, table)
+    report = update(brain)
+    assert report["ok"], report
+    assert (brain.root / index.CACHE).stat().st_ino != damaged
+    assert search([brain], Query(text="offline retrieval"), counted=False)["items"]
+
+
+def test_reads_ignore_a_completed_commit_whose_cleanup_was_interrupted(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(_store: Store) -> None:
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(records, "_clear", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            records.upsert(brain, "meetings", [Record(id="decision-1", title="Moved")], snapshot=False)
+    assert json.loads(brain.read("memories/.pending/manifest.json"))["complete"]
+    # Every record was committed: reads, searches and validation need not wait for the next writer's cleanup.
+    assert cast("dict[str, object]", read([brain], "meetings:decision-1")["record"])["title"] == "Moved"
+    assert search([brain], Query(text="moved"), counted=False)["items"]
+    assert validate(brain)["valid"]
+    report = update(brain)
+    assert report["ok"], report
+    assert not (brain.root / "memories/.pending").exists()
 
 
 def test_update_reports_skipped_evidence_as_failure(brain: Store) -> None:
-    brain.write("projects/broken.md", b"---\nreview_after: invalid\n---\n# Broken\n")
+    brain.write("projects/broken.md", b"---\nstale_after: invalid\n---\n# Broken\n")
     report = update(brain)
     assert cast("dict[str, int]", report["index"])["skipped"] == 1
     assert not report["ok"]
@@ -75,10 +263,10 @@ def test_missing_record_in_corrupt_source_is_not_proven_absent(brain: Store) -> 
 
 
 def test_missing_identity_in_skipped_evidence_is_not_proven_absent(brain: Store) -> None:
-    brain.write("projects/broken.md", b"---\nreview_after: invalid\n---\n# Broken\n")
+    brain.write("projects/broken.md", b"---\nstale_after: invalid\n---\n# Broken\n")
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 5\ncases:\n- name: absent\n  read: 'repo:example/absent'\n  empty: true\n",
+        b"version: 7\ncases:\n- name: absent\n  read: 'repo:example/absent'\n  empty: true\n",
     )
     assert not evaluate(brain)["passed"]
     with pytest.raises(Error, match="incomplete"):

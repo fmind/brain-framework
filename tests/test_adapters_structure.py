@@ -238,7 +238,7 @@ def test_incomplete_provider_snapshot_preserves_saved_records(
     brain.write(
         "bf.yaml",
         yaml.safe_dump(
-            {"version": 6, "name": "fixture", "sensors": {"demo": {"mode": "snapshot", "command": command}}}
+            {"version": 7, "name": "fixture", "sensors": {"demo": {"mode": "snapshot", "command": command}}}
         ).encode(),
     )
     monkeypatch.setenv(

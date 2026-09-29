@@ -4,6 +4,54 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v16.0.0](https://github.com/fmind/brain-framework/releases/tag/v16.0.0) - 2026-09-29
+
+Brain Framework 16 settles the contract so that later releases only add to it. One brain format number covers `bf.yaml` and evaluation suites, one word names each concept, dates and datetimes are separate, routines become general brain programs with hooks and logs, the agent skills ship with the package, and published reply schemas accept added fields while a release gate rejects anything else. Search, the graph, validation and interrupted writes are also more robust.
+
+### Breaking changes
+
+- **Brain format 7.** `bf.yaml` and every `evals/*.yaml` declare `version: 7`. The `schema:` key of `bf.yaml` is now `fields:`: `fields:` declares shared fields and relations, a sensor's `fields:` maps them, a record stores them and a note sets them.
+- **Dates and datetimes.** A note states its `updated` day as `date` (`2026-09-29`), never as the UTC instant of its local midnight; claims, exports and backlinks asserted by notes carry `date` too, and `review_due` is a date.
+- **OKF review deadline.** Note frontmatter `review_due` and `review_after` are replaced by OKF's `stale_after`, an instant with its timezone: a note is due for review once it is stale. Without it, projects fall due 14 days after their last edit, as before; replies name the deadline's origin as `review_source: stale_after` or `modified`. An OKF note's `resource` URI is one of its identities, like an alias. Every datetime in a reply shows the local offset, to the second (`2026-09-29T09:00:00+02:00`); files, run history and the cache keep UTC.
+- **Routines.** A routine is any deterministic brain program declared under `routines:`. `output: log` (the default) keeps its stdout in its log; `output: action` turns its Markdown into a dated action as before. `hooks: [pre-push]` lets `bf run --hook pre-push` run it, and `bf run ROUTINE [ARGS]...` runs one now; both pass arguments and piped input through. Action folders written by routines end in an 8-character suffix.
+- **Logs.** Sensors and routines log each run to `logs/NAME.log` in the brain, newest last and bounded to 1 MiB; `bf init` ignores `/logs/` in Git and retrieval never reads it. Status and errors name these brain-relative logs.
+- **Freshness.** A scheduled program late by more than twice its refresh is `overdue` (was `stale`); status no longer repeats it as a `stale` boolean. `stale` now only marks results served from a cache a writer is updating. Status reports that cache as `busy`, and an interrupted transaction as `pending_transaction` with its recovery command, instead of failing.
+- **Search.** Quoted phrases and `word*` prefixes are honored; results matching more of the query rank higher; tags rank like headings; a nested section's title reads `Note — Parent — Child`; equal scores list the newest first. Replies add `unmatched` (words found nowhere) and `sections` (other matching sections of a note). Periods accept `2026-09-21..2026-09-25` as a scope and a page. The search cache rebuilds itself once.
+- **Reads.** A note above 32 KiB opens with its outline, graph context and first 4 KiB; read its sections by ref or follow `next_offset`. Task text keeps its links as `[label](ref)` with brain-relative refs. Listed items and backlink previews show declared single-value `fields`, such as a status, and backlink previews add an `excerpt` of at most 160 characters. Outgoing claims keep up to 20 per relation and 50 in all, so a crowded relation never hides another.
+- **Export.** `bf export` prints edges; `bf export --kind identities` lists each note or record that declares names beyond its own address, with every name it answers to. The `edges` positional argument is gone.
+- **Skills.** Seven skills become three and ship inside the package: `bf-use` (find, write and track work), `bf-setup` (onboarding, discovery and imports) and `bf-maintain` (integrations and operations). `bf skills DIR` installs or updates them without overwriting edited copies; `--check` reports drift. Helper scripts use paths relative to their skill.
+- **Initialization.** `bf init` no longer creates `tests/`, `--full` no longer creates `settings/`, and the generated `AGENTS.md` teaches the new search syntax, `date`/`time` and `bf run`.
+- **Limits.** Continuation offsets stop at 2^53−1, the largest integer every JSON client represents exactly.
+
+Upgrade: stop the watcher, rename `schema:` to `fields:` and set `version: 7` in `bf.yaml` and each `evals/*.yaml`, replace note `review_due`/`review_after` with `stale_after`, add `output: action` to routines that write actions, add `/logs/` to `.gitignore`, replace `bf export edges` with `bf export`, read `freshness: overdue` and a note's `date` in scripts, reinstall skills with `bf skills DIR` after removing `bf-learn`, `bf-action`, `bf-scan` and `bf-import`, regenerate native schedules with `bf schedule`, then run `bf validate` and `bf eval`.
+
+### Added
+
+- `bf run` and routine `hooks` for Git and other event hooks; `bf update` names the manual programs it skipped.
+- Typed note claims: an OKF note's `fields:` sets declared fields, such as `owner: [person:email/bob@example.test]`, validated like a record's.
+- `bf skills DIR [--check] [--force]`.
+- `bf export --kind identities`.
+- Published reply schemas accept added fields, and `tests/contract/` keeps each schema of the major release: any other change fails the gate.
+- MCP tools publish their reply schemas as `outputSchema`; errors name the `search` and `read` tools.
+- `bf validate` checks that each enabled program in `sensors/` or `routines/` is an executable file, that declared relations are not written at the top level of frontmatter, and that `?rel=` appears only on `bf://` links.
+- Lookup errors name what exists: a missing section lists the note's sections, and a mistyped page, note, sensor or routine suggests close names.
+- Status reports each source's `bytes`.
+
+### Changed
+
+- A link naming an undeclared relation keeps its note or record searchable as an untyped link; `bf validate` names the relation.
+- `bf validate` accepts a record's provider alias as a link target, checks a relation's `targets` against every identity the target's owner declares, and accepts OKF `sources` whose `resource` describes a population.
+- Record commits back up replaced files with hard links and roll back only the files they changed, so an interrupted commit recovers in about a second; commits need about half the fsyncs.
+- Exact reads during a commit return within about 3 seconds, marked `stale`, instead of waiting up to 2 minutes; a waiting cache rebuild is no longer starved by readers; a damaged cache is discarded and rebuilt; watch and generated schedules allow 60 seconds to stop.
+- `bf eval` ranks each case among the first 50 results, even below its limit.
+- `bf --help` lists commands from setup to repair.
+
+### Fixed
+
+- A note dated in a timezone east of UTC no longer shows the previous day.
+- An unwritable state directory is named, with `XDG_STATE_HOME`, instead of blaming the brain.
+- A completed commit whose cleanup was interrupted no longer blocks reads.
+
 ## [v15.0.0](https://github.com/fmind/brain-framework/releases/tag/v15.0.0) - 2026-09-29
 
 Brain Framework 15 reshapes replies for agents: smaller, bounded, described by published JSON Schemas and easier to continue. It ranks sections by their note, collapses duplicate records across sources, pages relationships, adds graph settings and exports, and hardens collection and cache rebuilds. The brain storage format remains `version: 6`; the search cache rebuilds once after the upgrade.

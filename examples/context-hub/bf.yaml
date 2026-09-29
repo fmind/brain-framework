@@ -1,7 +1,7 @@
 # https://fmind.github.io/brain-framework/docs/schema/
-version: 6
+version: 7
 name: context-demo
-schema:
+fields:
   project:
     description: Project explicitly identified by the source.
     type: identity
@@ -11,32 +11,36 @@ schema:
     description: Common kind of source item.
     type: string
     cardinality: one
+  status:
+    description: The item's state as its own tool reports it.
+    type: string
+    cardinality: one
 sensors:
   workspace:
-    command: [sensors/demo.py, workspace]
+    command: [sensors/demo.py, workspace, "{{end}}"]
     mode: snapshot
-    refresh: 0
     fields:
       project: { path: /attributes/project }
       kind: { value: brief }
+      status: { path: /attributes/state }
   jira:
-    command: [sensors/demo.py, jira]
+    command: [sensors/demo.py, jira, "{{end}}"]
     mode: snapshot
-    refresh: 0
     fields:
       project: { path: /attributes/workstream }
       kind: { value: issue }
+      status: { path: /attributes/status }
   github:
-    command: [sensors/demo.py, github]
+    command: [sensors/demo.py, github, "{{end}}"]
     mode: snapshot
-    refresh: 0
     fields:
       project: { path: /attributes/repository_project }
       kind: { value: pull-request }
+      status: { path: /attributes/state }
   gcloud:
-    command: [sensors/demo.py, gcloud]
+    command: [sensors/demo.py, gcloud, "{{end}}"]
     mode: snapshot
-    refresh: 0
     fields:
       project: { path: /attributes/service_project }
       kind: { value: deployment }
+      status: { path: /attributes/health }

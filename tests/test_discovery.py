@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-HELPER = Path(__file__).resolve().parents[1] / "skills/bf-scan/scripts/inventory.py"
+HELPER = Path(__file__).resolve().parents[1] / "src/bf/skills/bf-setup/scripts/inventory.py"
 
 
 def run(*args: str, raw: bytes = b"") -> subprocess.CompletedProcess[bytes]:

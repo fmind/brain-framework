@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import re
 import unicodedata
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -22,6 +23,8 @@ MAX_FIELDS = 2 << 20
 # Authored Markdown, including routine output, is read whole: one note is at most 4 MiB.
 MAX_NOTE = 4 << 20
 MAX_FILES = 100_000
+# Continuation offsets stay integers every JSON client represents exactly.
+MAX_OFFSET = 2**53 - 1
 NAME = r"^[a-z][a-z0-9-]{0,63}$"
 SLUG = r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
 # JSON Schema regex engines may match `$` before a final newline; Rust's validator does not.
@@ -32,9 +35,9 @@ IDENTITY = r"[a-z][a-z0-9+.-]*:\S+"
 # A record id or note path must fit a BF address with the longest brain and source names plus a `?rel=` query.
 MAX_ENCODED = 8192 - len("bf:///:?rel=") - 3 * 64
 AUTHORED = ("projects", "actions", "concepts")
-# The built-in relation of tag membership; links and schema fields cannot assert it.
+# The built-in relation of tag membership; links and declared fields cannot assert it.
 TAGGED = "tagged-with"
-# The backlink group and role page of links without a declared relationship; no schema field can take its name.
+# The backlink group and relation page of links without a declared relation; no declared field can take its name.
 LINKS = "links"
 # The built-in relation of OKF `sources` and `?rel=cites` links: the subject derives from the target.
 CITES = "cites"
@@ -51,14 +54,24 @@ class NotFoundError(Error):
     """A complete lookup found no such page or reference; an incomplete read is never NotFoundError."""
 
 
+def suggest(value: str, known: Iterable[str]) -> str:
+    """A `; did you mean …?` hint naming up to three close known names, or nothing."""
+    close = difflib.get_close_matches(value, list(known), n=3, cutoff=0.6)
+    return f"; did you mean {' or '.join(close)}?" if close else ""
+
+
 class FormatError(Error):
     """A file declares a format version this release does not read."""
 
 
-def check_version(value: dict[str, object], supported: int, name: str) -> None:
+# The one brain format: bf.yaml, evaluation suites, record files and the memories/ layout share this number.
+FORMAT = 7
+
+
+def check_version(value: dict[str, object], name: str) -> None:
     """Name the one supported format before field validation, instead of every field a format change renamed."""
     found = value.get("version")
-    if type(found) is int and found == supported:
+    if type(found) is int and found == FORMAT:
         return
     if "version" not in value:
         problem = "has no version"
@@ -66,7 +79,7 @@ def check_version(value: dict[str, object], supported: int, name: str) -> None:
         problem = f"declares version {found}"
     else:
         problem = "declares an invalid version"
-    raise FormatError(f"{name} {problem}; this release reads version: {supported}")
+    raise FormatError(f"{name} {problem}; this release reads version: {FORMAT}")
 
 
 def addressable(value: str) -> bool:
@@ -90,6 +103,56 @@ def encode(value: object) -> bytes:
 
 # DEL and C1 controls, which JSON leaves raw and some terminals obey, such as U+009B CSI.
 _TERMINAL = re.compile("[\x7f-\x9f]")
+# The canonical UTC instant that files, run history and the cache store.
+_CANONICAL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z")
+# Reply keys holding instants; record `fields` keep their stored values.
+_INSTANTS = frozenset(
+    {
+        "end",
+        "last_collected",
+        "last_success",
+        "latest",
+        "modified",
+        "next_due",
+        "observed",
+        "reconciled",
+        "requested_end",
+        "requested_start",
+        "run",
+        "since",
+        "start",
+        "success",
+        "time",
+        "until",
+        "updated",
+    }
+)
+
+
+def local(value: str) -> str:
+    """A canonical UTC instant as an ISO 8601 date-time in the local timezone, with its offset, to the second."""
+    try:
+        return datetime.fromisoformat(value).astimezone().isoformat(timespec="seconds")
+    except ValueError, OverflowError:
+        return value
+
+
+def present(value: object) -> object:
+    """Replies state dates as dates and datetimes with the local offset; files and the cache keep UTC.
+
+    An item dated by a note's `date` drops the `time` that ordered it: a note states a day, not an instant.
+    """
+    if isinstance(value, dict):
+        return {
+            key: local(item)
+            if key in _INSTANTS and isinstance(item, str) and _CANONICAL.fullmatch(item)
+            else present(item)
+            for key, item in value.items()
+            if not (key == "time" and "date" in value)
+        }
+    if isinstance(value, list):
+        return [present(item) for item in value]
+    return value
 
 
 def terminal(value: object) -> bytes:
@@ -311,21 +374,26 @@ class Knowledge(BaseModel):
     # OKF notes use draft, stable or deprecated (`bf validate`); ordinary attachments keep their own words.
     status: Annotated[str, Field(max_length=128)] = ""
     updated: str = ""
-    review_after: Annotated[int | None, Field(ge=1, le=3650)] = None
-    review_due: str = ""
+    # OKF lifecycle: the note is stale, so due for review, at and after this instant.
+    stale_after: str = ""
+    # OKF: a URI of the asset the note describes; a URI-shaped resource is one of the note's identities.
+    resource: Annotated[str, Field(max_length=8192)] = ""
     summary: str = ""
     description: str = ""
     tags: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)
     links: list[str] = Field(default_factory=list)
     entity: Annotated[str, Field(max_length=8192)] = ""
+    # Values of fields declared in bf.yaml, checked against their declaration like a record's.
+    fields: dict[str, JsonValue] = Field(default_factory=dict)
 
     _identities = field_validator("aliases", "links")(identities)
 
     @property
     def names(self) -> list[str]:
-        """Aliases that name the note; `bf validate` rejects other aliases in OKF notes, and they stay searchable."""
-        return [alias for alias in self.aliases if re.fullmatch(IDENTITY, alias)]
+        """Aliases and a URI resource that name the note; `bf validate` rejects other aliases in OKF notes."""
+        named = [alias for alias in self.aliases if re.fullmatch(IDENTITY, alias)]
+        return named + ([self.resource] if re.fullmatch(IDENTITY, self.resource) else [])
 
     @field_validator("tags", mode="before")
     @classmethod
@@ -340,7 +408,12 @@ class Knowledge(BaseModel):
     def tagged(cls, values: list[str]) -> list[str]:
         return list(dict.fromkeys(tag_name(value) for value in values))
 
-    @field_validator("updated", "review_due")
+    @field_validator("stale_after")
+    @classmethod
+    def instant(cls, value: str) -> str:
+        return timestamp(value) if value else ""
+
+    @field_validator("updated")
     @classmethod
     def dated(cls, value: str) -> str:
         try:
@@ -386,7 +459,7 @@ class SchemaField(Model):
     # Read time only: a role page of the parent also lists this role's links; stored edges keep their own role.
     broader: Name | None = Field(
         default=None,
-        description="A declared relation, without its own broader, whose role page also lists this relation's links.",
+        description="A declared relation, without its own broader, whose relation page also lists this relation's links.",
     )
     targets: (
         Annotated[
@@ -420,7 +493,7 @@ class SchemaField(Model):
             raise ValueError("expected " + self.type)
         if isinstance(value, str):
             if len(value) > 8192:
-                raise ValueError("schema value exceeds 8192 characters")
+                raise ValueError("field value exceeds 8192 characters")
             clean(value)
             if self.type == "timestamp":
                 return timestamp(value)
@@ -550,7 +623,7 @@ class Reconciliation(Model):
 
 
 class Sensor(Program):
-    """Execution and explicit mapping of sensor output into the shared schema."""
+    """Execution and explicit mapping of sensor output into the declared fields."""
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -589,12 +662,27 @@ class Sensor(Program):
 
 
 class Routine(Program):
-    """A deterministic program whose Markdown output becomes the day's action for review."""
+    """A deterministic brain program: run when due, by a named hook, or now with `bf run`."""
 
     # An action is an authored note: keep its output within the note read limit.
     max_bytes: Annotated[int, Field(ge=1, le=MAX_NOTE)] = Field(
-        default=1 << 20, description="Maximum action Markdown output in bytes; bounded by the note read limit."
+        default=1 << 20, description="Maximum stdout in bytes; bounded by the note read limit."
     )
+    hooks: Annotated[list[Slug], Field(max_length=16)] = Field(
+        default_factory=list,
+        description="Events that run this routine through bf run --hook EVENT, such as pre-push from a Git hook.",
+    )
+    output: Literal["log", "action"] = Field(
+        default="log",
+        description="log keeps stdout in logs/NAME.log; action turns non-empty Markdown into a dated action.",
+    )
+
+    @field_validator("hooks")
+    @classmethod
+    def distinct(cls, values: list[str]) -> list[str]:
+        if len(set(values)) != len(values):
+            raise ValueError("hooks must be distinct")
+        return values
 
 
 class BrainReference(Model):
@@ -628,16 +716,16 @@ class WatchSettings(Model):
 
 
 class Config(Model):
-    """One brain: its name, related brains, shared schema, and the sensors and routines it may run."""
+    """One brain: its name, related brains, declared fields, and the sensors and routines it may run."""
 
     # One validated configuration is shared by a whole command; freezing keeps it intact. Freezing does not
     # reach its dictionaries: read them, never change them, or a later load returns the changed value.
     model_config = ConfigDict(frozen=True)
 
-    version: Literal[6] = Field(
+    version: Literal[7] = Field(
         description=(
-            "Brain storage format of bf.yaml, the memories/<source>/<sha256>.json layout and the record envelope; "
-            "independent of the package version."
+            "Brain format of bf.yaml, evaluation suites, the memories/<source>/<sha256>.json layout and the record "
+            "envelope; independent of the package version."
         )
     )
     name: Name = Field(description="Stable namespace in bf:// addresses; unique among selected brains.")
@@ -649,9 +737,9 @@ class Config(Model):
     )
     ontology: dict[Name, SchemaField] = Field(
         default_factory=dict,
-        alias="schema",
+        alias="fields",
         json_schema_extra={"additionalProperties": False},
-        description="Shared record fields and declared relationship meanings.",
+        description="Declared shared fields and relations that sensors map, records store and notes set.",
     )
     sensors: dict[Name, Sensor] = Field(
         default_factory=dict,
@@ -665,7 +753,7 @@ class Config(Model):
     routines: dict[Slug, Routine] = Field(
         default_factory=dict,
         json_schema_extra={"additionalProperties": False},
-        description="Reviewed deterministic programs producing action Markdown; names must differ from sensors.",
+        description="Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ from sensors.",
     )
 
     @model_validator(mode="after")
@@ -675,21 +763,21 @@ class Config(Model):
         if self.sensors.keys() & self.routines.keys():
             raise ValueError("sensor and routine names must be distinct; they share logs and locks")
         if TAGGED in self.ontology:
-            raise ValueError(f"schema field {TAGGED} is reserved for tag membership")
+            raise ValueError(f"fields.{TAGGED} is reserved for tag membership")
         if LINKS in self.ontology:
-            raise ValueError(f"schema field {LINKS} is reserved for untyped backlinks; choose another name")
+            raise ValueError(f"fields.{LINKS} is reserved for untyped backlinks; choose another name")
         if CITES in self.ontology:
-            raise ValueError(f"schema field {CITES} is reserved for OKF sources; choose another name")
+            raise ValueError(f"fields.{CITES} is reserved for OKF sources; choose another name")
         for name, field in self.ontology.items():
             parent = self.ontology.get(field.broader) if field.broader else None
             # One level keeps a role page one lookup: a parent lists its children, never their children.
             if field.broader and (parent is None or not parent.relation or parent.broader or field.broader == name):
-                raise ValueError(f"schema.{name}.broader: name another declared relation without its own broader")
+                raise ValueError(f"fields.{name}.broader: name another declared relation without its own broader")
         for sensor_name, sensor in self.sensors.items():
             for name, mapping in sensor.fields.items():
                 if name not in self.ontology:
                     # bf.yaml is owner-authored: naming its keys points at the line to fix.
-                    raise ValueError(f"sensors.{sensor_name}.fields.{name}: not declared in schema")
+                    raise ValueError(f"sensors.{sensor_name}.fields.{name}: not declared in fields")
                 if mapping.path is None and not self.ontology[name].allows(
                     self.ontology[name].normalize(mapping.value)
                 ):
@@ -697,7 +785,7 @@ class Config(Model):
         return self
 
     def narrower(self, relation: str) -> list[str]:
-        """The declared relations whose `broader` is this one: its role page lists their links too."""
+        """The declared relations whose `broader` is this one: its relation page lists their links too."""
         return sorted(name for name, field in self.ontology.items() if field.relation and field.broader == relation)
 
 
@@ -740,7 +828,7 @@ class Query(Model):
 
     text: Annotated[str, Field(max_length=4096)]
     limit: Annotated[int, Field(ge=1, le=50)] = 10
-    offset: Annotated[int, Field(ge=0, le=2**63 - 1)] = 0
+    offset: Annotated[int, Field(ge=0, le=MAX_OFFSET)] = 0
     since: str = ""
     until: str = ""
     # Only items without an event time, such as a snapshot source's undated records.

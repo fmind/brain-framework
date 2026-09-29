@@ -28,6 +28,10 @@ _COUNTERS = (
 )
 
 
+# Freshness of a scheduled program that has not succeeded within twice its refresh, or ever.
+_LATE = frozenset({"overdue", "never"})
+
+
 def _freshness(program: Program, success: str, now: datetime) -> str:
     """Scheduled programs are fresh within twice their refresh, based on local run history."""
     if not program.refresh:
@@ -35,7 +39,7 @@ def _freshness(program: Program, success: str, now: datetime) -> str:
     if not success:
         return "never"
     elapsed = now - datetime.fromisoformat(success)
-    return "fresh" if timedelta(0) <= elapsed <= timedelta(seconds=2 * program.refresh) else "stale"
+    return "fresh" if timedelta(0) <= elapsed <= timedelta(seconds=2 * program.refresh) else "overdue"
 
 
 def source_health(
@@ -68,15 +72,15 @@ def source_health(
     return result
 
 
-def _failure(store: Store, name: str, entry: dict[str, object]) -> dict[str, object]:
-    """The last attempt's error, consecutive failures and private log; empty after a success."""
+def _failure(name: str, entry: dict[str, object]) -> dict[str, object]:
+    """The last attempt's error, consecutive failures and log; empty after a success."""
     if not entry.get("error"):
         return {}
     return {
         "failed": True,
         "error": entry["error"],
         "failures": entry.get("failures", 1),
-        "log": str(log_path(store, name)),
+        "log": log_path(name),
     }
 
 
@@ -96,7 +100,7 @@ def routine_health(store: Store, *, now: datetime | None = None) -> dict[str, di
             item["last_success"] = success
         if entry.get("action"):
             item["action"] = entry["action"]
-        result[name] = {**item, **_failure(store, name, entry)}
+        result[name] = {**item, **_failure(name, entry)}
     return result
 
 
@@ -111,14 +115,14 @@ def attention(store: Store, now: datetime | None = None) -> list[dict[str, objec
             settings
             and settings.enabled
             and settings.refresh
-            and (health.get("failed") or health["freshness"] in {"never", "stale"})
+            and (health.get("failed") or health["freshness"] in _LATE)
         ):
             result.append(
                 {"sensor": name, "freshness": health["freshness"], **({"failed": True} if health.get("failed") else {})}
             )
     for name, health in routine_health(store, now=now).items():
         settings, failed = config.routines[name], health.get("failed")
-        if settings.enabled and settings.refresh and (failed or health["freshness"] in {"never", "stale"}):
+        if settings.enabled and settings.refresh and (failed or health["freshness"] in _LATE):
             result.append({"routine": name, "freshness": health["freshness"], **({"failed": True} if failed else {})})
     return result
 
@@ -150,24 +154,23 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             settings = config.sensors.get(name)
             run = history.get(name, {})
             # One shape shared with retrieval coverage, plus indexed totals and local run diagnostics.
-            entry: dict[str, object] = {**coverage[name], **counts.get(name, {"records": 0})}
+            entry: dict[str, object] = {**coverage[name], **counts.get(name, {"records": 0, "bytes": 0})}
             if counters := {key: run[key] for key in _COUNTERS if key in run}:
                 entry["last_run"] = counters
             if run.get("reconciled"):
                 entry["reconciled"] = run["reconciled"]
-            entry.update(_failure(store, name, run))
-            # Like routines, only a scheduled program this machine runs fails the check.
+            entry.update(_failure(name, run))
+            # Like routines, only a scheduled program this machine runs fails the check: only those are late.
             if settings is not None and settings.enabled and settings.refresh:
-                entry["stale"] = coverage[name]["freshness"] in {"never", "stale"}
-                healthy &= not entry["stale"] and not entry.get("failed")
+                healthy &= coverage[name]["freshness"] not in _LATE and not entry.get("failed")
             sources[name] = {key: value for key, value in entry.items() if value != ""}
         routines = routine_health(store, now=now)
         for name, entry in routines.items():
             settings = config.routines[name]
             if settings.enabled and settings.refresh:
-                entry["stale"] = entry["freshness"] in {"never", "stale"}
-                healthy &= not entry["stale"] and not entry.get("failed")
-        healthy &= not summary["problems"] and summary["cache"] == "ready"
+                healthy &= entry["freshness"] not in _LATE and not entry.get("failed")
+        # A busy cache still serves its last generation, marked stale in replies, while a live writer finishes.
+        healthy &= not summary["problems"] and summary["cache"] in {"ready", "busy"}
         brains.append(
             {
                 "brain": config.name,

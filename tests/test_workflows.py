@@ -18,7 +18,7 @@ from bf.storage import Store
 from conftest import Provider
 
 ROOT = Path(__file__).resolve().parents[1]
-HELPER = ROOT / "skills/bf-learn/scripts/evidence.py"
+HELPER = ROOT / "src/bf/skills/bf-use/scripts/evidence.py"
 NOTE = {"brain": "example", "ref": "projects/policy.md#retention", "text": "## Retention\n\nKeep the latest version.\n"}
 RECORD: dict = {
     "brain": "example",
@@ -51,8 +51,8 @@ def test_capture_keeps_only_selected_evidence_and_comparison_is_compact() -> Non
     assert "UNRELATED" not in json.dumps(capture)
     assert "external" not in capture
     assert len(capture["sha256"]) == 64
-    # Captures use the canonical UTC instants of bf replies.
-    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z", capture["captured_at"])
+    # Captures state their time like bf reply datetimes: local, to the second, with the offset.
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d", capture["captured_at"])
     assert run("compare", capture, NOTE)["state"] == "unchanged"
     changed = run("compare", capture, {**NOTE, "text": "## Retention\n\nKeep selected older versions.\n"})
     assert changed["state"] == "changed"
@@ -79,7 +79,8 @@ def test_record_observation_does_not_retrigger_but_revision_and_fields_do() -> N
     [
         {"problems": [{"error": "PRIVATE FAILURE"}]},
         {"stale": ["example"]},
-        {"collection": {"state": "active", "freshness": "stale"}},
+        {"collection": {"state": "active", "freshness": "overdue"}},
+        {"collection": {"state": "active", "freshness": "never"}},
         {"collection": {"state": "active", "freshness": "unknown"}},
         {"collection": {"state": "active", "freshness": "fresh", "failed": True}},
         {"collection": {"state": "historical", "freshness": "fresh"}},
@@ -164,7 +165,7 @@ def test_capture_identity_and_integrity_are_required() -> None:
 def test_real_reads_keep_history_after_replacement_and_explain_direct_impact(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nschema:\n  depends-on:\n    description: Needs review when evidence changes.\n"
+        b"version: 7\nname: fixture\nfields:\n  depends-on:\n    description: Needs review when evidence changes.\n"
         b"    type: identity\n    cardinality: many\n    relation: true\n",
     )
     brain.write("projects/policy.md", b"# Policy\n\n## Retention {#retention}\n\nKeep one version.\n")
@@ -207,6 +208,36 @@ def paged(brain: Store, ref: str) -> list[dict[str, object]]:
     return replies
 
 
+def helper_read(brain: Store, ref: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - the bundled helper runs this checkout's bf on a synthetic brain
+        [sys.executable, str(HELPER), "read", ref, "--brain", str(brain.root)],
+        env={**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+
+def test_real_record_read_keeps_its_local_time_and_unknown_freshness(brain: Store) -> None:
+    # A record's time carries the local offset; a source no sensor collects any more cannot clear a review.
+    reply = helper_read(brain, "meetings:decision-1")
+    assert reply.returncode == 0, reply.stderr
+    whole = json.loads(reply.stdout)
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d", whole["record"]["time"])
+    capture = run("capture", whole)
+    assert capture["record"]["time"] == whole["record"]["time"]
+    assert capture["limitations"] == ["source freshness is not established"]
+    assert run("compare", capture, whole) == {
+        "brain": "fixture",
+        "ref": "meetings:decision-1",
+        "state": "unknown",
+        "content_changed": False,
+        "limitations": ["source freshness is not established"],
+        "baseline_at": capture["captured_at"],
+    }
+
+
 def test_read_assembles_paged_exact_replies_for_capture(brain: Store) -> None:
     # Exact replies above 32 KiB arrive in text pages; one page is never complete evidence.
     brain.write("projects/large.md", ("# Large\n\n" + LARGE).encode())
@@ -247,7 +278,7 @@ def test_read_rejects_changed_or_incomplete_pages(brain: Store, provider: Provid
     sequence = [first, *([replaced] if replaced else []), *replies[2:]]
     provider.install("bf", [{"match": ["read"], "stdout": reply} for reply in sequence])
     result = provider.run(
-        "evidence.py", "read", ref, "--brain", "/brains/selected", folder="../skills/bf-learn/scripts"
+        "evidence.py", "read", ref, "--brain", "/brains/selected", folder="../src/bf/skills/bf-use/scripts"
     )
     assert result.returncode == 1
     assert not result.stdout
@@ -264,10 +295,12 @@ def test_read_rejects_changed_or_incomplete_pages(brain: Store, provider: Provid
 
 def test_read_passes_whole_replies_and_rejects_option_like_refs(provider: Provider) -> None:
     provider.install("bf", [{"match": ["read"], "stdout": NOTE}])
-    result = provider.run("evidence.py", "read", NOTE["ref"], "--brain", "brain", folder="../skills/bf-learn/scripts")
+    result = provider.run(
+        "evidence.py", "read", NOTE["ref"], "--brain", "brain", folder="../src/bf/skills/bf-use/scripts"
+    )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == NOTE
     for arguments in (("read", "--offset=1", "--brain", "brain"), ("read", NOTE["ref"]), ("read", "", "--brain", "x")):
-        result = provider.run("evidence.py", *arguments, folder="../skills/bf-learn/scripts")
+        result = provider.run("evidence.py", *arguments, folder="../src/bf/skills/bf-use/scripts")
         assert result.returncode == 2
     assert provider.calls("bf") == [["read", NOTE["ref"], "--brain", "brain"]]

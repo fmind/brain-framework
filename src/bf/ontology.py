@@ -1,4 +1,4 @@
-"""Explicit, deterministic schema projection; no expressions, inference or provider access."""
+"""Explicit, deterministic field projection; no expressions, inference or provider access."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def pointer(document: JsonValue, path: str) -> JsonValue:
                 return None
             value = value[int(key)]
         else:
-            raise Error("schema mapping cannot traverse the sensor value")
+            raise Error("field mapping cannot traverse the sensor value")
     return value
 
 
@@ -44,12 +44,12 @@ def project(record: Record, sensor: Sensor, config: Config) -> Record:
         value = pointer(document, mapping.path) if mapping.path is not None else mapping.value
         if value is None:
             if definition.cardinality == "one":
-                raise Error(f"schema field {name}: required mapped value is missing")
+                raise Error(f"field {name}: required mapped value is missing")
             continue
         try:
             fields[name] = definition.normalize(value)
         except ValueError as error:
-            raise Error(f"schema field {name}: {error}") from error
+            raise Error(f"field {name}: {error}") from error
     result = record.model_copy(update={"fields": fields})
     validate(result, config)
     return result
@@ -69,18 +69,28 @@ def validate(record: Record, config: Config, *, fields: bool = True) -> None:
     """
     for name, value in record.fields.items() if fields else ():
         if name == links.TAGGED:
-            raise Error(f"schema field {name} is reserved for tag membership")
+            raise Error(f"field {name} is reserved for tag membership")
         if name not in config.ontology:
-            raise Error(f"undeclared schema field {name}")
+            raise Error(f"field {name} is not declared in bf.yaml fields")
         definition = config.ontology[name]
         try:
             definition.normalize(value)
         except ValueError as error:
-            raise Error(f"schema field {name}: {error}") from error
+            raise Error(f"field {name}: {error}") from error
         if definition.relation and not definition.allows(
             [links.identity(str(target)) for target in (value if isinstance(value, list) else [value])]
         ):
-            raise Error(f"schema field {name}: identity outside the declared targets")
+            raise Error(f"field {name}: identity outside the declared targets")
+    _aliases(record, config)
+    item = links.address(config.name, "item")
+    for target in [*record.links, *([record.url] if record.url else [])]:
+        claim = links.claim(target, config, item, item, strict=True)
+        if fields and claim and outside(config, claim):
+            raise Error(f"link relation {claim.relation}: identity outside the declared targets")
+
+
+def _aliases(record: Record, config: Config) -> None:
+    """A record's aliases name it: a page, a record address or another brain's address would never reach it."""
     for alias in record.aliases:
         if links.computed(alias):
             raise Error(f"{_PAGES} and cannot be aliases")
@@ -90,11 +100,6 @@ def validate(record: Record, config: Config, *, fields: bool = True) -> None:
             links.identity(alias)
             if parsed.brain != config.name:
                 raise Error("BF aliases must belong to their own brain namespace")
-    item = links.address(config.name, "item")
-    for target in [*record.links, *([record.url] if record.url else [])]:
-        claim = links.claim(target, config, item, item)
-        if fields and claim and outside(config, claim):
-            raise Error(f"link relation {claim.relation}: identity outside the declared targets")
 
 
 def relations(record: Record, config: Config) -> list[tuple[str, str]]:
@@ -104,7 +109,7 @@ def relations(record: Record, config: Config) -> list[tuple[str, str]]:
     relation adds no edge, while a declared relation keeps every stored value that is an identity, whatever
     cardinality or type the field was collected with. `bf validate` names the values the schema now rejects.
     """
-    validate(record, config, fields=False)
+    _aliases(record, config)
     result = []
     for name, value in record.fields.items():
         if (definition := config.ontology.get(name)) is None or not definition.relation:
@@ -131,10 +136,11 @@ def qualify(config: Config, ref: str, fragment: str = "") -> str:
     return links.address(config.name, ref, fragment)
 
 
-def note_claims(note: Note, config: Config) -> list[links.Claim]:
+def note_claims(note: Note, config: Config, *, strict: bool = False) -> list[links.Claim]:
     """Each link claims a relation from the note's entity, otherwise its file, supported by its section.
 
-    Each OKF source cites its resource from the whole note, unless it is a BF link naming another relationship.
+    Each OKF source cites its resource from the whole note, unless it is a BF link naming another relation. With
+    `strict`, a link naming an undeclared relation fails instead of staying an untyped link.
     """
     file = qualify(config, note.path)
     subject = links.identity(note.knowledge.entity) if note.knowledge.entity else file
@@ -160,19 +166,40 @@ def note_claims(note: Note, config: Config) -> list[links.Claim]:
 
     for value, fragment in note.contexts:
         origin = qualify(config, note.path, fragment)
-        result.append(links.claim(value, config, subject, origin) or links.Claim(subject, "", target(value), origin))
+        typed = links.claim(value, config, subject, origin, strict=strict, authored=True)
+        result.append(typed or links.Claim(subject, "", target(value), origin))
     result.extend(
-        links.claim(value, config, subject, file) or links.Claim(subject, CITES, target(value), file)
+        links.claim(value, config, subject, file, strict=strict, authored=True)
+        or links.Claim(subject, CITES, target(value), file)
         for value in note.sources
     )
+    for name, value in note.knowledge.fields.items():
+        # Like a record's mapped fields: declared, typed and within their targets. The whole note supports them.
+        definition = config.ontology.get(name)
+        try:
+            if definition is None:
+                raise ValueError("not declared in bf.yaml fields")
+            normalized = definition.normalize(value)
+            targets = normalized if isinstance(normalized, list) else [normalized]
+            claims = (
+                [links.Claim(subject, name, links.identity(str(t)), file) for t in targets]
+                if definition.relation
+                else []
+            )
+        except (Error, ValueError) as error:
+            if strict:
+                raise Error(f"{note.path}: fields.{name}: {error}") from error
+            continue
+        result.extend(claims)
     return result
 
 
-def record_claims(record: Record, config: Config, ref: str) -> list[links.Claim]:
+def record_claims(record: Record, config: Config, ref: str, *, strict: bool = False) -> list[links.Claim]:
     origin = qualify(config, ref)
     result = [links.Claim(origin, role, target, origin) for role, target in relations(record, config)]
     result.extend(
-        links.claim(value, config, origin, origin) or links.Claim(origin, "", links.target(value), origin)
+        links.claim(value, config, origin, origin, strict=strict)
+        or links.Claim(origin, "", links.target(value), origin)
         for value in [*record.links, *([record.url] if record.url else [])]
     )
     return result

@@ -16,13 +16,15 @@ from bf.storage import Store
 from bf.validate import validate
 
 ROOT = Path(__file__).resolve().parents[1]
-HELPER = ROOT / "skills/bf-learn/scripts/guarded-write.py"
+HELPER = ROOT / "src/bf/skills/bf-use/scripts/guarded-write.py"
 NOTE = "projects/offline.md"
 
 
-def write(brain: Store, digest: str, content: str, path: str = NOTE) -> subprocess.CompletedProcess[str]:
+def write(
+    brain: Store, digest: str, content: str = "", path: str = NOTE, *options: str
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
-        [sys.executable, str(HELPER), path, "--expect-sha256", digest],
+        [sys.executable, str(HELPER), path, "--expect-sha256", digest, *options],
         cwd=brain.root,
         input=content,
         text=True,
@@ -94,16 +96,17 @@ def test_write_checks_again_before_the_rename(
     spec.loader.exec_module(helper)
     path = brain.root / NOTE
     original = path.read_bytes()
-    digest, mode = helper.current(path)
+    data, mode = helper.snapshot(path)
+    digest = helper.digest(data)
     # An editor saves while the helper writes its temporary file.
-    answers = iter([(digest, mode), ("0" * 64, mode)])
-    monkeypatch.setattr(helper, "current", lambda _path: next(answers))
+    answers = iter([(data, mode), (data + b"Another save.\n", mode)])
+    monkeypatch.setattr(helper, "snapshot", lambda _path: next(answers))
     with pytest.raises(helper.ChangedError):
-        helper.replace(path, digest, b"# Replacement\n")
+        helper.replace(path, digest, helper.whole(b"# Replacement\n"))
     assert path.read_bytes() == original
     assert not leftovers(brain)
     # A directory sync failure after the rename is reported as written, never as unchanged or as success.
-    monkeypatch.setattr(helper, "current", lambda _path: (digest, mode))
+    monkeypatch.setattr(helper, "snapshot", lambda _path: (data, mode))
     monkeypatch.setattr(helper, "sync", lambda _directory: (_ for _ in ()).throw(OSError("sync")))
     monkeypatch.setattr(sys, "argv", ["guarded-write.py", str(path), "--expect-sha256", digest])
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"# Replacement\n")))
@@ -112,3 +115,81 @@ def test_write_checks_again_before_the_rename(
     assert exit_info.value.code == 1
     assert capsys.readouterr().err.startswith("Written, but its directory could not be synced")
     assert path.read_bytes() == b"# Replacement\n"
+
+
+def test_replace_edits_one_exact_passage_of_the_note_that_was_read(brain: Store) -> None:
+    (brain.root / NOTE).chmod(0o640)
+    read = retrieve.read([brain], NOTE)
+    text = str(read["text"])
+    passage = text.rstrip("\n").splitlines()[-1]
+    assert passage
+    assert text.count(passage) == 1
+    # Replacement mode never reads stdin: an agent sends only the passage and its replacement.
+    result = write(brain, str(read["sha256"]), "IGNORED STDIN", NOTE, "--old", passage, "--new", "Revised line.")
+    assert result.returncode == 0, result.stderr
+    reply = json.loads(result.stdout)
+    expected = text.replace(passage, "Revised line.")
+    assert (brain.root / NOTE).read_text() == expected
+    assert reply == {"written": NOTE, "sha256": retrieve.read([brain], NOTE)["sha256"]}
+    assert (brain.root / NOTE).stat().st_mode & 0o777 == 0o640
+    assert validate(brain)["valid"]
+    # Multi-line passages can come from files; an empty replacement deletes the passage.
+    old, new = brain.root.parent / "old.txt", brain.root.parent / "new.txt"
+    old.write_text("\nRevised line.")
+    new.write_text("")
+    result = write(brain, reply["sha256"], "", NOTE, "--old-file", str(old), "--new-file", str(new))
+    assert result.returncode == 0, result.stderr
+    assert (brain.root / NOTE).read_text() == expected.replace("\nRevised line.", "")
+    assert not leftovers(brain)
+
+
+def test_replace_refuses_a_missing_repeated_or_changed_passage(brain: Store) -> None:
+    brain.write(NOTE, b"# Offline\n\nKeep one.\n\nKeep one.\n\nPRIVATE unique line.\n")
+    original = (brain.root / NOTE).read_bytes()
+    digest = str(retrieve.read([brain], NOTE)["sha256"])
+    for old, message in (("absent passage", "does not occur in the file"), ("Keep one.", "occurs 2 times")):
+        result = write(brain, digest, "", NOTE, "--old", old, "--new", "x")
+        assert result.returncode == 1
+        assert message in result.stderr
+        assert "PRIVATE" not in result.stderr
+        assert not result.stdout
+    assert (brain.root / NOTE).read_bytes() == original
+    # The digest guards a replacement too: another session's edit wins.
+    (brain.root / NOTE).write_bytes(original + b"Another session.\n")
+    result = write(brain, digest, "", NOTE, "--old", "PRIVATE unique line.", "--new", "x")
+    assert result.returncode == 1
+    assert "changed since it was read" in result.stderr
+    assert (brain.root / NOTE).read_bytes() == original + b"Another session.\n"
+    # A replacement never empties a file.
+    brain.write("projects/tiny.md", b"x")
+    tiny = str(retrieve.read([brain], "projects/tiny.md")["sha256"])
+    assert write(brain, tiny, "", "projects/tiny.md", "--old", "x", "--new", "").returncode == 1
+    assert (brain.root / "projects/tiny.md").read_bytes() == b"x"
+    assert not leftovers(brain)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("--old", "a"),
+        ("--new", "b"),
+        ("--old", "", "--new", "b"),
+        ("--old", "a", "--old-file", "x", "--new", "b"),
+        ("--old", "a", "--new", "b", "--new-file", "x"),
+    ],
+    ids=["old-only", "new-only", "empty-old", "two-olds", "two-news"],
+)
+def test_replace_rejects_incomplete_or_conflicting_options(brain: Store, options: tuple[str, ...]) -> None:
+    original = (brain.root / NOTE).read_bytes()
+    digest = str(retrieve.read([brain], NOTE)["sha256"])
+    assert write(brain, digest, "# New\n", NOTE, *options).returncode == 2
+    assert (brain.root / NOTE).read_bytes() == original
+
+
+def test_replace_reports_an_unreadable_passage_file(brain: Store, tmp_path: Path) -> None:
+    original = (brain.root / NOTE).read_bytes()
+    digest = str(retrieve.read([brain], NOTE)["sha256"])
+    result = write(brain, digest, "", NOTE, "--old-file", str(tmp_path / "absent"), "--new", "x")
+    assert result.returncode == 1
+    assert "--old-file is not a readable file" in result.stderr
+    assert (brain.root / NOTE).read_bytes() == original

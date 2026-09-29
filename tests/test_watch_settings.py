@@ -20,7 +20,7 @@ from bf.watch_settings import Notifications, desktop, settings
 def write_watch(brain: Store, data: bytes) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nwatch:\n" + b"\n".join(b"  " + line for line in data.splitlines()) + b"\n",
+        b"version: 7\nname: fixture\nwatch:\n" + b"\n".join(b"  " + line for line in data.splitlines()) + b"\n",
     )
 
 

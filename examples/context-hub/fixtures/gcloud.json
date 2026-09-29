@@ -1,0 +1,8 @@
+{
+  "id": "deployment",
+  "title": "New website preview deployment",
+  "text": "Revision demo-42 is deployed to the preview service and its health check passes. This is a preview deployment, not a public launch or an accessibility result.",
+  "time": "2026-09-26T08:00:00Z",
+  "url": "https://example.test/gcloud/new-website/preview",
+  "attributes": { "service_project": "project:new-website", "health": "healthy" }
+}

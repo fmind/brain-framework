@@ -9,7 +9,7 @@ import re
 import stat
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path, PurePosixPath
 
 from bf.models import MAX_FILE, MAX_FILES, Error, digest
@@ -153,6 +153,31 @@ class Store:
                 with suppress(FileNotFoundError):
                     os.unlink(temporary, dir_fd=parent)
 
+    def link(self, name: str, target: str) -> None:
+        """Replace `target` atomically with a second name for a regular file's bytes, without copying or syncing them.
+
+        Safe as a snapshot only because `write` renames new files into place: no BF write changes an existing inode.
+        A later `sync()` of the target's directory persists the entry. Raises OSError where the filesystem cannot link.
+        """
+        with self.parent(name) as (source, leaf), self.parent(target, create=True) as (parent, new):
+            temporary = ".write-" + os.urandom(16).hex()
+            # A symlink is linked as itself, never followed; the check below then refuses it.
+            os.link(leaf, temporary, src_dir_fd=source, dst_dir_fd=parent, follow_symlinks=False)
+            try:
+                if not stat.S_ISREG(os.stat(temporary, dir_fd=parent, follow_symlinks=False).st_mode):
+                    raise Error(f"{name}: expected a regular file")
+                try:
+                    info = os.stat(new, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    if not stat.S_ISREG(info.st_mode):
+                        raise Error(f"{target}: refusing to replace a non-regular file")
+                os.replace(temporary, new, src_dir_fd=parent, dst_dir_fd=parent)
+            finally:
+                with suppress(FileNotFoundError):
+                    os.unlink(temporary, dir_fd=parent)
+
     def delete(self, name: str, *, durable: bool = True) -> None:
         with self.parent(name) as (parent, leaf):
             if not stat.S_ISREG(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode):
@@ -285,13 +310,17 @@ class Store:
             os.close(fd)
         return result
 
-    def fingerprint(self, name: str) -> tuple[int, int, int, int]:
-        """Size, mtime, ctime and inode: ctime catches an edit whose mtime was preserved."""
+    def lstat(self, name: str) -> os.stat_result:
+        """A regular file's own status, never a link target's."""
         with self.parent(name) as (parent, leaf):
             info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-            if not stat.S_ISREG(info.st_mode):
-                raise Error(f"{name}: expected a regular file")
-            return _fingerprint(info)
+        if not stat.S_ISREG(info.st_mode):
+            raise Error(f"{name}: expected a regular file")
+        return info
+
+    def fingerprint(self, name: str) -> tuple[int, int, int, int]:
+        """Size, mtime, ctime and inode: ctime catches an edit whose mtime was preserved."""
+        return _fingerprint(self.lstat(name))
 
 
 def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
@@ -332,16 +361,23 @@ def _private(*parts: str, root: Path) -> Store:
         raise Error("state directory may not contain symlinks")
     # mkdir applies its mode to the last directory only: create the shared bf/ root explicitly too.
     top = home / "bf"
-    top.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = top.stat()
-    if info.st_uid != os.getuid():
-        raise Error("state directory must be owned by you with mode 700")
-    if info.st_mode & 0o077:
-        # Other users could list the per-brain directories; each one below is verified on its own.
-        top.chmod(0o700)
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077:
-        raise Error("state directory must be owned by you with mode 700")
+    try:
+        top.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = top.stat()
+        if info.st_uid != os.getuid():
+            raise Error("state directory must be owned by you with mode 700")
+        if info.st_mode & 0o077:
+            # Other users could list the per-brain directories; each one below is verified on its own.
+            top.chmod(0o700)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077:
+            raise Error("state directory must be owned by you with mode 700")
+    except OSError as error:
+        # Locks, run history and usage live there: every command needs it, whichever brain it reads.
+        cause = f" ({error.strerror})" if error.strerror else ""
+        raise Error(
+            f"state directory {top} is inaccessible{cause}; make it writable or set XDG_STATE_HOME to a writable directory"
+        ) from error
     return Store(directory)
 
 
@@ -400,7 +436,7 @@ def writer(store: Store, wait: float = 0) -> Iterator[None]:
 
 @contextmanager
 def reader(store: Store, wait: float = 120) -> Iterator[None]:
-    """Keep record files stable during one exact read; readers can run concurrently."""
+    """Keep record files stable during one consistent read; readers can run concurrently."""
     with _lock(store, "write.lock", wait, shared=True):
         yield
 
@@ -414,16 +450,25 @@ def building(store: Store, wait: float = 0) -> Iterator[None]:
 
 @contextmanager
 def generation(store: Store, *, shared: bool, wait: float) -> Iterator[None]:
-    """Search-cache readers hold this shared while connected; publishing a rebuilt cache holds it exclusively.
+    """Search-cache readers hold this shared while connected; replacing the cache file holds it exclusively.
 
     SQLite finds a database's -wal file by name, so no connection to a replaced cache may outlive its rename.
+    Readers pass a gate before connecting, which a replacement closes before it waits: overlapping readers cannot
+    keep it waiting forever, since only connections opened before it arrived delay it.
     """
     if shared:
         busy = "the search cache is being replaced; retry shortly"
+        with ExitStack() as connected:
+            with _lock(store, "cache-gate.lock", wait, shared=True, busy=busy):
+                connected.enter_context(_lock(store, "cache.lock", wait, shared=True, busy=busy))
+            yield
     else:
         busy = "readers kept the search cache open; retry bf build"
-    with _lock(store, "cache.lock", wait, shared=shared, busy=busy):
-        yield
+        with (
+            _lock(store, "cache-gate.lock", wait, busy=busy),
+            _lock(store, "cache.lock", wait, busy=busy),
+        ):
+            yield
 
 
 @contextmanager

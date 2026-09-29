@@ -1,36 +1,27 @@
 ---
-description: Run a fictional four-tool example that connects a brief, review, implementation and deployment.
+description: Run a fictional four-tool example that collects evidence, records a conclusion and flags it when a source changes.
 ---
 
 # Connect context across tools
 
-Ask one question across Google Workspace, Jira, GitHub and Gcloud: **“Is the New website ready to launch, what remains, and why did we choose one page?”** Collect their selected evidence once, map it into a shared schema, then let your terminal agent read it together.
+Ask one question across Google Workspace, Jira, GitHub and Gcloud: **“Can the New website launch, what remains, and why did we choose one page?”** This walkthrough collects each tool's evidence into one brain, records the answer in the project, then shows BF flagging that answer when Jira changes.
 
-This walkthrough uses four fictional records. It needs no provider accounts, credentials or model calls. The tiny adapter emits fixtures rather than contacting those services; source URLs under `example.test` are illustrative and must not be fetched.
+The four records are fictional fixtures: no provider account, credential, network access or model is needed. URLs under `example.test` are illustrative. Complete [Getting started](getting-started.md) first: this example combines sensors, field mappings and identities.
 
-**Advanced:** complete [Getting started](getting-started.md) first. This combines sensors, schema mappings, identities and agent retrieval.
+## Get the example
 
-## Run the example
-
-You need Linux or macOS, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git and `python3` for the standard-library demo sensor. Install BF if needed:
-
-```bash
-uv tool install --python 3.14 brain-framework
-bf --version
-```
-
-If `bf` is not on PATH, run `uv tool update-shell` and open a new shell. From a source checkout, you can instead use `uv run bf` for each command; the [example README](https://github.com/fmind/brain-framework/tree/main/examples/context-hub) shows that route.
-
-Create a disposable directory, retrieve the example from the release matching your installation and copy it into its own brain:
+You need Linux or macOS, BF, Git and `python3`. Copy the example from the release matching your installation into a disposable folder:
 
 ```bash
 context_demo=$(mktemp -d)
-git clone --depth 1 --branch "v$(bf --version)" https://github.com/fmind/brain-framework.git "$context_demo/source"
+git clone --quiet --depth 1 --branch "v$(bf --version)" https://github.com/fmind/brain-framework.git "$context_demo/source"
 cp -R "$context_demo/source/examples/context-hub" "$context_demo/brain"
 cd "$context_demo/brain"
 ```
 
-Review `bf.yaml` and `sensors/demo.py` in that copy. All four collection commands run the reviewed local fixture script:
+The brain holds a minimal project note, `bf.yaml` and a small sensor, `sensors/demo.py`, that prints `fixtures/TOOL.json` as if each tool had returned it. Review both before running anything. From a source checkout, copy `examples/context-hub` instead and run `uv run bf`.
+
+## Collect four tools
 
 ```bash
 bf collect workspace
@@ -40,46 +31,47 @@ bf collect gcloud
 bf read project:new-website
 ```
 
-Each collection returns `"records":1`. The project read returns the project note with `backlinks` under the shared `project` relationship, including these four refs:
+Each collection reports `"records":1`. `project:new-website` is the project note's alias, so the read opens the note. Its `backlinks` group the four records under the shared `project` relation, each with its `fields` side by side:
 
-| Ref                     | Saved evidence                                                |
-| ----------------------- | ------------------------------------------------------------- |
-| `workspace:brief`       | Visitors need a clear explanation before signing up.          |
-| `jira:review`           | Launch is blocked until the keyboard navigation check passes. |
-| `github:implementation` | Revision `demo-42` was merged.                                |
-| `gcloud:deployment`     | The same revision has a healthy preview deployment.           |
-
-Read the originals and verify the brain:
-
-```bash
-bf read workspace:brief
-bf read jira:review
-bf read github:implementation
-bf read gcloud:deployment
-bf validate
-bf eval --path evals/retrieval.yaml
+```json
+{
+  "relation": "project",
+  "total": 4,
+  "items": [
+    { "ref": "gcloud:deployment", "fields": { "kind": "deployment", "status": "healthy" } },
+    { "ref": "github:implementation", "fields": { "kind": "pull-request", "status": "merged" } },
+    { "ref": "jira:review", "fields": { "kind": "issue", "status": "In review" } },
+    { "ref": "workspace:brief", "fields": { "kind": "brief", "status": "approved" } }
+  ]
+}
 ```
 
-Validation reports `"valid":true`; evaluation reports `"score":"10/10"`. The evidence supports a precise answer: **the implementation reached preview, but launch remains blocked by accessibility review; the next action is the keyboard navigation check.** The Workspace brief explains the single-page choice. A healthy deployment alone cannot establish launch readiness.
+The previews already answer most of the question. Read the blocking record and check the brain:
 
-Repeat those reads, or search `"keyboard navigation"` with `--scope memories/jira`: retrieval reuses the saved context without executing the four sensors again. This proves the offline path on these fixtures, not a measured saving in provider requests for a real team. A later provider change needs explicit collection before the saved evidence reflects it.
+```bash
+bf read jira:review
+bf validate
+bf eval
+```
 
-## See the automatic normalization
+The Jira review says launch is blocked until the keyboard navigation check passes. Validation reports `"valid":true`, and the example's retrieval cases report `"score":"10/10"`. The evidence supports a precise answer: **the implementation is merged and its preview is healthy, but accessibility review still blocks launch.** A healthy deployment alone cannot establish launch readiness. These reads reuse the saved records: no sensor runs again.
 
-The four adapter outputs name their project field differently. `bf.yaml` declares how each maps into the same ontology:
+## How the four tools share one project
 
-| Adapter output field                    | Shared field | Explicit identity     |
-| --------------------------------------- | ------------ | --------------------- |
-| Workspace: `attributes.project`         | `project`    | `project:new-website` |
-| Jira: `attributes.workstream`           | `project`    | `project:new-website` |
-| GitHub: `attributes.repository_project` | `project`    | `project:new-website` |
-| Gcloud: `attributes.service_project`    | `project`    | `project:new-website` |
+Each tool names its project and state differently. `bf.yaml` maps them into the same shared fields:
 
-For example, this part of the configuration maps the Jira adapter:
+| Tool      | Project field                   | Status field        | Shared fields                             |
+| --------- | ------------------------------- | ------------------- | ----------------------------------------- |
+| Workspace | `attributes.project`            | `attributes.state`  | `project`, `status`, `kind: brief`        |
+| Jira      | `attributes.workstream`         | `attributes.status` | `project`, `status`, `kind: issue`        |
+| GitHub    | `attributes.repository_project` | `attributes.state`  | `project`, `status`, `kind: pull-request` |
+| Gcloud    | `attributes.service_project`    | `attributes.health` | `project`, `status`, `kind: deployment`   |
+
+For example, the Jira part of the configuration:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schema/
-schema:
+fields:
   project:
     description: Project explicitly identified by the source.
     type: identity
@@ -87,36 +79,98 @@ schema:
     relation: true
 sensors:
   jira:
-    command: [sensors/demo.py, jira]
+    command: [sensors/demo.py, jira, "{{end}}"]
+    mode: snapshot
     fields:
       project: { path: /attributes/workstream }
+      kind: { value: issue }
+      status: { path: /attributes/status }
 ```
 
-On collection, BF validates the value, saves `fields.project: project:new-website` and creates a `project` relationship supported by that record. The example also maps a common `kind` field. Original attributes, source URLs and record refs remain available.
+At collection, BF validates each mapped value, stores it under the record's `fields` and turns `project` into a relation to `project:new-website`. The mapping runs automatically; its meaning is configured by you. BF never guesses that similar names identify the same project. See [field mappings](schema.md#shared-fields-and-sensor-mappings).
 
-**The mappings run automatically; their meaning is explicitly configured.** These fixtures are adapter outputs, not provider API schemas. A real sensor normalizes known provider identities, or a reviewed mapping supplies the common identity for its selected scope. BF never guesses that matching names identify the same project. See [schema mappings](schema.md#shared-fields-and-sensor-mappings).
+## Record the conclusion
+
+Write what the reads establish into the owning project, dated today:
+
+```bash
+cat > projects/new-website.md <<EOF
+---
+type: project
+status: draft
+updated: $(date +%F)
+aliases: [project:new-website]
+summary: Launch a product website that explains the product before signup.
+---
+
+# New website
+
+## Decision
+
+Start with a single product page: visitors need a clear explanation before signing up. Evidence: [Workspace brief](workspace:brief).
+
+## Launch review
+
+Hold public launch. The [implementation](github:implementation) is merged and the [preview](gcloud:deployment) is healthy, but the [launch review](jira:review) still blocks launch on the keyboard navigation check.
+
+## Next actions
+
+- [ ] Run the keyboard navigation check.
+EOF
+bf read
+```
+
+The home page lists the project under `changed`, with its new `next` task. Its review is not due: no evidence is newer than the edit.
+
+## Follow a change
+
+In the fictional tracker, the keyboard navigation check passes and the review moves to Done. Swap in the tracker's next fixture and collect Jira again. That fixture's `time` is `now`, so the demo sensor dates the change at collection, as a tracker would report a transition that just happened:
+
+```bash
+cp fixtures/jira-done.json fixtures/jira.json
+bf collect jira
+bf read
+bf read project:new-website --rel project
+```
+
+Collection reports `"updated":1`. The home page now flags the project, since evidence dated after its last edit links to it:
+
+```json
+{
+  "ref": "projects/new-website.md",
+  "review": true,
+  "review_reasons": ["newer_evidence"],
+  "new_links": 1,
+  "next": "Run the keyboard navigation check."
+}
+```
+
+The relation page lists the Jira review first, now with `"status":"Done"`. The saved conclusion is out of date: read `jira:review`, update the Launch review and Next actions, and the flag clears with the edit. This is the loop BF supports: gather, connect, act, learn, and notice when evidence moves on.
 
 ## Give a terminal agent the same context
 
-Print the absolute demo path with `echo "$context_demo/brain"`. In a fresh terminal-agent session, replace `ABSOLUTE_DEMO_PATH` in this prompt:
+Print the demo path with `echo "$context_demo/brain"`. In a fresh terminal-agent session, replace `ABSOLUTE_DEMO_PATH` in this prompt:
 
-> Work in `ABSOLUTE_DEMO_PATH` and use the `bf` CLI. Read `project:new-website`, then read the Workspace, Jira, GitHub and Gcloud record refs supporting it. Is the website ready to launch, what remains, and why did we choose one page? Cite each supporting ref and distinguish recorded facts from inference. Report incomplete or stale evidence. Do not collect, fetch source URLs or change files.
+> Work in `ABSOLUTE_DEMO_PATH` and use the `bf` CLI. Read `project:new-website`, then the Workspace, Jira, GitHub and Gcloud records supporting it. Can the website launch, what remains, and why did we choose one page? Cite each supporting ref and separate recorded facts from inference. Report incomplete or outdated evidence. Do not collect, fetch source URLs or change files.
 
-No skill installation or MCP configuration is needed for this first explicit CLI task. The host must be able to execute `bf` and access the directory. Inspect its tool history: it should read all four records and cite the open Jira review before explaining the next action. A plausible answer without those reads does not verify access. Install [bf-use](agents.md#install-the-skills) later to make the retrieval procedure discoverable across sessions.
+No skill or MCP setup is needed for this first task. Check the tool history: the agent should read the records and cite the Jira review before answering. A plausible answer without those reads does not verify access. Install [the skills](agents.md#install-the-skills) to make the procedure available in every session. A cloud agent's provider may receive what the agent reads.
 
-A cloud agent's provider may receive the evidence it reads. Keep the intended brain and audience explicit when moving from this fictional demo to work data.
+Remove the disposable copy when you are done:
+
+```bash
+cd
+rm -rf -- "$context_demo"
+```
 
 ## Use it on your work
 
-Choose one recurring question whose answer is split across tools. Create a brain with [Getting started](getting-started.md), keep the decision in its owning project note, and connect only the evidence needed for that question:
+Choose one recurring question whose answer spans tools. Keep the decision in its project note and collect only the evidence the question needs:
 
-| Tool             | Access and starting point                                                                                                                                                                                                                                                             | What you implement                                                                                                                                                                                      |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GitHub           | [`gh`](https://cli.github.com/); the [Git sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/git-history.py) already handles local commit history.                                                                                                           | Select repositories and adapt the reviewed [GitHub history sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) for branch commits, issues and pull requests. |
-| Google Workspace | [`gws`](https://github.com/googleworkspace/cli); reviewed [Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) and [Drive folder](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py) sensors. | Extraction of selected document content; the folder sensor collects a catalog, not document bodies.                                                                                                     |
-| Jira             | [`acli`](https://developer.atlassian.com/cloud/acli/) or the API.                                                                                                                                                                                                                     | A sensor for selected issues, status and explicit project identities.                                                                                                                                   |
-| Gcloud           | [`gcloud`](https://cloud.google.com/sdk/gcloud) or the API.                                                                                                                                                                                                                           | A sensor for selected deployment revisions and observed service state.                                                                                                                                  |
+| Tool             | Access and starting point                                                                                                                                                                                                                                                                    | What you implement                                                                             |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| GitHub           | [`gh`](https://cli.github.com/) and the reviewed [GitHub history sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) for commits, issues and pull requests.                                                                                       | The repositories to select.                                                                    |
+| Google Workspace | [`gws`](https://github.com/googleworkspace/cli) and the reviewed [Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) and [Drive folder](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py) sensors. | Extraction of selected document content; the folder sensor lists folders, not document bodies. |
+| Jira             | [`acli`](https://developer.atlassian.com/cloud/acli/) or the API.                                                                                                                                                                                                                            | A sensor for selected issues, their status and explicit project identities.                    |
+| Gcloud           | [`gcloud`](https://cloud.google.com/sdk/gcloud) or the API.                                                                                                                                                                                                                                  | A sensor for selected deployment revisions and observed service state.                         |
 
-A sensor is a script that prints JSON records; any accessible CLI, API or file can be an input. Provider tools own authentication. Your adapter owns scope, complete pagination, output bounds, failures and identity normalization; BF validates, maps and retains the records. Test it with fake provider output before authorized collection. Follow [sensor development](https://github.com/fmind/brain-framework/tree/main/examples/sensors) and keep freshness requirements explicit.
-
-Agents use that context to reason and perform authorized work through the original tools. BF does not execute provider actions through retrieval. After work, update the project with the verified outcome and next step, link its evidence, and refresh only the sources that need it. The [team pilot](pilot.md) checks whether this loop helps people in practice.
+A sensor is a script printing JSON records; provider tools own authentication. Your script owns scope, complete pagination, output bounds, failures and identity normalization. Test it with fake provider output before collecting, as the [sensor guide](sensors.md) describes. The [team pilot](team.md#evaluate-a-pilot) checks whether the loop helps people in practice.

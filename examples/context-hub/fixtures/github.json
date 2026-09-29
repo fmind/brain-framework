@@ -1,0 +1,8 @@
+{
+  "id": "implementation",
+  "title": "New website implementation",
+  "text": "The product-page implementation was merged as revision demo-42. This does not close the launch review.",
+  "time": "2026-09-25T10:00:00Z",
+  "url": "https://example.test/github/new-website/pull/42",
+  "attributes": { "repository_project": "project:new-website", "state": "merged" }
+}

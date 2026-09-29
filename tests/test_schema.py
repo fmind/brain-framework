@@ -29,19 +29,19 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize(
     "value",
     [
-        {"version": 6, "name": "brain\n"},
-        {"version": 6, "name": "brain", "sensors": {"Invalid Name": {"nonsense": True}}},
-        {"version": 6, "name": "brain", "sensors": {"demo\n": {"command": ["echo"]}}},
-        {"version": 6, "name": "brain", "routines": {"bad--slug": {"command": ["echo"]}}},
-        {"version": 6, "name": "brain", "brains": {"Invalid Name": {"path": "../team"}}},
-        {"version": 6, "name": "brain", "schema": {"Invalid Name": {"description": "Kind", "type": "string"}}},
+        {"version": 7, "name": "brain\n"},
+        {"version": 7, "name": "brain", "sensors": {"Invalid Name": {"nonsense": True}}},
+        {"version": 7, "name": "brain", "sensors": {"demo\n": {"command": ["echo"]}}},
+        {"version": 7, "name": "brain", "routines": {"bad--slug": {"command": ["echo"]}}},
+        {"version": 7, "name": "brain", "brains": {"Invalid Name": {"path": "../team"}}},
+        {"version": 7, "name": "brain", "fields": {"Invalid Name": {"description": "Kind", "type": "string"}}},
         {
-            "version": 6,
+            "version": 7,
             "name": "brain",
-            "schema": {"kind": {"description": "Kind", "type": "string", "relation": True}},
+            "fields": {"kind": {"description": "Kind", "type": "string", "relation": True}},
         },
         *(
-            {"version": 6, "name": "brain", "schema": {"owner": {"description": "Owner", "type": "identity", **extra}}}
+            {"version": 7, "name": "brain", "fields": {"owner": {"description": "Owner", "type": "identity", **extra}}}
             for extra in (
                 {"targets": ["repo:"]},
                 {"broader": "owner", "relation": False},
@@ -53,12 +53,12 @@ ROOT = Path(__file__).resolve().parents[1]
             )
         ),
         {
-            "version": 6,
+            "version": 7,
             "name": "brain",
             "sensors": {"demo": {"command": ["echo"], "mode": "snapshot", "reconcile": {"refresh": 1, "lookback": 1}}},
         },
         *(
-            {"version": 6, "name": "brain", "watch": watch}
+            {"version": 7, "name": "brain", "watch": watch}
             for watch in (
                 None,
                 [],
@@ -74,10 +74,10 @@ ROOT = Path(__file__).resolve().parents[1]
         {"name": "brain"},
         {"version": 5, "name": "brain"},
         *(
-            {"version": 6, "name": "brain", "sensors": {"demo": {"command": [executable]}}}
+            {"version": 7, "name": "brain", "sensors": {"demo": {"command": [executable]}}}
             for executable in ("/usr/bin/env", "../escape.sh", "sensors/../x", "sensors//x", "bin/x", ".", "a{b")
         ),
-        {"version": 6, "name": "brain", "routines": {"digest": {"command": ["routines/./digest.py"]}}},
+        {"version": 7, "name": "brain", "routines": {"digest": {"command": ["routines/./digest.py"]}}},
     ],
 )
 def test_editor_and_runtime_reject_invalid_structure(value: dict) -> None:
@@ -92,9 +92,9 @@ def test_editor_and_runtime_reject_invalid_structure(value: dict) -> None:
 )
 def test_editor_rejects_invalid_mapping_forms(mapping: dict) -> None:
     value = {
-        "version": 6,
+        "version": 7,
         "name": "brain",
-        "schema": {"kind": {"description": "Item kind", "type": "string"}},
+        "fields": {"kind": {"description": "Item kind", "type": "string"}},
         "sensors": {"demo": {"command": ["echo"], "fields": {"kind": mapping}}},
     }
     with pytest.raises(ValidationError):
@@ -107,7 +107,7 @@ def test_editor_rejects_invalid_mapping_forms(mapping: dict) -> None:
 def test_evaluation_rejects_blank_labels_and_assertions(brain: Store, field: str, blank: str) -> None:
     case = {"name": "missing-evidence", "query": "absentneedle947ab3", "text": ["required evidence"]}
     case[field] = blank if field == "name" else [blank]
-    brain.write("evals/retrieval.yaml", json.dumps({"version": 5, "cases": [case]}).encode())
+    brain.write("evals/retrieval.yaml", json.dumps({"version": 7, "cases": [case]}).encode())
     with pytest.raises(Error, match=r"evals/retrieval.yaml"):
         evaluate(brain)
 
@@ -153,7 +153,7 @@ def test_starter_keeps_roles_without_serializing_redundant_defaults(tmp_path: Pa
     result = CliRunner().invoke(app, ["init", str(root), "--name", "new"])
     assert result.exit_code == 0, result.output
     document = yaml_object((root / "bf.yaml").read_bytes())
-    assert document["version"] == 6
+    assert document["version"] == 7
     assert not {"brains", "sensors", "routines", "watch"} & document.keys()
     assert "examples:" not in (root / "bf.yaml").read_text()
     config = load(Store(root))
@@ -210,9 +210,9 @@ def test_valid_mappings_preserve_escaped_paths_and_false_constants(mapping: dict
     from bf.ontology import project
 
     value = {
-        "version": 6,
+        "version": 7,
         "name": "brain",
-        "schema": {"field": {"description": "Meaning", "type": kind}},
+        "fields": {"field": {"description": "Meaning", "type": kind}},
         "sensors": {"demo": {"command": ["echo"], "fields": {"field": mapping}}},
     }
     config = Config.model_validate(value)
@@ -253,11 +253,13 @@ def test_evaluation_structure_matches_editor_validation(case: dict, valid: bool)
 
 
 @pytest.mark.parametrize(
-    ("header", "problem"), [("", "has no version"), ("version: 6\n", "declares version 6")], ids=["missing", "other"]
+    ("header", "problem"),
+    [("", "has no version"), ("version: 8\n", "declares version 8")],
+    ids=["missing", "other"],
 )
 def test_evaluation_suites_declare_their_format(brain: Store, header: str, problem: str) -> None:
     brain.write("evals/retrieval.yaml", f"{header}cases:\n- name: absent\n  query: word\n  empty: true\n".encode())
-    with pytest.raises(Error, match=rf"^evals/retrieval\.yaml {problem}; this release reads version: 5$"):
+    with pytest.raises(Error, match=rf"^evals/retrieval\.yaml {problem}; this release reads version: 7"):
         evaluate(brain)
 
 
@@ -267,12 +269,12 @@ def test_all_evaluation_cases_are_checked_before_retrieval(brain: Store, monkeyp
 
     monkeypatch.setattr("bf.evaluate.search", unexpected)
     valid = {"name": "valid", "query": "word", "text": ["answer"]}
-    brain.write("evals/a.yaml", json.dumps({"version": 5, "cases": [valid]}).encode())
-    brain.write("evals/z.yaml", json.dumps({"version": 5, "cases": [{**valid, "read": ""}]}).encode())
+    brain.write("evals/a.yaml", json.dumps({"version": 7, "cases": [valid]}).encode())
+    brain.write("evals/z.yaml", json.dumps({"version": 7, "cases": [{**valid, "read": ""}]}).encode())
     with pytest.raises(Error, match=r"evals/z.yaml.*use either query or read"):
         evaluate(brain)
     with pytest.raises(ValidationError, match="duplicate evaluation case names"):
-        Suite.model_validate({"version": 5, "cases": [valid, valid]})
+        Suite.model_validate({"version": 7, "cases": [valid, valid]})
 
 
 @pytest.mark.parametrize(

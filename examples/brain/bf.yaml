@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/
-version: 6
+version: 7
 name: example
 sensors:
   demo:
@@ -8,7 +8,7 @@ sensors:
     fields:
       kind: { value: event }
       repository: { path: /attributes/repository_refs }
-schema:
+fields:
   depends-on:
     description: This conclusion needs review when the target evidence changes.
     type: identity

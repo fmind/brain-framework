@@ -7,14 +7,24 @@ validate what it parses. Tests validate real replies against them, so a new fiel
 from __future__ import annotations
 
 _STRING = {"type": "string"}
-_INSTANT = {"type": "string", "description": "Canonical UTC instant, such as 2026-09-28T12:00:00.000000Z."}
+_INSTANT = {
+    "type": "string",
+    "format": "date-time",
+    "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+}
+_DATE = {"type": "string", "format": "date", "description": "A calendar date as written, such as 2026-09-28."}
 _COUNT = {"type": "integer", "minimum": 0}
+_FACTS = {
+    "type": "object",
+    "description": "Declared single-value fields, such as a status or an assignee, each at most 200 characters.",
+    "additionalProperties": {"type": ["string", "number", "boolean"]},
+}
 _REFS = {"type": "array", "items": _STRING}
 
 # A source's local collection state, shared by search coverage, the sources overview and exact record reads.
 _HEALTH: dict[str, object] = {
     "state": {"enum": ["active", "disabled", "historical"]},
-    "freshness": {"enum": ["fresh", "stale", "never", "manual", "unknown"]},
+    "freshness": {"enum": ["fresh", "overdue", "never", "manual", "unknown"]},
     "mode": {"enum": ["window", "snapshot"]},
     "last_collected": _INSTANT,
     "window": {
@@ -43,7 +53,8 @@ _DEFS: dict[str, object] = {
             "relation": _STRING,
             "target": _STRING,
             "origin": _STRING,
-            "time": _INSTANT,
+            "time": {**_INSTANT, "description": "When the asserting record happened; notes state `date` instead."},
+            "date": {**_DATE, "description": "The asserting note's date."},
             "brain": _STRING,
         },
         "additionalProperties": False,
@@ -62,7 +73,8 @@ _DEFS: dict[str, object] = {
             "ref": {"type": "string", "description": "Read this exact ref; a section ref ends in #fragment."},
             "kind": {"enum": ["note", "record"]},
             "title": _STRING,
-            "time": _INSTANT,
+            "time": {**_INSTANT, "description": "A record's event time; notes state `date` instead."},
+            "date": {**_DATE, "description": "A note's `updated` date as written."},
             "type": {"type": "string", "description": "A note's OKF type, such as project; records omit it."},
             "status": {
                 "type": "string",
@@ -70,6 +82,7 @@ _DEFS: dict[str, object] = {
             },
             "source": {"type": "string", "description": "A record's source."},
             "excerpt": {"type": "string", "description": "A one-line preview; read the ref for exact text."},
+            "fields": _FACTS,
             "url": _STRING,
             "updated": _INSTANT,
             "observed": _INSTANT,
@@ -78,8 +91,8 @@ _DEFS: dict[str, object] = {
             "next": {"type": "string", "description": "The note's first open task."},
             "modified": _INSTANT,
             "review": {"const": True},
-            "review_due": _INSTANT,
-            "review_source": {"enum": ["review_due", "modified"]},
+            "review_due": {**_DATE, "description": "The local day a review falls due."},
+            "review_source": {"enum": ["stale_after", "modified"]},
             "review_reasons": {
                 "type": "array",
                 "items": {"enum": ["due", "newer_evidence", "future_modified", "unknown_modified"]},
@@ -89,6 +102,11 @@ _DEFS: dict[str, object] = {
                 **_REFS,
                 "maxItems": 5,
                 "description": "Other sources' records sharing this record's URL; bf:// addresses with several brains.",
+            },
+            "sections": {
+                **_REFS,
+                "maxItems": 3,
+                "description": "Other matching sections of this note, best first; bf:// addresses with several brains.",
             },
             "relations": {"type": "array", "items": {"$ref": "#/$defs/Claim"}},
             "relations_truncated": {"const": True},
@@ -146,9 +164,12 @@ _DEFS: dict[str, object] = {
                         "kind": {"enum": ["note", "record"]},
                         "title": _STRING,
                         "time": _INSTANT,
+                        "date": _DATE,
                         "source": _STRING,
                         "status": _STRING,
                         "type": _STRING,
+                        "fields": _FACTS,
+                        "excerpt": {"type": "string", "description": "A preview of at most 160 characters."},
                         "brain": _STRING,
                         "uri": _STRING,
                     },
@@ -212,6 +233,12 @@ SEARCH: dict[str, object] = {
             "items": _ITEMS,
             "next_offset": _COUNT,
             "identity": {"const": "unknown", "description": "The identity-shaped query names nothing known."},
+            "unmatched": {
+                **_REFS,
+                "minItems": 1,
+                "description": "Query words, quoted phrases or word* prefixes that match nothing in the selected brains' "
+                "caches, whatever the scope; check their spelling or search a variant.",
+            },
             "sources": {"type": "array", "items": {"$ref": "#/$defs/Coverage"}},
             "sources_omitted": {"type": "integer", "minimum": 1},
         },
@@ -220,6 +247,7 @@ SEARCH: dict[str, object] = {
 
 READ: dict[str, object] = {
     "title": "bf read reply",
+    "type": "object",
     "$defs": _DEFS,
     "oneOf": [
         _shape(

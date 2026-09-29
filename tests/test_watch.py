@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
-CONFIG = b"""version: 6
+CONFIG = b"""version: 7
 name: fixture
 sensors:
   calendar:
@@ -271,7 +271,7 @@ def test_details_show_diagnostics_and_routine_markers_at_every_width(width: int,
     dashboard.key("j")
     output = screen(dashboard, width, height)
     assert "program exited with status 1" in output
-    assert "Private log: /state/b.log" in output
+    assert "Log: /state/b.log" in output
 
 
 def test_short_terminals_keep_program_rows_over_details() -> None:
@@ -612,7 +612,7 @@ def test_observation_loop_never_executes_and_recovers_config_error(
 def test_job_runs_selected_program_and_retains_state(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n",
+        b"version: 7\nname: fixture\nsensors:\n  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n",
     )
     brain.write("sensors/sample.py", b'import json\nprint(json.dumps([{"id":"one","title":"Local fixture"}]))\n')
     job = Job(brain, ("sample",), ())
@@ -626,16 +626,37 @@ def test_job_runs_selected_program_and_retains_state(brain: Store) -> None:
         job.close()
 
 
+def test_stopping_a_job_leaves_time_to_roll_back_a_commit(brain: Store) -> None:
+    signals: list[str] = []
+
+    class Update:
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            signals.append("terminate")
+
+        def wait(self, timeout: float | None = None) -> int:
+            signals.append(f"wait {timeout}")
+            return 130
+
+    job = Job(brain, (), ())
+    job.process = cast("subprocess.Popen[bytes]", Update())
+    job.close()
+    # A cancelled update rolls back its interrupted record commit before exiting; SIGKILL would leave the journal.
+    assert signals == ["terminate", "wait 60"]
+
+
 def test_job_tells_skipped_cache_files_apart_from_failed_programs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n"
+        b"version: 7\nname: fixture\nsensors:\n"
         b"  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n"
         b"  failing:\n    command: [python3, sensors/failing.py]\n    refresh: 60\n",
     )
     brain.write("sensors/sample.py", b'import json\nprint(json.dumps([{"id":"one","title":"Local fixture"}]))\n')
     brain.write("sensors/failing.py", b"raise SystemExit(3)\n")
-    brain.write("projects/broken.md", b"---\nreview_after: soon\n---\n# Broken\n")
+    brain.write("projects/broken.md", b"---\nstale_after: soon\n---\n# Broken\n")
     # Every selected program ran and only the search cache skipped a file, or a program also failed.
     for selected, skipped in ((("sample",), 1), (("failing",), 0)):
         job = Job(brain, selected, ())
@@ -674,7 +695,7 @@ def test_tui_exit_restores_terminal_and_cancels_sensor(
 ) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 6\nname: fixture\nsensors:\n  slow:\n    command: [python3, sensors/slow.py]\n    refresh: 60\n",
+        b"version: 7\nname: fixture\nsensors:\n  slow:\n    command: [python3, sensors/slow.py]\n    refresh: 60\n",
     )
     marker = tmp_path / "started"
     brain.write(
@@ -799,7 +820,7 @@ def test_json_watch_reports_completion_rows_and_delivery_warning(
     assert set(events[0]) == {"brain", "running", "message", "programs"}
     calendar = next(row for row in events[0]["programs"] if row["name"] == "calendar")
     assert (calendar["records"], calendar["added"], calendar["updated"]) == (10, 1, None)
-    assert calendar["success"] == "2026-09-01T12:00:00.000000Z"
+    assert calendar["success"] == "2026-09-01T12:00:00+00:00"
     warnings = [json.loads(line) for line in captured.err.splitlines()]
     if delivered:
         assert events[-1]["message"].startswith("Update failed")
