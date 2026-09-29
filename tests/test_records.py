@@ -68,6 +68,14 @@ def test_snapshot_replaces_the_complete_catalog(brain: Store) -> None:
     assert records.files(brain, "meetings") == [records.path("meetings", "only")]
 
 
+def test_an_oversized_change_fails_like_other_collection_errors(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A first backfill beyond the journal's bound is a failed operation naming the fix, never invalid input.
+    monkeypatch.setattr(records, "MAX_FILES", 2)
+    with pytest.raises(Error, match="at most 2 records; narrow the window or split the source"):
+        records.upsert(brain, "catalog", [Record(id=str(n), title=f"Item {n}") for n in range(3)], snapshot=True)
+    assert not (brain.root / "memories/catalog").exists()
+
+
 def test_collection_parses_only_the_files_it_replaces_or_removes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     records.upsert(brain, "catalog", [Record(id=str(n), title=f"Item {n}") for n in range(20)], snapshot=True)
     loaded: list[str] = []

@@ -1,4 +1,4 @@
-"""Check or regenerate every published configuration schema; compare JSON independent of formatting."""
+"""Check or regenerate every published configuration and reply schema; compare JSON independent of formatting."""
 
 import argparse
 from pathlib import Path

@@ -162,6 +162,9 @@ def reading(store: Store) -> Iterator[None]:
 def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) -> None:
     if not replacements:
         return
+    if len(replacements) > MAX_FILES:
+        # A failed operation, like any other collection failure: history records it and evidence stays as it was.
+        raise Error(f"one collection may change at most {MAX_FILES:,} records; narrow the window or split the source")
     changes = []
     for name in replacements:
         try:

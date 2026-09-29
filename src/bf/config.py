@@ -94,6 +94,11 @@ def _yaml_object(data: bytes, line: int) -> dict[str, object]:
     if len(data) > 1 << 20:
         raise Error("YAML exceeds 1 MiB")
     try:
+        # PyYAML also reads UTF-16 and UTF-32 with a byte-order mark; brain files are UTF-8 only.
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Error("YAML is not UTF-8") from None
+    try:
         depth = 0
         for count, event in enumerate(yaml.parse(data, Loader=_SafeLoader), 1):
             if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):

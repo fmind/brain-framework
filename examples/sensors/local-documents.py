@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 
-# UTF-8-only XML is rejected before parsing if it contains a DTD/entity; depth/nodes are bounded below.
+# UTF-8-only XML is rejected before parsing if it contains a DTD/entity; elements and nesting are bounded below.
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
@@ -32,6 +32,8 @@ TEXT_BYTES = 64 << 10
 TOTAL_BYTES = 64 << 20
 MAX_ENTRIES = 10000
 MAX_DEPTH = 20
+# Per Office XML part: parsing stops at these bounds and the record keeps the text read so far, marked partial.
+MAX_ELEMENTS, MAX_NESTING = 100_000, 64
 PDF_TIMEOUT = 60
 EXTENSIONS = {".txt", ".md", ".rst", ".org", ".csv", ".tsv", ".html", ".htm", ".docx", ".pptx", ".xlsx", ".pdf"}
 SKIP = {"node_modules", "__pycache__", "venv"}
@@ -73,8 +75,12 @@ def tag(element: ET.Element) -> str:
     return element.tag.rsplit("}", 1)[-1]
 
 
-def office(data: bytes, suffix: str) -> str:
-    """Read document text, slide paragraphs, or every worksheet's labelled cells without extracting files."""
+def office(data: bytes, suffix: str) -> tuple[str, bool]:
+    """Document text, slide paragraphs, or every worksheet's labelled cells, without extracting files.
+
+    Also returns whether a part reached its structure bound, so the record keeps what was read, marked partial.
+    """
+    partial = False
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         entries = archive.infolist()
         if len(entries) > 10000 or sum(item.file_size for item in entries) > TOTAL_BYTES:
@@ -83,6 +89,7 @@ def office(data: bytes, suffix: str) -> str:
             raise InvalidError("duplicate Office archive member")
 
         def xml(name: str) -> ET.Element:
+            nonlocal partial
             raw = archive.read(name)
             text = raw.decode("utf-8-sig")
             if len(raw) > FILE_BYTES or "\x00" in text or "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
@@ -90,21 +97,33 @@ def office(data: bytes, suffix: str) -> str:
             events: tuple[Literal["start", "end"], ...] = ("start", "end")
             parser: ET.XMLPullParser[ET.Element] = ET.XMLPullParser(events=events)
             root: ET.Element | None = None
-            count = depth = 0
+            # Open elements, and how many children each has started: a cut keeps exactly what came before it,
+            # although the parser has already built the rest of the current chunk.
+            opened: list[ET.Element] = []
+            started: list[int] = []
+            count = 0
             for offset in range(0, len(text), 65536):
                 parser.feed(text[offset : offset + 65536])
                 # The stdlib stub includes namespace events, which this parser never requests.
                 parsed = cast("Iterator[tuple[Literal['start', 'end'], ET.Element]]", parser.read_events())
                 for event, element in parsed:
-                    if event == "start":
-                        if root is None:
-                            root = element
-                        count += 1
-                        depth += 1
-                        if count > 100_000 or depth > 64:
-                            raise InvalidError("document XML exceeds its structure limit")
-                    else:
-                        depth -= 1
+                    if event == "end":
+                        opened.pop()
+                        started.pop()
+                        continue
+                    if root is None:
+                        root = element
+                    count += 1
+                    if count > MAX_ELEMENTS or len(opened) >= MAX_NESTING:
+                        # Stop at the bound: drop this element and everything after it, keeping the text before.
+                        for parent, kept in zip(opened, started, strict=True):
+                            del parent[kept:]
+                        partial = True
+                        return root
+                    if started:
+                        started[-1] += 1
+                    opened.append(element)
+                    started.append(0)
             parser.close()
             if root is None:
                 raise InvalidError("document XML is empty")
@@ -118,9 +137,10 @@ def office(data: bytes, suffix: str) -> str:
             names.extend(
                 sorted(name for name in archive.namelist() if re.fullmatch(r"word/(header|footer)\d+\.xml", name))
             )
-            return "\n".join(
+            content = "\n".join(
                 text(paragraph) for name in names for paragraph in xml(name).iter() if tag(paragraph) == "p"
             )
+            return content, partial
         if suffix == ".pptx":
             names = [
                 name
@@ -128,13 +148,16 @@ def office(data: bytes, suffix: str) -> str:
                 if re.fullmatch(r"ppt/(slides/slide|notesSlides/notesSlide)\d+\.xml", name)
             ]
             names.sort(key=lambda name: ("notesSlides" in name, int(re.findall(r"\d+", name)[-1])))
-            return "\n\n".join(
+            content = "\n\n".join(
                 name + "\n" + "\n".join(text(paragraph) for paragraph in xml(name).iter() if tag(paragraph) == "p")
                 for name in names
             )
+            return content, partial
         strings = (
             [text(item) for item in xml("xl/sharedStrings.xml")] if "xl/sharedStrings.xml" in archive.namelist() else []
         )
+        # Cells may refer to shared strings beyond a cut table: they read as empty instead of failing.
+        cut = partial
         names = [name for name in archive.namelist() if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)]
         names.sort(key=lambda name: int(re.findall(r"\d+", name)[-1]))
         parts = []
@@ -146,14 +169,14 @@ def office(data: bytes, suffix: str) -> str:
                 value = next((child.text or "" for child in cell if tag(child) == "v"), "")
                 if cell.get("t") == "s":
                     position = int(value)
-                    if not 0 <= position < len(strings):
+                    if position < 0 or (position >= len(strings) and not cut):
                         raise InvalidError("worksheet shared string index is invalid")
-                    value = strings[position]
+                    value = strings[position] if position < len(strings) else ""
                 elif cell.get("t") == "inlineStr":
                     value = text(cell)
                 formula = next((child.text or "" for child in cell if tag(child) == "f"), "")
                 parts.append(f"{cell.get('r', '?')}: {value}" + (f" [formula: {formula}]" if formula else ""))
-        return "\n".join(parts)
+        return "\n".join(parts), partial
 
 
 def pdf(path: Path) -> bytes:
@@ -197,9 +220,9 @@ def pdf(path: Path) -> bytes:
 
 
 def extract(data: bytes, suffix: str) -> tuple[str, bool]:
-    """A document's text, and whether decoding replaced invalid bytes, which makes the record partial."""
+    """A document's text, and whether it is partial: decoding replaced invalid bytes or an Office part was cut."""
     if suffix in {".docx", ".pptx", ".xlsx"}:
-        return office(data, suffix), False
+        return office(data, suffix)
     if suffix == ".pdf":
         # Use a private copy of the checked bytes so the converter never reopens an untrusted path.
         with tempfile.TemporaryDirectory() as temporary:

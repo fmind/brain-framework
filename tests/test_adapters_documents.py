@@ -75,6 +75,22 @@ def test_local_documents_mark_truncation_and_use_bounded_pdf_converter(provider:
     assert len(provider.calls("pdftotext")) == 1
 
 
+def test_local_documents_keep_text_before_the_office_element_bound(provider: Provider, tmp_path: Path) -> None:
+    # One part with more than 100,000 elements keeps its first 100,000 and marks the record partial.
+    root = tmp_path / "documents"
+    root.mkdir()
+    (root / "notes.txt").write_text("Keep evidence")
+    body = "<p><t>Kept heading</t></p><p>" + "<r/>" * 100_000 + "</p><p><t>Beyond the bound</t></p>"
+    with zipfile.ZipFile(root / "large.docx", "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", f"<document>{body}</document>")
+    records = {record.id: record for record in provider.records("local-documents.py", "work", str(root))}
+    large = records["work/large.docx"]
+    assert "Kept heading" in large.text
+    assert "Beyond the bound" not in large.text
+    assert large.attributes["partial"] is True
+    assert records["work/notes.txt"].attributes["partial"] is False
+
+
 @pytest.mark.parametrize("encoding", ["utf-16", "utf-32"])
 def test_document_xml_rejects_wide_encoded_entities(provider: Provider, tmp_path: Path, encoding: str) -> None:
     root = tmp_path / "documents"
@@ -240,11 +256,20 @@ def test_pdf_converter_is_killed_on_timeout_or_excess_output(
 def test_office_structure_and_projected_output_are_bounded(
     documents: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Nesting beyond 64 levels stops parsing: the text before the cut stays, marked partial.
     path = tmp_path / "deep.docx"
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("word/document.xml", "<p>" * 100 + "<t>deep</t>" + "</p>" * 100)
-    with pytest.raises(ValueError, match="structure limit"):
-        documents.extract(path.read_bytes(), ".docx")
+        archive.writestr("word/document.xml", "<p><t>shallow</t>" + "<p>" * 100 + "<t>deep</t>" + "</p>" * 101)
+    text, partial = documents.extract(path.read_bytes(), ".docx")
+    assert (text.split("\n")[0], "deep" in text, partial) == ("shallow", False, True)
+    # A cut shared-string table leaves later cells empty instead of calling the workbook damaged.
+    monkeypatch.setattr(documents, "MAX_ELEMENTS", 3)
+    path = tmp_path / "wide.xlsx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("xl/sharedStrings.xml", "<sst><si><t>Budget</t></si><si><t>Hidden</t></si></sst>")
+        archive.writestr("xl/worksheets/sheet1.xml", '<c r="A1" t="s"><v>1</v></c>')
+    assert documents.extract(path.read_bytes(), ".xlsx") == ("xl/worksheets/sheet1.xml\nA1: ", True)
+    monkeypatch.undo()
     root = tmp_path / "documents"
     root.mkdir()
     (root / "small.txt").write_text("tiny")

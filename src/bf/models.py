@@ -137,6 +137,10 @@ def local(value: str) -> str:
         return value
 
 
+# Provider data and declared field values: replies return them exactly as the record or note stores them.
+_VERBATIM = frozenset({"attributes", "fields"})
+
+
 def present(value: object) -> object:
     """Replies state dates as dates and datetimes with the local offset; files and the cache keep UTC.
 
@@ -144,7 +148,9 @@ def present(value: object) -> object:
     """
     if isinstance(value, dict):
         return {
-            key: local(item)
+            key: item
+            if key in _VERBATIM
+            else local(item)
             if key in _INSTANTS and isinstance(item, str) and _CANONICAL.fullmatch(item)
             else present(item)
             for key, item in value.items()

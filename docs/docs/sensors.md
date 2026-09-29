@@ -234,7 +234,7 @@ bf collect git-commits --since 2026-09-01 --until 2026-10-01
 
 A backfill that ends before the recorded coverage neither claims a fresh collection nor moves the resume point. A later window separated by a gap does not move it either, so the next update still fills the gap, up to 30 days back. A manual sensor has no update to fill gaps: backfill them yourself. The [GitHub history walkthrough](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) backfills a year in adjacent windows.
 
-Runs of one sensor wait for each other; different sensors may run at the same time. See [process safeguards](limits.md#processes-and-logs) for timeouts and cancellation.
+Only one run of a sensor can collect at a time: a second run of the same sensor fails at once with `SENSOR is already running for this brain; retry later`. Different sensors may run at the same time. See [process safeguards](limits.md#processes-and-logs) for timeouts and cancellation.
 
 ## Define the scope before adding a sensor
 

@@ -79,7 +79,9 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
             start_new_session=True,
         )
     except OSError as error:
-        append_log(store, name, f"{_now()} could not start {executable}")
+        # A log that cannot be written must not hide why the program did not start.
+        with suppress(Error, OSError):
+            append_log(store, name, f"{_now()} could not start {executable}")
         raise Error("could not start the program; check its executable bit and interpreter") from error
     stdout, stderr = child.stdout, child.stderr
     output, errors = bytearray(), bytearray()

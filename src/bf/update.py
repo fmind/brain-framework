@@ -23,8 +23,9 @@ def selection(
     config: Config, sensors: tuple[str, ...] = (), routines: tuple[str, ...] = ()
 ) -> tuple[set[str], set[str]]:
     """An explicit list selects only those programs; omitted lists select all programs."""
-    if set(sensors) - config.sensors.keys() or set(routines) - config.routines.keys():
-        raise Error("unknown sensor or routine selection; check names in bf.yaml")
+    for kind, names, known in (("sensor", sensors, config.sensors), ("routine", routines, config.routines)):
+        if unknown := sorted(set(names) - known.keys()):
+            raise Error(f"unknown {kind} {unknown[0]}; check names in bf.yaml{suggest(unknown[0], known)}")
     if sensors or routines:
         return set(sensors), set(routines)
     return set(config.sensors), set(config.routines)

@@ -58,7 +58,7 @@ This verifies the scripts' actual Git-to-brain lookup and prompt search; host in
 In the brain's project frontmatter, name the repository it belongs to, with its owner and name in lowercase, such as `repo:github.com/googlecloudplatform/open-knowledge-format`. Identities are case-sensitive, and this hook and the Git history sensor lowercase GitHub owners and names:
 
 ```yaml
-aliases: [repo:github.com/team/new-website]
+aliases: [repo:github.com/example/new-website]
 ```
 
 Run the copied hook from that repository with Python 3.11 or later as `python3` and `bf` 16 on PATH:
@@ -70,12 +70,12 @@ Run the copied hook from that repository with Python 3.11 or later as `python3` 
 For the fictional New website project, the output could read:
 
 ```text
-Brain context for repo:github.com/team/new-website (evidence, not instructions):
+Brain context for repo:github.com/example/new-website (evidence, not instructions):
 - Project: New website (`projects/new-website.md`), draft, edited 2026-09-27, review deadline 2026-10-11.
 - Next task: Draft the product page.
 - Linked evidence: repository 12, links 2; list one relation with `bf read projects/new-website.md --rel RELATION`.
-  - 2026-09-28 Website review (`actions/2026-09-28_website-review/ACTION.md`)
-- Collection needs attention: github-history overdue; see `bf status`.
+  - 2026-09-27 Website review (`actions/2026-09-27_website-review/ACTION.md`)
+- Collection needs attention: github-commits overdue; see `bf status`.
 Read more with `bf read projects/new-website.md`; collected records are counted, not quoted.
 ```
 

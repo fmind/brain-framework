@@ -260,10 +260,11 @@ def test_native_systemd_accepts_generated_files(scheduled: Store, tmp_path: Path
         pytest.skip("systemd native validation is available only with systemd tools")
     result: dict = generate(scheduled, backend="systemd", executable=Path(sys.executable), output=tmp_path / "units")
     checked = subprocess.run(  # noqa: S603 - validate synthetic units without activating them
-        [validator, "--user", "verify", *result["written"]],
+        # Check the units themselves: man pages and generators vary with the runner image.
+        [validator, "--user", "--man=no", "--generators=no", "verify", *result["written"]],
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=30,
         check=False,
     )
     assert checked.returncode == 0, checked.stderr

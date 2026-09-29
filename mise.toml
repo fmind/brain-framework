@@ -9,7 +9,7 @@ lychee = "0.24.2"
 python = "3.14.7"
 shellcheck = "0.11.0"
 trivy = "0.74.0"
-"aqua:astral-sh/uv" = "0.12.19"
+"aqua:astral-sh/uv" = "0.12.20"
 # 1.30 requires GitHub's new $/ self-reference, which actionlint 1.7.12 cannot parse yet
 # (rhysd/actionlint#711). Keep both strict gates warning-free rather than suppressing either.
 zizmor = "1.29.0"
@@ -115,7 +115,8 @@ run = "uv run --locked python scripts/notices.py"
 [tasks."check:outdated"]
 description = "Report drift in pinned mise tools and dprint plugins without failing the gate"
 run = [
-  "mise outdated --local --bump || true",
+  # Lists drift and exits 0; an error, such as an unreachable registry, still fails the task.
+  "mise outdated --local --bump",
   # Honors the seven-day cooldown and names any newer release it holds back.
   "dprint config update --dry-run --minimum-dependency-age P7D",
 ]
@@ -134,7 +135,7 @@ run = "uv run --locked python scripts/render_watch.py"
 
 [tasks."check:shell"]
 description = "Lint every shipped and release shell helper"
-run = "shellcheck -S warning scripts/release-notes scripts/verify-release-tag"
+run = "shellcheck -S warning scripts/push-and-tag scripts/release-notes scripts/verify-release-tag"
 
 [tasks."check:types"]
 alias = "ct"

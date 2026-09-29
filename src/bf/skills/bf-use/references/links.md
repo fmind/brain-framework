@@ -30,7 +30,7 @@ A relation to an identity that is not a `bf://` address, such as a person or a r
 ```yaml
 fields:
   owner: [person:email/bob@example.test]
-  depends-on: [repo:github.com/team/website]
+  depends-on: [repo:github.com/example/new-website]
 ```
 
 The whole note supports these claims. A declared field written at the top level of the frontmatter asserts nothing, and `bf validate` says to move it under `fields:`. A declared single-value field that is not a relation, such as a status, appears as a short fact in listings and backlink previews.
@@ -41,9 +41,9 @@ A file address is enough for most notes. When several sources name the same subj
 
 - `entity: bf://NAME/people/ID` (or another logical path in this brain's namespace), when the note owns that identity.
 - `aliases:` with verified namespaced identities (`scheme:value`), never display names. Identities are case-sensitive: write them as the sensors do (the reviewed examples lowercase GitHub owners and names).
-- `resource:` with the URI of the asset the note describes, such as `https://github.com/team/website`: it becomes one of the note's identities, like an alias.
+- `resource:` with the URI of the asset the note describes, such as `https://github.com/example/new-website`: it becomes one of the note's identities, like an alias.
 
-A record ref such as `jira:PROJ-1` is already an identity: link to it rather than repeating it as an alias, which would make both owners ambiguous. BF entities and aliases must use this brain's own namespace; link to another brain instead of claiming its identity. Other Markdown, such as action attachments, ignores `entity`, `aliases`, `tags` and `sources`.
+A record ref such as `jira:PROJ-1` is already an identity: link to it rather than repeating it as an alias, which would make both owners ambiguous. BF entities and aliases must use this brain's own namespace; link to another brain instead of claiming its identity. [Action attachments](actions.md#metadata-and-attachments) ignore these keys.
 
 `bf read IDENTITY` returns the owning note, or the links to the identity when nothing owns it: `backlinks` grouped by relation (5 newest each) and `claims` with that subject, each with its `origin` and the origin's `date` (a note) or `time` (a record). `bf search 'IDENTITY'` gives each linking item's `relations` with their origin and target section. Use explicit heading anchors (`## Display title {#stable-id}`) when a section needs a durable ref, and keep the brain's `name` stable across clones.
 

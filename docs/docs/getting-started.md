@@ -118,7 +118,7 @@ The projects page lists the note with its first open task, `"next":"Draft the pr
 { "notes": 3, "problems": [], "records": 0, "valid": true }
 ```
 
-A problem names the `file` to repair and its `error`; see [Check your brain](checks.md). `bf eval` runs the three starter questions about the welcome note and returns `"score":"3/3"` and `"passed":true`. Add [three New website questions](checks.md#retrieval-cases) to check your own decision. Neither command runs a model.
+A problem names the `file` to repair and its `error`; see [Check your brain](checks.md). `bf eval` runs the three starter checks, two questions about the welcome note and one check that an absent topic finds nothing, and returns `"score":"3/3"` and `"passed":true`. Add [three New website questions](checks.md#retrieval-cases) to check your own decision. Neither command runs a model.
 
 Edit the project as work changes. Search notices edits automatically; update `updated` when the note's meaning changes.
 
@@ -177,7 +177,7 @@ fields:
 ```
 
 - **`command`** runs the sensor from the brain folder, without a shell.
-- **`fields:` in `bf.yaml`** declares `kind` as a required text field.
+- **`fields:` in `bf.yaml`** declares `kind` as one string value, required on every record a sensor maps it to.
 - **The sensor's `fields`** set `kind: document` on each record it prints.
 - **`mode: snapshot`** says the output is the complete list, so a record the sensor stops printing is removed.
 - **`refresh: 0`** keeps the sensor manual: it runs only when you collect it.

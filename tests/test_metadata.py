@@ -45,6 +45,25 @@ def test_local_dates_use_the_offset_at_that_midnight() -> None:
     )
 
 
+def test_replies_localize_instants_but_return_stored_provider_values() -> None:
+    python_in_timezone(
+        "Europe/Paris",
+        """
+        from bf.models import present
+
+        stored = "2026-09-26T09:00:00.000000Z"
+        record = {"time": stored, "attributes": {"date": "2026-09-26", "time": "14:00", "start": stored}}
+        reply = present({"ref": "mail:1", "record": {**record, "fields": {"start": stored}}, "date": "2026-09-26"})
+        assert reply["record"]["time"] == "2026-09-26T11:00:00+02:00"
+        # Provider attributes and declared field values are evidence: returned exactly as the record stores them.
+        assert reply["record"]["attributes"] == record["attributes"]
+        assert reply["record"]["fields"] == {"start": stored}
+        # A note's date replaces the instant that ordered it.
+        assert "time" not in present({"date": "2026-09-26", "time": stored})
+        """,
+    )
+
+
 def test_timestamp_overflow_is_a_validation_failure() -> None:
     with pytest.raises(ValueError, match="timestamp"):
         timestamp("0001-01-01T00:00:00+14:00")

@@ -1232,15 +1232,15 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## pyjwt 2.15.0
+## pyjwt 2.15.1
 
 Source: <https://github.com/jpadilla/pyjwt>
 
 License: `MIT`
 
-Evidence: `pyjwt-2.15.0.dist-info/licenses/LICENSE`
+Evidence: `pyjwt-2.15.1.dist-info/licenses/LICENSE`
 
-### pyjwt-2.15.0.dist-info/licenses/LICENSE
+### pyjwt-2.15.1.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -1635,15 +1635,15 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## sse-starlette 3.4.11
+## sse-starlette 3.5.0
 
 Source: <https://github.com/sysid/sse-starlette>
 
 License: `BSD-3-Clause`
 
-Evidence: `sse_starlette-3.4.11.dist-info/licenses/LICENSE`
+Evidence: `sse_starlette-3.5.0.dist-info/licenses/LICENSE`
 
-### sse_starlette-3.4.11.dist-info/licenses/LICENSE
+### sse_starlette-3.5.0.dist-info/licenses/LICENSE
 
 ```text
 Copyright © 2020, [sysid](https://sysid.github.io/).

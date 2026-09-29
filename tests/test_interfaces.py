@@ -420,17 +420,17 @@ def test_generated_agent_instructions_name_real_commands_and_boundaries(tmp_path
         "`bf read REF --rel RELATION` lists",
         "put variants in one query",
         "Check `problems` and `stale`: an incomplete or empty result does not prove absence.",
-        "read a result's `uri`\n(`bf://fresh/...`)",
-        "then run\n`bf validate`",
+        "read a result's `uri`\n(`bf://NAME/...`)",
+        "When the user asks to save an outcome, or the task authorizes it",
+        "then run `bf validate`. Never edit `memories/`",
         "The `bf-use` skill holds the procedures",
     ):
         assert sentence in text
-    assert "BRAIN_NAME" not in text
     # Every agent loads this file: layout, loop and limits only; authoring rules live in the skills.
     assert len(text.split()) < 300
 
-    # The documented refresh compares a scratch copy with the same name: only template changes differ.
-    invoke("init", str(tmp_path / "scratch"), "--name", "fresh")
+    # The documented refresh compares any scratch brain's copy: only template changes differ.
+    invoke("init", str(tmp_path / "scratch"), "--name", "other")
     assert (tmp_path / "scratch/AGENTS.md").read_text() == text
 
 
@@ -722,6 +722,10 @@ def test_mcp_stdio_handshake(tmp_path: Path) -> None:
             found = await session.call_tool("search", {"query": "offline"})
             assert not found.is_error
             assert json.loads(text(found)) == found.structured_content
+            # The client validates each reply against the tool's outputSchema: an empty period page also has
+            # the shape of a listing, which the published schema must accept.
+            for arguments in ({}, {"ref": "7d"}, {"ref": "tasks"}, {"ref": "projects/offline.md"}):
+                assert not (await session.call_tool("read", arguments)).is_error
 
     asyncio.run(check())
 

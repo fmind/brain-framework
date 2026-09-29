@@ -57,11 +57,64 @@ For scheduled window sensors, `refresh` controls the regular cadence and `overla
 
 ## Scope and limits
 
-- Git history scans repositories one or two levels below `ROOT`, so select the folder holding your checkouts, such as `{{home}}/code`. It reads branches, tags, remote branches and a detached `HEAD`, never stashes or notes, and skips symlinked directories, hidden or named repositories, and bot/test authors. Folders it cannot list, or whose names are not UTF-8 or contain control characters, are skipped with a count on stderr; window mode keeps records already saved. A repository where Git fails or times out, such as a stale worktree, damaged objects, another owner's checkout or a stalled mount, fails the run and is named on stderr; repair it or add `--skip RELATIVE_REPO`. GitHub remotes become lowercase `repo:github.com/owner/name` links and author emails lowercase `person:email/` links: identities are case-sensitive, so write note aliases the same way. It includes commits within `START <= time < END` even when commit dates are out of order. Limits: 200 repositories, 10,000 commits per window and 16 MiB of output.
-- Local documents support text, Markdown, HTML, PDF (with `pdftotext`), Word, Excel and PowerPoint. Unsupported, hidden and common dependency files are outside the snapshot. It refuses symlinks and special files, bounds Office expansion, and converts PDFs in a private temporary directory. Text beyond 64 KiB, or not valid UTF-8 (such as a legacy CSV, kept with replacement characters), sets `attributes.partial`; there is no OCR. Names that are not UTF-8, contain control characters or exceed the record id limit are skipped with a count on stderr. An unreadable or damaged document instead fails the snapshot and names its root-relative path, so its saved record is not silently removed; fix or exclude it. `ROOT` and every parent folder must be real directories: when `{{home}}` or a parent such as `Documents` is a link, the run fails saying so; configure the path `realpath` prints. Limits: 10,000 entries, 20 folder levels, 16 MiB per file and 64 MiB in total.
-- Highlights read one complete portable JSON export, not a provider-specific download. The [fictional export](highlights.json) and [walkthrough](../../docs/docs/sensors.md#selected-highlights) show the format and provenance mapping. Source text stays in `text`; annotations stay in `attributes.annotation`. The sensor never fetches a URL or reads credentials. It refuses duplicate ids/keys, unknown fields, invalid dates/locations, symlinks in any path component and special files. Input is at most 8 MiB and 1000 highlights; each selection or annotation is at most 64 KiB, and output at most 16 MiB. Any failure emits no records; nothing is silently truncated.
-- Calendar selects events overlapping the requested interval: [Google's `timeMin` bounds event end, while `timeMax` bounds event start](https://developers.google.com/workspace/calendar/api/v3/reference/events/list). It is not a modification-time feed; reconcile past windows to revisit changed events. Cancellations stay, titled `Cancelled: SUMMARY`, so they overwrite records collected earlier. Its optional agenda snapshot runs from two days before END through N days after it, using separate agenda identities; replacement removes events that leave that range. Configure it as a separate `mode: snapshot` source. An agenda that becomes empty, or loses most of its events at once, trips the [removal guard](../../docs/docs/sensors.md#define-the-scope-before-adding-a-sensor): check it, then run `bf collect AGENDA --allow-removal`. An invitee entry means the person was listed, not that they attended. Participant emails become lowercase `person:email/` links. An event with more than about 1,000 participants keeps its organizer, source, attachment and agenda links, then invitees in email order up to BF's 1,000 links, and sets `attributes.participants_truncated`; `attributes.participants` keeps every address. Limits: 10,000 events and 20 pages.
-- Drive folders lists every My Drive and shared-with-me folder (`corpora: user`); shared drives are excluded. Its time-window arguments are ignored. `mode: snapshot` removes missing folders after a successful nonempty replacement. A folder's `time` is its creation and `attributes.updated` its last modification. Limits: 10,000 folders and 20 pages.
+GitHub history documents its scope and limits in [its guide](github-history.md#evidence-and-limits).
+
+### Git history
+
+- Requires Git 2.37 or later, for `git log --since-as-filter`. With an older or missing `git` on PATH, the run fails before reading any repository: `Git 2.37 or later is required`.
+- Scans repositories one or two levels below `ROOT`: select the folder holding your checkouts, such as `{{home}}/code`.
+- Reads branches, tags, remote branches and a detached `HEAD`, never stashes or notes. It includes commits with `START <= time < END`, even when commit dates are out of order.
+- Skips symlinked directories, hidden repositories, repositories named with `--skip` and bot or test authors.
+- Skips folders it cannot list, or whose names are not UTF-8 or contain control characters, with a count on stderr. Window mode keeps records already saved.
+- Fails the run and names the repository when Git fails or times out there, such as a stale worktree, damaged objects, another owner's checkout or a stalled mount. Repair it or add `--skip RELATIVE_REPO`.
+- Links GitHub remotes as lowercase `repo:github.com/owner/name` and author emails as lowercase `person:email/` identities. Identities are case-sensitive: write note aliases the same way.
+- Limits: 200 repositories, 10,000 commits per window and 16 MiB of output.
+
+### Local documents
+
+- Supports text, Markdown, HTML, PDF (with `pdftotext`), Word, Excel and PowerPoint, without OCR. Unsupported, hidden and common dependency files stay outside the snapshot.
+- Refuses symlinks and special files, bounds Office archive expansion and converts PDFs in a private temporary directory.
+- `ROOT` and every parent folder must be real directories. When `{{home}}` or a parent such as `Documents` is a link, the run fails saying so: configure the path `realpath` prints.
+- Keeps at most 64 KiB of text per document and sets `attributes.partial` when it cuts the text.
+- Also sets `attributes.partial` for text that is not valid UTF-8, such as a legacy CSV kept with replacement characters, and for an Office XML part beyond 100,000 elements or 64 nesting levels: parsing stops at that bound and keeps the text read so far.
+- Skips names that are not UTF-8, contain control characters or exceed the record id limit, with a count on stderr.
+- Fails the snapshot on an unreadable or damaged document and names its root-relative path, so its saved record is not silently removed: fix or exclude it.
+- Limits: 10,000 entries, 20 folder levels, 16 MiB per file and 64 MiB in total.
+
+### Highlights
+
+- Reads one complete export in the [portable format](#highlights-export), not a provider-specific download. The [fictional export](highlights.json) and [walkthrough](../../docs/docs/sensors.md#selected-highlights) show the provenance mapping.
+- Keeps source text in `text` and annotations in `attributes.annotation`. It never fetches a URL or reads credentials.
+- Refuses duplicate ids or keys, unknown fields, invalid dates or locations, symlinks in any path component and special files.
+- Limits: 8 MiB and 1,000 highlights of input, 64 KiB per selection or annotation and 16 MiB of output. Any failure emits no records; nothing is silently truncated.
+
+### Google Calendar
+
+- Selects events overlapping the requested interval: [Google's `timeMin` bounds event end, while `timeMax` bounds event start](https://developers.google.com/workspace/calendar/api/v3/reference/events/list). It is not a modification-time feed: reconcile past windows to revisit changed events.
+- Keeps cancellations, titled `Cancelled: SUMMARY`, so they overwrite records collected earlier.
+- An invitee entry means the person was listed, not that they attended. Participant emails become lowercase `person:email/` links.
+- Keeps at most BF's 1,000 links per event: organizer, source, attachment and agenda links first, then invitees in email order. A cut sets `attributes.participants_truncated`; `attributes.participants` keeps every address.
+- Limits: 10,000 events and 20 pages.
+
+`--agenda-days N`, from 1 to 366, turns a run into an agenda of the events from two days before `END` through N days after it; `START` must still precede `END` but does not bound the agenda. Add it as a separate `mode: snapshot` source beside `google-calendar-events`:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/sensors/
+sensors:
+  google-calendar-agenda:
+    command: [sensors/google-calendar.py, primary, "{{start}}", "{{end}}", --agenda-days, "14"]
+    mode: snapshot
+    refresh: 3600
+```
+
+Preview it with `bf collect google-calendar-agenda --dry-run`. Expected result: each sample has an alias such as `agenda:primary/EVENT_ID` and links `calendar:primary/EVENT_ID`, the same event's identity in `google-calendar-events`. Each replacement removes events that left the range. An agenda that becomes empty, or loses more than half of its events (and more than 10) at once, for example after a long pause, trips the [removal guard](../../docs/docs/sensors.md#define-the-scope-before-adding-a-sensor) and keeps its saved records. Check the preview, then accept that one run with `bf collect google-calendar-agenda --allow-removal`.
+
+### Google Drive folders
+
+- Lists every My Drive and shared-with-me folder (`corpora: user`); shared drives are excluded. It ignores the time-window arguments.
+- As a `mode: snapshot` source, it removes missing folders after a successful nonempty replacement.
+- A folder's `time` is its creation and `attributes.updated` its last modification.
+- Limits: 10,000 folders and 20 pages.
 
 ## Highlights export
 

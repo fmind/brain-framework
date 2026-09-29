@@ -38,7 +38,9 @@ def test_initialization_creates_the_layout_and_private_namespaces(tmp_path: Path
     assert config.name == "fresh"
     assert set(config.ontology) == {"author", "owner", "depends-on", "related-to"}
     assert config.sensors == {}
-    assert "bf://fresh/" in store.read("AGENTS.md").decode()
+    # The instructions are the same for every brain; the starter suite reads through this brain's name.
+    assert "bf://NAME/" in store.read("AGENTS.md").decode()
+    assert "bf://fresh/concepts/welcome.md" in store.read("evals/retrieval.yaml").decode()
     assert user_path().parts[-2:] == ("bf", "config.yaml")
     assert state_store(store.root).root.parent.name == "bf"
     result = CliRunner().invoke(app, ["search", "welcome", "--brain", str(target)])

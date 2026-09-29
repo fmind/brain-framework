@@ -20,7 +20,7 @@ Install the skills of the installed `bf` into the directory your agent host disc
 bf skills ~/.agents/skills
 ```
 
-The reply lists each skill as `installed`, `updated` or `current`. A manifest (`.bf-skill.json`) in each folder records the digests of the installed files, so a later `bf skills` updates only files nobody edited: an edited skill is reported as `modified`, and a folder BF did not install (or a link) as `unmanaged`, and both stay as they are unless you pass `--force`. Files a newer version no longer ships are removed only when unedited.
+The reply lists each skill as `installed`, `updated` or `current`. A manifest (`.bf-skill.json`) in each folder records the digests of the installed files, so a later `bf skills` updates only files nobody edited: a skill with an edited or deleted file is reported as `modified`, and a folder BF did not install (or a link) as `unmanaged`, and both stay as they are unless you pass `--force`. Files a newer version no longer ships are removed only when unedited.
 
 After upgrading `bf`, check for drift without writing anything:
 
@@ -36,7 +36,7 @@ It exits 1 unless every skill is `current`. Start a fresh host session after ins
 - `bf-setup`: installation, brain creation, agent access and verification in `SKILL.md`; references for scoped discovery, discovery methods and imports; the `inventory.py` helper.
 - `bf-maintain`: diagnosis and core commands in `SKILL.md`; references for integrations, operations and conflicts.
 
-Helpers are standalone Python 3.11+ scripts using only the standard library, run with the agent's `python3` by their path inside the skill folder. They never contact a network; the ones that read the brain call the offline `bf read`.
+Helpers are standalone Python 3.11+ scripts using only the standard library, run with the agent's `python3` by their path inside the skill folder. They never contact a network; the ones that read the brain call the offline `bf read` of the first `bf` on PATH, so a brain that pins its runtime runs them through `uv run --project PATH --locked`.
 
 ## Structure and maintenance
 

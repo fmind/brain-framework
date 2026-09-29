@@ -21,7 +21,7 @@ A valid New website note can still omit the reason for its decision: validation 
 - OKF metadata of projects, concepts and `ACTION.md` notes, and action folder names (`YYYY-MM-DD_topic`).
 - Every local link, image and `sources` entry, including sections, `bf://` targets in this brain and records named by a provider alias.
 - Declared relations: a link naming an undeclared one, a `?rel=` on a link that is not `bf://`, a relation written at the top of frontmatter instead of under `fields:`, and identities outside a relation's `targets`.
-- Record files: names, envelopes and stored fields against the current `fields:`.
+- Record files: their names, the fixed record format and stored `fields` against the current `fields:`.
 - Each enabled program in `sensors/` or `routines/`: it must be an executable regular file.
 
 It lists at most 200 problems, then `"problems_truncated":true`: fix these and validate again. Targets in other brains appear under [`unresolved`](link-reference.md#across-brains) without making the brain invalid.
@@ -34,7 +34,7 @@ It lists at most 200 problems, then `"problems_truncated":true`: fix these and v
 {
   "warning": "identities differ only by letter case",
   "identities": [
-    { "identity": "repo:github.com/team/new-website", "files": 12 },
+    { "identity": "repo:github.com/example/new-website", "files": 12 },
     { "identity": "repo:github.com/Team/new-website", "files": 3 }
   ]
 }

@@ -16,4 +16,4 @@ Include the affected version, operating system, impact, minimal reproduction, an
 
 The maintainer will acknowledge reports and coordinate validation, remediation, and disclosure on a best-effort basis. Please allow time for a fix before publishing details.
 
-The documented credential, execution, path, and storage boundaries are in [Privacy and security](https://fmind.github.io/brain-framework/docs/privacy/). A behavior explicitly described by its linked safeguards reference may be a product constraint rather than a vulnerability, but private reports are still welcome when the impact is unclear.
+The documented credential, execution, path, and storage boundaries are in [Privacy and security](https://fmind.github.io/brain-framework/docs/privacy/). A behavior documented in [Limits and safeguards](https://fmind.github.io/brain-framework/docs/limits/) may be a product constraint rather than a vulnerability, but private reports are still welcome when the impact is unclear.

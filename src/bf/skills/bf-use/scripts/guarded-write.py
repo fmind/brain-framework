@@ -15,6 +15,7 @@ import re
 import stat
 import sys
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 # Skills use the host's python3; this helper needs only the Python 3.11 standard library.
@@ -29,9 +30,28 @@ class EditError(Exception):
     """The requested edit does not apply to the file as read."""
 
 
-def snapshot(path: Path) -> tuple[bytes, int]:
+class SyncError(Exception):
+    """The file was replaced, but its folder could not be synced."""
+
+
+def folder(path: Path) -> int:
+    """A descriptor of the file's folder, opened one component at a time without following a symlink."""
+    parts = path.parent.parts
+    fd = os.open(parts[0] if path.is_absolute() else ".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in parts[1:] if path.is_absolute() else parts:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def snapshot(directory: int, name: str) -> tuple[bytes, int]:
     """The content and permission bits of a regular file, read without following a symlink."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode):
@@ -67,16 +87,17 @@ def substitute(old: bytes, new: bytes) -> Callable[[bytes], bytes]:
     return edit
 
 
-def replace(path: Path, expected: str, edit: Callable[[bytes], bytes]) -> str:
+def replace(directory: int, name: str, expected: str, edit: Callable[[bytes], bytes]) -> str:
     """Apply `edit` to the file as read, write beside it and check the digest again just before the atomic rename."""
-    data, mode = snapshot(path)
+    data, mode = snapshot(directory, name)
     if digest(data) != expected:
         raise ChangedError(digest(data))
     result = edit(data)
     if not result or len(result) > MAX_BYTES:
         raise EditError(f"the new content must hold 1 byte to {MAX_BYTES} bytes")
-    temporary = path.parent / f".guarded-write-{os.urandom(8).hex()}"
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    temporary = f".guarded-write-{os.urandom(8).hex()}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(temporary, flags, 0o600, dir_fd=directory)
     try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(result)
@@ -84,23 +105,34 @@ def replace(path: Path, expected: str, edit: Callable[[bytes], bytes]) -> str:
             os.fchmod(stream.fileno(), mode)
             os.fsync(stream.fileno())
         # An editor may have saved while this helper wrote: the second check narrows that window to the rename.
-        latest = digest(snapshot(path)[0])
+        latest = digest(snapshot(directory, name)[0])
         if latest != expected:
             raise ChangedError(latest)
-        temporary.replace(path)
+        os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        with suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=directory)
         raise
     return digest(result)
 
 
-def sync(directory: Path) -> None:
+def sync(directory: int) -> None:
     """Persist the rename itself."""
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    os.fsync(directory)
+
+
+def write(path: Path, expected: str, edit: Callable[[bytes], bytes]) -> str:
+    """Replace the file, reached without following a symlink, and persist the rename."""
+    directory = folder(path)
     try:
-        os.fsync(fd)
+        written = replace(directory, path.name, expected, edit)
+        try:
+            sync(directory)
+        except OSError as error:
+            raise SyncError from error
+        return written
     finally:
-        os.close(fd)
+        os.close(directory)
 
 
 def text(parser: argparse.ArgumentParser, value: str | None, file: Path | None, name: str) -> bytes | None:
@@ -145,7 +177,7 @@ def main() -> int:
             parser.exit(1, f"Refusing to write: stdin must hold the new content, 1 byte to {MAX_BYTES} bytes.\n")
         edit = whole(data)
     try:
-        written = replace(args.path, expected, edit)
+        written = write(args.path, expected, edit)
     except ChangedError as change:
         parser.exit(
             1,
@@ -154,12 +186,14 @@ def main() -> int:
         )
     except EditError as error:
         parser.exit(1, f"Not written: {error}; nothing changed.\n")
-    except OSError:
-        parser.exit(1, "Not written: expected an existing regular file that you can replace; nothing changed.\n")
-    try:
-        sync(args.path.parent)
-    except OSError:
+    except SyncError:
         parser.exit(1, "Written, but its directory could not be synced; check the file system before relying on it.\n")
+    except OSError:
+        parser.exit(
+            1,
+            "Not written: expected an existing regular file that you can replace, on a path without symbolic "
+            "links; nothing changed.\n",
+        )
     sys.stdout.write(json.dumps({"written": str(args.path), "sha256": written}, separators=(",", ":")) + "\n")
     return 0
 

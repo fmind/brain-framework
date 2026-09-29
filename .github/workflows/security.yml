@@ -26,10 +26,11 @@ jobs:
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           version: 2026.9.15
+          cache: false # Like CI: scans and installation checks never restore a cache.
       - name: Scan complete Git history
-        run: gitleaks git --redact=100 --verbose
+        run: gitleaks git --redact=100 --verbose --no-banner
       - name: Scan full checkout
-        run: trivy --config trivy.yaml fs .
+        run: mise run check:scan
       - name: Audit all locked Python dependencies
         run: mise run check:vuln
       - name: Audit workflows with online checks
@@ -37,9 +38,14 @@ jobs:
           GH_TOKEN: ${{ github.token }} # Read-only API access for impostor-commit and known-vulnerability audits.
         run: zizmor --persona=pedantic .github/workflows
   install:
-    name: Unlocked installation
+    name: Unlocked installation (Python ${{ matrix.python }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The next Python release too: requires-python has no upper bound, so users can install it there.
+        python: ["3.14", "3.15"]
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,7 +55,10 @@ jobs:
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           version: 2026.9.15
+          cache: false # Like CI: scans and installation checks never restore a cache.
       - name: Build distributions
         run: uv build --clear
       - name: Smoke-test distributions with the newest allowed dependencies
-        run: uv run --locked python scripts/test_package.py --unlocked
+        run: uv run --locked python scripts/test_package.py --unlocked --python "$PYTHON"
+        env:
+          PYTHON: ${{ matrix.python }}

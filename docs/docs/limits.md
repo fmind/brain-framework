@@ -8,43 +8,44 @@ Look up exact limits for a skipped file, a partial reply or a stopped program. F
 
 ## Size bounds
 
-| Resource                                      | Limit                                                                          |
-| --------------------------------------------- | ------------------------------------------------------------------------------ |
-| `bf.yaml`, machine registry, eval suite       | 1 MiB each                                                                     |
-| YAML structure, including frontmatter         | 32 nesting levels and 20,000 parser events                                     |
-| Authored note                                 | 4 MiB                                                                          |
-| Note or record title                          | 4,096 characters; listings show 200, then `…`                                  |
-| Search or page reply                          | Items end early near 32 KiB and continue at `next_offset`                      |
-| Exact read                                    | 32 KiB of JSON, then text pages; a large note's first page holds 4 KiB of text |
-| Outline of a paged note                       | 200 sections                                                                   |
-| Backlink previews                             | 5 newest items per relation, excerpts of 160 characters                        |
-| Claims of a subject                           | 20 per relation and 50 in all                                                  |
-| Record file                                   | 16 MiB                                                                         |
-| Record fields other than `text`               | 2 MiB, so an exact read's first page always fits                               |
-| Record id                                     | 1–4,096 characters and 7,988 once percent-encoded                              |
-| Record text                                   | 4,194,304 characters                                                           |
-| Record links, aliases                         | 1,000 each                                                                     |
-| Record URL, link, field value                 | 8,192 characters                                                               |
-| Listed field value                            | 200 characters; longer values stay in the exact read                           |
-| Entries per record source or authored folder  | 100,000                                                                        |
-| Folder depth                                  | 64 levels below a scanned folder                                               |
-| Note path                                     | 7,988 characters once percent-encoded                                          |
-| Search query                                  | 4,096 characters; the first 32 distinct words match                            |
-| Search results per page                       | 50                                                                             |
-| Page sizes                                    | Folders and tags 200; tasks, periods and relation pages 50; source pages 20    |
-| Offsets                                       | 2^53−1                                                                         |
-| Skipped files per brain                       | 200 listed in `problems`, then a count                                         |
-| Validation problems, warnings                 | 200 each, then a `*_truncated` flag; 20 spellings per warning                  |
-| Relation `targets`                            | 64 prefixes of at most 1,024 characters                                        |
-| Retrieval suites                              | 100 suites per run, 200 cases per suite                                        |
-| Reprojection                                  | 1,000 changed records per transaction; 200 failed records listed               |
-| Sensor output                                 | 64 MiB by default, up to 256 MiB                                               |
-| Routine output                                | 1 MiB by default, up to 4 MiB                                                  |
-| Routine input from `bf run`                   | 1 MiB, ending within 10 seconds when piped                                     |
-| Program command                               | 128 arguments of at most 16,384 characters each                                |
-| Program `timeout`                             | 1–3,600 seconds                                                                |
-| `refresh`, `lookback`, `overlap`, `reconcile` | up to 365 days                                                                 |
-| Program log                                   | 1 MiB per `logs/NAME.log`; 256 KiB of output per run                           |
+| Resource                                      | Limit                                                                                        |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `bf.yaml`, machine registry, eval suite       | 1 MiB each                                                                                   |
+| YAML structure, including frontmatter         | 32 nesting levels and 20,000 parser events                                                   |
+| Authored note                                 | 4 MiB                                                                                        |
+| Note or record title                          | 4,096 characters; listings show 200, then `…`                                                |
+| Search or page reply                          | Items end early near 32 KiB and continue at `next_offset`                                    |
+| Exact read                                    | 32 KiB of JSON, then text pages; a large note with sections opens with 4 KiB of text         |
+| Outline of a paged note                       | 200 sections                                                                                 |
+| Backlink previews                             | 5 newest items per relation, excerpts of 160 characters                                      |
+| Claims of a subject                           | 20 per relation and 50 in all                                                                |
+| Record file                                   | 16 MiB                                                                                       |
+| Record fields other than `text`               | 2 MiB, so an exact read's first page always fits                                             |
+| Record id                                     | 1–4,096 characters and 7,988 once percent-encoded                                            |
+| Record text                                   | 4,194,304 characters                                                                         |
+| Record links, aliases                         | 1,000 each                                                                                   |
+| Record URL, link, field value                 | 8,192 characters                                                                             |
+| Listed field value                            | 200 characters; longer values stay in the exact read                                         |
+| Entries per record source or authored folder  | 100,000                                                                                      |
+| Folder depth                                  | 64 levels below a scanned folder                                                             |
+| Note path                                     | 7,988 characters once percent-encoded                                                        |
+| Search query                                  | 4,096 characters; the first 32 distinct words match                                          |
+| Search results per page                       | 50                                                                                           |
+| Page sizes                                    | Folders and tags 200; `memories/SOURCE` 20; other pages 50                                   |
+| Offsets                                       | 2^53−1                                                                                       |
+| Skipped files per brain                       | 200 listed in `problems`, then a count                                                       |
+| Validation problems, warnings                 | 200 each, then a `*_truncated` flag; 20 spellings per warning                                |
+| Relation `targets`                            | 64 prefixes of at most 1,024 characters                                                      |
+| Retrieval suites                              | 100 suites per run, 200 cases per suite                                                      |
+| Records changed by one collection             | 100,000; narrow the window or split the source                                               |
+| Reprojection                                  | 1,000 changed records per transaction; 200 failed records listed                             |
+| Sensor output                                 | 64 MiB by default, up to 256 MiB                                                             |
+| Routine output                                | 1 MiB by default, up to 4 MiB                                                                |
+| Routine input from `bf run`                   | 1 MiB, ending within 10 seconds when piped                                                   |
+| Program command                               | 128 arguments of at most 16,384 characters each                                              |
+| Program `timeout`                             | 1–3,600 seconds                                                                              |
+| `refresh`, `lookback`, `overlap`, `reconcile` | up to 365 days                                                                               |
+| Program log                                   | 1 MiB per `logs/NAME.log`; per run, the last 256 KiB of stderr and of a log routine's stdout |
 
 Each record takes one folder entry. `bf status` warns above 80,000 entries without failing `--check`; a tree over the limit fails the scan and names the folder. Split a crowded source's sensor or archive its older records, and keep bulky imports in `inputs/` or `originals/`, which are not scanned. A long pasted question matches only its first 32 distinct words after function words are dropped: keep the distinctive terms.
 
@@ -67,4 +68,4 @@ Other variables, including provider credentials and absolute `PATH` entries, rem
 
 A timeout, cancellation, closed terminal or excessive output kills the program's whole process group; partial output never replaces stored records. A run ends when the program exits and its output closes. A background helper that keeps output open more than a second after the exit fails the run: redirect its output, for example to `/dev/null`. Watch and generated schedules allow 60 seconds after a stop request, so an interrupted record write can roll back.
 
-Each program appends to `logs/NAME.log` in the brain: a `== TIME OUTCOME ==` line per run, then its stderr, and a log routine's stdout. The log keeps its newest whole entries within 1 MiB. Errors and run history name the log without quoting provider output. Search and read keep a local `usage.jsonl` of at most 1 MiB, with the time, operation and result count, never queries or refs; `bf status` summarizes 7 and 30 days.
+Each run appends entries to the program's `logs/NAME.log` in the brain: a `== TIME OUTCOME ==` heading when the program exits, followed by its stderr and a log routine's stdout, then another heading with the run's result, such as the records collected or the failure. The log keeps its newest whole entries within 1 MiB. Errors and run history name the log without quoting provider output. Search and read keep a local `usage.jsonl` of at most 1 MiB, with the time, operation and result count, never queries or refs; `bf status` summarizes 7 and 30 days.

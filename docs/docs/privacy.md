@@ -2,7 +2,7 @@
 description: Understand local storage, cloud-agent boundaries, program execution and audience separation.
 ---
 
-# Your data stays yours
+# Privacy and security
 
 **We do not collect telemetry or data about you through Brain Framework. You own your data.** BF keeps your brain in files on your machine, with no BF account, hosted service or uploads to us.
 

@@ -5,21 +5,21 @@ set -eu
 tag=${1:?usage: release-notes <tag> [changelog]}
 changelog=${2:-CHANGELOG.md}
 
-awk -v prefix="## [${tag}]" '
+awk -v tag="${tag}" -v prefix="## [${tag}]" '
   index($0, prefix) == 1 { found++; active = 1; next }
   /^## \[/ { active = 0 }
   active { notes = notes $0 "\n" }
   END {
     if (!found) {
-      print "release-notes: no section for " substr(prefix, 4) > "/dev/stderr"
+      print "release-notes: no section for " tag > "/dev/stderr"
       exit 1
     }
     if (found != 1) {
-      print "release-notes: duplicate sections for " substr(prefix, 4) > "/dev/stderr"
+      print "release-notes: duplicate sections for " tag > "/dev/stderr"
       exit 1
     }
     if (notes !~ /[^[:space:]]/) {
-      print "release-notes: empty section for " substr(prefix, 4) > "/dev/stderr"
+      print "release-notes: empty section for " tag > "/dev/stderr"
       exit 1
     }
     printf "%s", notes

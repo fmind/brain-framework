@@ -148,6 +148,6 @@ The directory lists both tags with `tag`, `ref` and `total`; the `website` page 
 | Pages          | The directory counts distinct brain and tag pairs; a tag page lists members newest first. Both list 200 entries per page and have no sections.                                    |
 | Several brains | Equal labels in different brains are different identities, combined on the page.                                                                                                  |
 | Graph          | Each membership is a `tagged-with` claim supported by the whole note.                                                                                                             |
-| Addresses      | `bf://NAME/tags/LABEL` belongs to computed pages: it cannot be an entity or alias, and a scope ignores `?rel=`.                                                                   |
+| Addresses      | `bf://NAME/tags/LABEL` belongs to computed pages: it cannot be an entity or alias. A search scope rejects `?rel=` on it; a read ignores it.                                       |
 
 Tags need no concept note and imply no dependency. Provider labels stay collected evidence in record fields.

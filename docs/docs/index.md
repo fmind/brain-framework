@@ -48,12 +48,12 @@ Start with notes; add sources and routines as the work needs them. The [four-too
 | Understand the model   | [Core concepts](concepts.md), including the glossary and what BF does not do.                                        |
 | Use it each day        | [Write notes](brain.md), [search and read](search.md), [link knowledge](links.md) and [check your brain](checks.md). |
 | Bring in other sources | [Add a sensor](sensors.md), [run routines](routines.md), then [watch and schedule](schedule.md).                     |
-| Work with others       | [Connect an agent](agents.md) or [set up a team brain](team.md).                                                     |
+| Work with others       | [Use an agent](agents.md) or [set up a team brain](team.md).                                                         |
 | Look up exact behavior | [Commands](commands.md), [configuration](configuration.md) and the [retrieval reference](retrieval.md).              |
 | Resolve a problem      | [Troubleshooting](troubleshooting.md) or [install and update](upgrades.md).                                          |
 
 ## Know the boundaries
 
-Notes are Markdown; collected records are JSON. A disposable SQLite cache makes them searchable by words and exact identities, without embeddings or model calls. You choose what to collect and share, and programs run only when you ask. A cloud agent may send what it reads to its provider: read [Privacy and security](privacy.md) before connecting sensitive sources.
+Notes are Markdown; collected records are JSON. A disposable SQLite cache makes them searchable by words and by exact names, such as a repository address, without any AI model. You choose what to collect and share, and programs run only when you ask. A cloud agent may send what it reads to its provider: read [Privacy and security](privacy.md) before connecting sensitive sources.
 
 These docs follow the repository's current code. Check `bf --version` and `bf COMMAND --help` if an option differs; see [version differences](upgrades.md#match-the-docs-to-your-version).

@@ -82,7 +82,7 @@ def person(address: str) -> str:
     return reference("person:email/" + quote(address, safe="/:@+").replace("~", "%7E"))
 
 
-def instant(value: object) -> str:
+def optional_instant(value: object) -> str:
     """A provider timestamp with a timezone, or nothing: BF validates `attributes.updated` strictly."""
     try:
         return value if isinstance(value, str) and datetime.fromisoformat(value).tzinfo else ""
@@ -159,7 +159,7 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
                 title = summary or "Untitled calendar event"
             lines = ["Event: " + title, "Status: " + status]
             event_end = event.get("end", {})
-            updated = instant(event.get("updated"))
+            updated = optional_instant(event.get("updated"))
             timezone = event_start.get("timeZone") or page.get("timeZone", "")
             if event_start.get("date"):
                 if not timezone:

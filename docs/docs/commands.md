@@ -8,25 +8,25 @@ description: Look up Brain Framework commands, previews, graph exports, replies,
 
 ## Commands
 
-| Command                                                                      | Purpose                                                                                                                                  |
-| ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `init PATH [--name NAME] [--full]`                                           | Create a brain in a new, empty or freshly cloned folder; `--full` adds optional folders.                                                 |
-| `register [PATH]`                                                            | Add a brain's name and path to the optional machine registry.                                                                            |
-| `mcp`                                                                        | Serve `search` and `read` over MCP stdio.                                                                                                |
-| `skills DIR [--check] [--force]`                                             | Install or update the packaged agent skills; see [skills](agents.md#install-the-skills).                                                 |
-| `schema [--kind KIND]`                                                       | Print a configuration or [reply schema](retrieval.md#reply-schemas); defaults to `bf.yaml`.                                              |
-| `search QUERY [--scope SCOPE] [--limit N] [--offset N]`                      | Find words or an identity, optionally within one scope.                                                                                  |
-| `read [REF] [--rel RELATION] [--offset N]`                                   | Open home, a page, note, section, record or identity; `--rel` lists one relation's links.                                                |
-| `export [--kind edges\|identities]`                                          | Print the graph of the selected brains as JSON Lines, from their caches.                                                                 |
-| `collect SENSOR [--since TIME] [--until TIME] [--dry-run] [--allow-removal]` | Run one sensor now.                                                                                                                      |
-| `run [ROUTINE] [ARGS]... [--hook EVENT] [--dry-run]`                         | Run one routine, or every routine of a hook, now; see [routines](routines.md).                                                           |
-| `update [--sensor NAME] [--routine NAME] [--dry-run]`                        | Run due sensors, then due routines, then refresh the cache.                                                                              |
-| `watch [--interval N] [--poll-interval N] [--notify MODE] [--json]`          | Run due programs until you quit, with a live dashboard; see [watch](schedule.md).                                                        |
-| `schedule [--backend NAME] [--every N] [--name NAME] [--output DIR]`         | Generate native scheduler files and their installation commands; run nothing.                                                            |
-| `status [--check] [--watch]`                                                 | Report caches, records, program health, logs and local usage.                                                                            |
-| `validate`                                                                   | Check notes, links, actions, record files and program files.                                                                             |
-| `eval [--path evals] [--baseline FILE]`                                      | Run retrieval cases; compare ranks with a saved reply.                                                                                   |
-| `build [--reproject SENSOR [--dry-run]]`                                     | Recover interrupted record writes and rebuild the search cache; `--reproject` [re-applies mappings](schema.md#reproject-stored-records). |
+| Command                                                                                  | Purpose                                                                                                                                  |
+| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `init PATH [--name NAME] [--full]`                                                       | Create a brain in a new, empty or freshly cloned folder; `--full` adds optional folders.                                                 |
+| `register [PATH]`                                                                        | Add a brain's name and path to the optional machine registry.                                                                            |
+| `mcp`                                                                                    | Serve `search` and `read` over MCP stdio.                                                                                                |
+| `skills DIR [--check] [--force]`                                                         | Install or update the packaged agent skills; see [skills](agents.md#install-the-skills).                                                 |
+| `schema [--kind KIND]`                                                                   | Print a configuration or [reply schema](retrieval.md#reply-schemas); defaults to `bf.yaml`.                                              |
+| `search QUERY [--scope SCOPE] [--limit N] [--offset N]`                                  | Find words or an identity, optionally within one scope.                                                                                  |
+| `read [REF] [--rel RELATION] [--offset N]`                                               | Open home, a page, note, section, record or identity; `--rel` lists one relation's links.                                                |
+| `export [--kind edges\|identities]`                                                      | Print the graph of the selected brains as JSON Lines, from their caches.                                                                 |
+| `collect SENSOR [--since TIME] [--until TIME] [--dry-run] [--allow-removal]`             | Run one sensor now.                                                                                                                      |
+| `run [ROUTINE] [ARGS]... [--hook EVENT] [--dry-run]`                                     | Run one routine, or every routine of a hook, now; see [routines](routines.md).                                                           |
+| `update [--sensor NAME] [--routine NAME] [--dry-run]`                                    | Run due sensors, then due routines, then refresh the cache.                                                                              |
+| `watch [--interval N] [--poll-interval N] [--notify MODE] [--json]`                      | Run due programs until you quit, with a live dashboard; see [watch](schedule.md).                                                        |
+| `schedule [--backend NAME] [--every N] [--name NAME] [--output DIR] [--executable PATH]` | Generate native scheduler files and their installation commands; run nothing.                                                            |
+| `status [--check] [--watch]`                                                             | Report caches, records, program health, logs and local usage.                                                                            |
+| `validate`                                                                               | Check notes, links, actions, record files and program files.                                                                             |
+| `eval [--path evals] [--baseline FILE]`                                                  | Run retrieval cases; compare ranks with a saved reply.                                                                                   |
+| `build [--reproject SENSOR [--dry-run]]`                                                 | Recover interrupted record writes and rebuild the search cache; `--reproject` [re-applies mappings](schema.md#reproject-stored-records). |
 
 Every command taking `--brain NAME|PATH` selects brains as [Configuration](configuration.md#select-a-brain) describes. `collect`, `run`, `update`, `watch` and `schedule` act on exactly one brain; `update`, `watch` and `schedule` also accept repeatable `--sensor` and `--routine` [selectors](schedule.md#select-programs).
 
@@ -61,7 +61,7 @@ bf export | head -1
 
 Each line has `brain`, `subject`, `relation`, `target` and `origin`, plus the origin's `date` for a note or `time` for a record, and `observed` for a record. `relation` is a declared relation, `cites`, `tagged-with` or `links` for an untyped link. Lines are sorted by subject, relation, target and origin within each brain.
 
-`bf export --kind identities` prints one line per note or record that answers to more than one name, so duplicate subjects stand out:
+`bf export --kind identities` prints one line for each note or record that answers to more than its own address, such as through an alias, with every name it answers to, so duplicate subjects stand out:
 
 ```json
 {
@@ -103,11 +103,11 @@ Invalid input exits 2 and names the option or argument, before any brain is read
 
 A well-formed ref that names nothing exits 1 and suggests what exists: a close page, note, sensor or routine name (`did you mean projects?`), or the note's sections for a missing `#section`.
 
-`update` and `run` exit 1 when a program fails, and `update` and `build` when the refreshed cache skipped files; successful programs keep their results. `status --check` exits 1 on problems, unavailable brains or references, or scheduled programs that failed or are `overdue` or `never` succeeded. `validate` exits 1 on problems, never on warnings.
+`update` and `run` exit 1 when a program fails, and `update` and `build` when the refreshed cache skipped files; successful programs keep their results. `status --check` exits 1 on problems, unavailable brains or references, or scheduled programs that failed, are `overdue` or `never` succeeded. `validate` exits 1 on problems, never on warnings.
 
 ## Using replies
 
-Replies state a note's day as `date` (`2026-09-27`), as written in its `updated`. Every datetime shows your local offset, to the second (`2026-09-29T09:00:00+02:00`). Files, run history and the cache keep UTC. Search and read replies follow the [retrieval reference](retrieval.md); `problems` is always a list of objects with `error` and, when known, `brain` and `file`.
+Replies state a note's day as `date` (`2026-09-27`), as written in its `updated`, and other datetimes with your local offset, to the second (`2026-09-29T09:00:00+02:00`). Values under `attributes` and `fields` are returned exactly as stored. Files, run history and the cache keep UTC. Search and read replies follow the [retrieval reference](retrieval.md); `problems` is always a list of objects with `error` and, when known, `brain` and `file`.
 
 An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors` and `routines` it ran or found due, `manual` for skipped manual programs, and the refreshed `index`. A `run` reply has `ok`, `dry_run`, any `hook` and its `routines`, each with a `status` of `ran`, `skipped` or `failed`.
 
@@ -115,19 +115,19 @@ An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors` and `routines`
 
 `bf status` groups results under `brains`. Each brain has its `cache`, `notes`, `problems`, `sources`, `routines`, `coverage` totals and `usage`. A brain that cannot load appears with only `brain`, `error` and, when known, `path`.
 
-| Field                                | Meaning                                                                                                                                                                  |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cache`                              | `ready`; `busy` while a writer updates it; `stale` or `missing` while an interrupted write awaits recovery.                                                              |
-| `pending_transaction`                | `true` when `memories/.pending` holds an interrupted write; a problem names the command to recover it.                                                                   |
-| `state`                              | `active`, `disabled` or `historical` (records remain but `bf.yaml` no longer declares the sensor).                                                                       |
-| `freshness`                          | `fresh`, `overdue`, `never`, `manual` or `unknown`; see [timing and health](schedule.md#timing-and-health).                                                              |
-| `records`, `bytes`                   | Indexed records of the source and their size on disk.                                                                                                                    |
-| `mode`, `window`                     | Sensor mode and, for window sensors, the contiguous collected interval `{since, until}`.                                                                                 |
-| `last_collected`                     | The last collection that brought coverage up to date; routines report `last_success`.                                                                                    |
-| `last_run`                           | Counters of the last success: `records`, `added`, `updated`, `unchanged`, `removed`, `requested_start`, `requested_end`, `reconcile`, `elapsed_seconds`, `output_bytes`. |
-| `reconciled`                         | The last scheduled [reconciliation](sensors.md#frequent-updates-and-periodic-reconciliation).                                                                            |
-| `action`                             | A routine's latest action.                                                                                                                                               |
-| `failed`, `error`, `failures`, `log` | The last attempt failed: its diagnostic, consecutive failures and `logs/NAME.log`.                                                                                       |
+| Field                                | Meaning                                                                                                                                                                               |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cache`                              | `ready`, or `busy` while a writer updates it. `stale` (the last cache) or `missing` (none) while an interrupted write awaits recovery, unlike the `stale` of search and read replies. |
+| `pending_transaction`                | `true` when `memories/.pending` holds an interrupted write; a problem names the command to recover it.                                                                                |
+| `state`                              | `active`, `disabled` or `historical` (records remain but `bf.yaml` no longer declares the sensor).                                                                                    |
+| `freshness`                          | `fresh`, `overdue`, `never`, `manual` or `unknown`; see [timing and health](schedule.md#timing-and-health).                                                                           |
+| `records`, `bytes`                   | Indexed records of the source and their size on disk.                                                                                                                                 |
+| `mode`, `window`                     | Sensor mode and, for window sensors, the contiguous collected interval `{since, until}`.                                                                                              |
+| `last_collected`                     | The last collection that brought coverage up to date; routines report `last_success`.                                                                                                 |
+| `last_run`                           | Counters of the last success: `records`, `added`, `updated`, `unchanged`, `removed`, `requested_start`, `requested_end`, `reconcile`, `elapsed_seconds`, `output_bytes`.              |
+| `reconciled`                         | The last scheduled [reconciliation](sensors.md#frequent-updates-and-periodic-reconciliation).                                                                                         |
+| `action`                             | A routine's latest action.                                                                                                                                                            |
+| `failed`, `error`, `failures`, `log` | The last attempt failed: its diagnostic, consecutive failures and `logs/NAME.log`.                                                                                                    |
 
 For example, an hourly `mail` sensor that collected one message reports:
 

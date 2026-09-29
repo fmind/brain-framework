@@ -67,7 +67,7 @@ _DEFS: dict[str, object] = {
     },
     "Item": {
         "type": "object",
-        "description": "A note, note section or record in a search result, listing or role page.",
+        "description": "A note, note section or record in a search result, listing or relation page.",
         "required": ["ref", "kind"],
         "properties": {
             "ref": {"type": "string", "description": "Read this exact ref; a section ref ends in #fragment."},
@@ -110,7 +110,10 @@ _DEFS: dict[str, object] = {
             },
             "relations": {"type": "array", "items": {"$ref": "#/$defs/Claim"}},
             "relations_truncated": {"const": True},
-            "relation": {"type": "string", "description": "On a role page, the item's role when it is a child role."},
+            "relation": {
+                "type": "string",
+                "description": "On a relation page, the item's relation when it is a narrower relation.",
+            },
             "brain": {"type": "string", "description": "Present when several brains are selected."},
             "uri": {
                 "type": "string",
@@ -148,7 +151,7 @@ _DEFS: dict[str, object] = {
     },
     "Backlinks": {
         "type": "object",
-        "description": "Newest items linking with one relationship; `links` groups untyped links.",
+        "description": "Newest items linking with one relation; `links` groups untyped links.",
         "required": ["relation", "total", "items"],
         "properties": {
             "relation": _STRING,
@@ -306,8 +309,8 @@ READ: dict[str, object] = {
                 "items": _ITEMS,
                 **_PAGED,
                 "sources": {"type": "array", "items": {"$ref": "#/$defs/Coverage"}},
-                "ref": {"type": "string", "description": "On a relation page, the ref whose role is listed."},
-                "relation": {"type": "string", "description": "On a relation page, the listed role."},
+                "ref": {"type": "string", "description": "On a relation page, the ref whose links are listed."},
+                "relation": {"type": "string", "description": "On a relation page, the listed relation."},
                 "previous": _STRING,
                 "next": _STRING,
             },

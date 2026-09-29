@@ -6,7 +6,7 @@ description: Reply fields and rules for search, read, pages, relation pages, con
 
 Exact reply fields and rules for CLI and MCP clients. For everyday use, start with [Search and read](search.md). Examples use the `brain` from [Getting started](getting-started.md).
 
-Replies state a note's `updated` day as `date` (`2026-09-27`) and every instant with your local offset, to the second (`2026-09-29T09:00:00+02:00`). With several selected brains, list entries also name their `brain` and portable `uri`.
+Replies state a note's `updated` day as `date` (`2026-09-27`) and other instants with your local offset, to the second (`2026-09-29T09:00:00+02:00`); values under `attributes` and `fields` are returned exactly as stored. With several selected brains, list entries also name their `brain` and portable `uri`.
 
 ## Pages
 
@@ -124,13 +124,13 @@ Search lists in `sources` the sources of returned records and those needing atte
 
 ## Notes, records and identities
 
-| Exact read | Reply fields                                                                                                                                                                 |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Note       | `brain`, `ref`, `text` (the whole file), `sha256`, `modified`, `backlinks`, `claims`; `uri` for a BF address; an `ACTION.md` adds `files` and linked `projects`.             |
-| Section    | `brain`, `ref` with its `#section`, that section's `text`, and the whole file's `sha256` and `modified`.                                                                     |
-| Record     | `brain`, `ref`, `path`, `record` (`id`, `title` and any `text`, `time`, `url`, `links`, `aliases`, `attributes`, `fields`), `collection`, `sha256`, `modified`, `backlinks`. |
-| Identity   | The owning note or record; without an owner, a page of the backlinks naming it. An ambiguous alias fails: read an exact ref.                                                 |
-| Any        | `notice`, and `problems` or `stale` when evidence was skipped or the brain was busy.                                                                                         |
+| Exact read | Reply fields                                                                                                                                                                           |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Note       | `brain`, `ref`, `text` (the whole file), `sha256`, `modified`, `backlinks`, `claims`; `uri` for a BF address; an `ACTION.md` adds `files` and linked `projects`.                       |
+| Section    | `brain`, `ref` with its `#section`, that section's `text`, and the whole file's `sha256` and `modified`.                                                                               |
+| Record     | `brain`, `ref`, `path`, `record` (`id`, `title` and any `text`, `time`, `url`, `links`, `aliases`, `attributes`, `fields`), `collection`, `sha256`, `modified`, `backlinks`, `claims`. |
+| Identity   | The owning note or record; without an owner, a page of the backlinks naming it. An ambiguous alias fails: read an exact ref.                                                           |
+| Any        | `notice`, and `problems` or `stale` when evidence was skipped or the brain was busy.                                                                                                   |
 
 `sha256` covers the file's bytes, also on a section read: compare it before replacing a file you read. A record's text is `record.text`, never a top-level `text`. Record refs are `SOURCE:ID`; encode a literal `#` in an id as `%23`.
 
@@ -148,7 +148,7 @@ A relation page lists every item linking to a note, record or identity through o
 
 ```bash
 bf read projects/new-website.md --rel cites
-bf read repo:github.com/team/new-website --rel depends-on --offset 50
+bf read repo:github.com/example/new-website --rel depends-on --offset 50
 ```
 
 After [Connect two notes](links.md#connect-two-notes), the first returns `"page":"relation"`, `"relation":"cites"`, `"total":1` and the concept as an item with its `excerpt`.
@@ -163,20 +163,20 @@ After [Connect two notes](links.md#connect-two-notes), the first returns `"page"
 
 ## Continuations
 
-| Rule                  | Action                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------------------- |
-| `next_offset` present | Repeat the same request with that offset until it is absent; listings also report `total`.        |
-| Same request          | Keep the query or ref, scope, limit and brain selection unchanged.                                |
-| Changed files         | Restart after edits, or when a moving period such as `7d` reorders items.                         |
-| Offsets               | Zero-based, combined across brains, at most 2^53−1.                                               |
-| Page sizes            | Folders and tags: 200; tasks, periods and relation pages: 50; source pages: 20.                   |
-| Large items           | A page ends early when its items would exceed 32 KiB; `next_offset` continues after the last one. |
+| Rule                  | Action                                                                                                   |
+| --------------------- | -------------------------------------------------------------------------------------------------------- |
+| `next_offset` present | Repeat the same request with that offset until it is absent; listings also report `total`.               |
+| Same request          | Keep the query or ref, scope, limit and brain selection unchanged.                                       |
+| Changed files         | Restart after edits, or when a moving period such as `7d` reorders items.                                |
+| Offsets               | Zero-based, combined across brains, at most 2^53−1; a larger offset is invalid input (exit 2).           |
+| Page sizes            | Folders and tags: 200; `memories/SOURCE`: 20; tasks, periods, relation pages and other source pages: 50. |
+| Large items           | A page ends early when its items would exceed 32 KiB; `next_offset` continues after the last one.        |
 
 The last page still needs the [completeness checks](#incomplete-answers-and-freshness).
 
 ### Large exact reads
 
-An exact read whose reply would exceed 32 KiB returns its text in pages. A note's first page carries its `outline`, backlinks and claims and only the first 4 KiB of text; a record's first page carries every other field. Later pages carry `brain`, `ref`, their slice, the paging fields, `sha256`, `modified`, `notice` and any `problems` or `stale`.
+An exact read whose reply would exceed 32 KiB returns its text in pages. A note's first page carries its backlinks, claims and `outline`; when the note has sections, it holds only the first 4 KiB of text, otherwise as much as fits the page. A record's first page carries every other field. Later pages carry `brain`, `ref`, any `uri`, their slice, the paging fields, `sha256`, `modified`, `notice` and any `problems` or `stale`.
 
 | Field                                       | Meaning                                                                                     |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------- |
@@ -201,7 +201,7 @@ A reply that fits returns whole and rejects a non-zero offset.
 | Damaged cache                          | BF discards and rebuilds it once; run `bf build` if the problem persists.                                                                       |
 | Cache write access                     | Search and read refresh `.bf/`; a read-only brain fails naming it. Grant write access or use a copy.                                            |
 
-Malformed files, links and special files are skipped and reported while healthy brains still answer. [What BF does not do](concepts.md#what-bf-does-not-do) states what an incomplete reply cannot prove.
+Malformed files, links and special files are skipped and reported while healthy brains still answer. An exact read is the exception: across several brains, it fails when one of them is unavailable, since the ref could exist there too. Read its brain-qualified address instead, such as a search result's `uri` (`bf://NAME/...`), or repair that brain, for example with `bf build`. [What BF does not do](concepts.md#what-bf-does-not-do) states what an incomplete reply cannot prove.
 
 ## Reply schemas
 
@@ -224,7 +224,7 @@ Transport: **stdio**. [Set up your host](mcp.md).
 | `search` | Required `query`; `scope=""`, `limit=10` (1–50), `offset=0` | Ranked matches with exact refs.                                 |
 | `read`   | `ref=""`, `rel=""`, `offset=0`                              | Home, a page, note, section, record, identity or relation page. |
 
-Each tool publishes its reply schema as `outputSchema`. Text and structured results carry the same JSON value as the CLI. Invalid arguments return an error result starting with `invalid input:`. Other errors name the `search` and `read` tools where the CLI names commands, and hide brain paths.
+Each tool publishes its reply schema as `outputSchema`. Text and structured results carry the same JSON value as the CLI. Arguments outside the tool's input schema, such as `limit: 0`, return an error result with the MCP SDK's message. Values the tool rejects after that, such as a query without words, return one starting with `invalid input:`, and an unknown scope or relation names the valid choices. Other errors name the `search` and `read` tools where the CLI names commands, and hide brain paths.
 
 | Concern        | Contract                                                                                                               |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------- |

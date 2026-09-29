@@ -11,11 +11,15 @@ def _open(value: object) -> object:
     """A reply schema that tolerates fields added later: consumers ignore what they do not know.
 
     Tests validate every reply against the strict declaration in `bf.replies`, so an undeclared field still fails
-    there; the published form lets a minor release add fields without breaking a consumer's validation.
+    there; the published form lets a minor release add fields without breaking a consumer's validation. Once
+    shapes accept extra fields, one reply can match several of them (an empty period page is also a listing), so
+    their `oneOf` becomes `anyOf`.
     """
     if isinstance(value, dict):
         return {
-            key: _open(item) for key, item in value.items() if not (key == "additionalProperties" and item is False)
+            ("anyOf" if key == "oneOf" else key): _open(item)
+            for key, item in value.items()
+            if not (key == "additionalProperties" and item is False)
         }
     if isinstance(value, list):
         return [_open(item) for item in value]

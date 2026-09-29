@@ -4,10 +4,10 @@ Use only methods within the agreed scope. Never enumerate all browser profiles o
 
 ## Tools and applications
 
-Check a short list of tools relevant to the user's questions; the helper path is relative to this skill's folder:
+Check a short list of tools relevant to the user's questions, with `SKILL_DIR` as the skill defines it:
 
 ```bash
-python3 scripts/inventory.py tools git gh gws
+python3 "$SKILL_DIR/scripts/inventory.py" tools git gh gws
 ```
 
 The helper returns each name with `available: true|false`, using PATH lookup without execution; it omits executable paths and does not check credentials or versions. Names must be bare executable names, with at most 32 per invocation. It does not read stdin in this mode.
@@ -21,8 +21,8 @@ Prefer a user-selected export: Netscape bookmark HTML or Chromium bookmark JSON 
 After checking the approved file is regular, within the size limit and has no symlink components, run the helper locally. Replace the placeholder with the quoted approved path; never interpolate a discovered filename into shell code:
 
 ```bash
-python3 scripts/inventory.py bookmarks --format html < "/approved/bookmarks.html"
-python3 scripts/inventory.py bookmarks --format chromium < "/approved/Bookmarks"
+python3 "$SKILL_DIR/scripts/inventory.py" bookmarks --format html < "/approved/bookmarks.html"
+python3 "$SKILL_DIR/scripts/inventory.py" bookmarks --format chromium < "/approved/Bookmarks"
 ```
 
 For a synthetic export containing two links to `https://example.org/` with different paths, expect `{"hosts":[{"host":"example.org","count":2}],"skipped_urls":0}`; titles and URL paths must be absent.

@@ -108,7 +108,7 @@ A file address is enough for most notes. When sources use different identifiers 
 
 ```yaml
 entity: bf://brain/projects/new-website
-aliases: [repo:github.com/team/new-website]
+aliases: [repo:github.com/example/new-website]
 resource: https://example.test/new-website
 ```
 
@@ -116,7 +116,7 @@ All of them now open the same note:
 
 ```bash
 bf read bf://brain/projects/new-website
-bf read repo:github.com/team/new-website
+bf read repo:github.com/example/new-website
 ```
 
 | Field      | Meaning                                                                                         |

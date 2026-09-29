@@ -165,7 +165,8 @@ def main() -> int:
                 "export, such as one exported folder or a copy without some folders.\n"
             )
             return 1
-        except (ValueError, RecursionError, OSError):
+        # Older html.parser releases raise AssertionError, quoting the input, on malformed declarations.
+        except (ValueError, RecursionError, OSError, AssertionError):
             sys.stderr.write(
                 "Cannot summarize bookmarks: not a complete, supported export; select a supported export.\n"
             )
@@ -175,4 +176,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None

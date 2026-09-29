@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Callable
 from typing import Annotated
 
@@ -68,8 +69,13 @@ def server(stores: list[Store]) -> MCPServer:
         except ValidationError as error:
             text = "invalid input: " + explain(error)
             return CallToolResult(content=[TextContent(type="text", text=text)], is_error=True)
-        except (Error, OSError, ValueError) as error:
-            message = str(error) if isinstance(error, Error) else "inaccessible evidence; check the reference"
+        except (Error, OSError, ValueError, sqlite3.DatabaseError) as error:
+            if isinstance(error, Error):
+                message = str(error)
+            elif isinstance(error, sqlite3.DatabaseError):
+                message = pages.CACHE
+            else:
+                message = "inaccessible evidence; check the reference"
             for root in roots:
                 message = message.replace(root, "<brain>")
             message = _COMMANDS.sub(r"the \1 tool", message)

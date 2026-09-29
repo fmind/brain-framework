@@ -77,7 +77,7 @@ def reference(value: object) -> str:
     return ""
 
 
-def instant(value: object) -> str:
+def optional_instant(value: object) -> str:
     """A provider timestamp with a timezone, or nothing: BF validates `attributes.updated` strictly."""
     try:
         return value if isinstance(value, str) and datetime.fromisoformat(value).tzinfo else ""
@@ -130,7 +130,8 @@ def collect() -> list[dict[str, object]]:
             seen.add(identifier)
             if len(seen) > MAX_FOLDERS:
                 raise InvalidError(f"the catalog has more than {MAX_FOLDERS} folders")
-            created, modified = instant(folder.get("createdTime")), instant(folder.get("modifiedTime"))
+            created = optional_instant(folder.get("createdTime"))
+            modified = optional_instant(folder.get("modifiedTime"))
             records.append(
                 {
                     "id": identifier,

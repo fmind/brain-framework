@@ -184,8 +184,6 @@ def test_github_pull_detail_failure_does_not_publish_the_listing(provider: Provi
         {},
         {**ISSUE, "merged_at": None, "number": 99},
         {**ISSUE, "merged_at": None, "updated_at": "2010-01-01T00:00:00Z"},
-        {**ISSUE, "merged_at": None, "updated_at": END},
-        {**ISSUE, "merged_at": None, "updated_at": "2026-09-03T00:00:00Z"},
     ):
         provider.install(
             "gh",
@@ -197,6 +195,37 @@ def test_github_pull_detail_failure_does_not_publish_the_listing(provider: Provi
         result = provider.run("github-history.py", "example/project", "pulls", START, END)
         assert result.returncode == 1
         assert result.stdout == ""
+
+
+@pytest.mark.parametrize("modified", [END, "2026-09-03T00:00:00Z"])
+def test_github_pull_modified_after_listing_is_left_to_the_next_window(provider: Provider, modified: str) -> None:
+    # PR 1 changed between the listing and its detail request: its latest modification is at or after END.
+    pulls = [
+        {
+            **ISSUE,
+            "number": number,
+            "pull_request": {"url": f"https://api.github.com/repos/example/project/pulls/{number}"},
+        }
+        for number in (1, 2)
+    ]
+    provider.install(
+        "gh",
+        [
+            {"match": ["issues"], "stdout": response(pulls)},
+            {
+                "match": ["pulls/1"],
+                "stdout": "HTTP/2.0 200 OK\n\n" + json.dumps({**ISSUE, "merged_at": None, "updated_at": modified}),
+            },
+            {
+                "match": ["pulls/2"],
+                "stdout": "HTTP/2.0 200 OK\n\n" + json.dumps({**ISSUE, "number": 2, "merged_at": START}),
+            },
+        ],
+    )
+    [record] = provider.records("github-history.py", "example/project", "pulls", START, END)
+    assert (record.id, record.attributes["state"]) == ("example/project/pulls/2", "merged")
+    # Each selected PR costs one detail request after the listing page.
+    assert len(provider.calls("gh")) == 3
 
 
 def test_github_empty_collection_and_invalid_scope(provider: Provider) -> None:

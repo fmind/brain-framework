@@ -24,14 +24,14 @@ jobs:
         if: github.ref_type == 'tag'
         run: test "$GITHUB_REF_NAME" = "v$(uv version --short)"
       - name: Validate release notes
-        if: github.ref_type == 'tag'
-        run: scripts/release-notes "$GITHUB_REF_NAME" > /dev/null
+        # Every push checks the current version's section, so the script is exercised before a tag needs it.
+        run: scripts/release-notes "v$(uv version --short)" > /dev/null
       - name: Run shared checks
         run: mise run check
       - name: List checkout changes
         run: git status --porcelain
       - name: Verify clean checkout
-        run: test -z "$(git status --porcelain)"
+        run: status="$(git status --porcelain)" && test -z "$status"
       - name: Upload tested documentation
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
@@ -71,7 +71,7 @@ jobs:
       - name: List checkout changes
         run: git status --porcelain
       - name: Verify clean checkout
-        run: test -z "$(git status --porcelain)"
+        run: status="$(git status --porcelain)" && test -z "$status"
       - name: Record distribution hashes
         if: matrix.target == 'linux-x64' && github.ref_type == 'tag'
         run: sha256sum dist/*.whl dist/*.tar.gz > python-package.sha256

@@ -430,6 +430,11 @@ def test_run_rejects_missing_unknown_or_disabled_routines(
     assert message in plain(result.output) + str(result.exception)
 
 
+def test_update_selection_suggests_close_names(hooked: Store) -> None:
+    with pytest.raises(Error, match=r"unknown routine chek; check names in bf.yaml; did you mean check\?"):
+        update(hooked, now=NOW, runner=printing(b""), routines=("chek",))
+
+
 def test_hooks_are_distinct_slugs() -> None:
     for hooks in (["pre-push", "pre-push"], ["Pre-Push"], ["pre push"]):
         with pytest.raises(ValidationError):

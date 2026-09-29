@@ -738,6 +738,9 @@ def database(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
             with generation(store, shared=True, wait=_PUBLISH):
                 connection = _open(store)
                 if connection is None:
+                    if state == "busy":
+                        # fresh() already waited for the other writer: another wait would only delay this answer.
+                        raise BusyError("another writer is building the search cache; retry when it finishes")
                     continue
                 with closing(connection):
                     connection.execute("PRAGMA query_only=ON")
@@ -1008,7 +1011,7 @@ def search(
 ) -> Iterator[dict[str, object]]:
     """An exact identity or tag returns its owners, then what links to it; other text ranks lexically, within the scope.
 
-    `limit` bounds this brain's rows, such as enough to fill a continued multi-brain window; -1 is unbounded.
+    `limit` bounds this brain's rows, such as enough to fill a continued multi-brain window.
     Lexical rows name their `_passage` for `excerpt`, `also` other matching records of their URL and `sections`
     other matching sections of their note; records of `low` sources rank at half weight there. Identity rows carry
     their owner `_rank`.

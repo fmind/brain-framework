@@ -22,6 +22,7 @@ from uuid import uuid4
 SECTIONS = ("## Context {#context}", "## TODO", "## Decision {#decision}", "## Resume {#resume}", "## Outcome")
 # A suffixed name that also exists is astronomically unlikely; a few attempts end a pathological loop.
 ATTEMPTS = 5
+FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 def create(actions: int, topic: str, today: str, *, unique: bool) -> str:
@@ -36,7 +37,68 @@ def create(actions: int, topic: str, today: str, *, unique: bool) -> str:
     raise FileExistsError(topic)
 
 
-def main() -> None:
+def skeleton(topic: str, today: str) -> str:
+    """The ACTION.md text: OKF metadata, a title and the template's headings."""
+    title = topic.replace("-", " ").capitalize()
+    return f"---\ntype: action\nstatus: draft\nupdated: {today}\n---\n\n# {title}\n\n" + "\n\n".join(SECTIONS) + "\n"
+
+
+def write(actions: int, folder: str, text: str) -> None:
+    """Write ACTION.md into the new folder; on failure, remove the file this call created."""
+    action = os.open(folder, FLAGS, dir_fd=actions)
+    try:
+        entry = os.open("ACTION.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=action)
+        try:
+            with os.fdopen(entry, "w", encoding="utf-8") as stream:
+                stream.write(text)
+        except BaseException:
+            with suppress(OSError):
+                os.unlink("ACTION.md", dir_fd=action)
+            raise
+    finally:
+        os.close(action)
+
+
+def start(brain: Path, topic: str, *, unique: bool) -> str:
+    """The new action's folder name; a failure removes only the folders this call created."""
+    # Like bf, follow a linked brain root once; nothing below it is followed.
+    root = os.open(brain, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        config = os.open("bf.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        try:
+            if not stat.S_ISREG(os.fstat(config).st_mode):
+                raise OSError("expected regular brain configuration")
+        finally:
+            os.close(config)
+        made = False
+        with suppress(FileExistsError):
+            os.mkdir("actions", mode=0o700, dir_fd=root)
+            made = True
+        try:
+            actions = os.open("actions", FLAGS, dir_fd=root)
+            try:
+                today = date.today().isoformat()
+                folder = create(actions, topic, today, unique=unique)
+                try:
+                    write(actions, folder, skeleton(topic, today))
+                except BaseException:
+                    with suppress(OSError):
+                        os.rmdir(folder, dir_fd=actions)
+                    raise
+            finally:
+                os.close(actions)
+        except BaseException:
+            if made:
+                # rmdir removes only an empty folder: never another session's work.
+                with suppress(OSError):
+                    os.rmdir("actions", dir_fd=root)
+            raise
+    finally:
+        os.close(root)
+    return folder
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("topic", help="lowercase words joined by hyphens, such as website-review")
     parser.add_argument("--brain", required=True, type=Path, help="the brain directory, not a registered name")
@@ -46,45 +108,16 @@ def main() -> None:
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", args.topic) or len(args.topic) > 64:
         parser.error("topic must be lowercase words joined by single hyphens, at most 64 characters")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        # Like bf, follow a linked brain root once; nothing below it is followed.
-        root = os.open(args.brain.expanduser(), os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            config = os.open("bf.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
-            try:
-                if not stat.S_ISREG(os.fstat(config).st_mode):
-                    raise OSError("expected regular brain configuration")
-            finally:
-                os.close(config)
-            with suppress(FileExistsError):
-                os.mkdir("actions", mode=0o700, dir_fd=root)
-            actions = os.open("actions", flags, dir_fd=root)
-            try:
-                today = date.today().isoformat()
-                folder = create(actions, args.topic, today, unique=args.unique)
-                action = os.open(folder, flags, dir_fd=actions)
-                try:
-                    entry = os.open(
-                        "ACTION.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=action
-                    )
-                    with os.fdopen(entry, "w", encoding="utf-8") as stream:
-                        title = args.topic.replace("-", " ").capitalize()
-                        stream.write(
-                            f"---\ntype: action\nstatus: draft\nupdated: {today}\n---\n\n# {title}\n\n"
-                            + "\n\n".join(SECTIONS)
-                            + "\n"
-                        )
-                finally:
-                    os.close(action)
-            finally:
-                os.close(actions)
-        finally:
-            os.close(root)
+        folder = start(args.brain.expanduser(), args.topic, unique=args.unique)
     except OSError:
         parser.exit(1, "Could not create an action safely; inspect permissions and existing paths, then retry.\n")
     sys.stdout.write(json.dumps({"action": f"actions/{folder}/ACTION.md"}) + "\n")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None

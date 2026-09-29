@@ -4,7 +4,7 @@ description: Keep a Brain Framework brain (the bf command) healthy and connected
 license: MIT
 compatibility: Requires Brain Framework 16 (the bf command) on Linux or macOS.
 metadata:
-  version: "16.0.1"
+  version: "16.1.0"
 ---
 
 # bf-maintain
@@ -13,7 +13,7 @@ Sensors collect records from providers and routines are deterministic brain prog
 
 ## Select one brain
 
-Work inside the brain directory or pass `--brain PATH`; with a pinned runtime (a `pyproject.toml` and `uv.lock` in the brain), run `uv run --project PATH --locked bf ...`. `bf collect`, `bf run`, `bf update`, `bf watch` and `bf schedule` act on exactly one brain (`--brain`, `BF_BRAIN` or the enclosing brain), never its `brains:` references or other registered brains. A bare `--brain NAME` resolves through the registry first and fails when ambiguous: pass the path.
+Work inside the brain directory or pass `--brain PATH`; with a pinned runtime (a `pyproject.toml` and `uv.lock` in the brain), run `uv run --project PATH --locked bf ...`. `bf collect`, `bf run`, `bf update`, `bf watch` and `bf schedule` act on exactly one brain (`--brain`, then `BF_BRAIN`, then the enclosing brain), never its `brains:` references or other registered brains. A bare `--brain NAME` resolves through the registry first and fails when ambiguous: pass the path.
 
 ## Diagnose before executing
 
@@ -24,10 +24,10 @@ bf validate
 bf eval
 ```
 
-- `bf status` reports each brain's `cache` (`ready`, `busy` while a writer works, `stale` or `missing`), `pending_transaction` when an interrupted record write awaits recovery (its problem names the command to run), `problems`, scan-limit `warnings` and `usage`. Each source shows `state`, `freshness` (`fresh`, `overdue` when late by more than twice its refresh, `never`, `manual` or `unknown`), `last_collected`, `window`, `last_run`, `records` and `bytes`; each routine its `freshness`, `last_success` and latest `action`. A failed program adds `failed`, `error`, consecutive `failures` and its `log`. `bf status --check` exits 1 on an overdue or failed scheduled program, a problem or an unavailable brain.
+- `bf status` reports, without running anything, each brain's cache, problems and the freshness and failures of its sources and routines, and `bf status --check` exits 1 when one needs attention: [reading status](references/operations.md#read-bf-status) explains each field.
 - Each sensor and routine logs every run to `logs/NAME.log` in the brain, newest last and bounded to 1 MiB. Read it locally and keep provider text out of reports; retrieval never reads `logs/`, which `bf init` keeps out of Git.
 - `bf update --dry-run` lists due programs and their windows without running anything, and names the manual programs it would skip.
-- `bf validate` lists `problems` as `{file, error}`: invalid OKF metadata, broken links, unresolved merge markers, a program in `sensors/` or `routines/` that is not an executable file, a declared field written at the top level of a note's frontmatter, or `?rel=` on a link that is not `bf://`. Non-failing `warnings` list identities differing only by letter case.
+- `bf validate` lists `problems` as `{file, error}`: invalid OKF metadata, broken links, unresolved merge markers, an enabled program in `sensors/` or `routines/` that is not an executable regular file (check a disabled one with `test -x sensors/NAME`), a declared field written at the top level of a note's frontmatter, or `?rel=` on a link that is not `bf://`. Non-failing `warnings` list identities differing only by letter case.
 - `bf eval` runs the retrieval cases under `evals/`; save a reply and pass it back with `--baseline FILE` after a change to list `regressions`.
 
 `bf collect --dry-run` and `bf run --dry-run` **do run the program**: they skip saving, not execution. Discovery or a dry run grants no authority for live collection.
@@ -49,7 +49,7 @@ Core commands for that work:
 - `bf update` runs due sensors, then due routines, then refreshes the cache; `bf watch` does so continuously in a dashboard (`--json` for rows); `bf schedule` writes native scheduler files and activates nothing.
 - `bf skills DIR --check` reports whether installed skills match this version; `bf skills DIR` updates the unedited ones.
 
-For a retrieval miss, save the question as an `evals/` case (a suite starts with `version: 7`) before changing the owning note or sensor, and never weaken an assertion to make a case pass.
+For a retrieval miss, save the question as an `evals/` case (a suite starts with the same `version` as `bf.yaml`) before changing the owning note or sensor, and never weaken an assertion to make a case pass.
 
 ## Verify the result
 
@@ -58,5 +58,5 @@ Repeat the failed check, validate the brain and search and read the evidence the
 ## References
 
 - [references/integrations.md](references/integrations.md): sensors, field mappings, reprojection, routines, hooks and their tests.
-- [references/operations.md](references/operations.md): failure diagnosis, snapshot guard, backfills, recovery, watch, schedules, upgrades and brain instructions.
+- [references/operations.md](references/operations.md): status fields, failure diagnosis, snapshot guard, backfills, recovery, watch, schedules, upgrades and brain instructions.
 - [references/conflicts.md](references/conflicts.md): Git merges, competing records and actions, identity spellings.

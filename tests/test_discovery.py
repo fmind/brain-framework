@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
+import io
 import json
 import subprocess
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -104,6 +107,35 @@ def test_duplicate_keys_never_hide_bookmarks(raw: bytes) -> None:
     assert result.returncode == 1
     assert not result.stdout
     assert b"PRIVATE" not in result.stderr
+
+
+def test_malformed_marked_sections_release_no_input(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    raw = b"<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><![bogus[SECRET]]></DL>"
+    # Current parsers skip the section as a bogus comment; older ones raise an AssertionError quoting it.
+    result = run("bookmarks", "--format", "html", raw=raw)
+    assert result.returncode in {0, 1}
+    assert b"SECRET" not in result.stdout + result.stderr
+    assert b"Traceback" not in result.stderr
+    spec = importlib.util.spec_from_file_location("inventory", HELPER)
+    assert spec is not None
+    assert spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    # Replay the older parser, which handed every `<![` to the marked-section parser.
+    original = HTMLParser.parse_html_declaration
+
+    def older(self: HTMLParser, i: int) -> int:
+        return self.parse_marked_section(i) if self.rawdata.startswith("<![", i) else original(self, i)
+
+    monkeypatch.setattr(helper.BookmarksHTML, "parse_html_declaration", older)
+    monkeypatch.setattr(sys, "argv", ["inventory.py", "bookmarks", "--format", "html"])
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw)))
+    assert helper.main() == 1
+    captured = capsys.readouterr()
+    assert "not a complete, supported export" in captured.err
+    assert "SECRET" not in captured.out + captured.err
 
 
 def test_html_nested_folders_and_empty_exports() -> None:

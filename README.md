@@ -36,11 +36,15 @@ Start with one decision you can find again. You need Linux or macOS and [uv](htt
 
 ```bash
 uv tool install --python 3.14 brain-framework
+bf --version
+```
+
+If your shell cannot find `bf`, run `uv tool update-shell` and open a new shell. Then create your brain:
+
+```bash
 bf init ~/brain
 cd ~/brain
 ```
-
-If `bf` is not on PATH, run `uv tool update-shell` and open a new shell.
 
 Create `projects/new-website.md` in your editor, or ask your agent to save this fictional decision. Use today's date for `updated`:
 
@@ -91,11 +95,13 @@ Check that it cites `projects/new-website.md#decision` and names “Draft the pr
 bf skills ~/.agents/skills
 ```
 
+Each host reads its own folder: for Claude Code, use `~/.claude/skills` instead.
+
 `bf-use` finds evidence and keeps notes and actions current, `bf-setup` onboards brains and sources, and `bf-maintain` runs integrations and checks. Hosts that prefer tools can call `search` and `read` through [MCP](https://fmind.github.io/brain-framework/docs/mcp/). See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/).
 
 ## How it works
 
-**Gather → normalize → organize and connect → act → learn.** Sensors collect selected evidence; field mappings give sources shared fields and explicit relations. You and your agents do the work, then keep the outcome and next step in the brain.
+**Gather → normalize → organize and connect → act → learn.** Sensors, small programs you review, collect selected evidence; field mappings give records from different tools the same field names and explicit relations. You and your agents do the work, then keep the outcome and next step in the brain.
 
 ```text
 brain/
@@ -109,7 +115,7 @@ brain/
 └── logs/        # each program's recent output, ignored by Git
 ```
 
-Notes are Markdown with structured metadata; each record is a JSON file. Open them in any editor and use Git for history; the search cache is disposable. [Links and backlinks](https://fmind.github.io/brain-framework/docs/links/) connect decisions to evidence, and identities are always explicit: BF never guesses them from similar names. See the [file conventions](https://fmind.github.io/brain-framework/docs/brain/) and [team brains](https://fmind.github.io/brain-framework/docs/team/).
+Notes are Markdown with structured metadata; each record is a JSON file. Open them in any editor and use Git for history; the search cache is disposable. [Links and backlinks](https://fmind.github.io/brain-framework/docs/links/) connect decisions to evidence. Every connection is explicit: BF never links two subjects because their names look alike. See the [file conventions](https://fmind.github.io/brain-framework/docs/brain/) and [team brains](https://fmind.github.io/brain-framework/docs/team/).
 
 ## Bring your tools
 

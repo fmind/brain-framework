@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -86,6 +87,33 @@ def test_write_rejects_invalid_arguments_and_input(brain: Store, tmp_path: Path)
     assert not leftovers(brain)
 
 
+def test_write_follows_no_symlink_in_the_path(brain: Store, tmp_path: Path) -> None:
+    # A linked folder could redirect the write outside the brain between the read and the rename.
+    original = (brain.root / NOTE).read_bytes()
+    digest = str(retrieve.read([brain], NOTE)["sha256"])
+    (brain.root / "linked").symlink_to(brain.root / "projects", target_is_directory=True)
+    linked = tmp_path / "linked-brain"
+    linked.symlink_to(brain.root, target_is_directory=True)
+    for path in ("linked/offline.md", str(linked / NOTE)):
+        result = write(brain, digest, "# New\n", path)
+        assert result.returncode == 1
+        assert "on a path without symbolic links" in result.stderr
+    assert (brain.root / NOTE).read_bytes() == original
+    assert not leftovers(brain)
+    # Inside a linked brain folder, the working directory is already resolved: a relative path works.
+    result = subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
+        [sys.executable, str(HELPER), NOTE, "--expect-sha256", digest],
+        cwd=linked,
+        input="# New\n",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (brain.root / NOTE).read_text() == "# New\n"
+
+
 def test_write_checks_again_before_the_rename(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -96,17 +124,21 @@ def test_write_checks_again_before_the_rename(
     spec.loader.exec_module(helper)
     path = brain.root / NOTE
     original = path.read_bytes()
-    data, mode = helper.snapshot(path)
-    digest = helper.digest(data)
-    # An editor saves while the helper writes its temporary file.
-    answers = iter([(data, mode), (data + b"Another save.\n", mode)])
-    monkeypatch.setattr(helper, "snapshot", lambda _path: next(answers))
-    with pytest.raises(helper.ChangedError):
-        helper.replace(path, digest, helper.whole(b"# Replacement\n"))
+    directory = helper.folder(path)
+    try:
+        data, mode = helper.snapshot(directory, path.name)
+        digest = helper.digest(data)
+        # An editor saves while the helper writes its temporary file.
+        answers = iter([(data, mode), (data + b"Another save.\n", mode)])
+        monkeypatch.setattr(helper, "snapshot", lambda *_: next(answers))
+        with pytest.raises(helper.ChangedError):
+            helper.replace(directory, path.name, digest, helper.whole(b"# Replacement\n"))
+    finally:
+        os.close(directory)
     assert path.read_bytes() == original
     assert not leftovers(brain)
     # A directory sync failure after the rename is reported as written, never as unchanged or as success.
-    monkeypatch.setattr(helper, "snapshot", lambda _path: (data, mode))
+    monkeypatch.setattr(helper, "snapshot", lambda *_: (data, mode))
     monkeypatch.setattr(helper, "sync", lambda _directory: (_ for _ in ()).throw(OSError("sync")))
     monkeypatch.setattr(sys, "argv", ["guarded-write.py", str(path), "--expect-sha256", digest])
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"# Replacement\n")))

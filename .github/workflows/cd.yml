@@ -56,7 +56,8 @@ jobs:
           packages-dir: dist/
           skip-existing: true
       - name: Download PyPI release metadata
-        run: curl --fail --silent --show-error --retry 5 --retry-all-errors --max-time 30 "https://pypi.org/pypi/brain-framework/${GITHUB_REF_NAME#v}/json" --output "$RUNNER_TEMP/pypi.json"
+        # PyPI's JSON API can lag an upload by minutes: retry for about three minutes before failing.
+        run: curl --fail --silent --show-error --retry 12 --retry-delay 15 --retry-all-errors --max-time 30 "https://pypi.org/pypi/brain-framework/${GITHUB_REF_NAME#v}/json" --output "$RUNNER_TEMP/pypi.json"
       - name: Extract published distribution hashes
         run: jq -r '.urls[] | "\(.digests.sha256)  dist/\(.filename)"' "$RUNNER_TEMP/pypi.json" | sort > published.sha256
       - name: Sort expected distribution hashes

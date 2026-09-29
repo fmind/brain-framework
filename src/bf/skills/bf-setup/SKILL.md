@@ -1,10 +1,10 @@
 ---
 name: bf-setup
-description: Set up Brain Framework (the bf command) and a brain, connect an agent to it, discover which sources are worth connecting and import selected documents or notes. Use when the user says "set up my brain", "install bf", "create a brain", "connect my agent", "install the skills", "which sources should I connect", "connect a source", "scan my tools or bookmarks", "import this handbook, vault or folder", or when bf is missing, older than 16 or has no brain yet.
+description: Set up Brain Framework (the bf command) and a brain, connect an agent to it, discover which sources are worth connecting and import selected documents or notes. Use when the user says "set up my brain", "install bf", "create a brain", "connect my agent", "install the skills", "which sources should I connect", "connect a source", "scan my tools or bookmarks", "import this handbook, vault or folder", or when bf is missing, outdated or has no brain yet.
 license: MIT
 compatibility: Requires Brain Framework 16 (the bf command) on Linux or macOS.
 metadata:
-  version: "16.0.1"
+  version: "16.1.0"
 ---
 
 # bf-setup
@@ -13,7 +13,7 @@ Start from one project and a few questions the user keeps reconstructing across 
 
 ## Install and create the brain
 
-1. Check `bf --version`. When it is missing or older than 16, install or upgrade only with the user's consent: `uv tool install --python 3.14 brain-framework`, or `uv tool upgrade brain-framework` after stopping watchers and reading the changelog's upgrade steps; run `uv tool update-shell` when `bf` is not on PATH. When the brain pins its own runtime with a `pyproject.toml` and `uv.lock`, check `uv run --project PATH --locked bf --version` instead.
+1. Check `bf --version`: its major version must match this skill's `compatibility`. When `bf` is missing or older, install or upgrade only with the user's consent: `uv tool install --python 3.14 brain-framework`, or `uv tool upgrade brain-framework` after stopping watchers and reading the changelog's upgrade steps; run `uv tool update-shell` when `bf` is not on PATH. When it is newer, update the skills with `bf skills DIR` (below). When the brain pins its own runtime with a `pyproject.toml` and `uv.lock`, check `uv run --project PATH --locked bf --version` instead.
 1. Inspect an existing brain's `bf.yaml`, `AGENTS.md` and notes before changing anything; keep its name, customizations and unrelated work. For a new personal brain, default to `~/brain` unless the user chose a path, and run `bf init ~/brain`. It refuses a folder with content, derives the brain name from the directory (or `--name NAME`) and returns it as `brain`: use that name in `bf://` addresses. `bf register PATH` is optional: it lets search and read select the brain by name from anywhere and never runs its programs.
 1. Save one project note grounded in what the user said: `type: project`, `status: draft`, the decision under `## Decision {#decision}` with its reason, and a next task. Follow the `bf-use` skill's guide to writing knowledge back; never invent a decision to fill the example.
 1. Verify inside the brain directory (or with `--brain PATH` everywhere):
@@ -26,7 +26,7 @@ Start from one project and a few questions the user keeps reconstructing across 
    bf eval
    ```
 
-   Expect the saved reason at its ref, `"valid":true` and `"score":"3/3"` for the starter retrieval cases. Add the user's real questions as cases with expected refs and answer fragments, plus one query that must stay empty, to a suite under `evals/` starting with `version: 7` ([retrieval cases](https://fmind.github.io/brain-framework/docs/checks/)). Starter checks alone do not prove the user's questions are answered.
+   Expect the saved reason at its ref, `"valid":true` and `"score":"3/3"` for the starter retrieval cases. Add the user's real questions as cases with expected refs and answer fragments, plus one query that must stay empty, to a suite under `evals/` starting with the same `version` as `bf.yaml` ([retrieval cases](https://fmind.github.io/brain-framework/docs/checks/)). Starter checks alone do not prove the user's questions are answered.
 
 ## Connect the agent
 
@@ -61,7 +61,7 @@ Report the brain location, the questions answered with their refs, validation an
 
 ## References and helpers
 
-Helper paths are relative to this skill's folder; run them with `python3` (3.11 or later).
+`SKILL_DIR` stands for the absolute path of the folder holding this `SKILL.md`. Run a helper from any directory with Python 3.11 or later: `python3 "$SKILL_DIR/scripts/NAME.py" ...`.
 
 - [references/scan.md](references/scan.md): agree on an inspection scope, recommend sources and hand them off.
 - [references/discovery.md](references/discovery.md): bounded methods for tools, applications, bookmarks and project folders.

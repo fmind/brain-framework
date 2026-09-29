@@ -38,6 +38,8 @@ PAGE_ONE = {
         {"id": "evt2", "status": "cancelled", "start": {"dateTime": "2026-09-01T12:00:00Z"}},
     ],
 }
+# git-history checks the Git version once before reading any repository.
+GIT_VERSION = {"match": ["version"], "stdout": "git version 2.47.0\n", "repeat": True}
 PAGE_TWO = {
     "kind": "calendar#events",
     "timeZone": "Europe/Luxembourg",
@@ -170,6 +172,7 @@ def test_people_and_repository_identities_join_across_providers(
     provider.install(
         "git",
         [
+            GIT_VERSION,
             {"match": ["remote"], "stdout": "git@github.com:Owner/Project.git\n"},
             {
                 "match": ["log"],
@@ -243,7 +246,8 @@ def test_git_history_obeys_half_open_windows_with_out_of_order_dates(
     for when in dates:
         env.update(GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
         git("commit", "-q", "--allow-empty", "-m", "Evidence " + when)
-    start, end = "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z"
+    # BF substitutes canonical instants with microseconds for `{{start}}` and `{{end}}`; Git must accept them.
+    start, end = "2026-09-01T00:00:00.000000Z", "2026-09-02T00:00:00.000000Z"
     records = provider.records("git-history.py", str(root), start, end)
     assert len(records) == 1
     assert datetime.fromisoformat(records[0].time) == datetime.fromisoformat(start)
@@ -305,7 +309,8 @@ def test_git_history_skips_unreadable_and_unnameable_folders(provider: Provider,
     provider.install(
         "git",
         [
-            # `log` comes first: its `--remotes` argument would also match `remote`.
+            GIT_VERSION,
+            # `log` comes before `remote`: its `--remotes` argument would also match `remote`.
             {"match": ["log"], "stdout": "abc\u00002026-09-01T10:00:00Z\u0000owner@fmind.dev\u0000Keep\u0000"},
             {"match": ["remote"], "code": 2, "repeat": True},
         ],
@@ -341,6 +346,7 @@ def test_git_history_names_the_repository_git_cannot_read(provider: Provider, tm
     provider.install(
         "git",
         [
+            GIT_VERSION,
             {"match": ["worktree-x9", "log"], "code": 128, "stderr": "fatal: not a git repository\n", "repeat": True},
             {
                 "match": ["log"],
@@ -377,6 +383,8 @@ def test_git_history_names_a_repository_whose_remote_lookup_times_out(
         (root / name / ".git").mkdir(parents=True)
 
     def git(argv: list[str], _limit: int, _timeout: int) -> bytes:
+        if argv[1:] == ["version"]:
+            return b"git version 2.47.0\n"
         if argv[3] == "remote" and Path(argv[2]).name == "slow":
             raise TimeoutError("provider exceeded its timeout")
         if argv[3] == "remote":
@@ -390,11 +398,25 @@ def test_git_history_names_a_repository_whose_remote_lookup_times_out(
     assert sensor.collect(*window, frozenset({"slow"})) == ([], 0)
 
 
+@pytest.mark.parametrize("reply", ["git version 2.36.6\n", "not git\n", None])
+def test_git_history_requires_git_2_37(provider: Provider, tmp_path: Path, reply: str | None) -> None:
+    # `git log --since-as-filter` first shipped in Git 2.37: an older or missing Git fails once, by its requirement.
+    (tmp_path / "code/project/.git").mkdir(parents=True)
+    version = {"match": ["version"], "stdout": reply} if reply else {"match": ["version"], "code": 127}
+    provider.install("git", [version, {"match": [], "code": 97, "repeat": True}])
+    result = provider.run("git-history.py", str(tmp_path / "code"), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == "Git history collection failed: Git 2.37 or later is required; install it on PATH.\n"
+    assert provider.calls("git") == [["version"]]
+
+
 def test_git_history_drops_an_author_link_beyond_the_reference_bound(provider: Provider, tmp_path: Path) -> None:
     (tmp_path / "code/project/.git").mkdir(parents=True)
     author = "a" * 8300 + "@fmind.dev"
     log = f"abc\u00002026-09-01T10:00:00Z\u0000{author}\u0000Keep\u0000"
-    provider.install("git", [{"match": ["log"], "stdout": log}, {"match": ["remote"], "code": 2, "repeat": True}])
+    provider.install(
+        "git", [GIT_VERSION, {"match": ["log"], "stdout": log}, {"match": ["remote"], "code": 2, "repeat": True}]
+    )
     records = provider.records("git-history.py", str(tmp_path / "code"), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     assert [(record.links, record.attributes["author_refs"]) for record in records] == [(["repo:local/project"], [])]
 

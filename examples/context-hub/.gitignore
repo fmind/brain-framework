@@ -1,3 +1,4 @@
-# Local retrieval cache and collected copies are disposable in this fictional demo.
+# Local retrieval cache, program logs and collected copies are disposable in this fictional demo.
 /.bf/
+/logs/
 /memories/

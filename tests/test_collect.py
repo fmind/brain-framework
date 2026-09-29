@@ -542,7 +542,10 @@ def test_interpreter_startup_injection_is_removed(
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP], ids=["stop", "hangup"])
 def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_path: Path, signum: int) -> None:
     marker = tmp_path / "children"
-    configured.write("sensors/wait.sh", b'#!/bin/sh\nsleep 60 &\nprintf "%s %s\\n" "$$" "$!" > "$1"\nwait\n')
+    # The marker appears complete (renamed into place), so the test never reads a half-written list of ids.
+    configured.write(
+        "sensors/wait.sh", b'#!/bin/sh\nsleep 60 &\nprintf "%s %s\\n" "$$" "$!" > "$1.tmp"\nmv "$1.tmp" "$1"\nwait\n'
+    )
     (configured.root / "sensors/wait.sh").chmod(0o700)
     configured.write(
         "bf.yaml",
@@ -579,6 +582,7 @@ def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_pat
             time.sleep(0.02)
         assert marker.exists(), "collector did not start"
         pids = [int(value) for value in marker.read_text().split()]
+        assert len(pids) == 2, pids
         child.send_signal(signum)
         stdout, stderr = child.communicate(timeout=10)
         assert child.returncode == 130, stderr.decode()

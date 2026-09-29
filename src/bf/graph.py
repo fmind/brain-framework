@@ -47,6 +47,7 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
     matches: list[tuple[Store, int, set[str]]] = []
     problems: list[dict[str, object]] = []
     labels: dict[Path, str] = {}
+    failed: set[Path] = set()
     for store in stores:
         name = ""
         try:
@@ -69,8 +70,9 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
                     matches.append((store, row[0], names))
         except (Error, OSError, sqlite3.DatabaseError) as error:
             # Named and worded as the page reports the same brain, so a reply lists an unloadable brain once.
-            message = str(error) if isinstance(error, Error) else "identity cache unavailable"
+            message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; run bf status"
             problems.append({"brain": name or brain_name(store), "error": message.replace(str(store.root), "<brain>")})
+            failed.add(store.root)
     if len(matches) > 1:
         problems.append(
             {"error": "ambiguous identity across selected evidence; read the owning note's bf://NAME/path.md"}
@@ -81,8 +83,8 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
     owner, item, names = matches[0]
     shared: set[str] = set()
     for store in stores:
-        if store.root not in labels:
-            # Its bf.yaml did not load: already reported, and it cannot share an alias.
+        if store.root not in labels or store.root in failed:
+            # Its bf.yaml or cache did not load: already reported once, and it cannot share an alias.
             continue
         try:
             with index.database(store) as (connection, _state):
@@ -96,8 +98,9 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
                         (json.dumps(sorted(names - {value})), store.root == owner.root, item),
                     )
                 )
-        except Error, OSError, sqlite3.DatabaseError:
-            problems.append({"brain": labels[store.root], "error": "identity cache unavailable"})
+        except (Error, OSError, sqlite3.DatabaseError) as error:
+            message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; run bf status"
+            problems.append({"brain": labels[store.root], "error": message.replace(str(store.root), "<brain>")})
     if shared:
         problems.append({"error": f"{len(shared)} aliases are also claimed elsewhere and were not expanded"})
     return {value} | (names - shared), problems

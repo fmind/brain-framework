@@ -14,15 +14,15 @@ Read the exact note section or record with `bf read`. Record its original ref, w
 
 The standard-library [evidence helper](../scripts/evidence.py) never contacts a network. `read REF --brain PATH` runs the offline `bf read` and prints the whole reply: above 32 KiB it follows each `next_offset`, checks that every page names the same file `sha256` (and, for a whole note, that the joined text has it) and joins the pages, up to 4 MiB. `capture` and `compare` read only stdin. `capture` keeps one exact read's text or record, its source metadata, a local capture time and a content digest; it drops backlinks and other context and refuses listing pages, lone text pages and incomplete or `stale` reads. Partial or not-fresh records keep explicit limitations. A capture is a local observation, not proof of authorship, truth or live provider state.
 
-In the commands below, `$evidence_helper` is the path of `scripts/evidence.py` in this skill's folder, `$brain_path` the brain directory and `$evidence_ref` the exact ref; with several selected brains, use the returned `uri` (`bf://NAME/...`), since a plain ref present in two brains fails. This subshell creates an owner-only capture at an unused path, never replaces an earlier one and removes only a capture it failed to write:
+In the commands below, `$brain_path` is the brain directory and `$evidence_ref` the exact ref; with several selected brains, use the returned `uri` (`bf://NAME/...`), since a plain ref present in two brains fails. `$new_capture` is an unused `.json` path where the capture belongs (the owning action's `inputs/`, otherwise `assets/`, as above) and `$saved_capture` an earlier capture. This subshell creates an owner-only capture at an unused path, never replaces an earlier one and removes only a capture it failed to write:
 
 ```bash
 (
   set -o pipefail -o noclobber
   umask 077
   exec 3> "$new_capture" || exit 1
-  python3 "$evidence_helper" read "$evidence_ref" --brain "$brain_path" |
-    python3 "$evidence_helper" capture >&3 || { rm -f -- "$new_capture"; exit 1; }
+  python3 "$SKILL_DIR/scripts/evidence.py" read "$evidence_ref" --brain "$brain_path" |
+    python3 "$SKILL_DIR/scripts/evidence.py" capture >&3 || { rm -f -- "$new_capture"; exit 1; }
 )
 ```
 
@@ -35,8 +35,8 @@ To compare, supply the saved capture followed by a new exact read:
   set -o pipefail
   {
     cat "$saved_capture"
-    python3 "$evidence_helper" read "$evidence_ref" --brain "$brain_path"
-  } | python3 "$evidence_helper" compare
+    python3 "$SKILL_DIR/scripts/evidence.py" read "$evidence_ref" --brain "$brain_path"
+  } | python3 "$SKILL_DIR/scripts/evidence.py" compare
 )
 ```
 
@@ -44,7 +44,7 @@ Only the compact comparison reaches the model. `state` is `changed`, `unchanged`
 
 ## Revise a belief
 
-Keep the current conclusion in the owning project or concept. When the old claim matters, keep its decision note and capture, then write a successor decision note linking what it supersedes and why. A decision note under `outputs/` is ordinary Markdown: its `type`, `status` and `updated` apply, and its typed links use the file as their subject. Use `status: deprecated` for an authored note intentionally retired, and say "disputed" in the text when evidence conflicts: disputed is not a status. Distinguish disagreement from supersession and a fact from a proposal; more recent evidence is not automatically more authoritative.
+Keep the current conclusion in the owning project or concept. When the old claim matters, keep its decision note and capture, then write a successor decision note linking what it supersedes and why. A decision note under `outputs/` is an ordinary [attachment](actions.md#metadata-and-attachments). Use `status: deprecated` for an authored note intentionally retired, and say "disputed" in the text when evidence conflicts: disputed is not a status. Distinguish disagreement from supersession and a fact from a proposal; more recent evidence is not automatically more authoritative.
 
 Declare only the relations you use, such as `supersedes`, under `fields:` in `bf.yaml` (see [links](links.md)). Then write `[evidence](bf://NAME/concepts/policy.md?rel=depends-on#retention)` and `[previous decision](bf://NAME/actions/YYYY-MM-DD_topic/outputs/decision.md?rel=supersedes)`. Generic links establish neither dependency nor supersession. State when a claim holds as prose unless the brain declares fields for it. BF resolves these links; it never infers temporal truth or chooses the winning claim.
 

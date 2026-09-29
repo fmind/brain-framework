@@ -28,7 +28,7 @@ from rich.text import Text
 
 from bf.collect import next_due
 from bf.config import load
-from bf.history import ROUTINES, environment, log_path, state
+from bf.history import ROUTINES, SENSORS, environment, log_path, state
 from bf.models import Error, WatchSettings, decode, encode, present, terminal, timestamp
 from bf.storage import BusyError, Store, collecting
 from bf.update import selection
@@ -78,7 +78,7 @@ def snapshot(store: Store, sensors: tuple[str, ...] = (), routines: tuple[str, .
     now = datetime.now(UTC)
     rows = []
     for kind, programs, file, included in (
-        ("sensor", config.sensors, "sensors.json", selected[0]),
+        ("sensor", config.sensors, SENSORS, selected[0]),
         ("routine", config.routines, ROUTINES, selected[1]),
     ):
         # state() validates every entry, so each present field already has its history type.

@@ -15,7 +15,9 @@ nav = [
   { "Overview" = "docs/index.md" },
   { "Start here" = [
     { "Getting started" = "docs/getting-started.md" },
+    { "Connect context across tools" = "docs/context-hub.md" },
     { "Core concepts" = "docs/concepts.md" },
+    { "Install and update" = "docs/upgrades.md" },
   ] },
   { "Everyday use" = [
     { "Write notes and actions" = "docs/brain.md" },
@@ -27,14 +29,11 @@ nav = [
     { "Add a sensor" = "docs/sensors.md" },
     { "Run routines" = "docs/routines.md" },
     { "Watch and schedule updates" = "docs/schedule.md" },
-    { "Install and update" = "docs/upgrades.md" },
-    { "Troubleshooting" = "docs/troubleshooting.md" },
   ] },
   { "Agents and teams" = [
     { "Agent workflows" = "docs/agents.md" },
     { "Connect an agent with MCP" = "docs/mcp.md" },
     { "Team setup" = "docs/team.md" },
-    { "Connect context across tools" = "docs/context-hub.md" },
   ] },
   { "Reference" = [
     { "Commands" = "docs/commands.md" },
@@ -43,6 +42,7 @@ nav = [
     { "Links and tags" = "docs/link-reference.md" },
     { "Retrieval" = "docs/retrieval.md" },
     { "Limits and safeguards" = "docs/limits.md" },
+    { "Troubleshooting" = "docs/troubleshooting.md" },
   ] },
   { "Privacy and legal" = [
     { "Privacy and security" = "docs/privacy.md" },

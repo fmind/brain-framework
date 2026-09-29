@@ -7,6 +7,7 @@ import os
 import re
 import selectors
 import signal
+import sqlite3
 import stat
 import sys
 import time
@@ -28,8 +29,22 @@ from bf.collect import reproject as remap
 from bf.config import execution, load, one, register, select
 from bf.evaluate import evaluate, load_baseline
 from bf.install import skills
-from bf.models import FORMAT, NAME, SLUG, Config, Error, Query, SchemaField, explain, moment, present, terminal
+from bf.models import (
+    FORMAT,
+    MAX_OFFSET,
+    NAME,
+    SLUG,
+    Config,
+    Error,
+    Query,
+    SchemaField,
+    explain,
+    moment,
+    present,
+    terminal,
+)
 from bf.retrieve import RelationError, edges, identities, read, relation, search
+from bf.schemas import Kind, document
 from bf.storage import Store, relative, writer
 from bf.update import run_routines, update
 from bf.validate import validate
@@ -104,15 +119,16 @@ Answer in four steps:
 1. Answer with the conclusion, its refs and the remaining uncertainty.
 
 Search and read also cover direct `brains:` references. With several brains, read a result's `uri`
-(`bf://BRAIN_NAME/...`): a plain ref present in two brains fails.
+(`bf://NAME/...`): a plain ref present in two brains fails.
 
 `bf search`, `bf read`, `bf status`, `bf validate` and `bf eval` never run programs or network requests.
 `bf collect`, `bf run`, `bf update` and `bf watch` run configured programs with the user's permissions:
 run them only with explicit authority, on the one brain named by `--brain PATH`.
 Registration and references select brains for retrieval, never execution.
 
-After meaningful work, update the owning note with what changed, why and evidence refs, then run
-`bf validate`. The `bf-use` skill holds the procedures. See https://fmind.github.io/brain-framework/docs/agents/.
+When the user asks to save an outcome, or the task authorizes it, update the owning note with what
+changed, why and evidence refs, then run `bf validate`. Never edit `memories/`: sensors own records.
+The `bf-use` skill holds the procedures. See https://fmind.github.io/brain-framework/docs/agents/.
 """
 # Every brain starts with knowledge and verification; the other folders are created as needed or with --full.
 FOLDERS = ("projects", "actions")
@@ -253,7 +269,7 @@ def initialize(
         )
         for directory in FOLDERS + (OPTIONAL if full else ()):
             store.write(directory + "/.gitkeep", b"")
-        store.write("AGENTS.md", AGENTS.replace("BRAIN_NAME", name).encode())
+        store.write("AGENTS.md", AGENTS.encode())
         store.write(".gitignore", GITIGNORE.encode())
     emit({"created": str(store.root), "brain": name})
 
@@ -304,14 +320,9 @@ def install(
 
 @app.command("schema", rich_help_panel="Set up")
 def schema(
-    kind: Annotated[
-        Literal["brain", "registry", "eval", "search-reply", "read-reply"],
-        typer.Option(help="Configuration format or command reply to describe."),
-    ] = "brain",
+    kind: Annotated[Kind, typer.Option(help="Configuration format or command reply to describe.")] = "brain",
 ) -> None:
     """Print a configuration or reply JSON Schema; defaults to bf.yaml. No brain selection or network access."""
-    from bf.schemas import document
-
     emit(document(kind), reply=False)
 
 
@@ -326,7 +337,7 @@ def find(
         ),
     ] = "",
     limit: Annotated[int, typer.Option(min=1, max=50, help="Maximum number of results.")] = 10,
-    offset: Annotated[int, typer.Option(min=0, help="Continue at the reply's next_offset.")] = 0,
+    offset: Annotated[int, typer.Option(min=0, max=MAX_OFFSET, help="Continue at the reply's next_offset.")] = 0,
 ) -> None:
     """Search notes and records; results carry refs for bf read."""
     bounds = _option("--scope", pages.scope, scope)
@@ -355,14 +366,15 @@ def exact(
         ),
     ] = "",
     offset: Annotated[
-        int, typer.Option(min=0, help="Continue a listing, relation page or exact text at next_offset.")
+        int,
+        typer.Option(min=0, max=MAX_OFFSET, help="Continue a listing, relation page or exact text at next_offset."),
     ] = 0,
 ) -> None:
     """Read the home page, another page, a note, a note section, a record or an identity with its backlinks."""
     _option("REF", pages.readable, ref)
     stores = select(brain)
     if rel:
-        # An undeclared relationship is a usage error; an unreadable bf.yaml still fails the operation.
+        # An undeclared relation is a usage error; an unreadable bf.yaml still fails the operation.
         try:
             relation(stores, rel)
         except RelationError as error:
@@ -375,7 +387,8 @@ def export(
     kind: Annotated[
         Literal["edges", "identities"],
         typer.Option(
-            help="edges: one claim per line; identities: one note or record per line with every name it answers to."
+            help="edges: one claim per line; identities: each note or record that answers to more than its own "
+            "address, with every name."
         ),
     ] = "edges",
     brain: BrainOption = "",
@@ -493,11 +506,19 @@ def monitor(
         typer.Option(min=5, max=86400, help="Seconds between cycles; overrides bf.yaml watch.interval (default 60)."),
     ] = None,
     poll_interval: Annotated[
-        float | None, typer.Option(min=0.2, max=60, help="Seconds between local history reads (default 2).")
+        float | None,
+        typer.Option(
+            min=0.2,
+            max=60,
+            help="Seconds between local history reads; overrides bf.yaml watch.poll_interval (default 2).",
+        ),
     ] = None,
     notify: Annotated[
         Literal["off", "failure", "success", "all"] | None,
-        typer.Option(help="Desktop notifications: off, failure (default; includes recovery), success or all."),
+        typer.Option(
+            help="Desktop notifications: off, failure (default; includes recovery), success or all; overrides "
+            "bf.yaml watch.notifications."
+        ),
     ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Stream JSON snapshots instead of the interactive dashboard.")
@@ -570,7 +591,8 @@ def report(
     check: Annotated[
         bool,
         typer.Option(
-            help="Exit 1 on overdue or failed scheduled programs, problems, unavailable brains or broken references."
+            help="Exit 1 on scheduled programs that are overdue, never ran or failed, on problems, unavailable brains "
+            "or broken references."
         ),
     ] = False,
     watch: Annotated[
@@ -722,11 +744,14 @@ def main() -> None:
     except ValidationError as error:
         typer.echo("bf: invalid input: " + explain(error), err=True)
         sys.exit(2)
-    except (Error, OSError, UnicodeError) as error:
+    except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
         if isinstance(error, Error):
             message = str(error)
         elif isinstance(error, UnicodeError):
             message = "a file is not valid UTF-8; run bf validate to locate it"
+        elif isinstance(error, sqlite3.DatabaseError):
+            # Retrieval recovers a damaged cache itself; one it cannot open is a cache problem, not a bug.
+            message = pages.CACHE
         else:
             # strerror names the cause without the path.
             cause = f" ({error.strerror})" if error.strerror else ""

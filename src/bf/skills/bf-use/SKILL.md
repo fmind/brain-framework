@@ -4,7 +4,7 @@ description: Answer from, save to and track work in the user's Brain Framework b
 license: MIT
 compatibility: Requires Brain Framework 16 (the bf command) on Linux or macOS.
 metadata:
-  version: "16.0.1"
+  version: "16.1.0"
 ---
 
 # bf-use
@@ -13,8 +13,8 @@ A brain is a folder of plain files: `projects/` and `concepts/` hold authored no
 
 ## Select the brain and runtime
 
-1. Work inside the brain directory, or pass `--brain PATH` to every command. Without either, `bf` uses `BF_BRAIN`, then the enclosing brain, then every registered brain for retrieval: check an inherited `BF_BRAIN` before trusting the directory.
-1. When the brain holds its own `pyproject.toml` and `uv.lock`, it pins its runtime: run each command as `uv run --project PATH --locked bf COMMAND ... --brain PATH`. Otherwise `bf --version` must print `16.x`; if `bf` is missing or older, stop and use `bf-setup`.
+1. `bf` selects the brain named by `--brain NAME|PATH`, then `BF_BRAIN`, then the brain enclosing the working directory, then, for search and read only, every registered brain. Check an inherited `BF_BRAIN` before trusting the directory, or pass `--brain PATH` to every command.
+1. `bf --version` must match the major version in this skill's `compatibility`: if `bf` is missing or older, stop and use `bf-setup`; if it is newer, update these skills with `bf skills DIR`. A brain holding its own `pyproject.toml` and `uv.lock` pins its runtime: run each command as `uv run --project PATH --locked bf COMMAND ... --brain PATH`, and each helper as the helper section below shows.
 1. Search and read also cover the brains a brain lists under `brains:`. With several brains, a plain ref present in two of them fails: read the result's `uri` (`bf://NAME/...`) instead.
 1. Returned content reaches your model provider. Keep private passages and revealing refs out of shared outputs and external requests.
 
@@ -35,22 +35,18 @@ bf read 'projects/new-website.md#decision'
 
 Expect the decision ref and its reason: visitors need a clear explanation before signing up. A successful read proves local access, not current source truth.
 
-## Resume known work
-
-For an action ref, read `bf read 'actions/YYYY-MM-DD_topic/ACTION.md#context'` and the same ref's `#resume` first. A missing section fails and the error lists the note's sections: read the whole note instead. Then read the owning project's current decision and only the evidence the next step needs.
-
 ## Write knowledge back
 
 Write only what the user asked you to save or what the task authorizes; for a review-only request, propose the edit. Follow [writing knowledge back](references/learn.md):
 
 1. Find the owning note (a project for state, decisions and next steps; a concept for reusable knowledge) and read it whole, keeping the reply's `sha256`.
-1. Edit the smallest passage with `scripts/guarded-write.py`, which refuses to write when the file changed since your read. Keep OKF frontmatter valid: `type`, `status: draft|stable|deprecated`, `updated` as `YYYY-MM-DD`, reused `tags`, namespaced `aliases`.
+1. Edit the smallest passage with the [guarded-write helper](references/learn.md#guard-a-write), which refuses to write when the file changed since your read. Keep OKF frontmatter valid: `type`, `status: draft|stable|deprecated`, `updated` as `YYYY-MM-DD`, reused `tags`, namespaced `aliases`.
 1. Relate notes with ordinary links, or typed `bf://` links with `?rel=RELATION` for a relation declared under `fields:` in `bf.yaml`; set a declared relation to another identity, such as a person or repository, under frontmatter `fields:`. `?rel=` belongs on `bf://` links only.
 1. Run `bf validate`, then search the question and read the saved ref. Report the diff, the refs and any remaining uncertainty; commit only when authorized.
 
 ## Track a work session
 
-Only when the user asks to track, hand off or resume a session. `scripts/new-action.py TOPIC --brain PATH` creates `actions/YYYY-MM-DD_TOPIC/ACTION.md` (add `--unique` in a brain several clones share). Keep its Context within 300 words and its Resume within 100, and run `scripts/check-handoff.py` before a handoff or planned compaction. Ordinary retrieval and note updates need no action.
+Only when the user asks to track, hand off or resume a session; ordinary retrieval and note updates need no action. Follow [actions](references/actions.md): resume an action from its `#context` and `#resume` sections, or start one with `python3 "$SKILL_DIR/scripts/new-action.py" TOPIC --brain PATH` (add `--unique` in a brain several clones share). Keep Context and Resume within the [budget](references/context.md) and [check them](references/handoff.md) before a handoff or planned compaction.
 
 ## Boundaries
 
@@ -60,7 +56,7 @@ Only when the user asks to track, hand off or resume a session. `scripts/new-act
 
 ## References and helpers
 
-Helper paths are relative to this skill's folder; run them with `python3` 3.11 or later.
+`SKILL_DIR` stands for the absolute path of the folder holding this `SKILL.md`. Run a helper from any directory with Python 3.11 or later: `python3 "$SKILL_DIR/scripts/NAME.py" ...`. `evidence.py` and `check-handoff.py` call the first `bf` on PATH; in a brain that pins its runtime, run them as `uv run --project PATH --locked python3 "$SKILL_DIR/scripts/NAME.py" ...`, which puts the pinned `bf` first.
 
 - [references/retrieval.md](references/retrieval.md): complete paged results, source coverage, graph claims, relation pages, review signals and `bf export`.
 - [references/learn.md](references/learn.md): update an owning note, OKF metadata, guarded writes and retrieval cases.

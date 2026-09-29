@@ -61,11 +61,21 @@ def plain(value: object) -> str:
 
 
 def local(value: object) -> str:
-    """The local date of a returned UTC time: a note dated 2026-09-25 is local midnight, not the UTC day."""
+    """The local date of a returned time or date: replies state times with their offset, and a date stays its day."""
     try:
         return datetime.fromisoformat(str(value)).astimezone().date().isoformat()
     except ValueError:
         return ""
+
+
+def when(item: dict) -> str:
+    """An item's day or local time as the reply states it: a dated note has no time, a time keeps its offset."""
+    if item.get("date"):
+        return plain(item["date"])
+    try:
+        return datetime.fromisoformat(str(item.get("time", ""))).isoformat(sep=" ", timespec="minutes")
+    except ValueError:
+        return "undated"
 
 
 def link(item: dict) -> str:
@@ -146,7 +156,7 @@ def render(day: str, home: dict, week: dict) -> Iterator[str]:
     yield "## Coming week"
     yield ""
     for item in home.get("upcoming", []):
-        yield f"- {str(item.get('time', ''))[:16].replace('T', ' ')} UTC: {mention(item)}"
+        yield f"- {when(item)}: {mention(item)}"
     if not home.get("upcoming"):
         yield "Nothing is scheduled."
     yield ""

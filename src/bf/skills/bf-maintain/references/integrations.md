@@ -4,7 +4,7 @@ Use once a recurring question and a source are selected and implementation is au
 
 ## Sensors
 
-Start from a reviewed [sensor example](https://github.com/fmind/brain-framework/tree/main/examples/sensors), copied from the release matching `bf --version`, and the [sensor contract](https://fmind.github.io/brain-framework/docs/sensors/). Put the executable in `sensors/` (`bf validate` checks it is an executable file) and declare it disabled first, with an explicit account, folder or channel scope and a known behavior for modification times, pagination, partial content and deletions:
+Start from a reviewed [sensor example](https://github.com/fmind/brain-framework/tree/main/examples/sensors), copied from the release matching `bf --version`, and the [sensor contract](https://fmind.github.io/brain-framework/docs/sensors/). Put the executable in `sensors/` and declare it disabled first, with an explicit account, folder or channel scope and a known behavior for modification times, pagination, partial content and deletions:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
@@ -17,7 +17,7 @@ sensors:
       kind: { value: document }
 ```
 
-`command` is direct argv without a shell; arguments accept `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. `mode: window` (the default) collects a time window each run; `mode: snapshot` returns the whole catalog each run, so records it no longer returns are removed. `refresh` sets how often the sensor is due (0 keeps it manual); `priority: low` quiets a high-volume feed on period and home pages.
+`command` is direct argv without a shell; arguments accept `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. `bf validate` checks that an enabled program is an executable regular file; check a disabled one with `test -x sensors/NAME`. `mode: window` (the default) collects a time window each run; `mode: snapshot` returns the whole catalog each run, so records it no longer returns are removed. `refresh` sets how often the sensor is due (0 keeps it manual); `priority: low` quiets a high-volume feed on period and home pages.
 
 Shared meanings live once under the top-level `fields:` of `bf.yaml` (description, type, cardinality, `relation: true` for identities, optional `broader` and `targets`); the example assumes `kind` is declared there. A sensor's `fields:` maps each one from a JSON pointer into its output (`path`, such as `/attributes/repository_refs`) or a constant (`value`). Emit explicit namespaced identities only (`person:email/address`, `repo:github.com/owner/name`, lowercase as the reviewed examples write them), never display names or names matched by similarity. Keep the upstream modification time in `attributes.updated` and mark incomplete text with `attributes.partial`; BF sets `attributes.observed`. A mapped identity outside its relation's `targets` fails the run without changing evidence. See [good records](https://fmind.github.io/brain-framework/docs/sensors/#good-records) and the [limits](https://fmind.github.io/brain-framework/docs/limits/).
 

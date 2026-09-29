@@ -56,6 +56,12 @@ def test_skills_install_update_and_never_replace_edits(tmp_path: Path) -> None:
     assert skill.read_text().endswith("Local rule.\n")
     assert statuses(run(str(destination), "--force"))["bf-use"] == "updated"
     assert not skill.read_text().endswith("Local rule.\n")
+    # A deleted file leaves the skill incomplete: it is reported like an edit, and --force restores it.
+    (destination / "bf-use/scripts/new-action.py").unlink()
+    deleted = run(str(destination), "--check", code=1)
+    assert deleted["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["scripts/new-action.py"]}
+    assert statuses(run(str(destination), "--force"))["bf-use"] == "updated"
+    assert (destination / "bf-use/scripts/new-action.py").is_file()
 
 
 def test_skills_leave_foreign_and_linked_folders_alone(tmp_path: Path) -> None:

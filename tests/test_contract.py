@@ -60,12 +60,19 @@ def _breaks(old: dict, new: dict, old_root: dict, new_root: dict, path: str, *, 
     for key in ("items", "additionalProperties"):
         if isinstance(old.get(key), dict) and isinstance(new.get(key), dict):
             problems.extend(_breaks(old[key], new[key], old_root, new_root, f"{path}[{key}]", reply=reply))
-    # A reply alternative, such as one read page shape, must keep its match in the new schema.
-    for index, option in enumerate(old.get("oneOf", [])):
+    # An alternative, such as one read page shape, must keep a match in the new schema: a titled one by its title,
+    # an untitled one (such as a nullable value) by any compatible option. `anyOf` only relaxes `oneOf`, since open
+    # reply shapes may overlap.
+    alternatives = new.get("oneOf", []) + new.get("anyOf", [])
+    for index, option in enumerate(old.get("oneOf", []) + old.get("anyOf", [])):
         title = _resolve(option, old_root).get("title")
-        match = next((o for o in new.get("oneOf", []) if _resolve(o, new_root).get("title") == title), None)
+        if title is None:
+            if not any(not _breaks(option, o, old_root, new_root, path, reply=reply) for o in alternatives):
+                problems.append(f"{path}.alternative[{index}]: removed")
+            continue
+        match = next((o for o in alternatives if _resolve(o, new_root).get("title") == title), None)
         if match is None:
-            problems.append(f"{path}.oneOf[{index}] {title}: removed")
+            problems.append(f"{path}.alternative[{index}] {title}: removed")
         else:
             problems.extend(_breaks(option, match, old_root, new_root, f"{path}.{title}", reply=reply))
     return problems
@@ -89,6 +96,11 @@ def test_the_comparison_catches_breaking_changes() -> None:
     assert _breaks(old, retyped, old, retyped, "s", reply=True) == ["s.a: type string became integer"]
     narrowed = {**old, "properties": {**old["properties"], "b": {"enum": ["x"]}}}
     assert _breaks(old, narrowed, old, narrowed, "s", reply=False) == ["s.b: accepted values narrowed"]
+    nullable = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    assert _breaks(nullable, nullable, nullable, nullable, "s", reply=False) == []
+    assert _breaks(nullable, {"anyOf": [{"type": "string"}]}, {}, {}, "s", reply=False) == ["s.alternative[1]: removed"]
+    shapes = {"oneOf": [{"title": "A", "type": "object"}]}
+    assert _breaks(shapes, {"anyOf": shapes["oneOf"]}, {}, {}, "s", reply=True) == []
     required = {**grown, "required": ["a", "c"]}
     assert _breaks(old, required, old, required, "s", reply=False) == ["s: newly required ['c']"]
     assert _breaks(old, required, old, required, "s", reply=True) == []

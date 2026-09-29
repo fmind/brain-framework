@@ -13,7 +13,7 @@ Keep work progress in the tasks and Resume below. `status` describes this note's
 
 ## Context {#context}
 
-Outcome, binding constraints, current decision, material unknowns and at most six evidence refs. At most 300 words and 4 KiB; open long or external evidence only when the next step needs it.
+Outcome, binding constraints, current decision, material unknowns and the evidence refs the next step needs, within the Context budget; open long or external evidence only when the next step needs it.
 
 ## TODO
 
@@ -30,7 +30,7 @@ For a consequential choice: useful alternative, distinguishing assumption, expec
 
 ## Resume {#resume}
 
-Last verified state, blockers and the exact next action, in at most 100 words. Update it before the session ends.
+Last verified state, blockers and the exact next action, within the Resume budget. Update it before the session ends.
 
 ## Outcome
 

@@ -84,7 +84,7 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
             identities=local_identities,
             targets=local_targets,
             exact=exact,
-            limit=bound if bound <= 2**63 - 1 else -1,
+            limit=bound,
             low=pages.low(store),
         )
         known = set(index.sources(connection)) | set(load(store).sensors)

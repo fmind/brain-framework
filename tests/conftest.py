@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import best_match
 from pydantic import TypeAdapter
 
-from bf import replies, retrieve
+from bf import replies, retrieve, schemas
 from bf.config import register
 from bf.models import MAX_REPLY, Record, encode
 from bf.records import path as record_path
@@ -127,7 +127,8 @@ def provider(tmp_path: Path) -> Provider:
     return Provider(tmp_path / "bin", state)
 
 
-# Every reply a test produces must match a published reply schema; both share their definitions.
+# Every reply a test produces must match its strict declaration, which rejects undeclared fields, and the
+# published schema a client validates against, as MCP clients do with `outputSchema`.
 _REPLY = Draft202012Validator(
     {
         "$defs": replies.SEARCH["$defs"],
@@ -136,6 +137,7 @@ _REPLY = Draft202012Validator(
         ],
     }
 )
+_PUBLISHED = [Draft202012Validator(schemas.document(kind)) for kind in ("search-reply", "read-reply")]
 
 
 @pytest.fixture(autouse=True)
@@ -147,6 +149,7 @@ def published_replies(monkeypatch: pytest.MonkeyPatch) -> None:
         result = bounded(value, limit)
         error = best_match(_REPLY.iter_errors(result))
         assert error is None, f"{list(error.absolute_path)}: {error.message[:300]}"
+        assert any(validator.is_valid(result) for validator in _PUBLISHED), "no published reply schema accepts it"
         return result
 
     monkeypatch.setattr(retrieve, "bounded", checked)

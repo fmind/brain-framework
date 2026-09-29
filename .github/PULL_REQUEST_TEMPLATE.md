@@ -12,4 +12,4 @@
 - [ ] User-facing docs, the owning skill and a runnable example with its expected result are updated
 - [ ] `CHANGELOG.md` records user-visible changes under `Unreleased`
 - [ ] No real brain, workspace data, or personal identifier appears in the diff
-- [ ] Any break to a flag, configuration key, stored format, reference format, or MCP tool name is stated above — there is no compatibility layer
+- [ ] Any break to a flag, configuration key, stored format, reference format, reply field or schema, or MCP tool name is stated above — there is no compatibility layer

@@ -100,7 +100,7 @@ Preview the review before creating an action. Run from the brain folder with Pyt
 routines/weekly-review.py "$PWD" 2026-09-27T12:00:00Z
 ```
 
-Output starting with OKF metadata (`type: action`, `status: draft`) is the review; empty output means there is nothing to review. The timestamp sets the note's date; page reads use the current brain. `bf run weekly-review` creates the action now, and `bf update` creates it when due. A second run on the same day keeps the existing action.
+Output starting with OKF metadata (`type: action`, `status: draft`) is the review; empty output means there is nothing to review. Its Coming week lists each item by its `date`, or by the local time `bf read` returns, with its offset, such as `2026-09-26 11:00+02:00`. The timestamp sets the note's date; page reads use the current brain. `bf run weekly-review` creates the action now, and `bf update` creates it when due. A second run on the same day keeps the existing action.
 
 ## Contract
 

@@ -21,18 +21,23 @@ This site follows the repository's current code, which can be newer than your in
 
 ## Update
 
-Stop watchers and scheduled collection, read the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md) and back up the idle brain. A major release lists its manual upgrade steps in the changelog; apply them before resuming collection.
+Stop watchers and scheduled collection, read the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md) and back up the idle brain. Then upgrade and confirm the new version:
 
 ```bash
 uv tool upgrade brain-framework
-cd ~/brain
 bf --version
+```
+
+For a major release, apply the changelog's upgrade steps now, before collecting again. Then check the brain and update the agent skills:
+
+```bash
+cd ~/brain
 bf validate
 bf eval
 bf skills ~/.agents/skills
 ```
 
-Expect `"valid":true` from validation and `"passed":true` from your retrieval cases; otherwise fix the reported problem first, with [Troubleshooting](troubleshooting.md). `bf skills` updates the skills it installed, and leaves folders you edited unchanged; see [skill installation](agents.md#install-the-skills).
+Expect `"valid":true` from validation and `"passed":true` from your retrieval cases; otherwise fix the reported problem first, with [Troubleshooting](troubleshooting.md). `bf skills` updates the skills it installed and never overwrites a folder that reports `modified` (you edited it) or `unmanaged` (it has no `.bf-skill.json` manifest, such as a copy made before 16.0). Either status makes the command exit 1 and leaves that folder unchanged: back up any edits you want to keep, then rerun `bf skills ~/.agents/skills --force`. See [skill installation](agents.md#install-the-skills).
 
 `bf init` writes a brain's `AGENTS.md` once. Merge new guidance by hand, as [Refresh brain instructions](agents.md#refresh-brain-instructions) shows. Regenerate native schedules with `bf schedule` when the changelog asks or the `bf` executable moved.
 
@@ -40,12 +45,12 @@ Use the same release on every clone and collecting machine of a team brain. Rest
 
 ## Pin a brain's runtime
 
-A brain can pin its own BF release as a uv project, so every clone runs the same version:
+A brain can pin its own BF release as a uv project, so every clone runs the same version. This pins the version your installed `bf` reports:
 
 ```bash
 cd ~/brain
 uv init --bare --python 3.14
-uv add "brain-framework==16.0.1"
+uv add "brain-framework==$(bf --version)"
 echo /.venv/ >> .gitignore
 uv run --locked bf --version
 ```

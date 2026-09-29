@@ -160,18 +160,18 @@ Each sensor's `fields` maps a declared field to exactly one `path` or literal `v
 | `/links`                  | The record's link list.              |
 | `/attributes/people/0`    | The first item in the `people` list. |
 
-Escape `/` in a key as `~1` and `~` as `~0`. Missing members are absent; traversing a scalar fails. There are no wildcards, expressions or implicit conversions. Sensors print the fixed envelope below and cannot supply `fields` themselves.
+Escape `/` in a key as `~1` and `~` as `~0`. Missing members are absent; traversing a scalar fails. There are no wildcards, expressions or implicit conversions. Every record a sensor prints follows the fixed format below; a sensor cannot supply `fields` itself.
 
-| Envelope field | Rule                                                                                                           |
-| -------------- | -------------------------------------------------------------------------------------------------------------- |
-| `id`           | 1 to 4,096 characters without control characters; at most 7,988 once percent-encoded, so it fits a BF address. |
-| `title`        | 1 to 4,096 characters without control characters.                                                              |
-| `text`         | Optional; at most 4,194,304 characters.                                                                        |
-| `time`         | Optional ISO 8601 timestamp with a timezone.                                                                   |
-| `url`          | Optional; at most 8,192 characters without control characters.                                                 |
-| `links`        | At most 1,000 identities or URLs of at most 8,192 characters.                                                  |
-| `aliases`      | At most 1,000 namespaced identities, never display names.                                                      |
-| `attributes`   | JSON values; `updated`, `observed` and `partial` are [reserved](#record-revisions-and-provenance).             |
+| Record key   | Rule                                                                                                           |
+| ------------ | -------------------------------------------------------------------------------------------------------------- |
+| `id`         | 1 to 4,096 characters without control characters; at most 7,988 once percent-encoded, so it fits a BF address. |
+| `title`      | 1 to 4,096 characters without control characters.                                                              |
+| `text`       | Optional; at most 4,194,304 characters.                                                                        |
+| `time`       | Optional ISO 8601 timestamp with a timezone.                                                                   |
+| `url`        | Optional; at most 8,192 characters without control characters.                                                 |
+| `links`      | At most 1,000 identities or URLs of at most 8,192 characters.                                                  |
+| `aliases`    | At most 1,000 namespaced identities, never display names.                                                      |
+| `attributes` | JSON values; `updated`, `observed` and `partial` are [reserved](#record-revisions-and-provenance).             |
 
 Fields other than `text` must fit 2 MiB. Text must be valid Unicode: a lone surrogate, as from a non-UTF-8 file name, is rejected with its field named. One invalid record fails the whole collection before anything is saved. Only mapped fields apply to a sensor, and `bf validate` checks stored fields against the current declarations, including sources no longer configured.
 

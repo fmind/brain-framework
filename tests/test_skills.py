@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import os
 import re
@@ -209,6 +210,29 @@ def test_action_helper_writes_the_template_sections(brain: Store) -> None:
     template = (SKILLS / "bf-use/templates/action.md").read_text(encoding="utf-8")
     assert re.findall(r"^## .*", created, re.MULTILINE) == re.findall(r"^## .*", template, re.MULTILINE)
     assert validate(brain)["valid"]
+
+
+def test_action_helper_removes_only_what_a_failed_write_created(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = importlib.util.spec_from_file_location("new_action", SKILLS / "bf-use/scripts/new-action.py")
+    assert spec is not None
+    assert spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    # Text the file cannot encode fails once ACTION.md exists: the file and both new folders go.
+    monkeypatch.setattr(helper, "skeleton", lambda *_: "\ud800")
+    with pytest.raises(UnicodeEncodeError):
+        helper.start(brain.root, "review", unique=False)
+    assert not (brain.root / "actions").exists()
+    # An interruption removes the new action folder, never an existing session or the actions folder it holds.
+    other = "actions/2026-09-27_review/ACTION.md"
+    brain.write(other, b"---\ntype: action\nstatus: draft\n---\n\n# Review\n")
+    monkeypatch.setattr(helper, "skeleton", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
+    with pytest.raises(KeyboardInterrupt):
+        helper.start(brain.root, "review", unique=True)
+    assert sorted(path.relative_to(brain.root).as_posix() for path in (brain.root / "actions").rglob("*")) == [
+        "actions/2026-09-27_review",
+        other,
+    ]
 
 
 def test_unedited_templates_validate_and_keep_their_documented_anchors(brain: Store) -> None:

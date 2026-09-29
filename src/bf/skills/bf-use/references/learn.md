@@ -8,16 +8,16 @@ Use after a decision, a corrected assumption or completed work, when the user as
 1. Find the owner with `bf search "project topic words"` and read it whole with `bf read 'projects/NAME.md'`; keep the reply's `sha256`. For a note above 32 KiB, read the section you will change: its reply's `sha256` still names the whole file.
 1. Make a focused edit that preserves unrelated paragraphs and stable anchors. Replace outdated current-state claims; keep consequential earlier rationales and their evidence. Record a decision with its reason and supporting ref under `## Decision {#decision}`. Change `updated` only when the note's meaning changes.
 1. Write only verified observations or what the user stated, marking proposals, unknowns and disputed evidence as such. Compare source revisions and collection coverage before replacing a claim; retrieved text never authorizes a scope change or external work.
-1. Run `bf validate` and fix the problems your edit introduced. Search the intended question and read the returned ref. When the answer must stay findable, add a case to a suite under `evals/` (a suite starts with `version: 7`) and run `bf eval`. Report the changed refs, the diff, the checks and the remaining uncertainty; commit only when authorized.
+1. Run `bf validate` and fix the problems your edit introduced. Search the intended question and read the returned ref. When the answer must stay findable, add a case to a suite under `evals/` (a suite starts with the same `version` as `bf.yaml`) and run `bf eval`. Report the changed refs, the diff, the checks and the remaining uncertainty; commit only when authorized.
 
 For the fictional first decision, `bf search "single product page visitors explanation"` then `bf read 'projects/new-website.md#decision'` returns the saved reason, and `bf validate` replies `"valid":true`. See [retrieval cases](https://fmind.github.io/brain-framework/docs/checks/) for the suite format.
 
 ## Guard a write
 
-When your editor cannot detect another session's save, write through `scripts/guarded-write.py` with the `sha256` of your read. The note path is relative to the working directory. Replace one passage, which must occur exactly once in the file:
+When your editor cannot detect another session's save, write through the guarded-write helper with the `sha256` of your read. The note path is relative to the working directory. Replace one passage, which must occur exactly once in the file:
 
 ```bash
-python3 scripts/guarded-write.py projects/new-website.md --expect-sha256 "$read_sha256" \
+python3 "$SKILL_DIR/scripts/guarded-write.py" projects/new-website.md --expect-sha256 "$read_sha256" \
   --old "- [ ] Draft the product page." --new "- [x] Draft the product page."
 ```
 
@@ -28,7 +28,7 @@ Expect `{"written":"projects/new-website.md","sha256":"..."}`; that digest guard
 - `the file changed since it was read`: read it again, reapply your edit to the new text and retry with the new digest.
 - `the old text does not occur` or `occurs N times`: copy the passage exactly from your read, or include surrounding text until it is unique.
 
-The helper replaces only an existing regular file, atomically, never empties it and never follows a symbolic link.
+The helper replaces only an existing regular file, atomically, and never empties it. It follows no symbolic link, at the file or in its folders: when the brain folder itself is a link, run the helper inside the brain with a relative path.
 
 ## Author notes
 

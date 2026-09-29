@@ -16,23 +16,24 @@ Read the file, field or program the diagnostic names before retrying. Diagnostic
 
 ## Find the right fix
 
-| Symptom                                     | First check                                                                | Next step                                                                                                    |
-| ------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `bf: command not found`                     | Did uv finish installing BF?                                               | Run `uv tool update-shell`, open a new shell and retry `bf --version`.                                       |
-| No brain, or the wrong one                  | Working directory and `BF_BRAIN`.                                          | Pass `--brain ~/brain`; see [brain selection](configuration.md#select-a-brain).                              |
-| `pass --brain PATH or run inside the brain` | Did `collect`, `run`, `update`, `watch` or `schedule` run outside a brain? | Run inside it or pass `--brain PATH`; registration selects brains for retrieval only.                        |
-| An option is unknown                        | `bf --version` and `bf COMMAND --help`.                                    | [Match the docs to your version](upgrades.md#match-the-docs-to-your-version).                                |
-| `bf.yaml declares version …`                | The brain format in `bf.yaml` and `evals/*.yaml`.                          | Apply the upgrade steps in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md). |
-| A configuration field is rejected           | The named file and field.                                                  | Fix its type, spelling or duplicate key; use the [editor schema](schema.md#editor-schemas).                  |
-| `reference not found; … did you mean …?`    | The suggested name.                                                        | Read the suggestion, or search for the evidence. A missing section lists the note's sections.                |
-| `"valid":false`                             | Each problem's `file` and `error`.                                         | Repair them and validate again; see [Check your brain](checks.md).                                           |
-| Search misses a known answer                | The exact note or record ref, and `unmatched`.                             | Use words from that evidence without a scope; see [search](search.md#search).                                |
-| A reply has `problems` or `stale`           | Skipped files, references or a busy writer.                                | Resolve them, or retry after the writer finishes.                                                            |
-| `reference exists in several brains`        | Several selected brains hold that ref.                                     | Read the result's `uri`, a `bf://NAME/...` address.                                                          |
-| A program fails                             | `bf status` and its `logs/NAME.log`.                                       | See [a program fails](#a-program-fails).                                                                     |
-| A program never runs automatically          | `enabled`, `refresh` and selectors.                                        | See [updates do not run](#updates-do-not-run).                                                               |
-| `state directory … is inaccessible`         | The named directory and `XDG_STATE_HOME`.                                  | Make it yours and writable, or set `XDG_STATE_HOME`; see [local state](configuration.md#local-state).        |
-| An agent cannot connect                     | The same read in your terminal.                                            | Check absolute paths and restart the host; see [MCP troubleshooting](mcp.md#if-the-connection-fails).        |
+| Symptom                                     | First check                                                                | Next step                                                                                                             |
+| ------------------------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `bf: command not found`                     | Did uv finish installing BF?                                               | Run `uv tool update-shell`, open a new shell and retry `bf --version`.                                                |
+| No brain, or the wrong one                  | Working directory and `BF_BRAIN`.                                          | Pass `--brain ~/brain`; see [brain selection](configuration.md#select-a-brain).                                       |
+| `pass --brain PATH or run inside the brain` | Did `collect`, `run`, `update`, `watch` or `schedule` run outside a brain? | Run inside it or pass `--brain PATH`; registration selects brains for retrieval only.                                 |
+| An option is unknown                        | `bf --version` and `bf COMMAND --help`.                                    | [Match the docs to your version](upgrades.md#match-the-docs-to-your-version).                                         |
+| `bf.yaml declares version …`                | The brain format in `bf.yaml` and `evals/*.yaml`.                          | Apply the upgrade steps in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md).          |
+| A configuration field is rejected           | The named file and field.                                                  | Fix its type, spelling or duplicate key; use the [editor schema](schema.md#editor-schemas).                           |
+| `reference not found; … did you mean …?`    | The suggested name.                                                        | Read the suggestion, or search for the evidence. A missing section lists the note's sections.                         |
+| `"valid":false`                             | Each problem's `file` and `error`.                                         | Repair them and validate again; see [Check your brain](checks.md).                                                    |
+| Search misses a known answer                | The exact note or record ref, and `unmatched`.                             | Use words from that evidence without a scope; see [search](search.md#search).                                         |
+| A reply has `problems` or `stale`           | Skipped files, references or a busy writer.                                | Resolve them, or retry after the writer finishes.                                                                     |
+| `reference exists in several brains`        | Several selected brains hold that ref.                                     | Read the result's `uri`, a `bf://NAME/...` address.                                                                   |
+| A program fails                             | `bf status` and its `logs/NAME.log`.                                       | See [a program fails](#a-program-fails).                                                                              |
+| A program never runs automatically          | `enabled`, `refresh` and selectors.                                        | See [updates do not run](#updates-do-not-run).                                                                        |
+| `state directory … is inaccessible`         | The named directory and `XDG_STATE_HOME`.                                  | Make it yours and writable, or set `XDG_STATE_HOME`; see [local state](configuration.md#local-state).                 |
+| `state directory may not contain symlinks`  | Whether `~/.local/state`, `XDG_STATE_HOME` or its `bf/` folder is a link.  | Replace the link with a real folder, or set `XDG_STATE_HOME` to one; see [local state](configuration.md#local-state). |
+| An agent cannot connect                     | The same read in your terminal.                                            | Check absolute paths and restart the host; see [MCP troubleshooting](mcp.md#if-the-connection-fails).                 |
 
 ## A program fails
 
@@ -53,7 +54,7 @@ A program runs automatically only when it is enabled, has a nonzero `refresh`, i
 
 ## Recover the cache or an interrupted write
 
-`bf status` reports the cache as `ready`, `busy` while a writer updates it, or `stale` while an interrupted record write awaits recovery; then `"pending_transaction":true` and a problem name the command to run. Let active collection finish, then:
+`bf status` reports the cache as `ready`, or `busy` while a writer updates it. While an interrupted record write awaits recovery, it reports `stale` (the last cache, not refreshed) or `missing` (no cache yet), with `"pending_transaction":true` and a problem naming the command to run. This status `stale` differs from the `stale` of search and read replies, which marks results served while another writer updates the cache. Let active collection finish, then:
 
 ```bash
 bf build
@@ -61,7 +62,7 @@ bf validate
 bf status --check
 ```
 
-`bf build` recovers the interrupted write and rebuilds the cache from the files. Before replacing records, a write keeps hard-link backups of them in `memories/.pending/`. Recovery restores only the files that write changed, so it takes about a second; keep that folder until it succeeds. `bf update`, and therefore `bf watch`, recovers too; search and read never do.
+`bf build` recovers the interrupted write and rebuilds the cache from the files. Before replacing records, a write keeps hard-link backups of them in `memories/.pending/`. Recovery restores only the files that write changed, so it takes about a second; keep that folder until it succeeds. `bf collect`, `bf update` and `bf watch` also recover it before writing; search and read never do.
 
 The rebuild fills `.bf/index.sqlite.new` beside the live cache and replaces it when complete: searches keep answering meanwhile. `bf build` exits 1 when its `skipped` count shows unreadable files; `bf validate` names them. A damaged cache is discarded and rebuilt on its own. An exact read that meets an active write returns within about 3 seconds, marked `stale`: retry it for the final content.
 

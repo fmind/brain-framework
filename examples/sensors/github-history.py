@@ -217,13 +217,16 @@ def collect(repository: str, kind: str, start: str, end: str, branch: str) -> li
             if kind == "pulls":
                 if type(item["number"]) is not int or item["number"] <= 0:
                     raise InvalidError("GitHub returned an invalid pull request identity")
+                # One extra request per selected PR: only the detail states whether it was merged.
                 details, _ = request(f"repos/{repository}/pulls/{item['number']}", {})
                 if not isinstance(details, dict) or details.get("number") != item["number"]:
                     raise InvalidError("GitHub returned an invalid pull request detail")
-                if not when <= instant(details["updated_at"]) < finish:
-                    raise InvalidError(
-                        "GitHub returned pull request detail outside the listed window; retry the window"
-                    )
+                modified = instant(details["updated_at"])
+                if modified < when:
+                    raise InvalidError("GitHub returned pull request detail older than its listing; retry the window")
+                if modified >= finish:
+                    # Modified again after the listing: its latest modification belongs to the next window.
+                    continue
                 item = {**details, "pull_request": {"merged_at": details["merged_at"]}}
             value = record(repository, kind, item)
             size += len(json.dumps(value, ensure_ascii=True).encode()) + 2

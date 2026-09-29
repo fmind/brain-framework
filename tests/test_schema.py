@@ -123,6 +123,14 @@ def test_tagged_yaml_failures_are_safe(value: bytes) -> None:
     assert "private-key" not in str(failure.value)
 
 
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-32", "latin-1"])
+def test_yaml_other_than_utf8_is_named_not_decoded(encoding: str) -> None:
+    # PyYAML would read UTF-16 or UTF-32 with a byte-order mark; brain files and the registry are UTF-8 only.
+    with pytest.raises(Error, match=r"^config.yaml: YAML is not UTF-8$"):
+        yaml_object("brains: {café: {path: ~/brain}}\n".encode(encoding), "config.yaml")
+    assert yaml_object("\ufeffname: café\n".encode(), "bf.yaml") == {"name": "café"}
+
+
 @pytest.mark.parametrize("loader", ["default", "pure"])
 def test_yaml_constructor_failures_are_safe_with_either_parser(loader: str) -> None:
     program = """

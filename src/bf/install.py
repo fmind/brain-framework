@@ -53,7 +53,9 @@ def _state(store: Store, skill: str, wanted: dict[str, str]) -> tuple[str, list[
             if digest(store.read(f"{skill}/{name}")) != value:
                 edited.append(name)
         except FileNotFoundError:
-            continue
+            # A deleted file the packaged skill still needs leaves it incomplete; `--force` restores it.
+            if name in wanted:
+                edited.append(name)
         except Error:
             edited.append(name)
     if edited:

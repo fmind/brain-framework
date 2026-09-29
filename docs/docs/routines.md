@@ -16,7 +16,7 @@ A routine's `output` decides what its stdout becomes. `log`, the default, keeps 
 
 ## Run routines from hooks
 
-A Git pre-commit hook can refuse a commit while the brain has validation problems. The routine is `bf validate` itself. Add it to `bf.yaml`:
+A Git pre-commit hook can refuse a commit while the brain has validation problems. The brain must be a Git repository: if it is not yet, run `git init` inside it first. The routine is `bf validate` itself. Add it to `bf.yaml`:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/routines/

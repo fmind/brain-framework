@@ -31,7 +31,7 @@ Markdown from another tool, such as an Obsidian vault, becomes OKF when imported
 - Keep only namespaced identities (`scheme:value`) in `aliases`; mention display names in the body instead.
 - Move other metadata that matters, such as an owner or a due date, into the body, into a declared field under `fields:` or into `stale_after` for a review deadline; drop the rest.
 - Convert wiki links (`[[Page]]`) into relative Markdown links to the imported notes, and embedded images into links to files under `assets/`.
-- Files kept in an action's `inputs/` or `outputs/` stay ordinary Markdown: only `title`, `type`, `status`, `updated`, `summary` and `description` apply there. Body links and images are validated everywhere.
+- Files kept in an action's `inputs/` or `outputs/` stay ordinary Markdown, with only the few metadata keys the `bf-use` action guide lists. Body links and images are validated everywhere.
 
 For example, a fictional deployment handbook overview might say: "The [deployment handbook](https://example.com/handbook/deployment) covers prerequisites, rollout checks and rollback. Fetch its current rollback section through the team's authenticated documentation reader before preparing a recovery plan." Replace the link and access method with what you inspected; a pointer is not proof that the source stays accessible or unchanged.
 

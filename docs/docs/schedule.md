@@ -12,7 +12,17 @@ Keep reviewed sensors and routines current with their `enabled` and `refresh` se
 | Observe another collector                 | `bf status --watch`; it executes nothing.                                 |
 | Run unattended on a running machine       | `bf schedule`, then install the generated systemd, launchd or cron files. |
 
-BF installs no background service. [Check your programs](#check-before-scheduling) before starting collection.
+BF installs no background service. First run your programs once by hand.
+
+## Check before scheduling
+
+```bash
+bf update --dry-run    # list due work; run nothing
+bf update              # run due sensors, then routines
+bf status --check
+```
+
+The dry run lists due programs with their windows, and names under `manual` the enabled programs with `refresh: 0` that updates skip. A healthy `bf status --check` exits 0. Set `enabled: false` to stop a program, or `refresh: 0` to keep it manual. Keep CI for offline `bf validate` and `bf eval`; for a shared source, designate one [collecting laptop](team.md#collect-on-a-laptop).
 
 ## Watch collection
 
@@ -54,7 +64,7 @@ bf watch --json     # run due work and stream JSON Lines
 
 Observation shows local history alongside a native scheduler. It offers `u` to reread and has no pause. Without an interactive terminal, it fails and suggests `bf status`.
 
-`bf watch --json` writes a snapshot every `poll_interval` with `brain`, `running`, `message` and one row per program. A row's `status` is the dashboard state: `failed`, `never`, `due`, `fresh`, `manual` or `disabled`. Times show your local offset, and absent values are empty strings or null. The [`Row` class](https://github.com/fmind/brain-framework/blob/main/src/bf/watch.py) defines every row field. A JSON watcher always collects and fails while another watcher owns the brain.
+`bf watch --json` writes a snapshot every `poll_interval` with `brain`, `running`, `message` and `programs`, one row per program. A row's `status` is the dashboard state: `failed`, `never`, `due`, `fresh`, `manual` or `disabled`. Times show your local offset, and absent values are empty strings or null. The [`Row` class](https://github.com/fmind/brain-framework/blob/main/src/bf/watch.py) defines every row field. A JSON watcher always collects and fails while another watcher owns the brain.
 
 ## Watch preferences
 
@@ -92,7 +102,7 @@ bf watch --sensor git-commits --routine weekly-review
 bf schedule --sensor git-commits --name git-only
 ```
 
-With no selector, every configured program is eligible, including programs added later. With any selector, **only the named programs** are. Unknown names fail before anything runs. Selectors never force a disabled or manual program to run.
+With no selector, every configured program is eligible, including programs added later. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run.
 
 ## Generate a native schedule
 
@@ -116,7 +126,7 @@ Review the programs and the generated environment, then follow the returned comm
 <details markdown="1">
 <summary>Scheduler behavior and host lifecycle</summary>
 
-Systemd timers catch up missed triggers and add up to 30 seconds of jitter. LaunchAgents coalesce occurrences missed during sleep; neither replays runs missed while powered off, and cron skips them. Stopping a job allows 60 seconds for an update to roll back an interrupted record write. Each program's `timeout` bounds its run; there is no total job timeout.
+Systemd timers run a trigger missed while the machine was off once after it starts again (`Persistent=true`), and add up to 30 seconds of jitter. LaunchAgents coalesce triggers missed during sleep into one run, but do not replay those missed while powered off. Cron skips missed triggers. Stopping a job allows 60 seconds for an update to roll back an interrupted record write. Each program's `timeout` bounds its run; there is no total job timeout.
 
 Use a running systemd user manager on Linux and a logged-in user's LaunchAgent on macOS. ChromeOS stops its Linux environment at logout, and WSL needs a running distribution. See the [ChromeOS lifecycle](https://www.chromium.org/chromium-os/developer-library/guides/containers/containers-and-vms/#lifecycles), [WSL systemd](https://learn.microsoft.com/en-us/windows/wsl/systemd) and [Apple scheduling](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html) guides.
 
@@ -128,18 +138,8 @@ Use one execution owner per program. A second interactive `bf watch` on the same
 
 Updates of one brain run one at a time. A second update waits up to 10 minutes, then computes its own due list, or fails with `another update is still active`. `bf collect` keeps its own lock per sensor. Removing a systemd or launchd job with the returned commands also stops an active update; removing a cron line stops future runs only.
 
-## Check before scheduling
-
-```bash
-bf update --dry-run    # list due work; run nothing
-bf update              # run due sensors, then routines
-bf status --check
-```
-
-The dry run lists due programs with their windows, and names under `manual` the enabled programs with `refresh: 0` that updates skip. A healthy `bf status --check` exits 0. Set `enabled: false` to stop a program, or `refresh: 0` to keep it manual. Keep CI for offline `bf validate` and `bf eval`; for a shared source, designate one [collecting laptop](team.md#collect-on-a-laptop).
-
 ## Timing and health
 
-A scheduled program is `fresh` when its last success on this machine is within twice its `refresh`, and `overdue` after that; `never` means no local success. `bf status --check` exits 1 for an enabled scheduled program that is `overdue`, `never` succeeded or last failed. Run it on the collecting machine: run history is local, even when records are shared.
+A scheduled program is `fresh` when it succeeded on this machine within twice its `refresh`, `overdue` when it has succeeded but not within that time, and `never` when it has no local success. A program with `refresh: 0` is `manual`; a disabled program or historical source is `unknown`. `bf status --check` exits 1 for an enabled scheduled program that is `overdue`, `never` succeeded or last failed. Run it on the collecting machine: run history is local, even when records are shared.
 
 Choose a timer interval shorter than the smallest nonzero `refresh`. With an hourly sensor and a 15-minute timer, a check 59 minutes after the last success skips the sensor, and the next check, at 74 minutes, runs it. A success timestamp in the future, after a clock correction, makes the program due at once. Long pauses catch up at most 30 days.

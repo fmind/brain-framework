@@ -19,12 +19,12 @@ bf search "product page" --scope projects
 
 The first search finds the decision's reason; the second searches project notes only. Any query word can match, and results matching more of the words rank higher. Put variants in one query, such as `signup "sign up" registration`: BF does not translate or expand words.
 
-| Write                              | To match                                                              |
-| ---------------------------------- | --------------------------------------------------------------------- |
-| `visitors signup`                  | Either word, in any form English stemming relates, such as `visitor`. |
-| `"clear explanation"`              | The exact phrase.                                                     |
-| `synchro*`                         | Words starting with `synchro`, such as `synchronizes`.                |
-| `repo:github.com/team/new-website` | The identity's owner and every item linking to it.                    |
+| Write                                 | To match                                                              |
+| ------------------------------------- | --------------------------------------------------------------------- |
+| `visitors signup`                     | Either word, in any form English stemming relates, such as `visitor`. |
+| `"clear explanation"`                 | The exact phrase.                                                     |
+| `synchro*`                            | Words starting with `synchro`, such as `synchronizes`.                |
+| `repo:github.com/example/new-website` | The identity's owner and every item linking to it.                    |
 
 Each item has a `title`, an `excerpt` and a `ref`. A note states its `date`; a record states its event `time` with your local offset. `sections` lists up to three other matching sections of the same note, and `unmatched` names query words found nowhere, so you can rephrase:
 
@@ -46,7 +46,7 @@ If a query misses, use the evidence's own words and drop the scope. The sample s
 | `memories/brief`, `memories/brief/7d` | One source, optionally within a period.                                |
 | `today`, `7d`, `2026-09`              | A period of local time.                                                |
 | `2026-09-21..2026-09-25`              | Local days from the first through the last, inclusive.                 |
-| `repo:github.com/team/new-website`    | The identity's owner and the items linking to it.                      |
+| `repo:github.com/example/new-website` | The identity's owner and the items linking to it.                      |
 | `bf://brain/tags/website`             | Notes carrying that tag; see [tag rules](link-reference.md#tag-rules). |
 
 ## Read a ref
@@ -62,10 +62,10 @@ The `text` field holds the original Decision section. Omit `#decision` to read t
 | Note     | `bf read projects/new-website.md`             | Whole note, backlinks and the claims it makes.                                           |
 | Section  | `bf read projects/new-website.md#decision`    | That section only.                                                                       |
 | Record   | `bf read brief:website-brief`                 | The [collected brief](getting-started.md#collect-your-first-source).                     |
-| Identity | `bf read repo:github.com/team/new-website`    | Its owning note, after [declaring the alias](links.md#give-a-subject-a-stable-identity). |
+| Identity | `bf read repo:github.com/example/new-website` | Its owning note, after [declaring the alias](links.md#give-a-subject-a-stable-identity). |
 | Relation | `bf read projects/new-website.md --rel cites` | Every item citing the note: a [relation page](retrieval.md#relation-pages).              |
 
-A whole read previews the five newest backlinks of each relation, each with a short `excerpt` and single-value `fields` such as a status. A note above 32 KiB opens with its `outline` of section refs, its backlinks and its first 4 KiB: read the section you need, or follow `next_offset`.
+A whole read previews the five newest backlinks of each relation, each with a short `excerpt` and single-value `fields` such as a status. A note above 32 KiB returns its text in pages. The first page carries its backlinks and, when the note has sections, an `outline` of section refs with only the first 4 KiB of text: read the section you need, or follow `next_offset`.
 
 With several brains selected, each result also names its `brain` and a `uri` such as `bf://brain/projects/new-website.md#decision`. Read the `uri`: a plain ref that exists in two brains fails.
 
@@ -81,7 +81,7 @@ Pages are computed views for browsing:
 | `bf read actions`                | Find a session to resume.                                      |
 | `bf read 7d`                     | Browse the last seven days of dated notes and records.         |
 | `bf read 2026-09-21..2026-09-25` | Browse a range of local days.                                  |
-| `bf read memories`               | Inspect each source's records and collection coverage.         |
+| `bf read memories`               | See each source's record count, freshness and coverage.        |
 | `bf read tags`                   | List topic labels and their note counts.                       |
 
 For the New website project, `bf read projects` shows `"next":"Draft the product page."` and `bf read tasks` lists that checkbox with its `ref` and `line`. A project with `"review":true` needs attention; `review_reasons` says why. Pages use saved dates and never fetch anything. The [page reference](retrieval.md#pages) lists every page and its rules.

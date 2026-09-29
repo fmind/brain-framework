@@ -4,6 +4,40 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v16.1.0](https://github.com/fmind/brain-framework/releases/tag/v16.1.0) - 2026-09-29
+
+A review release: no format or reply change is required. It fixes the published reply schemas, which rejected some valid replies, and several failure paths; the skills, examples and documentation are clearer and match the code.
+
+Upgrade: `uv tool upgrade brain-framework`, then `bf skills DIR` to update unedited skills. Re-copy the example `weekly-review.py`, `github-history.py`, `git-history.py` or `local-documents.py` if your brain uses one, and merge the new `AGENTS.md` guidance as [Refresh brain instructions](https://fmind.github.io/brain-framework/docs/agents/#refresh-brain-instructions) shows. From 15.x, apply the 16.0.1 steps first: `bf skills` reports skill copies made before 16.0 as `unmanaged` and leaves them; back up any edits and rerun it with `--force`.
+
+### Fixed
+
+- The published reply schemas (`bf schema --kind read-reply`, MCP `outputSchema`) accept every valid reply: an empty period page, such as `bf read 7d` in a new brain, matched two page shapes, so MCP clients that validate structured output failed the read. Reply shapes are now alternatives (`anyOf`), and tests validate every reply against the published schemas too.
+- A record's `attributes` and `fields` are returned exactly as stored: replies no longer convert instants inside them to local time or drop an attribute named `time` beside `date`.
+- A collection that would change more than 100,000 records fails like any other collection error, recorded in history with its backoff, instead of exiting as invalid input and stopping `bf update`.
+- An unrecoverable cache error prints `the search cache is unavailable; run bf build` in the CLI and MCP instead of a traceback.
+- A read waiting for another writer to build a missing cache fails after one wait, naming the writer, instead of retrying for up to six minutes.
+- A program that cannot start is reported as such even when its log cannot be written.
+- YAML files other than UTF-8, such as UTF-16 with a byte-order mark, are rejected naming the file.
+- `bf skills --check` reported a skill with a deleted file as `current`: it is now `modified` and lists the file under `edited`; `--force` restores it.
+- A reply names an unavailable brain once, worded as its pages report it.
+- `bf search` and `bf read` reject `--offset` above 2^53−1 as invalid input (exit 2), like the MCP tools.
+
+### Changed
+
+- `bf update --sensor` and `--routine` suggest close names for an unknown program.
+- `bf init` writes the same `AGENTS.md` for every brain (`bf://NAME/...`), so comparing it with a scratch brain shows only template changes. It asks agents to update notes when the user asks or the task authorizes it, and never to edit `memories/`.
+- Help text states that `watch` options override `bf.yaml`, that `status --check` also fails on programs that never succeeded and which items `export --kind identities` lists.
+- Skills: helpers run from any directory as `python3 "$SKILL_DIR/scripts/NAME.py"`, and through `uv run --project PATH --locked` in a brain that pins its runtime. Version checks follow each skill's `compatibility` instead of a written version. `guarded-write.py` refuses a symbolic link anywhere in the note's path; run it from inside the brain with a relative path. `new-action.py` removes what it created when its write fails. `bf-maintain` explains each `bf status` field, and duplicated rules now live in one guide each.
+- Examples: `weekly-review.py` shows times with their offset instead of labelling local times as UTC. `github-history.py` skips a pull request updated during its run, which the next window collects. `git-history.py` requires Git 2.37 and says so. `local-documents.py` keeps the text read before an Office part's element or nesting limit and marks the record `partial` instead of failing the snapshot. The sensors README adds a Calendar agenda configuration, and example brains ignore `logs/`.
+- Documentation: Install and update and the four-tool walkthrough move to Start here, Troubleshooting to Reference. The upgrade steps separate the version upgrade from the manual steps of a major release and explain `modified` and `unmanaged` skills. The docs now say that `overdue` means no success within twice the refresh, that a status `cache` of `stale` or `missing` awaits recovery, and that an exact read across brains fails while one of them is unavailable. They also document the state-directory symlink error and the corrected page sizes, log limits and missed-schedule behavior.
+
+### Development
+
+- `scripts/push-and-tag X.Y.Z` pushes `main`, waits for CI on that commit and tags it only after success, whatever shell runs it; `tests/test_release.py` covers the release scripts, and CI validates the release notes on every push.
+- The weekly security workflow also installs the package on the next Python release, and scans through the gate's tasks without caches.
+- Dependency updates: uv 0.12.20, zensical 0.0.66, sse-starlette 3.5.0, pyjwt 2.15.1.
+
 ## [v16.0.1](https://github.com/fmind/brain-framework/releases/tag/v16.0.1) - 2026-09-29
 
 First published 16.0 release. The v16.0.0 tag stopped at verification before publication and remains unchanged: two cache-recovery tests expected a rebuilt cache to get a new inode number, which Linux CI filesystems reuse; they now check the rebuilt cache's integrity instead.

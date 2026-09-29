@@ -2,6 +2,7 @@
 """Collect bounded local Git history as Brain Framework records; no provider authentication.
 
 Usage: git-history.py ROOT START END [--skip RELATIVE_REPO]...
+Requires Git 2.37 or later on PATH.
 Scans repositories one or two levels below ROOT. Automated history stays out: hidden repositories (such as
 ~/.codex/memories), repositories named with --skip (such as an autonomous agent loop), commits by bots or
 reserved test domains, and internal refs such as stashes and notes.
@@ -19,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+# `git log --since-as-filter` first shipped in Git 2.37.
+MIN_GIT = (2, 37)
 MAX_REPOSITORIES = 200
 MAX_COMMITS = 10000
 MAX_BYTES = 16 << 20
@@ -135,6 +138,17 @@ def repositories(root: Path, skip: frozenset[str]) -> tuple[list[Path], int]:
     return sorted(found), len(skipped)
 
 
+def supported() -> None:
+    """Check Git once: an older Git rejects `--since-as-filter`, which would fail every repository by name."""
+    try:
+        reply = run(["git", "version"], 1024, 10).decode(errors="replace")
+    except (OSError, ValueError, TimeoutError, subprocess.CalledProcessError):
+        reply = ""
+    found = re.match(r"git version (\d+)\.(\d+)", reply)
+    if not found or (int(found[1]), int(found[2])) < MIN_GIT:
+        raise InvalidError("Git 2.37 or later is required; install it on PATH")
+
+
 def history(repository: Path, start: str, end: str) -> list[str]:
     """One repository's commits in the window, as hash, committer time, author email and message fields."""
     payload = run(
@@ -185,6 +199,8 @@ def collect(
     if not root.is_dir():
         raise InvalidError("ROOT is not a directory")
     selected, skipped = repositories(root, skip)
+    if selected:
+        supported()
     records: list[dict[str, object]] = []
     for repository in selected:
         relative = repository.relative_to(root).as_posix()

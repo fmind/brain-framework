@@ -25,11 +25,14 @@ sensors:
   github-pulls:
     command: [sensors/github-history.py, example/project, pulls, "{{start}}", "{{end}}"]
     mode: window
+    timeout: 3600 # one extra detail request per selected PR
     refresh: 3600
     reconcile: { refresh: 86400, lookback: 604800 }
 ```
 
 Each source belongs to one repository. Use distinct sensor names for additional repositories. The branch defaults to literal `main`, including commits reachable through merged branches; it is not a first-parent-only log. Append `--branch, master` to the commit command for a repository whose selected branch is `master`. A missing branch fails visibly rather than falling back to another branch.
+
+Each selected PR costs one more `gh api` request for its merge outcome, allowed up to 60 seconds, so `github-pulls` raises BF's default 300-second `timeout` to its 3,600-second maximum. A window whose PRs need longer fails without changing evidence: narrow it.
 
 ## Backfill, then refresh
 
@@ -73,7 +76,9 @@ Existing `bf watch` or `bf update` runs then collect incremental windows. The we
 - Issues and PRs retain title, description, creation and modification dates, state, canonical URL and repository link; PR state distinguishes merged from closed. All ages and states are eligible. Comments, reviews, attachments, patches, CI logs and timeline events are outside this projection.
 - The [repository issues endpoint](https://docs.github.com/en/rest/issues/issues#list-repository-issues) includes PRs. The adapter separates them and selects by modification time; each selected PR needs one additional detail request for its merge outcome. The [commits endpoint](https://docs.github.com/en/rest/commits/commits#list-commits) uses the explicit branch and dates. Output windows are half-open: `START <= time < END`, using modification time for issues/PRs.
 - There is one current record per upstream identity, not a revision archive. An old record can be updated later. Missing/deleted/private-inaccessible objects cannot be reconstructed, and window mode does not remove previously saved records. Pagination is not a transaction: concurrent upstream changes can require another reconciliation.
-- Each run allows at most 100 API pages, 10,000 output records and 16 MiB of JSON; each provider call allows 60 seconds and 16 MiB. BF's configured timeout also bounds the whole run. Limits, malformed pages or pagination, repeated identities and provider errors fail without printing a partial array or changing evidence. A PR detail older than its listing or modified at or after `END` also fails; retry that window so the listing and detail agree on its scope. Narrow the interval after overflow; fix account access or rate limits before retrying a provider failure. Issue and PR runs each scan the combined issue/PR endpoint, so the page bound includes both kinds.
+- Each run allows at most 100 API pages of 100 items, so at most 10,000 commits or 10,000 listed issues and PRs, 10,000 output records and 16 MiB of JSON; each provider call allows 60 seconds and 16 MiB. BF's configured `timeout` also bounds the whole run. Issue and PR runs each scan the combined issue/PR endpoint, so the page bound includes both kinds.
+- Limits, malformed pages or pagination, repeated identities and provider errors fail without printing a partial array or changing evidence. Narrow the interval after overflow; fix account access or rate limits before retrying a provider failure. A PR detail older than its listing also fails; retry that window. A PR modified again between its listing and its detail request, at or after `END`, is skipped: the next window collects its latest modification.
+- A scheduled run beyond these limits keeps failing. BF records a reconciliation only when it succeeds, so every later due run requests the whole `reconcile.lookback` again, and the regular hourly refresh collects nothing until one succeeds; `bf status` reports the failure. The weekly commit reconciliation above revisits 365 days: when the branch receives more than about 10,000 commits a year, shorten `reconcile.lookback` and the initial `lookback`, for example to 90 days (`7776000`), and backfill older months with explicit windows.
 - `lookback: 31536000` sets the first scheduled commit window; an explicit manual `--since` can request more. Retention is separate: this example never prunes old records. Measure saved file count, disk usage, cache build time and retrieval usefulness before widening scope.
 
 ## Test without GitHub
@@ -84,4 +89,4 @@ From the framework checkout:
 uv run --locked pytest -q tests/test_adapters_github.py tests/test_adapters_limits.py
 ```
 
-Expected result: passing tests with fake GitHub responses, including an old closed issue updated today, a merged PR, branch selection, pagination and a failed second page that leaves saved evidence unchanged. These are fictional fixtures, not live account or completeness proof.
+Expected result: passing tests with fake GitHub responses, including an old closed issue updated today, a merged PR, a PR modified during collection that is left to the next window, branch selection, pagination and a failed second page that leaves saved evidence unchanged. These are fictional fixtures, not live account or completeness proof.

@@ -444,6 +444,24 @@ def test_a_busy_writer_serves_the_current_cache_as_stale(brain: Store) -> None:
     assert refs(brain, "latecomer") == ["concepts/late.md"]
 
 
+def test_a_missing_cache_behind_a_busy_writer_fails_after_one_wait(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        (brain.root / (index.CACHE + suffix)).unlink(missing_ok=True)
+    waits: list[float] = []
+
+    def busy(_store: Store, *, wait: float = 30, **_options: object) -> dict[str, object]:
+        waits.append(wait)
+        raise BusyError("another writer holds the brain")
+
+    monkeypatch.setattr(index, "refresh", busy)
+    # With nothing to serve, the read waits once for the writer, then names it instead of retrying the wait.
+    with pytest.raises(BusyError, match="another writer is building the search cache"), index.database(brain):
+        pass
+    assert waits == [120]
+
+
 @pytest.mark.parametrize("outdated", [False, True])
 def test_concurrent_first_search_waits_for_a_complete_cache(
     brain: Store, monkeypatch: pytest.MonkeyPatch, outdated: bool

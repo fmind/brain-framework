@@ -384,7 +384,7 @@ def test_identity_problems_name_the_configured_brain(
 
     monkeypatch.setattr(index, "database", unavailable_later)
     _targets, problems = graph.expand([brain, team], "repo:example/project")
-    assert {"brain": "team", "error": "identity cache unavailable"} in problems
+    assert {"brain": "team", "error": "simulated unavailable cache"} in problems
 
 
 # Process and network events that retrieval must never cause. Audit hooks cannot be removed, so a flag gates them.
