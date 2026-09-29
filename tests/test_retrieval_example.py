@@ -24,7 +24,7 @@ def test_retrieval_example_validates_and_answers_its_questions(tmp_path: Path) -
             ranks = {case["name"]: case.get("rank") for case in reply["cases"]}
             # Before 15.0.0 three other projects' Next actions sections mentioning Atlas ranked first.
             assert ranks["project-next-actions-first"] == {"projects/atlas.md#next-actions": 1}
-            # Before 16.0.0 a glossary definition sharing two of the three words ranked first.
+            # Before 16 a glossary definition sharing two of the three words ranked first.
             assert ranks["one-result-per-document-url"] == {"documents:atlas-launch-plan": 1}
             baseline.write_text(result.stdout)
     # The low-priority catalog copy of the launch plan collapses into the full document.

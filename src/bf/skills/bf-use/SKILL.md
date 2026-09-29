@@ -4,7 +4,7 @@ description: Answer from, save to and track work in the user's Brain Framework b
 license: MIT
 compatibility: Requires Brain Framework 16 (the bf command) on Linux or macOS.
 metadata:
-  version: "16.0.0"
+  version: "16.0.1"
 ---
 
 # bf-use

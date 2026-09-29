@@ -123,6 +123,15 @@ def test_exact_reads_do_not_wait_out_a_writer(brain: Store, monkeypatch: pytest.
         read([brain], "meetings:absent", counted=False)
 
 
+def _intact(brain: Store) -> bool:
+    """Whether the cache passes SQLite's own page check; a rebuilt file may reuse the damaged one's inode number."""
+    try:
+        with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
+            return connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    except sqlite3.DatabaseError:
+        return False
+
+
 def _damage(brain: Store, table: str) -> None:
     """Overwrite the root page of one cache table, as a bad disk block would."""
     path = brain.root / index.CACHE
@@ -137,8 +146,8 @@ def _damage(brain: Store, table: str) -> None:
 @pytest.mark.parametrize("table", ["items", "files"])
 def test_a_damaged_cache_is_discarded_and_rebuilt(brain: Store, table: str) -> None:
     index.refresh(brain)
-    damaged = (brain.root / index.CACHE).stat().st_ino
     _damage(brain, table)
+    assert not _intact(brain)
     if table == "items":
         # Freshness reads only file fingerprints: the first query to meet the damage fails and discards it.
         with pytest.raises(Error, match="search cache is unavailable"):
@@ -147,7 +156,7 @@ def test_a_damaged_cache_is_discarded_and_rebuilt(brain: Store, table: str) -> N
     reply = search([brain], Query(text="offline retrieval"), counted=False)
     assert cast("list[dict[str, object]]", reply["items"])[0]["ref"] == "projects/offline.md"
     assert "stale" not in reply
-    assert (brain.root / index.CACHE).stat().st_ino != damaged
+    assert _intact(brain)
 
 
 def test_damage_in_one_brain_discards_only_its_own_cache(brain: Store, tmp_path: Path) -> None:
@@ -190,11 +199,11 @@ def test_recovery_refuses_an_oversized_backup_before_restoring(brain: Store, mon
 @pytest.mark.parametrize("table", ["items", "search_data"])
 def test_update_rebuilds_a_damaged_cache_instead_of_reporting_ok(brain: Store, table: str) -> None:
     index.refresh(brain)
-    damaged = (brain.root / index.CACHE).stat().st_ino
     _damage(brain, table)
+    assert not _intact(brain)
     report = update(brain)
     assert report["ok"], report
-    assert (brain.root / index.CACHE).stat().st_ino != damaged
+    assert _intact(brain)
     assert search([brain], Query(text="offline retrieval"), counted=False)["items"]
 
 

@@ -4,7 +4,7 @@ description: Set up Brain Framework (the bf command) and a brain, connect an age
 license: MIT
 compatibility: Requires Brain Framework 16 (the bf command) on Linux or macOS.
 metadata:
-  version: "16.0.0"
+  version: "16.0.1"
 ---
 
 # bf-setup

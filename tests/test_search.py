@@ -1085,7 +1085,7 @@ def test_quoted_phrases_and_word_prefixes_match_while_other_syntax_stays_literal
     brain.write("concepts/sync.md", b"# Sync\n\nThe offices synchronize field reports nightly.\n")
     brain.write("projects/plan.md", b"# Plan\n\nThe launch budget is fixed.\n")
     brain.write("projects/memo.md", b"# Memo\n\nThe budget covers the launch.\n")
-    # Before 16.0.0 the `*` and quotes were dropped: `synchro` matched no word, and both notes held the two words.
+    # Before 16 the `*` and quotes were dropped: `synchro` matched no word, and both notes held the two words.
     assert refs(brain, "synchro*") == ["concepts/sync.md"]
     assert refs(brain, '"launch budget"') == ["projects/plan.md"]
     assert refs(brain, "“launch budget”") == ["projects/plan.md"]
@@ -1110,7 +1110,7 @@ def test_quoted_phrases_and_word_prefixes_match_while_other_syntax_stays_literal
 
 def test_search_names_query_words_that_match_nothing(brain: Store, tmp_path: Path) -> None:
     reply = search([brain], Query(text="offline budjet"))
-    # Before 16.0.0 a misspelled word left no trace: the reply looked like an answer about both words.
+    # Before 16 a misspelled word left no trace: the reply looked like an answer about both words.
     assert reply["unmatched"] == ["budjet"]
     assert "projects/offline.md" in refs(brain, "offline budjet")
     assert "unmatched" not in search([brain], Query(text="offline retrieval"))
@@ -1138,7 +1138,7 @@ def test_tags_rank_like_headings_above_passing_mentions(brain: Store) -> None:
     brain.write(
         "concepts/stars.md", b"---\ntype: concept\n---\n# Stars\n\nSeveral stars, such as Vega, shine in autumn.\n"
     )
-    # Before 16.0.0 tags ranked at half the weight of body text, so a passing mention came first.
+    # Before 16 tags ranked at half the weight of body text, so a passing mention came first.
     assert refs(brain, "vega") == ["projects/launch.md", "concepts/stars.md"]
 
 
@@ -1148,7 +1148,7 @@ def test_nested_sections_rank_and_read_under_their_parent_headings(brain: Store)
         b"# Portfolio\n\n## Orion\n\n### Budget\n\nApproved at 2600 credits.\n\n"
         b"## Vega\n\nA partner survey.\n\n### Budget\n\nApproved at 1300 credits.\n",
     )
-    # Before 16.0.0 a section ranked with its own heading and note title only: `#vega` answered, without the amount.
+    # Before 16 a section ranked with its own heading and note title only: `#vega` answered, without the amount.
     item = cast("list[dict[str, str]]", search([brain], Query(text="Vega budget"))["items"])[0]
     assert (item["ref"], item["title"]) == ("projects/portfolio.md#budget-1", "Portfolio — Vega — Budget")
     assert item["excerpt"] == "Approved at 1300 credits."
@@ -1160,13 +1160,13 @@ def test_nested_sections_rank_and_read_under_their_parent_headings(brain: Store)
 def test_whole_note_results_without_matching_text_preview_the_note_lead(brain: Store) -> None:
     brain.write("projects/atlas.md", b"---\ntype: project\n---\n# Atlas\n\n## Decision\n\nAtlas uses SQLite.\n")
     item = cast("list[dict[str, str]]", search([brain], Query(text="Atlas"))["items"])[0]
-    # Before 16.0.0 the note's empty introduction left the excerpt empty.
+    # Before 16 the note's empty introduction left the excerpt empty.
     assert (item["ref"], item["excerpt"]) == ("projects/atlas.md", "Atlas uses SQLite.")
 
 
 def test_results_name_other_matching_sections_of_their_note(brain: Store, tmp_path: Path) -> None:
     item = cast("list[dict[str, object]]", search([brain], Query(text="retention guide"))["items"])[0]
-    # Before 16.0.0 only the best section of a note returned; the decision was hidden.
+    # Before 16 only the best section of a note returned; the decision was hidden.
     assert (item["ref"], item["sections"]) == ("projects/offline.md#next-actions", ["projects/offline.md#decision"])
     body = "# Quarters\n\n" + "".join(f"## Q{n}\n\n{'Revenue grew. ' * n}Revenue grew.\n\n" for n in range(1, 6))
     brain.write("projects/quarters.md", body.encode())
@@ -1192,7 +1192,7 @@ def test_function_words_of_questions_drop_while_subjects_stay(brain: Store) -> N
     assert index.terms("has been") == ["has", "been"]
     brain.write("projects/budget.md", b"# Budget\n\nThe budget is final.\n")
     brain.write("projects/noise.md", b"# Has been\n\nThere has been any number of notes about it.\n")
-    # Before 16.0.0 these auxiliary words ranked the noise first.
+    # Before 16 these auxiliary words ranked the noise first.
     assert refs(brain, "Has there been any budget?")[0] == "projects/budget.md"
 
 
@@ -1210,7 +1210,7 @@ def test_equal_scores_list_the_newest_first(brain: Store, tmp_path: Path) -> Non
             status("d"),
         ],
     )
-    # Before 16.0.0 ties listed refs alphabetically: the oldest meeting came first.
+    # Before 16 ties listed refs alphabetically: the oldest meeting came first.
     assert refs(brain, "weekly status") == ["calendar:b", "calendar:c", "calendar:a", "calendar:d"]
     root = tmp_path / "team"
     root.mkdir()
@@ -1237,7 +1237,7 @@ def test_evaluation_ranks_expected_refs_beyond_the_case_limit(brain: Store) -> N
     )
     reply = evaluate(brain)
     case = cast("list[dict[str, object]]", reply["cases"])[0]
-    # Before 16.0.0 a ref below the limit ranked as missing: MRR could not tell rank 2 from rank 50.
+    # Before 16 a ref below the limit ranked as missing: MRR could not tell rank 2 from rank 50.
     assert (case["passed"], case["rank"], case["returned"]) == (
         False,
         {"projects/offline.md#decision": 2},

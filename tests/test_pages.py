@@ -168,7 +168,7 @@ def test_period_pages_list_dated_items_and_link_neighbours(brain: Store) -> None
 
 
 def test_date_ranges_are_inclusive_local_days_as_pages_and_scopes(brain: Store) -> None:
-    # Before 16.0.0 a range was neither a period nor a scope: a week took one read per day.
+    # Before 16 a range was neither a period nor a scope: a week took one read per day.
     week = pages.period("2026-09-10..2026-09-14", NOW)
     assert week == pages.Period(
         "2026-09-10T00:00:00.000000Z", "2026-09-15T00:00:00.000000Z", "2026-09-05..2026-09-09", "2026-09-15..2026-09-19"

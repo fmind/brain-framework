@@ -45,7 +45,7 @@ A brain can pin its own BF release as a uv project, so every clone runs the same
 ```bash
 cd ~/brain
 uv init --bare --python 3.14
-uv add "brain-framework==16.0.0"
+uv add "brain-framework==16.0.1"
 echo /.venv/ >> .gitignore
 uv run --locked bf --version
 ```

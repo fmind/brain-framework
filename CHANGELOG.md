@@ -4,7 +4,9 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
-## [v16.0.0](https://github.com/fmind/brain-framework/releases/tag/v16.0.0) - 2026-09-29
+## [v16.0.1](https://github.com/fmind/brain-framework/releases/tag/v16.0.1) - 2026-09-29
+
+First published 16.0 release. The v16.0.0 tag stopped at verification before publication and remains unchanged: two cache-recovery tests expected a rebuilt cache to get a new inode number, which Linux CI filesystems reuse; they now check the rebuilt cache's integrity instead.
 
 Brain Framework 16 settles the contract so that later releases only add to it. One brain format number covers `bf.yaml` and evaluation suites, one word names each concept, dates and datetimes are separate, routines become general brain programs with hooks and logs, the agent skills ship with the package, and published reply schemas accept added fields while a release gate rejects anything else. Search, the graph, validation and interrupted writes are also more robust.
 
