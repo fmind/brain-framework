@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
-from bf.models import AUTHORED, IDENTITY, NAME, TAGGED, Config, Error, clean, tag_name
+from bf.models import AUTHORED, CITES, IDENTITY, NAME, TAGGED, Config, Error, clean, tag_name
 
 # The one period syntax, parsed by pages.period(): a day, a month or a trailing window, even an invalid date.
 PERIOD = re.compile(r"today|yesterday|[0-9]{4}-[0-9]{2}(?:-[0-9]{2})?|[0-9]{1,5}[hdw]")
@@ -133,12 +133,14 @@ class Claim:
 
 
 def claim(value: str, config: Config, subject: str, origin: str) -> Claim | None:
-    """The typed claim of a `?rel=` link; other values are untyped links."""
+    """The typed claim of a `?rel=` link: a declared relationship or the built-in `cites`; other values are untyped."""
     parsed = parse(value)
     if not parsed or not parsed.relation:
         return None
     if parsed.relation == TAGGED:
         raise Error(f"link relation {TAGGED} is reserved for tag membership; add the tag to the note instead")
+    if parsed.relation == CITES:
+        return Claim(subject, CITES, parsed.identity, origin)
     definition = config.ontology.get(parsed.relation)
     if not definition or not definition.relation:
         # Never quote the relation: a sensor's output controls it, and errors reach run history and status.

@@ -16,13 +16,14 @@ import pytest
 from mcp.types import CallToolResult
 from typer.testing import CliRunner
 
-from bf import graph, health, index, retrieve
+from bf import graph, health, index, pages, retrieve
 from bf.cli import app
 from bf.collect import collect
 from bf.config import user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
 from bf.models import Error, NotFoundError, Query, Record, digest, encode
+from bf.records import path as record_path
 from bf.storage import Store
 from bf.validate import validate
 from conftest import records_file
@@ -130,29 +131,33 @@ def test_skipped_directories_are_visible_without_following_them(brain: Store, tm
     assert not validate(brain)["valid"]
 
 
-def test_oversized_record_reassembles_exact_json(brain: Store) -> None:
-    record = Record(id="large", title="Unicode evidence", text='é "\\\n' * 40000)
+def test_oversized_record_text_reads_in_pages(brain: Store) -> None:
+    record = Record(id="large", title="Unicode evidence", text='é "\\\n' * 40000, attributes={"kind": "doc"})
     records_file(brain, "docs", [record])
-    chunks: list[str] = []
+    stored = brain.read(record_path("docs", "large"))
+    pieces: list[str] = []
     offset = 0
-    hashes = set()
     while True:
         reply = retrieve.read([brain], "bf://fixture/docs:large", offset=offset)
-        assert reply["format"] == "json"
-        assert "external" not in reply
-        assert len(encode(reply)) <= retrieve.MAX_REPLY
-        assert reply["offset"] == offset
-        assert len(cast("str", reply["chunk"])) == retrieve.CHUNK or "next_offset" not in reply
-        hashes.add(reply["sha256"])
-        chunks.append(cast("str", reply["chunk"]))
+        # Every page fits the budget, names the record file's digest and continues where the last one ended.
+        assert len(encode(reply)) <= pages.BUDGET
+        assert (reply["ref"], reply["offset"], reply["sha256"]) == ("docs:large", offset, digest(stored))
+        assert reply["total_characters"] == len(record.text)
+        page = cast("dict[str, object]", reply["record"])
+        # The first page carries the whole record but its text; later pages carry only their slice.
+        assert set(page) == ({"id", "title", "text", "attributes"} if not offset else {"text"})
+        assert ("collection" in reply, "backlinks" in reply) == (not offset, not offset)
+        text = cast("str", page["text"])
+        pieces.append(text)
         if "next_offset" not in reply:
             break
+        assert text.endswith("\n")
         offset = cast("int", reply["next_offset"])
-    raw = "".join(chunks)
-    assert hashes == {digest(raw.encode())}
-    assert json.loads(raw)["record"] == record.model_dump(exclude_defaults=True)
+        assert offset == cast("int", reply["offset"]) + len(text)
+    assert len(pieces) > 2
+    assert "".join(pieces) == record.text
     with pytest.raises(Error, match="beyond"):
-        retrieve.read([brain], "docs:large", offset=len(raw) + 1000)
+        retrieve.read([brain], "docs:large", offset=len(record.text))
 
 
 def test_invalid_optional_registry_does_not_affect_explicit_reads(brain: Store) -> None:
@@ -205,18 +210,18 @@ def test_read_rejects_invalid_service_offsets(brain: Store) -> None:
         retrieve.read([brain], "projects", offset=-1)
 
 
-def test_evaluation_assembles_chunked_exact_reads_before_checking_them(brain: Store) -> None:
+def test_evaluation_assembles_paged_exact_reads_before_checking_them(brain: Store) -> None:
     records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000 + "closing clause")])
     brain.write(
         "evals/large.yaml",
         b"version: 5\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n  text: [closing clause]\n",
     )
-    assert "chunk" in retrieve.read([brain], "docs:large")
+    assert "closing clause" not in str(retrieve.read([brain], "docs:large"))
     reply = evaluate(brain)
     assert reply["passed"] is True, reply["cases"]
 
 
-def test_evaluation_rejects_a_chunked_read_that_changes_between_chunks(
+def test_evaluation_rejects_a_paged_read_that_changes_between_pages(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000)])
@@ -274,19 +279,33 @@ def test_claim_preview_reports_truncation(brain: Store) -> None:
     assert reply["claims_truncated"] is True
 
 
-def test_every_chunk_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(brain: Store) -> None:
-    brain.write("projects/mid.md", b"# Mid\n\n" + b"evidence " * 22_000)
-    whole = retrieve.read([brain], "projects/mid.md", counted=False)
-    assert whole["format"] == "json"
-    assert (whole["offset"], whole["next_offset"]) == (0, retrieve.CHUNK)
+def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(brain: Store) -> None:
+    data = b"# Mid\n\n## Part one\n\n" + b"evidence\n" * 4_000 + b"### Detail\n\nfact\n\n## Part two\n\nend\n"
+    brain.write("projects/mid.md", data)
+    first = retrieve.read([brain], "projects/mid.md", counted=False)
+    assert (first["offset"], first["total_characters"], first["sha256"]) == (0, len(data), digest(data))
+    assert first["outline"] == [
+        {"ref": "projects/mid.md#mid", "title": "Mid", "characters": len(data)},
+        {"ref": "projects/mid.md#part-one", "title": "Part one", "characters": len(data) - 7 - 17},
+        {"ref": "projects/mid.md#detail", "title": "Detail", "characters": 18},
+        {"ref": "projects/mid.md#part-two", "title": "Part two", "characters": 17},
+    ]
+    section = retrieve.read([brain], "projects/mid.md#part-one", counted=False)
+    assert section["sha256"] == first["sha256"]
+    assert [entry["ref"] for entry in cast("list[dict]", section["outline"])] == [
+        "projects/mid.md#part-one",
+        "projects/mid.md#detail",
+    ]
 
     def assemble(read: Callable[[int], dict]) -> str:
-        chunks, offset = [], 0
+        pieces, offset = [], 0
         while True:
             reply = read(offset)
-            chunks.append(reply["chunk"])
+            assert reply["sha256"] == first["sha256"]
+            assert ("outline" in reply) == (offset == 0)
+            pieces.append(reply["text"])
             if "next_offset" not in reply:
-                return "".join(chunks)
+                return "".join(pieces)
             offset = reply["next_offset"]
 
     def cli(offset: int) -> dict:
@@ -302,11 +321,15 @@ def test_every_chunk_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(
         assert isinstance(result, CallToolResult)
         return cast("dict", result.structured_content)
 
-    for raw in (assemble(cli), assemble(tool)):
-        assert digest(raw.encode()) == whole["sha256"]
-        assert json.loads(raw)["text"].startswith("# Mid")
-    with pytest.raises(Error, match="not chunked"):
+    for text in (assemble(cli), assemble(tool)):
+        # A whole note's pages rebuild its file, which the common digest verifies.
+        assert digest(text.encode()) == first["sha256"]
+    with pytest.raises(Error, match="not paged"):
         retrieve.read([brain], "projects/offline.md", offset=1)
+    # A note search skips, such as one with a merge conflict marker, still pages its text without an outline.
+    brain.write("projects/mid.md", data + b"<<<<<<< ours\n")
+    conflicted = retrieve.read([brain], "projects/mid.md", counted=False)
+    assert (conflicted["total_characters"], "outline" in conflicted) == (len(data) + 13, False)
 
 
 def test_typed_links_read_their_unowned_target_identity(brain: Store) -> None:

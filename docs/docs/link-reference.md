@@ -111,9 +111,13 @@ If Alice is explicitly responsible for the fictional website project, put this i
 
 The claim says the project has Alice as its owner, supported by the Ownership section. Its subject is the note's `entity`, if declared, otherwise its file. A record's links use the record as their subject. Each claim records `subject`, `relation`, `target` and `origin`.
 
-`rel` is the only accepted BF query key; it must name a declared `relation: true` field and precede any fragment. `tagged-with` is reserved for [tag membership](#tag-rules). BF removes it from the target identity, so links with `?rel=owner` and `?rel=author` still point to the same Alice. An HTTPS URL such as `https://example.test/?rel=owner` keeps its whole identity and remains untyped.
+`rel` is the only accepted BF query key; it must name a declared `relation: true` field or the built-in `cites`, and precede any fragment. `tagged-with` is reserved for [tag membership](#tag-rules), `links` names the backlink group of untyped links and `cites` means the subject derives from the target; `bf.yaml` cannot declare any of them. Reading an address whose `?rel=` names no declared relationship still opens its target, with the problem `undeclared relationship ROLE; declare it in bf.yaml schema`. BF removes it from the target identity, so links with `?rel=owner` and `?rel=author` still point to the same Alice. An HTTPS URL such as `https://example.test/?rel=owner` keeps its whole identity and remains untyped.
 
 Other query keys, repeated or empty values, userinfo, ports, traversal and malformed percent encoding are rejected. Links hold at most 8,192 characters. Use declared roles for ownership and authorship, never URI userinfo. To assert another entity's relationship, write it in that entity's note.
+
+Each OKF `sources` entry of a project, concept or `ACTION.md` claims `cites` from the note's subject to its `resource`, with the whole note as origin; a BF resource with its own `?rel=` claims that role instead. An item that both cites and links to a target is listed once, under `cites`. Read those claims with `bf read REF --rel cites`.
+
+A relation's [`broader`](schema.md#narrower-roles-and-allowed-targets) role lists its links too on the broader role's page, and its `targets` restrict the identities its links and mapped values may name; `bf validate` reports a typed link outside them.
 
 Two files asserting the same claim remain separately attributable; removing one removes only its support. Repeating a link within one section adds nothing. Untyped links stay untyped. BF infers neither a reverse relationship nor a chain of relationships: Alice owning the website does not make the website an owner of Alice.
 

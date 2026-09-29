@@ -12,54 +12,61 @@ Use this reference to look up exact limits for a skipped file, partial reply or 
 | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | A skipped symlink or special file in `problems`                   | Use a regular file inside the brain. BF never follows the skipped target.              |
 | `file name is not valid UTF-8 or contains a backslash; rename it` | Rename the file shown with `\xNN` escapes, such as a Latin-1 name from an old archive. |
-| An interrupted record transaction                                 | Keep `memories/.pending/`, then run `bf build` and `bf validate`.                      |
+| An interrupted record transaction                                 | Keep `memories/.pending/`, then run `bf build` or `bf update`, then `bf validate`.     |
 | A busy writer or stale cache                                      | Let the writer finish, then repeat the read.                                           |
 
-Writes are atomic. Processes using the same physical brain share its writer lock and each program's lock, even through another path such as a bind mount; run history follows the resolved path. Use the same [state directory](configuration.md#local-state) for those processes. Back up an idle brain, including any pending journal. These protections are not a sandbox against other programs running as your account.
+Writes are atomic. A write killed before its rename leaves a `.write-` temporary file beside its target; it never counts as a record, and the next transaction or recovery of that source removes it. Processes using the same physical brain share its writer lock and each program's lock, even through another path such as a bind mount; run history follows the resolved path. Use the same [state directory](configuration.md#local-state) for those processes. Back up an idle brain, including any pending journal. These protections are not a sandbox against other programs running as your account.
 
 Linked or special folders are named in errors, such as `settings: expected a directory; symlinks and special files are not followed`; replace them with regular directories. A regular file where a path needs a folder cannot hold that path: writing below it fails with `expected a directory, found a file`, and an exact read finds the note in another selected brain or reports it not found. A file removed while a scan runs, as by an editor's atomic save, is skipped until the next refresh. Emacs lock files beside authored files, named `.#NAME` and often dangling links, are ignored in `projects/`, `concepts/` and `actions/`: an open editor never fails a build or update. A name that is not valid UTF-8, or that holds a backslash, cannot become a ref: it is reported like a link, shown with `\xNN` escapes. A snapshot collection of a source folder holding one fails until it is renamed; window collections proceed, while `bf build`, `bf update` and `bf validate` keep reporting it.
 
 ## Size bounds
 
-| Resource                                | Limit                                                           |
-| --------------------------------------- | --------------------------------------------------------------- |
-| `bf.yaml`, machine registry, eval suite | 1 MiB each                                                      |
-| YAML structure, including frontmatter   | 32 nesting levels and 20,000 parser events                      |
-| Authored note                           | 4 MiB                                                           |
-| Note title                              | 4,096 characters                                                |
-| Search or page reply                    | 4 MiB; items end early near 2 MiB and continue at `next_offset` |
-| Exact read before chunks                | 65,536 Unicode characters of serialized JSON                    |
-| Exact-read chunk                        | 65,536 Unicode characters                                       |
-| Record file                             | 16 MiB                                                          |
-| Entries per scanned tree                | 100,000                                                         |
-| Directory depth                         | 64 levels below a scanned folder                                |
-| Record id                               | 1–4,096 characters and 7,988 once percent-encoded               |
-| Note path                               | 7,988 characters once percent-encoded                           |
-| Record title                            | 1–4,096 characters                                              |
-| Record text                             | 4,194,304 characters (4 Mi)                                     |
-| Record links, aliases                   | 1,000 each                                                      |
-| Record URL                              | 8,192 characters                                                |
-| Search query                            | 4,096 characters; the first 32 distinct words are matched       |
-| Search results per page                 | 50                                                              |
-| Skipped files per brain                 | 200 listed in `problems`, then a count                          |
-| Period listing                          | 50 items per page                                               |
-| Folder listing                          | 200 notes per page                                              |
-| Source overview                         | 20 records per page                                             |
-| Retrieval suites                        | 100 suites per run, 200 cases per suite                         |
-| Sensor stdout                           | 64 MiB by default; configurable up to 256 MiB                   |
-| Routine stdout                          | 1 MiB by default; configurable up to 4 MiB                      |
-| Program command                         | 128 arguments of at most 16,384 characters each                 |
-| Program `timeout`                       | 1–3,600 seconds                                                 |
-| Program `refresh`, `lookback`           | up to 31,536,000 seconds (365 days)                             |
-| Sensor `overlap`, `reconcile` values    | up to 31,536,000 seconds (365 days)                             |
+| Resource                                | Limit                                                                                           |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `bf.yaml`, machine registry, eval suite | 1 MiB each                                                                                      |
+| YAML structure, including frontmatter   | 32 nesting levels and 20,000 parser events                                                      |
+| Authored note                           | 4 MiB                                                                                           |
+| Note title                              | 4,096 characters                                                                                |
+| Result or listing title preview         | 200 characters, then `…`; exact reads keep the whole title                                      |
+| Search or page reply                    | 4 MiB; items end early near 32 KiB, including a page's summaries, and continue at `next_offset` |
+| Exact read before text pages            | 32 KiB of serialized JSON                                                                       |
+| Exact-read text page                    | 32 KiB of serialized JSON, including the first page's context; at least 8 KiB of text per page  |
+| Backlink previews                       | 5 newest items per relationship; role pages list 50 per page                                    |
+| Outline of a paged note                 | 200 sections                                                                                    |
+| Record file                             | 16 MiB                                                                                          |
+| Record fields other than `text`         | 2 MiB serialized, so an exact read's first page always fits                                     |
+| Entries per record source or folder     | 100,000                                                                                         |
+| Directory depth                         | 64 levels below a scanned folder                                                                |
+| Record id                               | 1–4,096 characters and 7,988 once percent-encoded                                               |
+| Note path                               | 7,988 characters once percent-encoded                                                           |
+| Record title                            | 1–4,096 characters                                                                              |
+| Record text                             | 4,194,304 characters (4 Mi)                                                                     |
+| Record links, aliases                   | 1,000 each                                                                                      |
+| Record URL                              | 8,192 characters                                                                                |
+| Search query                            | 4,096 characters; the first 32 distinct words are matched                                       |
+| Search results per page                 | 50                                                                                              |
+| Skipped files per brain                 | 200 listed in `problems`, then a count                                                          |
+| Validation problems, warnings           | 200 each, then a `*_truncated` flag; 20 spellings per warning                                   |
+| Reprojection transaction                | 1,000 changed records; 200 failed records listed                                                |
+| Relation `targets`                      | 64 prefixes of at most 1,024 characters                                                         |
+| Period listing                          | 50 items per page                                                                               |
+| Folder listing                          | 200 notes per page                                                                              |
+| Source overview                         | 20 records per page                                                                             |
+| Retrieval suites                        | 100 suites per run, 200 cases per suite                                                         |
+| Sensor stdout                           | 64 MiB by default; configurable up to 256 MiB                                                   |
+| Routine stdout                          | 1 MiB by default; configurable up to 4 MiB                                                      |
+| Program command                         | 128 arguments of at most 16,384 characters each                                                 |
+| Program `timeout`                       | 1–3,600 seconds                                                                                 |
+| Program `refresh`, `lookback`           | up to 31,536,000 seconds (365 days)                                                             |
+| Sensor `overlap`, `reconcile` values    | up to 31,536,000 seconds (365 days)                                                             |
 
-Each record consumes one filesystem entry. The 100,000-entry limit applies to the entire recursive traversal of `memories/`, across sources, including directories and ignored extensions. Allow room for source directories when sizing a corpus. A tree over either scan bound fails the scan with an error naming the directory; move deep or bulky trees to root `inputs/` or `originals/`.
+Each record consumes one filesystem entry. The 100,000-entry limit applies to each source directory under `memories/` and to each of `projects/`, `concepts/` and `actions/`, including subdirectories and ignored extensions. `bf status` lists a directory above 80,000 entries under its brain's `warnings` without failing `--check`; see [status replies](commands.md#status-sources-and-routines). A tree over either scan bound fails the scan with an error naming the directory: split a crowded source's sensor into several sources or archive its older records outside the brain, and move deep or bulky authored trees to root `inputs/` or `originals/`.
 
 Search drops function words before counting query words, so a long pasted question matches only its first 32 distinct remaining words; shorten it to the distinctive terms.
 
 Keep bulky imports in root `inputs/` or `originals/`, which are not scanned. Link an authored note to the retained file and record the useful conclusion in the note.
 
-Page sizes do not limit the whole result set. For example, a period with 51 items needs a second request after its first 50. Follow the returned `next_offset`; listings also report `total`. Summary sections remain bounded previews. Large exact reads use lossless JSON chunks with a digest; see [continuations](retrieval.md#continuations).
+Page sizes do not limit the whole result set. For example, a period with 51 items needs a second request after its first 50. Follow the returned `next_offset`; listings also report `total`. Summary sections remain bounded previews. Large exact reads return their text in pages that name the file's digest; see [large exact reads](retrieval.md#large-exact-reads). The first page carries every field but the text; collection rejects a record whose other fields exceed 2 MiB, so every stored record reads back.
 
 Pagination retains only the requested page in Python, but SQLite still ranks every match up to the offset. Deep offsets can take longer; excerpts and relations are computed only for returned results.
 

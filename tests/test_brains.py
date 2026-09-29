@@ -150,7 +150,7 @@ def test_init_never_writes_global_config_by_default(tmp_path: Path, monkeypatch:
     assert not user_path().exists()
     monkeypatch.chdir(target)
     assert search(select(), Query(text="welcome"))["items"]
-    assert "direct references only" in (target / "AGENTS.md").read_text()
+    assert "direct `brains:` references" in (target / "AGENTS.md").read_text()
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
+import re
 import stat
 import time
 from collections.abc import Iterator
@@ -23,6 +24,8 @@ class FileAncestorError(Error):
 
 
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+# The temporary name `write` gives new bytes before renaming them over their file.
+_TEMPORARY = re.compile(r"\.write-[0-9a-f]{32}")
 # A scanned name BF cannot address: its bytes are not UTF-8, or it holds a backslash, which relative() rejects.
 UNNAMED = "file name is not valid UTF-8 or contains a backslash; rename it"
 
@@ -98,6 +101,10 @@ class Store:
             os.close(descriptor)
 
     def read(self, name: str, limit: int = MAX_FILE) -> bytes:
+        return self.stamped(name, limit)[0]
+
+    def stamped(self, name: str, limit: int = MAX_FILE) -> tuple[bytes, int]:
+        """A regular file's bytes and the modification time, in nanoseconds, of the descriptor that read them."""
         with self.parent(name) as (parent, leaf):
             try:
                 fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
@@ -117,7 +124,7 @@ class Store:
                     data += stream.read(limit + 1 - len(data))
         if len(data) > limit:
             raise Error(f"{name}: file exceeds {limit} bytes")
-        return data
+        return data, info.st_mtime_ns
 
     def write(self, name: str, data: bytes, *, durable: bool = True) -> None:
         """Replace a regular file atomically; readers see the old or the new bytes, never a mix.
@@ -163,6 +170,29 @@ class Store:
         finally:
             os.close(descriptor)
 
+    def sweep(self, directory: str) -> None:
+        """Remove the temporary files that killed `write` calls left directly in a directory.
+
+        Call it under the brain writer lock for a directory only lock holders write, where no such file can belong to
+        a live write. Removal need not be durable: a file a crash brings back is removed again.
+        """
+        try:
+            with self.parent(directory) as (parent, leaf):
+                descriptor = os.open(leaf, _DIR, dir_fd=parent)
+        except OSError as error:
+            if error.errno in {errno.ENOENT, errno.ELOOP, errno.ENOTDIR}:
+                # Nothing to sweep; the caller's own access names a linked or special directory.
+                return
+            raise
+        try:
+            with os.scandir(descriptor) as entries:
+                for entry in entries:
+                    if _TEMPORARY.fullmatch(entry.name) and entry.is_file(follow_symlinks=False):
+                        with suppress(FileNotFoundError):
+                            os.unlink(entry.name, dir_fd=descriptor)
+        finally:
+            os.close(descriptor)
+
     def rmdir(self, name: str) -> None:
         """Remove an empty directory without following links."""
         with self.parent(name) as (parent, leaf):
@@ -171,35 +201,40 @@ class Store:
             os.rmdir(leaf, dir_fd=parent)
             os.fsync(parent)
 
-    def files(self, directory: str, *, skipped: dict[str, tuple[int, int, int, int]] | None = None) -> list[str]:
-        return sorted(self.scan(directory, skipped=skipped))
+    def files(
+        self, directory: str, *, skipped: dict[str, tuple[int, int, int, int]] | None = None, split: bool = False
+    ) -> list[str]:
+        return sorted(self.scan(directory, skipped=skipped, split=split))
 
     def scan(
-        self, directory: str, *, skipped: dict[str, tuple[int, int, int, int]] | None = None
+        self,
+        directory: str,
+        *,
+        skipped: dict[str, tuple[int, int, int, int]] | None = None,
+        split: bool = False,
+        counts: dict[str, int] | None = None,
     ) -> dict[str, tuple[int, int, int, int]]:
         """Regular files below a directory, fingerprinted by the traversal's own no-follow stats.
 
         Symlinks, special files and names BF cannot address are never followed. They fail the scan, or, when
         the caller passes `skipped`, land there with their own fingerprint so the caller can report them and
         carry on; an unaddressable name lands under its escaped form, for which `unnamed` holds.
-        Bound the entire traversal, including directories and ignored extensions.
+        Each traversed tree holds at most MAX_FILES entries, counting directories and ignored extensions: the whole
+        directory, or with `split`, its own listing and each subdirectory's tree, such as one source of memories/.
+        `counts` receives the entries of each tree.
         """
         relative(directory)
         result: dict[str, tuple[int, int, int, int]] = {}
-        visited = 0
+        visited = {} if counts is None else counts
 
-        def visit(fd: int, prefix: str) -> None:
-            nonlocal visited
+        def visit(fd: int, prefix: str, tree: str) -> None:
             if prefix.count("/") > 64:
                 raise Error(f"{prefix}: directory exceeds the 64-level depth limit")
             with os.scandir(fd) as entries:
                 for entry in entries:
-                    visited += 1
-                    if visited > MAX_FILES:
-                        raise Error(
-                            f"{directory} exceeds the {MAX_FILES:,}-entry scan limit; keep bulky files "
-                            "in the brain's root inputs/ or originals/, which are not scanned"
-                        )
+                    visited[tree] = visited.get(tree, 0) + 1
+                    if visited[tree] > MAX_FILES:
+                        raise Error(f"{tree} exceeds the {MAX_FILES:,}-entry scan limit; {_crowded(tree)}")
                     path = f"{prefix}/{entry.name}"
                     shown = _shown(entry.name)
                     try:
@@ -217,7 +252,7 @@ class Store:
                         continue
                     if child is not None:
                         try:
-                            visit(child, path)
+                            visit(child, path, path if split and prefix == directory else tree)
                         finally:
                             os.close(child)
                     elif stat.S_ISREG(info.st_mode):
@@ -245,7 +280,7 @@ class Store:
                     fd = child
             except FileNotFoundError:
                 return {}
-            visit(fd, directory)
+            visit(fd, directory, directory)
         finally:
             os.close(fd)
         return result
@@ -261,6 +296,13 @@ class Store:
 
 def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
     return info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino
+
+
+def _crowded(tree: str) -> str:
+    """How to bring a tree back under the scan limit."""
+    if tree.split("/")[0] == "memories":
+        return "split its sensor into several sources or archive older records outside the brain"
+    return "keep bulky files in the brain's root inputs/ or originals/, which are not scanned"
 
 
 def xdg_setting(name: str) -> Path | None:
@@ -360,6 +402,27 @@ def writer(store: Store, wait: float = 0) -> Iterator[None]:
 def reader(store: Store, wait: float = 120) -> Iterator[None]:
     """Keep record files stable during one exact read; readers can run concurrently."""
     with _lock(store, "write.lock", wait, shared=True):
+        yield
+
+
+@contextmanager
+def building(store: Store, wait: float = 0) -> Iterator[None]:
+    """Serialize full search-cache builds, which read the brain without holding its writer lock."""
+    with _lock(store, "build.lock", wait, busy="another search cache build is active; retry after it finishes"):
+        yield
+
+
+@contextmanager
+def generation(store: Store, *, shared: bool, wait: float) -> Iterator[None]:
+    """Search-cache readers hold this shared while connected; publishing a rebuilt cache holds it exclusively.
+
+    SQLite finds a database's -wal file by name, so no connection to a replaced cache may outlive its rename.
+    """
+    if shared:
+        busy = "the search cache is being replaced; retry shortly"
+    else:
+        busy = "readers kept the search cache open; retry bf build"
+    with _lock(store, "cache.lock", wait, shared=shared, busy=busy):
         yield
 
 

@@ -50,7 +50,33 @@ bf read bf://example/projects/example
 bf read 'bf://example/projects/example.md#now'
 ```
 
-Read the concept's `backlinks` to find the project under `related-to`. Read the project's `claims` to find the same link and its origin, `projects/example.md#now`. These are two views of one declared relationship. `bf read repo:example/project` also groups the collected record under its `repository` role. Use real identities when adapting the example.
+Read the concept's `backlinks` to find the project under `related-to`. Read the project's `claims` to find the same link and its origin, `projects/example.md#now`. These are two views of one declared relationship. `bf read repo:example/project` also groups the collected record under its `repository` role; `bf.yaml` restricts that role to `repo:` identities with `targets`, so a sensor mapping any other value fails without saving. Use real identities when adapting the example.
+
+`bf.yaml` also declares `depends-on` with `broader: related-to`, so a `related-to` role page lists dependencies too:
+
+```bash
+bf read bf://example/concepts/archive-policy.md --rel related-to
+```
+
+It returns `"total":1` with the decision `actions/2026-09-25_retention-review/outputs/decision.md`, whose item keeps its own `"relation":"depends-on"`. The policy's backlinks still group that link under `depends-on`.
+
+## Export the graph
+
+Print every claim as one JSON object per line, for tools such as DuckDB or networkx:
+
+```bash
+bf export edges | head -3
+```
+
+With `TZ=UTC`, the first three lines are:
+
+```text
+{"brain":"example","origin":"bf://example/actions/2026-09-19_retention/ACTION.md","relation":"tagged-with","subject":"bf://example/actions/2026-09-19_retention/ACTION.md","target":"bf://example/tags/retention"}
+{"brain":"example","origin":"bf://example/actions/2026-09-25_retention-review/ACTION.md#context","relation":"links","subject":"bf://example/actions/2026-09-25_retention-review/ACTION.md","target":"bf://example/actions/2026-09-25_retention-review/outputs/decision.md","time":"2026-09-25T00:00:00.000000Z"}
+{"brain":"example","origin":"bf://example/actions/2026-09-25_retention-review/ACTION.md#decision","relation":"links","subject":"bf://example/actions/2026-09-25_retention-review/ACTION.md","target":"bf://example/actions/2026-09-25_retention-review/outputs/decision.md","time":"2026-09-25T00:00:00.000000Z"}
+```
+
+Lines are sorted by subject, relation, target and origin. The first action has no `updated` date, so its claim has no `time`; a note's time is local midnight of its date, so another timezone shifts it. `head` closing the pipe early is expected. See [export edges](../../docs/docs/commands.md#export-the-graph).
 
 ## Review a decision
 
@@ -106,7 +132,7 @@ sed -i.bak 's/latest version/two latest versions/' concepts/archive-policy.md
 } | python3 "$bf_checkout/skills/bf-learn/scripts/evidence.py" compare
 ```
 
-It returns `"state":"changed"`, while the capture retains the old body. It does not revise the dependent decision for you. Incomplete evidence yields `unknown` or an error, never permission to dismiss an intention. The helper needs Python 3.11 or later. A direct pipe suits this short section: `bf read` chunks replies above 65,536 characters, which `capture` refuses. For those, pipe the helper's `read REF --brain BRAIN` mode instead: it runs `bf` from PATH and assembles the chunks, as the [evidence guide](../../skills/bf-learn/references/evidence.md#retain-a-revision) shows.
+It returns `"state":"changed"`, while the capture retains the old body. It does not revise the dependent decision for you. Incomplete evidence yields `unknown` or an error, never permission to dismiss an intention. The helper needs Python 3.11 or later. A direct pipe suits this short section: `bf read` returns the text of replies above 32 KiB in pages, which `capture` refuses. For those, pipe the helper's `read REF --brain BRAIN` mode instead: it runs `bf` from PATH and assembles the pages, as the [evidence guide](../../skills/bf-learn/references/evidence.md#retain-a-revision) shows.
 
 ### Share the procedure with a team brain
 

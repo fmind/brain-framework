@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from datetime import datetime
+from urllib.parse import quote
 
 REPLY_BYTES = 4 << 20
 TIMEOUT = 120
@@ -68,7 +69,9 @@ def local(value: object) -> str:
 
 
 def link(item: dict) -> str:
-    return f"[{plain(item.get('title', item['ref']))}]({item['uri']})"
+    """A brain-qualified address when several brains answer; otherwise a path from this action's folder."""
+    target = item.get("uri") or "../../" + quote(item["ref"], safe="/")
+    return f"[{plain(item.get('title', item['ref']))}]({target})"
 
 
 def code(value: object) -> str:
@@ -128,7 +131,7 @@ def render(day: str, home: dict, week: dict) -> Iterator[str]:
     preview = tasks.get("items", [])[:TASK_PREVIEW]
     for task in preview:
         # Plain bullets and inert refs avoid creating duplicate tasks or new graph evidence.
-        yield f"- {plain(task['text'])} ({code(task['uri'])}, line {task['line']})."
+        yield f"- {plain(task['text'])} ({code(task.get('uri') or task['ref'])}, line {task['line']})."
     if tasks["total"] > len(preview):
         yield f"Showing {len(preview)} of {tasks['total']} open tasks; use `bf read tasks` and follow `next_offset`."
     yield ""

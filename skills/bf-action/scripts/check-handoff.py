@@ -25,7 +25,7 @@ def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def read(action: str, brain: str, section: str) -> tuple[str, str | int]:
-    """The section's brain and text, or the reply's serialized size when bf chunked it."""
+    """The section's brain and text, or its length in characters when bf pages it."""
     ref = f"{action}#{section}"
     try:
         # bf already bounds replies. Capture its stdout only; diagnostics may contain private paths.
@@ -41,11 +41,11 @@ def read(action: str, brain: str, section: str) -> tuple[str, str | int]:
         reply = json.loads(result.stdout, object_pairs_hook=unique)
         if not isinstance(reply, dict) or reply.get("problems") or reply.get("stale"):
             raise ValueError("incomplete read")
-        chunked = "chunk" in reply
+        paged = "next_offset" in reply
         size = reply.get("total_characters")
-        if chunked and (reply.get("format") != "json" or reply.get("offset") != 0 or type(size) is not int):
-            raise ValueError("unexpected chunk")
-        if not chunked and any(key in reply for key in ("next_offset", "page", "record")):
+        if reply.get("offset", 0) != 0 or (paged and type(size) is not int):
+            raise ValueError("unexpected page")
+        if any(key in reply for key in ("page", "record")):
             raise ValueError("expected an exact section")
         match = ACTION.fullmatch(action)
         assert match is not None  # noqa: S101 - argument validation happens before any read
@@ -55,7 +55,7 @@ def read(action: str, brain: str, section: str) -> tuple[str, str | int]:
             raise ValueError("expected a named brain")
         if (owner and owner != name) or reply.get("ref") != f"{path}#{section}":
             raise ValueError("read resolved to another action")
-        if chunked:
+        if paged:
             return name, cast("int", size)
         if not isinstance(text, str) or not text.partition("\n")[2].strip():
             raise ValueError("empty section")
@@ -75,9 +75,9 @@ def check(action: str, brain: str) -> dict[str, object]:
             if owner and owner != name:
                 raise ValueError("sections resolved to different brains; use a brain-qualified action ref")
             owner = name
-            # bf chunks a reply above 65,536 characters, far beyond a handoff budget: fail it unassembled.
+            # bf pages a section above 32 KiB, far beyond a handoff budget: fail it without reading the rest.
             counts = (
-                {"reply_characters": text}
+                {"characters": text}
                 if isinstance(text, int)
                 else {"words": len(text.split()), "bytes": len(text.encode("utf-8"))}
             )
@@ -89,7 +89,7 @@ def check(action: str, brain: str) -> dict[str, object]:
                 else "invalid section encoding"
             )
             return {"checked": False, "passed": False, "sections": sections, "error": message}
-        okay = "reply_characters" not in counts and all(counts[key] <= limit for key, limit in limits.items())
+        okay = "characters" not in counts and all(counts[key] <= limit for key, limit in limits.items())
         path = action.removeprefix(f"bf://{name}/")
         sections[section] = {"ref": f"bf://{name}/{path}#{section}", **counts, "limits": limits, "passed": okay}
         passed = passed and okay

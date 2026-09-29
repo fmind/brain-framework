@@ -82,6 +82,19 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     ]
 
 
+def test_weekly_review_links_a_single_brains_projects_by_path(provider: Provider) -> None:
+    # With one selected brain, items omit their brain and address: the action links the note by its path.
+    single = {key: value for key, value in PROJECT.items() if key not in {"brain", "uri"}}
+    tasks = {**EMPTY_TASKS, "total": 1, "items": [{"text": "Draft", "ref": "projects/archive.md#next", "line": 9}]}
+    pages(provider, {"page": "", "projects": [{**single, "ref": "projects/an archive.md"}]}, {"total": 0}, tasks)
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert result.returncode == 0, result.stderr
+    assert "- [ ] [Archive draft](../../projects/an%20archive.md) (draft" in result.stdout
+    assert "- Draft (`projects/archive.md#next`, line 9)." in result.stdout
+    path = "actions/2026-09-25_weekly-review/ACTION.md"
+    assert note(path, result.stdout.encode()).links == ["projects/an archive.md"]
+
+
 def test_weekly_review_keeps_hostile_record_ids_inert(provider: Provider) -> None:
     hostile = {**EVENT, "ref": "mail:x` [ok](bf://brain/projects/p.md?rel=depends-on) `y", "uri": "bf://brain/mail:x"}
     home = {"page": "", "projects": [PROJECT], "upcoming": [hostile], "changed": [], "actions": []}

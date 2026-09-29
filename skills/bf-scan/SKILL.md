@@ -2,9 +2,9 @@
 name: bf-scan
 description: Discover useful Brain Framework sources from user-approved bookmarks, available tools and selected project folders. Use for onboarding or reassessing coverage; produces recommendations, not automatic collection.
 license: MIT
-compatibility: Discovery helper requires Python 3.11 or later on Linux or macOS; comparing existing brain coverage requires Brain Framework 14 (bf).
+compatibility: Discovery helper requires Python 3.11 or later on Linux or macOS; comparing existing brain coverage requires Brain Framework 15 (bf).
 metadata:
-  version: "14.0.0"
+  version: "15.0.0"
 ---
 
 # bf-scan

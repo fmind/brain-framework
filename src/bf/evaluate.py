@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
+from math import inf
+from pathlib import Path
 from typing import Annotated, Literal, cast
 
-from pydantic import ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from bf import links
-from bf.config import yaml_object
+from bf.config import load, yaml_object
 from bf.markdown import authored, split_ref
-from bf.models import Error, Model, NotFoundError, Query, check_version, clean, digest, explain
-from bf.pages import readable, scope
+from bf.models import MAX_FILE, Error, Model, NotFoundError, Query, check_version, clean, decode, explain
+from bf.pages import address, readable, scope
 from bf.retrieve import read, search
 from bf.storage import Store
 
@@ -151,23 +152,43 @@ def _strings(value: object, key: str = "") -> Iterator[tuple[str, str]]:
         yield key, value
 
 
+def _entries(value: object) -> Iterator[dict[str, object]]:
+    """Every object naming a ref, however deeply a page or its backlinks nest it."""
+    if isinstance(value, dict):
+        if isinstance(value.get("ref"), str):
+            yield value
+        for child in value.values():
+            yield from _entries(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _entries(child)
+
+
+def _text(reply: dict[str, object]) -> str:
+    return str(cast("dict[str, object]", reply["record"]).get("text", "") if "record" in reply else reply["text"])
+
+
 def _whole(store: Store, ref: str) -> dict[str, object]:
-    """Assemble a chunked exact read like a client would: chunks share one digest, verified before parsing."""
-    reply = read([store], ref, counted=False)
-    if "chunk" not in reply:
+    """Assemble a paged exact read like a client would: every page names the same file digest."""
+    first = reply = read([store], ref, counted=False)
+    if "total_characters" not in reply:
         return reply
-    expected, parts = reply["sha256"], []
+    parts = []
     while True:
-        parts.append(str(reply["chunk"]))
+        parts.append(_text(reply))
         if "next_offset" not in reply:
             break
         reply = read([store], ref, offset=cast("int", reply["next_offset"]), counted=False)
-        if reply.get("sha256") != expected:
+        if reply.get("sha256") != first["sha256"]:
             raise Error("exact reply changed during evaluation; rerun bf eval")
     text = "".join(parts)
-    if digest(text.encode()) != expected:
-        raise Error("assembled exact reply does not match its sha256; rerun bf eval")
-    return cast("dict[str, object]", json.loads(text))
+    paging = {"offset", "next_offset", "total_characters", "outline", "outline_truncated"}
+    whole = {key: value for key, value in first.items() if key not in paging}
+    if "record" in whole:
+        whole["record"] = {**cast("dict[str, object]", whole["record"]), "text": text}
+    else:
+        whole["text"] = text
+    return whole
 
 
 def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], list[str], str]:
@@ -179,18 +200,23 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
             # Nothing to read answers "is anything there?"; every other failure fails the case.
             reply = {}
         pairs = [(key, value) for key, value in _strings(reply) if key != "notice"]
+        name = load(store).name
         return (
             reply,
             [value for key, value in pairs if key == "ref"],
-            [value for key, value in pairs if key == "uri"],
+            # An entry without a brain belongs to the evaluated one, the only brain its reply selected.
+            [value for key, value in pairs if key == "uri"]
+            + [address(str(entry.get("brain", name)), entry) for entry in _entries(reply)],
             "\n".join(value for _, value in pairs),
         )
     reply = search([store], _query(case.query, case.scope, case.limit), counted=False)
     items = cast("list[dict[str, object]]", reply["items"])
+    name = load(store).name
     return (
         reply,
         [str(item["ref"]) for item in items],
-        [str(item["uri"]) for item in items],
+        # With one selected brain, items omit their address: every item is the evaluated brain's.
+        [str(item.get("uri") or address(name, item)) for item in items],
         "\n".join(f"{item.get('title', '')}\n{item.get('excerpt', '')}" for item in items),
     )
 
@@ -201,7 +227,77 @@ def _matches(expected: str, refs: list[str]) -> bool:
     return any(ref == expected or (whole_note and split_ref(ref)[0] == expected) for ref in refs)
 
 
-def evaluate(store: Store, path: str = "evals") -> dict[str, object]:
+def _ranks(expect: list[str], refs: list[str], uris: list[str]) -> dict[str, int | None]:
+    """Each expected ref's 1-based position among the returned search items, or None when it is missing."""
+    return {
+        ref: next((n for n, item in enumerate(zip(refs, uris, strict=True), 1) if _matches(ref, list(item))), None)
+        for ref in expect
+    }
+
+
+class _Outcome(BaseModel):
+    """One case of a previous `bf eval` reply; its other fields are diagnostics."""
+
+    model_config = ConfigDict(strict=True)
+
+    suite: str
+    name: str
+    passed: bool
+    rank: dict[str, Annotated[int, Field(ge=1)] | None] = Field(default_factory=dict)
+
+
+class _Baseline(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    cases: Annotated[list[_Outcome], Field(max_length=100 * 200)]
+
+
+def load_baseline(value: str) -> dict[tuple[str, str], _Outcome]:
+    """A previous `bf eval` reply, keyed by suite and case name."""
+    path = Path(value)
+    try:
+        # Bounded bytes from a regular file: a plain open would wait on a FIFO.
+        data = Store(path.parent).read(path.name)
+    except (Error, OSError) as error:
+        raise Error(f"baseline must be a readable regular file of at most {MAX_FILE} bytes, not a symlink") from error
+    try:
+        cases = _Baseline.model_validate(decode(data)).cases
+    except (Error, ValidationError) as error:
+        raise Error("baseline is not a bf eval reply; save one with bf eval > FILE") from error
+    return {(case.suite, case.name): case for case in cases}
+
+
+def _change(before: _Outcome, after: dict[str, object]) -> int:
+    """-1 when a pass became a failure or an expected ref ranks lower, else 1 when a failure passes or one ranks higher."""
+    ranks = cast("dict[str, int | None]", after.get("rank", {}))
+    # A missing ref ranks below every position.
+    moves = [
+        (old or inf) - (new or inf)
+        for ref, new in ranks.items()
+        if ref in before.rank and (old := before.rank[ref]) != new
+    ]
+    if (before.passed and not after["passed"]) or any(move < 0 for move in moves):
+        return -1
+    return 1 if (after["passed"] and not before.passed) or moves else 0
+
+
+def _compare(results: list[dict[str, object]], previous: dict[tuple[str, str], _Outcome]) -> dict[str, object]:
+    changes: dict[int, list[dict[str, object]]] = {-1: [], 1: []}
+    for result in results:
+        before = previous.get((str(result["suite"]), str(result["name"])))
+        if before is not None and (change := _change(before, result)):
+            changes[change].append(
+                {
+                    **{key: result[key] for key in ("suite", "name", "passed", "rank") if key in result},
+                    "baseline": {"passed": before.passed, **({"rank": before.rank} if before.rank else {})},
+                }
+            )
+    return {"regressions": changes[-1], "improvements": changes[1]}
+
+
+def evaluate(
+    store: Store, path: str = "evals", previous: dict[tuple[str, str], _Outcome] | None = None
+) -> dict[str, object]:
     paths = (
         [path]
         if path.endswith((".yaml", ".yml"))
@@ -222,12 +318,16 @@ def evaluate(store: Store, path: str = "evals") -> dict[str, object]:
         except ValidationError as error:
             raise Error(f"invalid {name}: " + explain(error)) from error
         cases.extend((name, case) for case in suite.cases)
-    results = []
+    results: list[dict[str, object]] = []
+    # Each ranked search case's reciprocal rank of its best-placed expected ref; a miss or failure counts zero.
+    reciprocal: list[float] = []
     for path, case in cases:
+        ranked = case.read is None and bool(case.expect)
         try:
             reply, refs, uris, delivered = _answer(store, case)
         except Error as error:
             results.append({"suite": path, "name": case.name, "passed": False, "error": str(error)})
+            reciprocal.extend([0.0] if ranked else [])
             continue
         matches = [*refs, *uris]
         missing = [ref for ref in case.expect if not _matches(ref, matches)]
@@ -237,6 +337,9 @@ def evaluate(store: Store, path: str = "evals") -> dict[str, object]:
             not case.empty or not refs
         )
         result: dict[str, object] = {"suite": path, "name": case.name, "passed": passed}
+        if ranked:
+            result["rank"] = ranks = _ranks(case.expect, refs, uris)
+            reciprocal.append(max((1 / n for n in ranks.values() if n), default=0.0))
         if not passed:
             result.update(missing=missing, forbidden=forbidden, absent=absent, returned=refs)
             for field in ("problems", "stale"):
@@ -244,4 +347,10 @@ def evaluate(store: Store, path: str = "evals") -> dict[str, object]:
                     result[field] = reply[field]
         results.append(result)
     passed = sum(bool(r["passed"]) for r in results)
-    return {"passed": passed == len(results), "score": f"{passed}/{len(results)}", "cases": results}
+    summary = {
+        "passed": passed == len(results),
+        "score": f"{passed}/{len(results)}",
+        **({"mrr": round(sum(reciprocal) / len(reciprocal), 4)} if reciprocal else {}),
+        "cases": results,
+    }
+    return {**summary, **_compare(results, previous)} if previous is not None else summary

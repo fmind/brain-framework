@@ -152,6 +152,8 @@ def test_a_note_path_too_long_for_an_address_is_named_and_still_reads(brain: Sto
     for problems in (validate(brain)["problems"], search([brain], Query(text="longpathneedle"))["problems"]):
         assert path in str(problems)
         assert "path exceeds 7988 characters once percent-encoded in a BF address" in str(problems)
+    with pytest.raises(Error, match="links are unavailable for a path this long"):
+        read([brain], path, rel="links")
 
 
 def test_a_note_path_with_a_control_character_still_reads(brain: Store) -> None:
@@ -165,6 +167,8 @@ def test_a_note_path_with_a_control_character_still_reads(brain: Store) -> None:
     assert reply["problems"] == [
         {"brain": "fixture", "file": path, "error": "backlinks are unavailable for this path; rename it"}
     ]
+    with pytest.raises(Error, match="links are unavailable for this path; rename it"):
+        read([brain], path, rel="links")
 
 
 def test_headings_and_file_names_stay_addressable(brain: Store) -> None:

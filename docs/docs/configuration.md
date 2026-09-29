@@ -13,7 +13,7 @@ bf read projects/new-website.md#decision
 
 The reply contains the saved reason for choosing a single product page. You do not need a global configuration file or registration.
 
-Each brain's `bf.yaml` holds its name, optional references, [schema](schema.md), [sensors](sensors.md), [routines](routines.md) and optional [watch preferences](schedule.md#watch-preferences). Unknown settings, duplicate keys and invalid values fail visibly. The [JSON Schema](../bf.schema.json) describes the current format; [editor schemas](schema.md#editor-schemas) also cover the machine registry and evaluation suites.
+Each brain's `bf.yaml` holds its name, optional references, [schema](schema.md), [sensors](sensors.md), [routines](routines.md) and optional [watch preferences](schedule.md#watch-preferences). Unknown settings, duplicate keys and invalid values fail visibly. Search and read apply a sensor's [`priority`](sensors.md#quiet-a-high-volume-source) when they run, so changing it needs no `bf build`. The [JSON Schema](../bf.schema.json) describes the current format; [editor schemas](schema.md#editor-schemas) also cover the machine registry and evaluation suites.
 
 The walkthrough uses `~/brain`; any directory can hold a brain. Its path and configured name are separate: `bf init ~/brains/default --name brain` creates a folder at `~/brains/default` whose links start with `bf://brain/`. See [location choices](getting-started.md#choose-a-location).
 

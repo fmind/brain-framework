@@ -10,9 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from bf import retrieve
-from bf.models import digest, encode
-from bf.retrieve import CHUNK
+from bf import pages, retrieve
 from bf.storage import Store
 from conftest import Provider
 
@@ -106,7 +104,7 @@ def test_handoff_context_byte_boundary(provider: Provider, size: int) -> None:
         {**reply("context", CONTEXT), "next_offset": 1},
         {**reply("context", CONTEXT), "next_offset": 0},
         {**reply("context", CONTEXT), "page": "actions"},
-        {**reply("context", CONTEXT), "chunk": "PRIVATE CONTENT"},
+        {**reply("context", CONTEXT), "offset": 1024},
         reply("context", "## Context {#context}\n\n"),
         {**reply("context", CONTEXT), "text": 17},
         {**reply("context", CONTEXT), "ref": f"{ACTION}#other"},
@@ -180,26 +178,24 @@ def test_handoff_rejects_invalid_action_before_running_bf(provider: Provider) ->
     assert not provider.calls("bf")
 
 
-def split(value: dict[str, object]) -> list[dict[str, object]]:
-    """The chunked form of one exact reply, as bf returns it above 65,536 characters."""
-    text = encode(value).decode()
+def split(value: dict[str, object], size: int) -> list[dict[str, object]]:
+    """The text pages of one exact section read, as bf returns them above its page budget."""
+    text = str(value["text"])
     return [
         {
-            "brain": value["brain"],
-            "ref": value["ref"],
-            "format": "json",
-            "chunk": text[start : start + CHUNK],
+            **value,
+            "text": text[start : start + size],
             "offset": start,
             "total_characters": len(text),
-            "sha256": digest(text.encode()),
-            **({"next_offset": start + CHUNK} if start + CHUNK < len(text) else {}),
+            "sha256": "0" * 64,
+            **({"next_offset": start + size} if start + size < len(text) else {}),
         }
-        for start in range(0, len(text), CHUNK)
+        for start in range(0, len(text), size)
     ]
 
 
-def test_handoff_fails_a_chunked_section_from_its_first_chunk(provider: Provider) -> None:
-    pieces = split(reply("resume", "## Resume {#resume}\n\n" + "PRIVATE CONTENT " * 5000))
+def test_handoff_fails_a_paged_section_from_its_first_page(provider: Provider) -> None:
+    pieces = split(reply("resume", "## Resume {#resume}\n\n" + "PRIVATE CONTENT " * 5000), 50_000)
     assert len(pieces) == 2
     provider.install(
         "bf",
@@ -215,12 +211,12 @@ def test_handoff_fails_a_chunked_section_from_its_first_chunk(provider: Provider
     assert not report["passed"]
     assert report["sections"]["resume"] == {
         "ref": f"bf://example/{ACTION}#resume",
-        "reply_characters": pieces[0]["total_characters"],
+        "characters": pieces[0]["total_characters"],
         "limits": {"words": 100},
         "passed": False,
     }
     assert "PRIVATE CONTENT" not in result.stdout + result.stderr
-    # One read per section: a chunked reply is never assembled.
+    # One read per section: a paged reply is never assembled.
     assert len(provider.calls("bf")) == 2
     provider.install("bf", [{"match": ["#context"], "stdout": pieces[1] | {"ref": f"{ACTION}#context"}}])
     report = json.loads(execute(provider).stdout)
@@ -239,15 +235,15 @@ def real(brain: Store) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_real_handoff_fails_a_chunked_context(brain: Store) -> None:
+def test_real_handoff_fails_a_paged_context(brain: Store) -> None:
     context = "## Context {#context}\n\n" + "word " * 20000 + "\n"
     brain.write(ACTION, ("---\ntype: action\nstatus: draft\n---\n\n# Website\n\n" + context + RESUME).encode())
-    assert "chunk" in retrieve.read([brain], f"{ACTION}#context")
+    assert "next_offset" in retrieve.read([brain], f"{ACTION}#context")
     result = real(brain)
     report = json.loads(result.stdout)
     assert result.returncode == 1
     assert report["checked"]
-    assert report["sections"]["context"]["reply_characters"] > CHUNK
+    assert report["sections"]["context"]["characters"] == len(context) > pages.BUDGET
     assert not report["sections"]["context"]["passed"]
     assert report["sections"]["resume"]["passed"]
 

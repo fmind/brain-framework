@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read one exact bf reply whole, capture it, or compare a retained capture with a new read.
 
-`read` runs the offline `bf read` and assembles JSON chunks; `capture` and `compare` use stdin only.
+`read` runs the offline `bf read` and assembles text pages; `capture` and `compare` use stdin only.
 """
 
 from __future__ import annotations
@@ -17,7 +17,8 @@ from typing import TypeAlias, cast
 # Agents run this helper with whatever python3 is on PATH: keep it compatible with Python 3.11.
 JSON: TypeAlias = "bool | int | float | str | list[JSON] | dict[str, JSON] | None"
 
-MAX_REPLY = 4 << 20  # UTF-8 bytes of one assembled exact read; larger evidence needs a section.
+MAX_REPLY = 4 << 20  # UTF-8 bytes of one bf reply, and characters of one assembled text.
+PAGING = ("offset", "next_offset", "total_characters", "outline", "outline_truncated")
 MAX_INPUT = 9 << 20  # Two bounded bf replies, plus the small capture envelope.
 
 
@@ -51,7 +52,7 @@ def identity(reply: dict[str, JSON]) -> tuple[str, str]:
 
 def body(reply: dict[str, JSON]) -> dict[str, JSON]:
     """Keep the answer, never backlinks, aliases resolved elsewhere, or a page listing."""
-    if "chunk" in reply or "next_offset" in reply:
+    if "next_offset" in reply or reply.get("offset", 0) != 0:
         raise ValueError("assemble the complete exact read before retaining evidence")
     if "page" in reply or ("text" in reply) == ("record" in reply):
         raise ValueError("expected an exact note, section or record read")
@@ -67,10 +68,18 @@ def body(reply: dict[str, JSON]) -> dict[str, JSON]:
     return {"record": record}
 
 
+def text_of(reply: dict[str, JSON]) -> str:
+    text = object_value(reply["record"]).get("text", "") if "record" in reply else reply.get("text")
+    if not isinstance(text, str):
+        raise ValueError("expected text")
+    return text
+
+
 def exact(ref: str, brain: str) -> dict[str, JSON]:
-    """Follow next_offset through an exact read's JSON chunks and verify their digest before parsing."""
+    """Follow next_offset through an exact read's text pages; every page names the same file digest."""
+    first: dict[str, JSON] = {}
     pieces: list[str] = []
-    offset, total, digest = 0, 0, ""
+    offset = 0
     while True:
         # bf reads offline and never runs sensors. Its diagnostics may contain private paths: discard them.
         result = subprocess.run(  # noqa: S603 - literal argv; main() rejects a ref that could start an option
@@ -83,29 +92,40 @@ def exact(ref: str, brain: str) -> dict[str, JSON]:
         if result.returncode or len(result.stdout) > MAX_REPLY:
             raise ValueError("read failed or exceeded the reply limit")
         reply = object_value(json.loads(result.stdout, object_pairs_hook=unique))
-        if "chunk" not in reply:
+        if "total_characters" not in reply:
             if offset:
-                raise ValueError("chunks ended early")
+                raise ValueError("pages ended early")
             return reply
-        chunk = reply["chunk"]
-        if not isinstance(chunk, str) or not chunk or reply.get("format") != "json" or reply.get("offset") != offset:
-            raise ValueError("unexpected chunk")
+        if reply.get("offset") != offset:
+            raise ValueError("unexpected page")
         if offset == 0:
-            total, digest = cast("int", reply.get("total_characters")), cast("str", reply.get("sha256"))
-            if type(total) is not int or total > MAX_REPLY or not isinstance(digest, str):
-                raise ValueError("unexpected chunk")
-        elif (reply.get("total_characters"), reply.get("sha256")) != (total, digest):
+            first = reply
+            total = first.get("total_characters")
+            if type(total) is not int or total > MAX_REPLY or not isinstance(first.get("sha256"), str):
+                raise ValueError("unexpected page")
+        elif (reply.get("total_characters"), reply.get("sha256")) != (first["total_characters"], first["sha256"]):
             raise ValueError("the reply changed while reading")
-        pieces.append(chunk)
-        offset += len(chunk)
+        piece = text_of(reply)
+        pieces.append(piece)
+        offset += len(piece)
         if "next_offset" not in reply:
             break
-        if reply["next_offset"] != offset or offset >= total:
+        if reply["next_offset"] != offset or not piece or offset >= cast("int", first["total_characters"]):
             raise ValueError("unexpected continuation")
-    data = "".join(pieces).encode()
-    if offset != total or len(data) > MAX_REPLY or hashlib.sha256(data).hexdigest() != digest:
+    text = "".join(pieces)
+    whole = {key: value for key, value in first.items() if key not in PAGING}
+    if offset != first["total_characters"]:
         raise ValueError("the reply changed while reading")
-    return object_value(json.loads(data, object_pairs_hook=unique))
+    if "record" in whole:
+        # As in a whole read, a record without text has no text field.
+        fields = {key: value for key, value in object_value(whole["record"]).items() if key != "text"}
+        whole["record"] = {**fields, "text": text} if text else fields
+    else:
+        whole["text"] = text
+        # A whole note's text is its file, which the digest names; a section's digest names its whole file.
+        if "#" not in str(whole.get("ref")) and hashlib.sha256(text.encode()).hexdigest() != whole["sha256"]:
+            raise ValueError("the reply changed while reading")
+    return whole
 
 
 def fingerprint(value: dict[str, JSON]) -> str:

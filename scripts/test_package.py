@@ -7,6 +7,7 @@ network access and runs weekly in the security workflow.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -45,6 +46,10 @@ async def check() -> None:
         note = await session.call_tool("read", {"ref": "concepts/welcome.md"})
         assert not note.is_error
         assert note.structured_content["text"]
+        # The starter index links to the welcome note without a declared relationship.
+        linked = await session.call_tool("read", {"ref": "concepts/welcome.md", "rel": "links"})
+        assert not linked.is_error
+        assert [item["ref"] for item in linked.structured_content["items"]] == ["concepts/index.md"]
 
 
 asyncio.run(check())
@@ -170,8 +175,14 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
                 "search": any(
                     item.get("ref") == "concepts/welcome.md" for item in replies[("search", "welcome")].get("items", [])
                 ),
-                "exact read": replies[("read", "concepts/welcome.md")].get("text")
-                == (brain / "concepts/welcome.md").read_text(),
+                "exact read": (
+                    replies[("read", "concepts/welcome.md")].get("text"),
+                    replies[("read", "concepts/welcome.md")].get("sha256"),
+                )
+                == (
+                    (brain / "concepts/welcome.md").read_text(),
+                    hashlib.sha256((brain / "concepts/welcome.md").read_bytes()).hexdigest(),
+                ),
                 "projects": any(
                     item.get("ref") == "projects/package.md" for item in replies[("read", "projects")].get("items", [])
                 ),

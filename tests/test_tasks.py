@@ -35,15 +35,13 @@ def test_tasks_include_source_sections_lines_and_counts_for_canonical_notes(brai
     items = cast("list[dict[str, object]]", result["items"])
     found = items[1]
     assert found == {
-        "brain": "fixture",
         "ref": "projects/tasks.md#next",
-        "uri": "bf://fixture/projects/tasks.md#next",
         "note": "projects/tasks.md",
         "title": "Plan",
         "line": 8,
         "text": "Read the source.",
     }
-    assert "- [ ] Read" in str(read([brain], str(found["uri"]))["text"])
+    assert "- [ ] Read" in str(read([brain], str(found["ref"]))["text"])
     assert [item["text"] for item in items] == ["Resume.", "Read the source.", "Numbered."]
     assert read([brain], "bf://fixture/tasks")["summary"] == result["summary"]
 

@@ -10,27 +10,29 @@ import shutil
 import sqlite3
 import stat
 import sys
+import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 from mcp.types import CallToolResult
 from pydantic import ValidationError
 
-from bf import index, usage
+from bf import index, pages, records, storage, usage
 from bf.cli import main
 from bf.config import register, user_path
 from bf.markdown import LEAD, entry_note
 from bf.mcp import server
-from bf.models import Error, NotFoundError, Query, Record, timestamp
+from bf.models import Error, NotFoundError, Query, Record, digest, encode, timestamp
 from bf.pages import scope
 from bf.retrieve import read, search
-from bf.storage import UNNAMED, Store, state_store, writer
+from bf.storage import UNNAMED, BusyError, Store, state_store, writer
 from bf.update import update
 from bf.validate import validate
 from conftest import records_file
@@ -60,16 +62,14 @@ def test_results_are_compact_and_cite_readable_refs(brain: Store) -> None:
     items = reply["items"]
     assert isinstance(items, list)
     record = next(i for i in items if i["kind"] == "record")
+    # With one selected brain, items name neither it nor their address; a record's kind is its only type.
     assert record == {
-        "brain": "fixture",
         "excerpt": "The team chose offline retrieval.",
         "kind": "record",
         "ref": "meetings:decision-1",
-        "uri": "bf://fixture/meetings:decision-1",
         "source": "meetings",
         "time": "2026-08-31T12:00:00.000000Z",
         "title": "Preserve durable evidence",
-        "type": "record",
         # Searches retain collected excerpts; the reply's notice marks all retrieved content as untrusted.
     }
     assert "untrusted" in str(reply["notice"])
@@ -79,6 +79,25 @@ def test_results_are_compact_and_cite_readable_refs(brain: Store) -> None:
     assert note["excerpt"].startswith("Provider retention cannot guarantee")
     concepts = search([brain], Query(text="durable evidence", **scope("concepts")))["items"]
     assert cast("list[dict[str, str]]", concepts)[0]["excerpt"] == "Originals outlive providers."
+
+
+def test_long_titles_are_previews_in_results_and_exact_in_reads(brain: Store) -> None:
+    # Some sensors title a record with a whole message, such as a commit body.
+    title = "Fix the release gate " + " ".join(f"step{n}" for n in range(300))
+    records_file(brain, "commits", [Record(id="c1", title=title, text="release gate")])
+    item = cast("list[dict[str, str]]", search([brain], Query(text="release gate"))["items"])[0]
+    assert item["ref"] == "commits:c1"
+    assert len(item["title"]) <= index.TITLE
+    # Cut at a word boundary, without a dangling space before the ellipsis.
+    assert item["title"].endswith("…")
+    assert not item["title"].endswith(" …")
+    assert title.startswith(item["title"].removesuffix("…"))
+    assert cast("dict[str, str]", read([brain], "commits:c1")["record"])["title"] == title
+    # Short titles are unchanged, and a single long word is cut at the limit.
+    word = "x" * 500
+    records_file(brain, "commits", [Record(id="c2", title=word, text="lonely word")])
+    item = cast("list[dict[str, str]]", search([brain], Query(text="lonely word"))["items"])[0]
+    assert item["title"] == "x" * (index.TITLE - 1) + "…"
 
 
 def test_exact_identities_and_their_linked_items(brain: Store) -> None:
@@ -460,10 +479,9 @@ def test_concurrent_first_search_waits_for_a_complete_cache(
     ]
 
 
-def test_failed_full_rebuild_does_not_publish_an_incomplete_cache(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_failed_or_abandoned_full_rebuilds_keep_the_live_cache(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     index.refresh(brain)
+    live = cache_file(brain)
     original_index = index._index  # noqa: SLF001 - inject failure after a file was indexed
     indexed: list[str] = []
 
@@ -478,10 +496,104 @@ def test_failed_full_rebuild_does_not_publish_an_incomplete_cache(
         with pytest.raises(Error, match="check free space"):
             index.refresh(brain, full=True)
     assert len(indexed) == 1
+    assert not (brain.root / index.BUILD).exists()
+    assert cache_file(brain) == live
     with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
-        assert connection.execute("SELECT count(*) FROM items").fetchone()[0] == 0
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == index.SCHEMA
+        assert connection.execute("SELECT count(*) FROM items").fetchone()[0] == 4
     assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
+    # A killed build leaves its partial file and journal beside the cache; the next build replaces them.
+    for suffix in ("", "-journal"):
+        (brain.root / (index.BUILD + suffix)).write_bytes(b"abandoned build")
+    assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
+    assert index.refresh(brain, full=True)["files"] == 4
+    assert sorted(path.name for path in (brain.root / ".bf").iterdir()) == ["index.sqlite"]
+    assert cache_file(brain) != live
+
+
+def test_a_full_build_keeps_serving_and_refreshing_the_live_cache_until_it_publishes(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index.refresh(brain)
+    live = cache_file(brain)
+    ingesting, finish = Event(), Event()
+    original_index = index._index  # noqa: SLF001 - pause the build after its scan
+
+    def paused(connection: sqlite3.Connection, store: Store, path: str) -> None:
+        if not ingesting.is_set():
+            ingesting.set()
+            assert finish.wait(10)
+        return original_index(connection, store, path)
+
+    monkeypatch.setattr(index, "_index", paused)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        build = executor.submit(index.refresh, brain, full=True)
+        try:
+            assert ingesting.wait(10)
+            # The build holds no writer lock: a collection commits while searches read and refresh the live cache.
+            with writer(brain):
+                brain.write("concepts/late.md", b"# Late\n\nOsmium evidence.\n")
+                brain.delete(records.path("meetings", "lunch"))
+            assert refs(brain, "osmium") == ["concepts/late.md"]
+            assert cache_file(brain) == live
+        finally:
+            finish.set()
+        # The build fingerprinted its files before the commit: the removed record is neither indexed nor skipped.
+        assert build.result(timeout=10) == {"files": 4, "changed": 4, "removed": 0, "skipped": 0}
+    assert cache_file(brain) != live
+    # The file added after the build's scan has no fingerprint in the new generation: the next refresh indexes it.
+    reply = search([brain], Query(text="osmium lunch"), counted=False)
+    assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == ["concepts/late.md"]
+    assert "problems" not in reply
+
+
+def test_a_build_publishes_after_readers_close_the_generation_it_replaces(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index.refresh(brain)
+    waiting = Event()
+
+    def sleep(seconds: float) -> None:
+        waiting.set()
+        time.sleep(seconds)
+
+    # The publish waits in the generation lock that readers hold while connected.
+    monkeypatch.setattr(storage, "time", SimpleNamespace(monotonic=time.monotonic, sleep=sleep))
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with index.database(brain) as (connection, _state):
+            build = executor.submit(index.refresh, brain, full=True)
+            # SQLite finds -wal and -shm files by name: no reader of the old generation may outlive the rename.
+            assert waiting.wait(10)
+            assert not build.done()
+            assert connection.execute("SELECT count(*) FROM items").fetchone()[0] == 4
+        assert build.result(timeout=10)["files"] == 4
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
+    # A reader that outlasts the wait fails the build visibly; the live cache stays in service.
+    live = cache_file(brain)
+    monkeypatch.setattr(index, "_PUBLISH", 0)
+    with index.database(brain) as (connection, _state), pytest.raises(BusyError, match="readers kept"):
+        index.refresh(brain, full=True)
+    assert not (brain.root / index.BUILD).exists()
+    assert cache_file(brain) == live
+    assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
+
+
+def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
+    schema = b"version: 6\nname: fixture\nschema:\n  owner:\n    description: Who owns it.\n    type: identity\n"
+    brain.write("bf.yaml", schema + b"    relation: true\n")
+    index.refresh(brain)
+    generation = cache_file(brain)
+    reworded = schema.replace(b"Who owns it.", b"The accountable owner.")
+    brain.write("bf.yaml", reworded + b"    relation: true\n    examples: [person:ada]\n")
+    assert index.refresh(brain)["changed"] == 0
+    assert cache_file(brain) == generation
+    # A structural change still rebuilds: edges follow relation fields.
+    brain.write("bf.yaml", reworded)
+    assert index.refresh(brain)["changed"] == 4
+    assert cache_file(brain) != generation
 
 
 def test_live_pending_commit_serves_stale_cache_but_abandoned_commit_errors(brain: Store) -> None:
@@ -547,14 +659,20 @@ def test_exact_reads(brain: Store) -> None:
         read([brain], "x" * 9000)
 
 
-def test_oversized_replies_are_explicit_json_chunks(brain: Store) -> None:
-    brain.write("concepts/quoted.md", b"# Quoted\n\n" + b'"' * 3_000_000)
+def test_oversized_notes_read_as_pages_of_their_text(brain: Store) -> None:
+    # Escaped quotes double the serialized size: a page holds fewer characters, never more bytes.
+    data = b"# Quoted\n\n" + b'"' * 3_000_000
+    brain.write("concepts/quoted.md", data)
     reply = read([brain], "concepts/quoted.md")
-    assert reply["format"] == "json"
-    assert reply["offset"] == 0
-    assert reply["next_offset"] == 65536
-    assert reply["sha256"]
-    assert len(str(reply["chunk"])) == 65536
+    assert "chunk" not in reply
+    assert (reply["offset"], reply["total_characters"], reply["sha256"]) == (0, len(data), digest(data))
+    assert len(encode(reply)) <= pages.BUDGET
+    # No line ends within the slice, so it ends where the budget does.
+    assert reply["next_offset"] == len(str(reply["text"])) > pages.BUDGET // 4
+    assert reply["modified"] == timestamp(
+        # Exact integer division, as bf computes it: `ns / 1e9` rounds ns to a float first, off by one microsecond.
+        datetime.fromtimestamp((brain.root / "concepts/quoted.md").stat().st_mtime_ns / 1_000_000_000, UTC).isoformat()
+    )
 
 
 def test_usage_counts_searches_empty_results_and_reads_without_queries(brain: Store) -> None:
@@ -840,45 +958,31 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
         search([other, other], Query(text="offline"), counted=False)
 
 
-def test_search_waits_if_a_rebuild_replaces_the_checked_generation(
+def test_a_search_opens_a_generation_published_after_its_freshness_check(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     index.refresh(brain)
-    checked, reopen, ingesting, finish, retrying = (Event() for _ in range(5))
-    original_fresh, original_index = index.fresh, index._index  # noqa: SLF001 - coordinate a real generation replacement
-    checks = 0
+    live = cache_file(brain)
+    checked, reopen = Event(), Event()
+    original_fresh = index.fresh
 
     def paused_fresh(store: Store) -> str:
-        nonlocal checks
-        checks += 1
-        if checks > 1:
-            retrying.set()
         state = original_fresh(store)
-        if checks == 1:
-            checked.set()
-            assert reopen.wait(10)
+        checked.set()
+        assert reopen.wait(10)
         return state
 
-    def paused_index(connection: sqlite3.Connection, store: Store, path: str) -> None:
-        ingesting.set()
-        assert finish.wait(10)
-        return original_index(connection, store, path)
-
     monkeypatch.setattr(index, "fresh", paused_fresh)
-    monkeypatch.setattr(index, "_index", paused_index)
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         query = executor.submit(search, [brain], Query(text="offline"), counted=False)
         try:
             assert checked.wait(10)
-            rebuild = executor.submit(index.refresh, brain, full=True)
-            assert ingesting.wait(10)
-            reopen.set()
-            assert retrying.wait(10)
+            # A checked reader holds no connection yet, so the build publishes without waiting for it.
+            assert index.refresh(brain, full=True)["files"] == 4
         finally:
             reopen.set()
-            finish.set()
-        assert rebuild.result(timeout=10)["files"] == 4
         reply = query.result(timeout=10)
+    assert cache_file(brain) != live
     assert isinstance(reply["items"], list)
     assert reply["items"][0]["ref"] == "projects/offline.md"
     assert "problems" not in reply
@@ -949,6 +1053,75 @@ def test_one_ranked_query_keeps_notes_above_long_records_that_happen_to_hold_eve
     )
     # Before 12.0.0 every item holding all four words ranked first, so these traces hid the note entirely.
     assert refs(brain, "brain framework search ranking", limit=3)[0] == "projects/ranking.md"
+
+
+def test_a_section_ranks_under_its_note_title_while_the_title_alone_finds_the_note(brain: Store) -> None:
+    brain.write("projects/atlas.md", b"# Atlas\n\nA fictional project.\n\n## Next actions\n\n- Measure latency.\n")
+    for name in ("borealis", "cobalt", "delta"):
+        body = f"# {name.title()}\n\n## Next actions\n\n- Compare with the Atlas baseline.\n"
+        brain.write(f"projects/{name}.md", body.encode())
+        brain.write(f"actions/2026-09-20_{name}/ACTION.md", b"# Session\n\n## Resume\n\nAtlas next actions first.\n")
+    # Before 15.0.0 the heading alone ranked a section: every other "Next actions" mentioning Atlas came first.
+    assert refs(brain, "Atlas next actions")[0] == "projects/atlas.md#next-actions"
+    # A section matching only through its note's title repeats the note, which answers instead.
+    assert refs(brain, "Atlas")[0] == "projects/atlas.md"
+    assert refs(brain, "Atlas latency")[0] == "projects/atlas.md#next-actions"
+
+
+def test_records_of_several_sources_sharing_a_url_collapse_to_the_best_ranked_one(brain: Store, tmp_path: Path) -> None:
+    url = "https://docs.example.test/plan"
+    records_file(brain, "drive", [Record(id="plan", title="Launch plan", text="Launch after review.", url=url)])
+    for n in range(7):
+        records_file(
+            brain, f"mirror{n}", [Record(id="plan", title="Launch plan", url=url, links=["repo:example/plan"])]
+        )
+    # One source's records of a URL stay distinct, such as two highlights of one document.
+    book = "https://book.example.test/"
+    records_file(brain, "highlights", [Record(id=f"h{n}", title=f"Launch plan note {n}", url=book) for n in (1, 2)])
+    items = cast("list[dict[str, object]]", search([brain], Query(text="launch plan"))["items"])
+    shared = [item for item in items if item.get("url") == url]
+    assert len(shared) == 1
+    also = cast("list[str]", shared[0]["also"])
+    # At most five other matching refs, sorted; all eight records remain distinct evidence.
+    assert len(also) == index.ALSO
+    assert also == sorted(also)
+    assert {shared[0]["ref"], *also} < {"drive:plan", *(f"mirror{n}:plan" for n in range(7))}
+    assert sorted((str(item["ref"]), "also" in item) for item in items if item.get("url") == book) == [
+        ("highlights:h1", False),
+        ("highlights:h2", False),
+    ]
+    # Collapse precedes the window, so continuations neither repeat nor skip a result.
+    windows = [refs(brain, "launch plan", limit=1, offset=offset) for offset in range(len(items) + 1)]
+    assert [ref for window in windows for ref in window] == [str(item["ref"]) for item in items]
+    # Identity searches list every record that links to the identity.
+    assert len(refs(brain, "repo:example/plan", limit=50)) == 7
+    # Only one brain's records collapse; another brain keeps its own copy.
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 6\nname: team\n")
+    records_file(team, "drive", [Record(id="plan", title="Launch plan", url=url)])
+    both = cast("list[dict[str, object]]", search([brain, team], Query(text="launch plan"))["items"])
+    assert sorted(str(item["brain"]) for item in both if item.get("url") == url) == ["fixture", "team"]
+    # With several brains, `also` names records by address: a plain ref could exist in both.
+    mine = next(item for item in both if item.get("url") == url and item["brain"] == "fixture")
+    assert cast("list[str]", mine["also"]) == [f"bf://fixture/{ref}" for ref in also]
+
+
+def test_low_priority_sources_rank_at_half_weight_without_a_rebuild(brain: Store) -> None:
+    records_file(brain, "news", [Record(id="bridge", title="Harbor bridge", text="Harbor bridge.")])
+    records_file(
+        brain, "minutes", [Record(id="bridge", title="Harbor bridge", text="The harbor bridge needs repairs.")]
+    )
+    assert refs(brain, "harbor bridge") == ["news:bridge", "minutes:bridge"]
+    cache = (brain.root / index.CACHE).stat().st_ino
+    brain.write(
+        "bf.yaml", b"version: 6\nname: fixture\nsensors:\n  news:\n    command: [news-cli]\n    priority: low\n"
+    )
+    assert refs(brain, "harbor bridge") == ["minutes:bridge", "news:bridge"]
+    assert (brain.root / index.CACHE).stat().st_ino == cache
+    # A source scope holds one priority: its order and pages stay unchanged.
+    assert refs(brain, "harbor", **scope("memories/news")) == ["news:bridge"]
 
 
 def test_only_entry_notes_rank_above_evidence(brain: Store) -> None:
@@ -1042,6 +1215,31 @@ def test_only_returned_results_compute_excerpts(brain: Store, monkeypatch: pytes
     reply = search([brain], Query(text="needle", limit=5, offset=50))
     assert len(cast("list", reply["items"])) == len(computed) == 5
     assert all(item["excerpt"] == "needle" for item in cast("list[dict[str, object]]", reply["items"]))
+
+
+def test_search_coverage_names_the_sources_it_returned_or_that_need_attention(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 6\nname: fixture\nsensors:\n"
+        b"  manual:\n    command: [true-command]\n"
+        b"  due:\n    command: [true-command]\n    refresh: 3600\n",
+    )
+    records_file(brain, "manual", [Record(id="m", title="Manual notes")])
+    reply = search([brain], Query(text="offline retrieval"))
+    # meetings returned a record; due never collected here; manual needs nothing and returned nothing.
+    assert [(s["source"], s["freshness"]) for s in cast("list[dict]", reply["sources"])] == [
+        ("due", "never"),
+        ("meetings", "unknown"),
+    ]
+    assert reply["sources_omitted"] == 1
+    # An empty reply, or a search of collected evidence alone, lists every searched source.
+    empty = search([brain], Query(text="zzabsent"))
+    assert [s["source"] for s in cast("list[dict]", empty["sources"])] == ["due", "manual", "meetings"]
+    assert "sources_omitted" not in empty
+    scoped = search([brain], Query(text="offline", **scope("memories")))
+    assert len(cast("list[dict]", scoped["sources"])) == 3
+    # Authored-folder scopes search no source.
+    assert not {"sources", "sources_omitted"} & set(search([brain], Query(text="offline", **scope("projects"))))
 
 
 def test_source_scopes_cover_only_brains_that_hold_the_source(brain: Store, tmp_path: Path) -> None:

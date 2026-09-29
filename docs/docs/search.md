@@ -19,7 +19,7 @@ bf search "product page" --scope projects
 
 The first search finds the decision's reason; the second limits matches to project notes. Search matches any query word and ranks results, so `product page` can match either word. It does not generate an answer or translate your query. Use a few words the source is likely to contain. Words need spaces or punctuation between them: for Chinese, Japanese or Thai text written without spaces, search a whole run between punctuation exactly as written, a tag or an alias.
 
-Each item includes a title, excerpt, `ref` and brain-qualified `uri`. Read a returned ref exactly:
+Each item includes a title, excerpt and `ref`; with several selected brains, also its `brain` and brain-qualified `uri`. Records of several sources sharing a URL, such as a file and its catalog entry, appear once; `also` lists the other refs. Read a returned ref exactly:
 
 ```bash
 bf read projects/new-website.md#decision
@@ -46,7 +46,7 @@ Use pages when you want to browse rather than search for words:
 
 For the New website project, `bf read projects` shows `"next":"Draft the product page."`. A project's `review: true` flag is a reminder, with `review_reasons` explaining the deadline or newer evidence. File modification time supplies the default age signal; an explicit `review_due` sets a deadline. Neither means the note was verified. See [review reminders](brain.md#review-reminders).
 
-Recent-activity pages use note dates and record timestamps. They do not fetch anything from a provider. See the [page reference](retrieval.md#pages) for all available pages and their time rules.
+Recent-activity pages use note dates and record timestamps. They do not fetch anything from a provider. A [low-priority source](sensors.md#quiet-a-high-volume-source), such as a news feed, appears there only as a count with its page. See the [page reference](retrieval.md#pages) for all available pages and their time rules.
 
 ## Summarize open tasks
 
@@ -73,25 +73,26 @@ The directory shows counts; the tag page lists New website; the scoped search ma
 
 ## Notes, records and identities
 
-| Read     | Example                                    | Result                                                                              |
-| -------- | ------------------------------------------ | ----------------------------------------------------------------------------------- |
-| Note     | `bf read projects/new-website.md`          | Whole note and backlinks.                                                           |
-| Section  | `bf read projects/new-website.md#decision` | Decision text only.                                                                 |
-| Record   | `bf read brief:website-brief`              | Brief collected in [Getting started](getting-started.md#collect-your-first-source). |
-| Identity | `bf read repo:github.com/team/new-website` | Owning note after [declaring the alias](links.md#give-a-subject-a-stable-identity). |
+| Read     | Example                                       | Result                                                                                                     |
+| -------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Note     | `bf read projects/new-website.md`             | Whole note and backlinks.                                                                                  |
+| Section  | `bf read projects/new-website.md#decision`    | Decision text only.                                                                                        |
+| Record   | `bf read brief:website-brief`                 | Brief collected in [Getting started](getting-started.md#collect-your-first-source).                        |
+| Identity | `bf read repo:github.com/team/new-website`    | Owning note after [declaring the alias](links.md#give-a-subject-a-stable-identity).                        |
+| Role     | `bf read projects/new-website.md --rel links` | Every item linking to the note without a declared relationship; see [role pages](retrieval.md#role-pages). |
 
-Use returned refs exactly. Ordinary names do not establish identities.
+Use returned refs exactly. Ordinary names do not establish identities. A whole-note read previews the 5 newest backlinks of each relationship; its role page lists them all.
 
 ## Incomplete answers and freshness
 
 Before concluding that evidence is absent, check the reply:
 
-| Signal                       | What to do                                                                         |
-| ---------------------------- | ---------------------------------------------------------------------------------- |
-| `problems`                   | Resolve the named skipped or unreadable files and brains, then repeat the request. |
-| `stale`                      | Wait for the active writer to finish, then retry the cache refresh.                |
-| Source coverage or freshness | Check whether the collecting machine covered the period you need.                  |
-| `next_offset`                | Continue with that offset if you need the complete listing.                        |
+| Signal                       | What to do                                                                                                                                                                       |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `problems`                   | Resolve the named skipped or unreadable files and brains, then repeat the request.                                                                                               |
+| `stale`                      | Wait for the active writer to finish, then retry the cache refresh.                                                                                                              |
+| Source coverage or freshness | Check whether the collecting machine covered the period you need. Search lists the sources of returned records and those needing attention; `sources_omitted` counts the others. |
+| `next_offset`                | Continue with that offset if you need the complete listing.                                                                                                                      |
 
 A clean cache does not prove current provider data. For example, no matches for today's meeting could mean the meeting was never collected. Check locally retained coverage:
 
@@ -113,7 +114,7 @@ bf search "product" --limit 1 --offset 1
 
 Keep the query, scope, limit and brain selection unchanged. Stop when there is no `next_offset`; restart if the files change. Listings use the same `--offset` option.
 
-Exact reads longer than 65,536 characters return chunks, from the first one, instead of a full reply. Follow the [chunk assembly and digest checks](retrieval.md#continuations) to reconstruct them; a preview or single chunk is not complete evidence.
+An exact read above 32 KiB returns its text in pages, from the first one. The first page's `outline` lists the note's sections: read the one you need, or follow the [text pages](retrieval.md#large-exact-reads) to the end. A preview or single page is not complete evidence.
 
 ## Retrieval cases
 

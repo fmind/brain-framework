@@ -14,6 +14,7 @@ schema:
     type: identity
     cardinality: many
     relation: true
+    broader: related-to
   supersedes:
     description: This authored decision explicitly replaces the target decision.
     type: identity
@@ -34,4 +35,5 @@ schema:
     type: identity
     cardinality: many
     relation: true
+    targets: ["repo:"]
     examples: [[repo:example/project]]

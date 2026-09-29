@@ -93,18 +93,42 @@ To collect a passage with its page or section and a separate annotation, follow 
 
 The executable is a command on PATH or a `sensors/` executable. Arguments pass directly, without a shell. The placeholders `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}` are replaced once. Directly executed Python examples need an executable bit and a suitable `python3`; the walkthrough uses `uv` instead.
 
-| Setting     | Default  | Meaning                                                                       |
-| ----------- | -------- | ----------------------------------------------------------------------------- |
-| `command`   | required | Executable and up to 127 arguments of at most 16,384 characters each.         |
-| `fields`    | `{}`     | [Schema mappings](schema.md#shared-fields-and-sensor-mappings).               |
-| `enabled`   | `true`   | Disabled sensors keep their existing records searchable.                      |
-| `mode`      | `window` | Update returned items, or replace a complete `snapshot`.                      |
-| `refresh`   | `0`      | Seconds between automatic runs, up to 365 days; zero keeps the sensor manual. |
-| `lookback`  | `86400`  | Seconds covered by the first run, or each snapshot run; up to 365 days.       |
-| `overlap`   | `300`    | Seconds re-read before the previous window's end; up to 365 days.             |
-| `reconcile` | omitted  | Optional periodic wider window; requires `refresh` and `lookback` in seconds. |
-| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                                  |
-| `max_bytes` | 64 MiB   | Maximum stdout size; configurable up to 256 MiB.                              |
+| Setting     | Default  | Meaning                                                                               |
+| ----------- | -------- | ------------------------------------------------------------------------------------- |
+| `command`   | required | Executable and up to 127 arguments of at most 16,384 characters each.                 |
+| `fields`    | `{}`     | [Schema mappings](schema.md#shared-fields-and-sensor-mappings).                       |
+| `enabled`   | `true`   | Disabled sensors keep their existing records searchable.                              |
+| `mode`      | `window` | Update returned items, or replace a complete `snapshot`.                              |
+| `refresh`   | `0`      | Seconds between automatic runs, up to 365 days; zero keeps the sensor manual.         |
+| `lookback`  | `86400`  | Seconds covered by the first run, or each snapshot run; up to 365 days.               |
+| `overlap`   | `300`    | Seconds re-read before the previous window's end; up to 365 days.                     |
+| `reconcile` | omitted  | Optional periodic wider window; requires `refresh` and `lookback` in seconds.         |
+| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                                          |
+| `max_bytes` | 64 MiB   | Maximum stdout size; configurable up to 256 MiB.                                      |
+| `priority`  | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source) in pages and search. |
+
+## Quiet a high-volume source
+
+A feed that collects many records a day, such as news headlines, can crowd period pages and search results. Mark it `low` to keep it as background evidence. For a reviewed feed sensor accepting `START END`, add `priority` beside its other settings:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/sensors/
+sensors:
+  news:
+    command: [sensors/news.py, "{{start}}", "{{end}}"]
+    refresh: 3600
+    priority: low
+```
+
+After the next collection, `bf read today` lists the other sources' items, while `news` appears only under `sources`, in an entry such as `{"source":"news","records":120,"page":"memories/news/today","priority":"low"}`. Read that page to list its records.
+
+| Where                                                | Low-priority records                                       |
+| ---------------------------------------------------- | ---------------------------------------------------------- |
+| Period pages (`today`, `7d`, `2026-09`…) and home    | Counted in `sources`/`activity`, not listed in items.      |
+| Word search                                          | Rank at half weight; `--scope memories/news` is unchanged. |
+| Source pages, exact reads, identity and tag searches | Unchanged.                                                 |
+
+Search and read apply the setting when they run: changing it needs no `bf build`. The [retrieval example](https://github.com/fmind/brain-framework/tree/main/examples/retrieval) marks a document catalog `low`: its `2026-09-11` page lists the launch plan document and counts the catalog entry.
 
 ## Any source you can script
 

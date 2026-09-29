@@ -14,10 +14,13 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import best_match
 from pydantic import TypeAdapter
 
+from bf import replies, retrieve
 from bf.config import register
-from bf.models import Record, encode
+from bf.models import MAX_REPLY, Record, encode
 from bf.records import path as record_path
 from bf.storage import Store
 
@@ -85,7 +88,12 @@ class Provider:
         return [json.loads(line) for line in (self.state / f"{name}.calls").read_text().splitlines()]
 
     def run(
-        self, adapter: str, *arguments: str, home: Path | None = None, folder: str = "sensors"
+        self,
+        adapter: str,
+        *arguments: str,
+        home: Path | None = None,
+        folder: str = "sensors",
+        stdin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
@@ -98,6 +106,7 @@ class Provider:
         return subprocess.run(  # noqa: S603 - the subject is the adapter's own process boundary
             [sys.executable, str(ROOT / "examples" / folder / adapter), *arguments],
             env=env,
+            input=stdin,
             capture_output=True,
             text=True,
             timeout=120,
@@ -116,6 +125,31 @@ def provider(tmp_path: Path) -> Provider:
     (state / "home").mkdir(parents=True)
     (tmp_path / "bin").mkdir()
     return Provider(tmp_path / "bin", state)
+
+
+# Every reply a test produces must match a published reply schema; both share their definitions.
+_REPLY = Draft202012Validator(
+    {
+        "$defs": replies.SEARCH["$defs"],
+        "anyOf": [
+            {key: value for key, value in schema.items() if key != "$defs"} for schema in (replies.SEARCH, replies.READ)
+        ],
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def published_replies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Search and read replies return through `bounded`: validate each one against the reply schemas."""
+    bounded = retrieve.bounded
+
+    def checked(value: dict[str, object], limit: int = MAX_REPLY) -> dict[str, object]:
+        result = bounded(value, limit)
+        error = best_match(_REPLY.iter_errors(result))
+        assert error is None, f"{list(error.absolute_path)}: {error.message[:300]}"
+        return result
+
+    monkeypatch.setattr(retrieve, "bounded", checked)
 
 
 @pytest.fixture(autouse=True)

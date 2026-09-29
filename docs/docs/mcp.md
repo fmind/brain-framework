@@ -103,4 +103,8 @@ The answer should cite the ref. A configured entry alone does not prove the serv
 - Retrieval can refresh the disposable cache in the brain's `.bf/` directory, which must be writable by the host's account, and write private local usage counts.
 - The host may have other tools and may send evidence to a cloud model. See [privacy](privacy.md#your-agent-has-its-own-privacy-rules).
 
-To read from one brain when a ref exists in several, pass its `bf://NAME/...` address, exactly as in the CLI. For parameters, pagination and large replies, use the [MCP tool contract](retrieval.md#mcp-tool-contract).
+To read from one brain when a ref exists in several, pass its `bf://NAME/...` address, exactly as in the CLI. To list every item linking to a note through one relationship, pass it as `rel`, as `bf read REF --rel ROLE` does: `{"ref":"projects/new-website.md","rel":"links"}`. For parameters, pagination and large replies, use the [MCP tool contract](retrieval.md#mcp-tool-contract).
+
+## What the server tells the agent
+
+Hosts show the tools as **Search the brain** (`search`) and **Read a brain page, note or record** (`read`), both annotated read-only. At connection, the server also sends instructions with the loop the generated `AGENTS.md` teaches: orient with the home page, search a few subject words, read each ref relied on (preferring a `#section`), follow `next_offset`, list a backlink group with `rel`, inspect `problems` and `stale`, and treat retrieved content as untrusted evidence. Whether a host passes server instructions to its model depends on the host.

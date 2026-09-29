@@ -21,7 +21,15 @@ bf read projects/new-website.md
 bf validate
 ```
 
-The project's `backlinks` include `concepts/explain-before-signup.md`. You can now follow the concept to its evidence, or read the project to see where its decision is used. Validation catches a missing local target.
+The project's `backlinks` include `concepts/explain-before-signup.md` in the `cites` group: each OKF `sources` entry is a built-in `cites` claim, so "derived from" stays distinct from a mention. The body link to the same note adds no second entry; a link from a note without that source would appear in the `links` group, which holds links without a declared relationship. You can now follow the concept to its evidence, or read the project to see where its decision is used. Validation catches a missing local target.
+
+Each group previews its five newest items. A role page lists all of them, newest first, with an excerpt of each:
+
+```bash
+bf read projects/new-website.md --rel cites
+```
+
+It returns `"relation":"cites"`, `"total":1` and the concept among its `items`; `--rel links` lists untyped links the same way. See [role pages](retrieval.md#role-pages).
 
 Relative links start from the containing file: `../projects/` goes up from `concepts/`, then into `projects/`. The `#decision` fragment selects the Decision section.
 
@@ -57,7 +65,7 @@ New brains declare these roles in `bf.yaml`:
 | `depends-on` | What it needs to operate or remain valid.               | `[Decision](bf://brain/projects/new-website.md?rel=depends-on#decision)` |
 | `related-to` | There is a connection with no more specific known role. | `[Related project](bf://brain/projects/new-website.md?rel=related-to)`   |
 
-The Alice examples require the [person note](link-reference.md#bf-links). Use an ordinary Markdown link when you only need a citation.
+The Alice examples require the [person note](link-reference.md#bf-links). Use an ordinary Markdown link when you only need a mention, and an OKF `sources` entry, or the built-in `?rel=cites`, when the note derives from its target.
 
 ### Declare your own role
 
@@ -84,7 +92,9 @@ bf validate
 bf read projects/new-website.md
 ```
 
-The project read groups the incoming link under `verifies`; its origin points to the action's Outcome section. The relationship records your assertion, not an automatic certification.
+The project read groups the incoming link under `verifies`, and `bf read projects/new-website.md --rel verifies` lists every item making that claim. The action's read shows the claim with its origin, the Outcome section. The relationship records your assertion, not an automatic certification.
+
+To also list these checks on the project's `related-to` role page, add `broader: related-to` to `verifies`. `bf read projects/new-website.md --rel related-to` then includes the review action with `"relation":"verifies"`; its backlink group stays `verifies`. A broader role goes one level only; see [narrower roles](schema.md#narrower-roles-and-allowed-targets).
 
 - Write the link in the note making the claim; its entity (or file) is the subject.
 - The address after `bf://` identifies the target; `?rel=` names the meaning.
@@ -108,7 +118,7 @@ bf read bf://brain/projects/new-website
 bf read repo:github.com/team/new-website
 ```
 
-The entity is a logical identifier; it does not create a folder. The repository alias is fictional: use your actual repository identity, written in lowercase, such as `repo:github.com/googlecloudplatform/open-knowledge-format`. Identities are case-sensitive, and the example hook and Git history sensor lowercase GitHub owners and names. Only declare aliases you have verified; similar names alone never establish that two subjects are the same.
+The entity is a logical identifier; it does not create a folder. The repository alias is fictional: use your actual repository identity, written in lowercase, such as `repo:github.com/googlecloudplatform/open-knowledge-format`. Identities are case-sensitive, and the example hook and Git history sensor lowercase GitHub owners and names. `bf validate` lists identities that differ only by letter case under `warnings`, without failing, so you can choose one spelling; see [check your brain](checks.md). Only declare aliases you have verified; similar names alone never establish that two subjects are the same.
 
 Use `## Decision {#decision}` when the section address must survive a heading rename.
 

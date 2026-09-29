@@ -131,9 +131,32 @@
     },
     "SchemaField": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "relation": { "const": true } }, "required": ["relation"] },
+          "then": { "properties": { "type": { "const": "identity" } } }
+        },
+        {
+          "if": {
+            "anyOf": [
+              { "properties": { "broader": { "type": "string" } }, "required": ["broader"] },
+              { "properties": { "targets": { "type": "array" } }, "required": ["targets"] }
+            ]
+          },
+          "then": { "properties": { "relation": { "const": true } }, "required": ["relation"] }
+        }
+      ],
       "description": "A shared meaning; cardinality applies when a sensor maps this field.",
-      "if": { "properties": { "relation": { "const": true } }, "required": ["relation"] },
       "properties": {
+        "broader": {
+          "anyOf": [
+            { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "A declared relation, without its own broader, whose role page also lists this relation's links.",
+          "title": "Broader"
+        },
         "cardinality": {
           "default": "optional",
           "description": "Required scalar, optional scalar, or up to 1000 scalars; applies only when mapped.",
@@ -155,6 +178,25 @@
           "title": "Relation",
           "type": "boolean"
         },
+        "targets": {
+          "anyOf": [
+            {
+              "items": {
+                "maxLength": 1024,
+                "not": { "pattern": "\\s" },
+                "pattern": "^[a-z][a-z0-9+.-]*:\\S*$",
+                "type": "string"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array"
+            },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "Allowed identity prefixes, such as person:email/; collection rejects other mapped values.",
+          "title": "Targets"
+        },
         "type": {
           "enum": ["string", "integer", "number", "boolean", "timestamp", "identity"],
           "title": "Type",
@@ -162,7 +204,6 @@
         }
       },
       "required": ["description", "type"],
-      "then": { "properties": { "type": { "const": "identity" } } },
       "title": "SchemaField",
       "type": "object"
     },
@@ -230,6 +271,13 @@
           "minimum": 0,
           "title": "Overlap",
           "type": "integer"
+        },
+        "priority": {
+          "default": "normal",
+          "description": "Low ranks this source's records at half weight in word search and lists them only by count on period and home pages.",
+          "enum": ["normal", "low"],
+          "title": "Priority",
+          "type": "string"
         },
         "reconcile": {
           "anyOf": [{ "$ref": "#/$defs/Reconciliation" }, { "type": "null" }],

@@ -76,3 +76,19 @@ def test_prepared_knowledge_transfer_works_without_the_source_brain(tmp_path: Pa
     assert reply.exit_code == 0, reply.output
     assert json.loads(reply.stdout)["brain"] == "example-team"
     assert not load(store).brains
+
+
+def test_example_graph_export_and_broader_role_match_the_readme(tmp_path: Path) -> None:
+    brain = tmp_path / "example"
+    shutil.copytree(Path(__file__).parents[1] / "examples/brain", brain)
+    readme = (Path(__file__).parents[1] / "examples/brain/README.md").read_text()
+    documented = readme.split("the first three lines are:\n\n```text\n", 1)[1].split("```", 1)[0].splitlines()
+    result = CliRunner().invoke(app, ["export", "edges", "--brain", str(brain)])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines()[:3] == documented
+    policy = "bf://example/concepts/archive-policy.md"
+    reply = CliRunner().invoke(app, ["read", policy, "--rel", "related-to", "--brain", str(brain)])
+    items = json.loads(reply.stdout)["items"]
+    assert [(item["ref"], item["relation"]) for item in items] == [
+        ("actions/2026-09-25_retention-review/outputs/decision.md", "depends-on")
+    ]

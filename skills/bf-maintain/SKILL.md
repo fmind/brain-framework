@@ -2,9 +2,9 @@
 name: bf-maintain
 description: Diagnose and repair Brain Framework collection, routines, retrieval or conflicts; implement selected integrations and operate authorized refresh jobs. Use bf-setup for onboarding and bf-scan for discovery.
 license: MIT
-compatibility: Requires Brain Framework 14 (the bf command) on Linux or macOS.
+compatibility: Requires Brain Framework 15 (the bf command) on Linux or macOS.
 metadata:
-  version: "14.0.0"
+  version: "15.0.0"
 ---
 
 # bf-maintain
@@ -20,7 +20,7 @@ bf validate
 bf eval
 ```
 
-`status` reports each brain's `cache` (`ready` or `stale`), sources (`state`, `freshness`, `last_collected`, `window`, `last_run`) and routines (`state`, `last_success`, `action`); a failed program adds `failed`, `error`, `failures` and its private `log`. `update --dry-run` lists due programs and windows without running them. Validation and evaluation check file structure and saved retrieval expectations; inspect failures and incomplete evidence before reporting success. `bf validate` lists `problems` as `{file, error}` objects, at most 200 with `problems_truncated`; fix those and validate again.
+`status` reports each brain's `cache` (`ready` or `stale`), sources (`state`, `freshness`, `last_collected`, `window`, `last_run`) and routines (`state`, `last_success`, `action`); a failed program adds `failed`, `error`, `failures` and its private `log`. Non-failing `warnings` name a source or authored folder above 80% of the scan limit. `update --dry-run` lists due programs and windows without running them. Validation and evaluation check file structure and saved retrieval expectations; inspect failures and incomplete evidence before reporting success. `bf validate` lists `problems` as `{file, error}` objects, at most 200 with `problems_truncated`; fix those and validate again. Its non-failing `warnings` list identities differing only by letter case: keep one spelling.
 
 `bf collect --dry-run` **does execute provider code** and may write private stderr logs. Live collection, update, routine previews and watch need the user's authority for that scope; recurring execution needs matching authority. Reuse approval already supplied. Discovery alone grants neither.
 
@@ -34,7 +34,7 @@ bf eval
 | Resolve Git conflicts or competing identities                     | [Conflict resolution](references/conflicts.md)      |
 | Correct authored knowledge or review a decision                   | `bf-learn`, if installed                            |
 
-For a retrieval miss, save the question as an `evals/` case before changing the owning note or sensor; a new suite starts with `version: 5`. Keep technical regressions in `tests/`. Run `bf eval --path evals/NAME.yaml` for one suite or `bf eval` for all. Every suite is validated before retrieval: a malformed `read` ref or an empty window such as `0d` stops the whole run and names the suite and field. Never substitute empty assertions to make a case pass; see [retrieval cases](https://fmind.github.io/brain-framework/docs/checks/#suite-reference).
+For a retrieval miss, save the question as an `evals/` case before changing the owning note or sensor; a new suite starts with `version: 5`. Keep technical regressions in `tests/`. Run `bf eval --path evals/NAME.yaml` for one suite or `bf eval` for all. Search cases report each expected ref's `rank` and the run its `mrr`: save a reply before a change and pass it to `bf eval --baseline FILE` afterward to list `regressions`, including a case that still passes at a lower rank. Every suite is validated before retrieval: a malformed `read` ref or an empty window such as `0d` stops the whole run and names the suite and field. Never substitute empty assertions to make a case pass; see [retrieval cases](https://fmind.github.io/brain-framework/docs/checks/#suite-reference).
 
 Use `bf schema` for the installed brain schema, including `watch` preferences, or `--kind registry|eval` for other configuration formats. These commands are offline and need no selected brain. Editor schemas check structure; runtime validation, evaluation and update planning check their owning semantics.
 

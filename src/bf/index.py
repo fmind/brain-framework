@@ -8,7 +8,8 @@ import os
 import re
 import sqlite3
 import stat
-from collections.abc import Iterator, Mapping, Sequence
+import time
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
@@ -18,11 +19,18 @@ from bf import links as bf_links
 from bf import ontology, records
 from bf.config import load
 from bf.markdown import LEAD, authored, editor_lock, entry_note, note
-from bf.models import AUTHORED, IDENTITY, MAX_NOTE, Error, Query, Record, digest, encode, fold, moment
-from bf.storage import UNNAMED, BusyError, Store, reader, unnamed, writer
+from bf.models import AUTHORED, IDENTITY, LINKS, MAX_FILES, MAX_NOTE, Error, Query, Record, digest, encode, fold, moment
+from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, writer
 
-SCHEMA = 26
+SCHEMA = 27
 CACHE = ".bf/index.sqlite"
+# A full build fills this file beside the live cache, then renames it over CACHE.
+BUILD = CACHE + ".new"
+_SIDECARS = ("", "-wal", "-shm", "-journal")
+# Seconds a finished build waits for connections to the generation it replaces to close.
+_PUBLISH = 30
+# `bf status` warns about a scanned tree once it holds more entries than this.
+CROWDED = MAX_FILES * 4 // 5
 # `file` binds a generation to the database file bf created: a cache copied, cloned or extracted from
 # elsewhere has another inode, so it is rebuilt from the brain's files instead of trusted.
 _DDL = """
@@ -78,6 +86,10 @@ _STOP = frozenset(
 _IDENTITY = re.compile(IDENTITY)
 # A word query matches any of its first 32 distinct words; later words are ignored.
 WORDS = 32
+# A lexical result names at most this many other matching records that share its URL.
+ALSO = 5
+# Result and listing titles are previews of at most this many characters; exact reads keep the whole title.
+TITLE = 200
 # SQL twins of markdown.action_note and markdown.entry_note over `items i`, for page builders.
 ACTION = (
     "i.kind='note' AND substr(i.path,1,8)='actions/' AND substr(i.path,-10)='/ACTION.md' "
@@ -89,17 +101,18 @@ ENTRY = (
 )
 
 
-def inputs(store: Store) -> dict[str, tuple[int, int, int, int]]:
+def inputs(store: Store, counts: dict[str, int] | None = None) -> dict[str, tuple[int, int, int, int]]:
     """Authored notes and record files with their file fingerprints.
 
     Every symlink, special entry or unaddressable name stays an input so its exclusion is reported. A link can
     hide a whole directory regardless of its filename; never inspect its target to guess its contents. Editor
-    locks beside authored files are neither: an open editor must not fail updates.
+    locks beside authored files are neither: an open editor must not fail updates. The scan limit bounds each
+    authored folder and each source of memories/ on its own; `counts` receives their entries.
     """
     found: dict[str, tuple[int, int, int, int]] = {}
     for directory in (*AUTHORED, "memories"):
         skipped: dict[str, tuple[int, int, int, int]] = {}
-        scanned = store.scan(directory, skipped=skipped)
+        scanned = store.scan(directory, skipped=skipped, split=directory == "memories", counts=counts)
         if directory == "memories":
             found.update({name: info for name, info in scanned.items() if records.stored(name)})
             found.update(skipped)
@@ -122,21 +135,29 @@ def _writable() -> Iterator[None]:
         raise
 
 
-def _path(store: Store) -> Path:
+def _path(store: Store, name: str = CACHE) -> Path:
     # One no-follow descriptor checks and tightens .bf, so a swapped symlink cannot redirect either step;
     # Store.parent names a .bf that is a symlink or not a directory.
-    with _writable(), store.parent(CACHE, create=True) as (directory, _name):
+    with _writable(), store.parent(name, create=True) as (directory, _name):
         info = os.fstat(directory)
         if info.st_uid != os.getuid():
             raise Error(".bf belongs to another user; remove it so bf can rebuild its own cache")
         if stat.S_IMODE(info.st_mode) & 0o077:
             # A copied or extracted brain can bring a loose cache directory; the cache holds every record's text.
             os.fchmod(directory, stat.S_IMODE(info.st_mode) & 0o700)
-    path = store.root / CACHE
-    for suffix in ("", "-wal", "-shm", "-journal"):
+    path = store.root / name
+    for suffix in _SIDECARS:
         with suppress(FileNotFoundError):
-            store.fingerprint(CACHE + suffix)
+            store.fingerprint(name + suffix)
     return path
+
+
+def _remove(store: Store, name: str, suffixes: Sequence[str] = _SIDECARS) -> None:
+    """Delete a database file and its SQLite sidecars without following links."""
+    with _writable(), suppress(FileNotFoundError), store.parent(name) as (directory, leaf):
+        for suffix in suffixes:
+            with suppress(FileNotFoundError):
+                os.unlink(leaf + suffix, dir_fd=directory)
 
 
 def _open(store: Store) -> sqlite3.Connection | None:
@@ -144,8 +165,8 @@ def _open(store: Store) -> sqlite3.Connection | None:
     path = _path(store)
     signature = _signature(store)
     try:
-        # A concurrent full build may remove the file between this check and the connection: then
-        # SQLite creates an empty file, whose identity and version fail below.
+        # A concurrent full build may rename its generation over the file between this check and the connection:
+        # that generation's identity then fails below, and the caller checks again.
         expected = (signature, _file(path))
     except FileNotFoundError:
         return None
@@ -190,8 +211,10 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 
 def _signature(store: Store) -> str:
+    """The configuration a generation's rows depend on; documentation, such as a field's description, is not."""
     config = load(store)
-    return digest(encode({"name": config.name, "schema": {n: f.model_dump() for n, f in config.ontology.items()}}))
+    schema = {n: f.model_dump(exclude={"description", "examples"}) for n, f in config.ontology.items()}
+    return digest(encode({"name": config.name, "schema": schema}))
 
 
 def _file(path: Path) -> str:
@@ -204,15 +227,14 @@ def _file(path: Path) -> str:
 
 
 def _create(store: Store) -> sqlite3.Connection:
-    """An empty generation in rollback-journal mode; the caller switches it to WAL once it is filled.
+    """An empty generation beside the live cache in rollback-journal mode; the build switches it to WAL once filled.
 
     A new file needs almost no rollback journal, while WAL would write every page twice: once to the log
-    and again when checkpointing it.
+    and again when checkpointing it. Only the build lock holder uses BUILD: any file there is an abandoned build.
     """
-    path = _path(store)
+    path = _path(store, BUILD)
+    _remove(store, BUILD)
     with _writable():
-        for suffix in ("", "-wal", "-shm", "-journal"):
-            path.with_name(path.name + suffix).unlink(missing_ok=True)
         # Private from creation: SQLite gives its journal and WAL files the database file's mode.
         os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
     connection = _connect(path)
@@ -341,6 +363,7 @@ def _index(connection: sqlite3.Connection, store: Store, path: str) -> None:
                 "review_after": knowledge.review_after or 0,
                 "review_due": knowledge.review_due,
             },
+            # A section's `names` hold only its note's title: _lexical ranks them like a heading.
             [
                 (p.fragment, p.title, p.heading, p.text, projection.title if p.fragment else metadata)
                 for p in projection.passages
@@ -410,78 +433,166 @@ def lead(record: Record) -> str:
         size *= 4
 
 
-def refresh(store: Store, *, full: bool = False, wait: float = 30) -> dict[str, object]:
-    """Re-index only changed files; a file that fails to parse is skipped and reported, not fatal."""
+def refresh(store: Store, *, full: bool = False, wait: float = 30, recover: bool = False) -> dict[str, object]:
+    """Re-index only changed files; a file that fails to parse is skipped and reported, not fatal.
+
+    `full`, or a cache that is missing or incompatible, builds a new generation. `full` and `recover` first roll
+    back an interrupted record transaction, as build and update do; reads refuse to apply its journal instead.
+    """
     try:
-        return _refresh(store, full=full, wait=wait)
+        return _refresh(store, full=full, wait=wait, recover=full or recover)
     except sqlite3.DatabaseError as error:
         raise Error("could not refresh the search cache; check free space and run bf build") from error
 
 
-def _refresh(store: Store, *, full: bool, wait: float) -> dict[str, object]:
-    with writer(store, wait):
+def _refresh(store: Store, *, full: bool, wait: float, recover: bool) -> dict[str, object]:
+    if not full and (result := _incremental(store, wait=wait, recover=recover)) is not None:
+        return result
+    with building(store, wait):
         if full:
+            with writer(store, wait):
+                records.recover(store)
+        # Another build may have published a compatible generation while this one waited.
+        elif (result := _incremental(store, wait=wait, recover=recover)) is not None:
+            return result
+        return _build(store, wait)
+
+
+def _incremental(store: Store, *, wait: float, recover: bool) -> dict[str, object] | None:
+    """Update the live generation in place; None when there is no compatible one."""
+    with writer(store, wait):
+        if recover:
             records.recover(store)
         else:
             records.require_ready(store)
-        existing = None if full else _open(store)
-        connection = existing or _create(store)
+        connection = _open(store)
+        if connection is None:
+            return None
         with closing(connection):
-            # Keep the index B-trees being written in memory: up to 64 MiB, released when the refresh closes.
-            connection.execute("PRAGMA cache_size=-65536")
-            current = inputs(store)
-            known = _known(connection)
-            # A file's problem depends on its own bytes and the configuration signature: an unchanged
-            # fingerprint keeps its result.
-            changed = sorted(path for path, info in current.items() if known.get(path) != info)
-            removed = sorted(known.keys() - current.keys())
-            with connection:
-                connection.execute("BEGIN")
-                # A new generation has nothing to drop.
-                for path in (removed + changed) if existing else ():
-                    _drop(connection, path)
-                for path in changed:
-                    connection.execute("SAVEPOINT file")
-                    error = ""
-                    try:
-                        _index(connection, store, path)
-                    except (Error, UnicodeError) as problem:
-                        connection.execute("ROLLBACK TO file")
-                        error = str(problem) or "invalid file"
-                    except OSError:
-                        connection.execute("ROLLBACK TO file")
-                        error = "inaccessible file; check permissions"
-                    connection.execute("RELEASE file")
-                    connection.execute("INSERT INTO files VALUES(?,?,?,?,?,?)", (path, *current[path], error))
-                if existing is None:
-                    for statement in _INDEXES:
-                        connection.execute(statement)
-                # PRAGMA has no bound-parameter form; SCHEMA is an internal integer constant.
-                connection.execute(f"PRAGMA user_version={SCHEMA}")
-            if existing is None:
-                # Incremental refreshes then commit beside readers instead of blocking them.
-                connection.execute("PRAGMA journal_mode=WAL")
-            skipped = connection.execute("SELECT count(*) FROM files WHERE error!=''").fetchone()[0]
-        return {"files": len(current), "changed": len(changed), "removed": len(removed), "skipped": skipped}
+            return _fill(store, connection, new=False)
+
+
+def _build(store: Store, wait: float) -> dict[str, object]:
+    """Fill a new generation beside the live cache, then publish it; a failed build leaves the live cache.
+
+    The build lock keeps one build at a time, but the brain writer lock is held only to publish: searches keep
+    reading the live cache, incremental refreshes keep updating it, and collections keep committing. A file that
+    changes after the build fingerprinted it no longer matches its fingerprint, so the next refresh indexes it again.
+    """
+    try:
+        with closing(_create(store)) as connection:
+            result = _fill(store, connection, new=True)
+            # Incremental refreshes then commit beside readers instead of blocking them.
+            connection.execute("PRAGMA journal_mode=WAL")
+        # Rather than discard a finished build, wait out a collection's commit.
+        with writer(store, max(wait, _PUBLISH)):
+            _publish(store)
+    finally:
+        # After a publish, only sidecars an unclean close left can remain.
+        _remove(store, BUILD)
+    return result
+
+
+def _publish(store: Store) -> None:
+    """Rename the finished build over the live cache, under the brain writer lock.
+
+    SQLite finds a database's -wal and -shm files by name, never checking which database they belong to: a
+    connection to the old file would attach the new generation's log. Readers therefore hold the generation lock
+    while connected, and the publish takes it exclusively. The old generation leaves WAL mode, which removes both
+    files, so connections to the new file can neither replay nor share them. The rename keeps the inode `file` records.
+    """
+    with generation(store, shared=False, wait=_PUBLISH):
+        _replace(store)
+
+
+def _replace(store: Store) -> None:
+    path = _path(store)
+    deadline = time.monotonic() + _PUBLISH
+    with closing(_connect(path)) as live:
+        while True:
+            try:
+                live.execute("PRAGMA journal_mode=DELETE")
+                break
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise BusyError("readers kept the search cache open; retry bf build") from error
+                time.sleep(0.05)
+            except sqlite3.DatabaseError:
+                # Not a database: no connection can use a log beside it.
+                break
+    _remove(store, CACHE, _SIDECARS[1:])
+    with _writable(), store.parent(CACHE) as (directory, leaf):
+        os.replace(Path(BUILD).name, leaf, src_dir_fd=directory, dst_dir_fd=directory)
+
+
+def _fill(store: Store, connection: sqlite3.Connection, *, new: bool) -> dict[str, object]:
+    """Index changed files in one transaction; a new generation has nothing to drop and then gains its indexes."""
+    # Keep the index B-trees being written in memory: up to 64 MiB, released when the refresh closes.
+    connection.execute("PRAGMA cache_size=-65536")
+    current = inputs(store)
+    known = _known(connection)
+    # A file's problem depends on its own bytes and the configuration signature: an unchanged
+    # fingerprint keeps its result.
+    changed = sorted(path for path, info in current.items() if known.get(path) != info)
+    removed = sorted(known.keys() - current.keys())
+    with connection:
+        connection.execute("BEGIN")
+        for path in () if new else (removed + changed):
+            _drop(connection, path)
+        for path in changed:
+            connection.execute("SAVEPOINT file")
+            error = ""
+            try:
+                _index(connection, store, path)
+            except FileNotFoundError:
+                # Removed after the scan, as by a commit during a build or an editor's atomic save: without a
+                # fingerprint, the next refresh compares it again.
+                connection.execute("ROLLBACK TO file")
+                connection.execute("RELEASE file")
+                continue
+            except (Error, UnicodeError) as problem:
+                connection.execute("ROLLBACK TO file")
+                error = str(problem) or "invalid file"
+            except OSError:
+                connection.execute("ROLLBACK TO file")
+                error = "inaccessible file; check permissions"
+            connection.execute("RELEASE file")
+            connection.execute("INSERT INTO files VALUES(?,?,?,?,?,?)", (path, *current[path], error))
+        for statement in _INDEXES if new else ():
+            connection.execute(statement)
+        # PRAGMA has no bound-parameter form; SCHEMA is an internal integer constant.
+        connection.execute(f"PRAGMA user_version={SCHEMA}")
+    skipped = connection.execute("SELECT count(*) FROM files WHERE error!=''").fetchone()[0]
+    return {"files": len(current), "changed": len(changed), "removed": len(removed), "skipped": skipped}
 
 
 def fresh(store: Store) -> str:
-    """Refresh a stale cache, or keep serving it as `stale` while another writer holds the brain."""
-    connection = _open(store)
+    """Refresh a stale cache, or keep serving it as `stale` while another writer holds the brain.
+
+    Never call it while holding the generation lock: its refresh may publish a rebuilt generation.
+    """
+    # The cache folder's own checks come first: they name the problem more precisely than a lock would.
+    _path(store)
+    connection = None
     try:
-        with reader(store, wait=0):
-            # A live writer may have a pending journal; only an abandoned one blocks cached reads.
-            records.require_ready(store)
-            if connection is not None and _known(connection) == inputs(store):
-                return "ready"
+        with generation(store, shared=True, wait=_PUBLISH):
+            connection = _open(store)
+            try:
+                with reader(store, wait=0):
+                    # A live writer may have a pending journal; only an abandoned one blocks cached reads.
+                    records.require_ready(store)
+                    if connection is not None and _known(connection) == inputs(store):
+                        return "ready"
+            finally:
+                if connection is not None:
+                    connection.close()
     except BusyError:
         if connection is not None:
             return "stale"
-    finally:
-        if connection is not None:
-            connection.close()
     try:
-        # Without any usable generation there is nothing to serve, so wait for the other writer.
+        # Without any usable generation there is nothing to serve, so wait for the other writer or build.
         refresh(store, wait=0 if connection is not None else 120)
     except BusyError:
         return "stale"
@@ -506,25 +617,25 @@ def session() -> Iterator[None]:
 def database(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
     checked = _CHECKED.get()
     state = checked.get(store.root, "") if checked is not None else ""
-    connection = _open(store) if state else None
-    if connection is None:
-        # A full rebuild may replace the generation between the freshness check and open.
-        # Retry once: fresh() waits for an in-progress generation instead of serving it.
-        for _ in range(2):
+    # A full rebuild may replace the generation between the freshness check and open: check again, twice at most.
+    # fresh() waits for an in-progress generation instead of serving it, so it runs outside the generation lock.
+    for attempt in range(3):
+        if attempt or not state:
             state = fresh(store)
+            if checked is not None:
+                checked[store.root] = state
+        with generation(store, shared=True, wait=_PUBLISH):
             connection = _open(store)
-            if connection is not None:
-                break
-        else:
-            raise Error("the search cache is unavailable; run bf build")
-        if checked is not None:
-            checked[store.root] = state
-    with closing(connection):
-        connection.execute("PRAGMA query_only=ON")
-        # Counts, rows, snippets and claims must see one generation even while a WAL writer
-        # commits between their queries. Closing the connection releases this read snapshot.
-        connection.execute("BEGIN")
-        yield connection, state
+            if connection is None:
+                continue
+            with closing(connection):
+                connection.execute("PRAGMA query_only=ON")
+                # Counts, rows, snippets and claims must see one generation even while a WAL writer
+                # commits between their queries. Closing the connection releases this read snapshot.
+                connection.execute("BEGIN")
+                yield connection, state
+            return
+    raise Error("the search cache is unavailable; run bf build")
 
 
 def terms(text: str) -> list[str]:
@@ -608,19 +719,38 @@ def _lexical(connection: sqlite3.Connection, params: dict[str, object]) -> Itera
 
     Every match is ranked on narrow rows; only the returned items read their display fields. Each row
     names its best passage: snippets cost far more than ranking, so only a reply's items get an excerpt.
+
+    A section's `names` column holds only its note's title (see _index). Weighted like a heading, "Atlas" and
+    "Next actions" outrank another note's "Next actions" that merely mentions Atlas in its text. A section
+    matching through that inherited title alone repeats the whole note, which answers instead.
+
+    One window keeps each note's best passage and, for each URL, the records of its best-ranked record's source,
+    before the window is cut: a record has one passage and a note no URL, and an item number never equals a URL
+    string. Another source's record of that URL, such as a catalog entry for a collected file, becomes the kept
+    record's `also`; one source's records stay distinct, such as several highlights of one document. A ROWS
+    frame spares first_value the default frame's scan of tied rows.
     """
     rows = connection.execute(
         f"""WITH matches AS MATERIALIZED (
-             SELECT p.item,p.id AS passage,p.fragment,i.ref,i.status='deprecated' AS closed,
-                    -bm25(search,10.0,1.0,0.5)*i.weight AS score
+             SELECT p.item,p.id AS passage,p.fragment,i.ref,i.url,i.source,i.status='deprecated' AS closed,
+                    -(CASE WHEN p.fragment='' THEN bm25(search,10.0,1.0,0.5) ELSE bm25(search,10.0,1.0,10.0) END)
+                    *i.weight*(CASE WHEN i.source IN (SELECT value FROM json_each(:low)) THEN 0.5 ELSE 1.0 END) AS score
              FROM search JOIN passages p ON p.id=search.rowid JOIN items i ON i.id=p.item
-             WHERE search MATCH :match AND {_FILTERS}),
-           top AS (
-             SELECT * FROM (SELECT *,row_number() OVER (PARTITION BY item ORDER BY score DESC,fragment) AS position
-                            FROM matches)
-             WHERE position=1 ORDER BY closed,score DESC,ref LIMIT :limit)
-           SELECT {_FIELDS},t.fragment,p.title,t.passage AS _passage FROM top t
+             WHERE search MATCH :match AND {_FILTERS} AND (p.fragment='' OR bm25(search,10.0,1.0,0.0)<0)),
+           ranked AS MATERIALIZED (
+             SELECT *,row_number() OVER copy AS position,first_value(source) OVER copy AS lead FROM matches
+             WINDOW copy AS (PARTITION BY CASE WHEN url='' THEN item ELSE url END
+                             ORDER BY closed,score DESC,fragment,ref ROWS UNBOUNDED PRECEDING)),
+           top AS (SELECT * FROM ranked WHERE position=1 OR (url!='' AND source=lead)
+                   ORDER BY closed,score DESC,ref LIMIT :limit),
+           copies AS (
+             SELECT url,json_group_array(ref) AS refs
+             FROM (SELECT url,ref,row_number() OVER (PARTITION BY url ORDER BY ref) AS n FROM ranked
+                   WHERE source!=lead AND url IN (SELECT url FROM top WHERE position=1 AND url!=''))
+             WHERE n<={ALSO} GROUP BY url)
+           SELECT {_FIELDS},t.fragment,p.title,t.passage AS _passage,c.refs AS also FROM top t
            JOIN items i ON i.id=t.item JOIN passages p ON p.id=t.passage
+           LEFT JOIN copies c ON c.url=t.url AND t.position=1
            ORDER BY t.closed,t.score DESC,t.ref""",  # noqa: S608 - fixed SQL
         params,
     )
@@ -707,12 +837,20 @@ def known(connection: sqlite3.Connection, identities: set[str]) -> bool:
 
 
 def search(
-    connection: sqlite3.Connection, query: Query, *, identities: set[str], targets: set[str], exact: bool, limit: int
+    connection: sqlite3.Connection,
+    query: Query,
+    *,
+    identities: set[str],
+    targets: set[str],
+    exact: bool,
+    limit: int,
+    low: Collection[str] = (),
 ) -> Iterator[dict[str, object]]:
     """An exact identity or tag returns its owners, then what links to it; other text ranks lexically, within the scope.
 
     `limit` bounds this brain's rows, such as enough to fill a continued multi-brain window; -1 is unbounded.
-    Lexical rows name their `_passage` for `excerpt`; identity rows carry their owner `_rank`.
+    Lexical rows name their `_passage` for `excerpt`, and `also` other matching records of their URL; records
+    of `low` sources rank at half weight there. Identity rows carry their owner `_rank`.
     """
     text = query.text.strip()
     if bf_links.tag(text) is not None:
@@ -730,7 +868,8 @@ def search(
         return ({**_clean(dict(row)), "_rank": row["score"]} for row in _identity(connection, params))
     if not terms(text):
         return iter(())
-    return (_clean(row) for row in _lexical(connection, {**params, "match": _match(text)}))
+    rows = _lexical(connection, {**params, "match": _match(text), "low": json.dumps(sorted(low))})
+    return (_clean({**row, "also": sorted(json.loads(str(row["also"]))) if row["also"] else None}) for row in rows)
 
 
 def listing(
@@ -763,19 +902,40 @@ _GROUPS = f"""{_INCOMING} SELECT k.relation,count(*) AS total FROM linked k JOIN
   WHERE i.ref!=:exclude GROUP BY k.relation ORDER BY k.relation='',k.relation LIMIT 64"""  # noqa: S608
 _GROUP = f"""{_INCOMING} SELECT {_ROW} FROM linked k JOIN items i ON i.id=k.item
   WHERE k.relation=:relation AND i.ref!=:exclude ORDER BY time DESC,i.ref DESC LIMIT :limit"""  # noqa: S608
+_ROLE = "k.relation IN (SELECT value FROM json_each(:relations)) AND i.ref!=:exclude"
+_ROLE_TOTAL = f"{_INCOMING} SELECT count(*) FROM linked k JOIN items i ON i.id=k.item WHERE {_ROLE}"  # noqa: S608
+_ROLE_ROWS = f"""{_INCOMING} SELECT {_ROW},k.relation FROM linked k JOIN items i ON i.id=k.item
+  WHERE {_ROLE} ORDER BY time DESC,i.ref DESC,k.relation"""  # noqa: S608
 
 
 def incoming(
     connection: sqlite3.Connection, targets: set[str], *, exclude: str = "", limit: int = 20
 ) -> list[dict[str, object]]:
-    """Items linking to any target, grouped by explicit relationship; links without a role come last."""
+    """Items linking to any target, grouped by explicit relationship; links without a role come last as LINKS."""
     values = {**_parameters(targets), "exclude": exclude, "limit": limit}
     groups = []
     for relation, total in connection.execute(_GROUPS, values).fetchall():
         rows = connection.execute(_GROUP, {**values, "relation": relation}).fetchall()
-        group: dict[str, object] = {"total": total, "items": [_clean(dict(row)) for row in rows]}
-        groups.append({"relation": relation, **group} if relation else group)
+        groups.append({"relation": relation or LINKS, "total": total, "items": [_clean(dict(row)) for row in rows]})
     return groups
+
+
+def linking(
+    connection: sqlite3.Connection, targets: set[str], relations: list[str], *, exclude: str = ""
+) -> tuple[Iterator[dict[str, object]], int]:
+    """Stream the items linking to any target through these relationships, newest first, with their total.
+
+    Each row names its `relation`, LINKS for an untyped link; an item linking through two of the relationships
+    appears once per relationship.
+    """
+    values = {
+        **_parameters(targets),
+        "exclude": exclude,
+        "relations": json.dumps(["" if relation == LINKS else relation for relation in relations]),
+    }
+    total = connection.execute(_ROLE_TOTAL, values).fetchone()[0]
+    rows = connection.execute(_ROLE_ROWS, values)
+    return ({**_clean(dict(row)), "relation": row["relation"] or LINKS} for row in rows), total
 
 
 def newer_links(connection: sqlite3.Connection, ref: str, after: str) -> int:
@@ -800,6 +960,11 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
     if isinstance(excerpt := row.get("excerpt"), str):
         # A one-line preview; `bf read` returns the exact text.
         row["excerpt"] = re.sub(r"\s+", " ", excerpt).strip()
+    if isinstance(title := row.get("title"), str) and len(title) > TITLE:
+        # Some sources title records with a whole message, such as a commit; cut at a word when one is near.
+        cut = title[: TITLE - 1]
+        space = cut.rfind(" ")
+        row["title"] = (cut[:space] if space >= TITLE // 2 else cut).rstrip() + "…"
     row.pop("score", None)
     row.pop("position", None)
     opened, done = int(cast("int", row.pop("tasks_open", 0) or 0)), int(cast("int", row.pop("tasks_done", 0) or 0))
@@ -812,6 +977,9 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
     if row["kind"] == "note":
         row.pop("source", None)
         row.pop("updated", None)
+    else:
+        # Every record's type is `record`, which its kind already states.
+        row.pop("type", None)
     return {key: value for key, value in row.items() if value not in ("", None)}
 
 
@@ -850,10 +1018,28 @@ def activity(connection: sqlite3.Connection, since: str, until: str) -> list[tup
     ]
 
 
+def capacity(store: Store) -> list[dict[str, object]]:
+    """Scanned trees, each authored folder and each source of memories/, holding more than CROWDED entries."""
+    counts: dict[str, int] = {}
+    inputs(store, counts)
+    return [
+        {"warning": "directory nears the scan limit", "directory": tree, "entries": entries, "limit": MAX_FILES}
+        for tree, entries in sorted(counts.items())
+        if entries > CROWDED
+    ]
+
+
 def status(store: Store) -> dict[str, object]:
-    """Cache state, note and record counts, and skipped files."""
+    """Cache state, note and record counts, skipped files, and trees nearing the scan limit."""
     with database(store) as (connection, state):
         counts = sources(connection)
         notes = connection.execute("SELECT count(*) FROM items WHERE kind='note'").fetchone()[0]
         skipped = problems(connection)
-    return {"cache": state, "notes": notes, "sources": counts, "problems": skipped}
+    crowded = capacity(store)
+    return {
+        "cache": state,
+        "notes": notes,
+        "sources": counts,
+        "problems": skipped,
+        **({"warnings": crowded} if crowded else {}),
+    }

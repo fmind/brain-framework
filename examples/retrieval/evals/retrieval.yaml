@@ -28,6 +28,11 @@ cases:
     limit: 1
     expect: [projects/atlas.md#next-actions]
     text: [Measure cold-cache retrieval latency]
+  - name: project-next-actions-first
+    query: Atlas next actions
+    limit: 1
+    expect: [projects/atlas.md#next-actions]
+    text: [Measure cold-cache retrieval latency]
   - name: find-the-supporting-record
     query: deciding constraint
     scope: memories/meetings
@@ -39,6 +44,17 @@ cases:
     read: meetings:offline
     expect: ["meetings:offline"]
     text: [The review selected SQLite for local queries.]
+  - name: one-result-per-document-url
+    query: Atlas launch plan
+    limit: 3
+    expect: ["documents:atlas-launch-plan"]
+    forbid: ["catalog:atlas-launch-plan"]
+    text: [schedules the public release]
+  - name: day-lists-low-priority-source-by-count
+    read: "2026-09-11"
+    expect: ["documents:atlas-launch-plan"]
+    forbid: ["catalog:atlas-launch-plan"]
+    text: [memories/catalog/2026-09-11]
   - name: explicit-repository-identity
     query: repo:example/atlas
     limit: 5

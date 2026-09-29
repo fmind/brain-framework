@@ -19,7 +19,7 @@ from bf import graph, index, links, usage
 from bf.config import brain_name, load
 from bf.health import attention, source_health
 from bf.markdown import action_note, authored, editor_lock, entry_note, note, reference, split_ref
-from bf.models import AUTHORED, MAX_REPLY, NAME, Error, NotFoundError, addressable, encode, tag_name, timestamp
+from bf.models import AUTHORED, LINKS, NAME, Error, NotFoundError, addressable, encode, tag_name, timestamp
 from bf.storage import UNNAMED, Store, relative, unnamed
 
 # The automatic reminder interval for project files; modification time is not evidence of verification.
@@ -27,8 +27,11 @@ REVIEW_DAYS = 14
 SECTION = 20
 PAGE = 50
 LISTING = 200
-# A page's items fill at most half a reply: a page of large items ends early and continues at next_offset.
-BUDGET = MAX_REPLY // 2
+# The newest items previewed in each backlink group; its role page lists them all.
+PREVIEW = 5
+# Serialized bytes of a page's items, or of an exact read's text page. Agents read a reply whole: a larger one
+# ends early and continues at next_offset.
+BUDGET = 32 << 10
 BROWSE = ["projects", "concepts", "actions", "tasks", "memories", "tags", "today", "7d"]
 CACHE = "the search cache is unavailable; run bf build"
 _SCOPE = (
@@ -38,6 +41,8 @@ _SCOPE = (
 )
 _MISSING = "page not found; read projects, concepts, actions or memories to browse the brain"
 _BELOW = "(i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')"
+# Items outside the :low sources; notes have no source. Period and home lists keep those sources as counts.
+_LOUD = "i.source NOT IN (SELECT value FROM json_each(:low))"
 
 
 Build = Callable[[Store, str, sqlite3.Connection], dict[str, object] | None]
@@ -124,11 +129,55 @@ def scope(value: str, now: datetime | None = None) -> Scope:
     return {"prefix": path}
 
 
+def low(store: Store) -> list[str]:
+    """Sensors configured with `priority: low`, read at query time so a change needs no cache rebuild."""
+    return sorted(name for name, sensor in load(store).sensors.items() if sensor.priority == "low")
+
+
+def _counts(store: Store, rows: list[tuple[str, int]], page: str) -> list[dict[str, object]]:
+    """Records per source with the page listing them; a low-priority source is marked, its items listed only there."""
+    quiet = set(low(store))
+    return [
+        {
+            "source": source,
+            "records": count,
+            "page": f"memories/{source}/{page}",
+            **({"priority": "low"} if source in quiet else {}),
+        }
+        for source, count in rows
+    ]
+
+
+def address(brain: str, item: Mapping[str, object]) -> str:
+    """The portable address of one cached item: a record id may contain `#`, a note ref names its section."""
+    ref = str(item["ref"])
+    return links.address(brain, ref) if item.get("kind") == "record" else links.address(brain, *split_ref(ref))
+
+
 def label(brain: str, item: dict[str, object]) -> dict[str, object]:
     """Name the brain and add the portable address of one cached item."""
-    ref = str(item["ref"])
-    uri = links.address(brain, ref) if item.get("kind") == "record" else links.address(brain, *split_ref(ref))
-    return {"brain": brain, **item, "uri": uri}
+    return {"brain": brain, **item, "uri": address(brain, item)}
+
+
+def local(reply: dict[str, object]) -> dict[str, object]:
+    """With one selected brain, entries need not repeat its name and address; problems still name their brain.
+
+    Only the reply's lists of entries and their backlink groups change: an exact read's own fields stay.
+    """
+
+    def plain(entry: object) -> object:
+        if not isinstance(entry, dict):
+            return entry
+        entry = {k: v for k, v in cast("dict[str, object]", entry).items() if k not in {"brain", "uri"}}
+        if isinstance(items := entry.get("items"), list):
+            # A backlink group's previews.
+            entry["items"] = [plain(item) for item in items]
+        return entry
+
+    return {
+        key: [plain(entry) for entry in value] if key != "problems" and isinstance(value, list) else value
+        for key, value in reply.items()
+    }
 
 
 def brains(
@@ -186,12 +235,12 @@ def unique(problems: list[dict[str, object]]) -> list[dict[str, object]]:
     return list({encode(problem): problem for problem in problems}.values())
 
 
-def fitting(items: list[dict[str, object]]) -> list[dict[str, object]]:
+def fitting(items: list[dict[str, object]], budget: int = BUDGET) -> list[dict[str, object]]:
     """The leading items within the reply budget; at least one, so a continuation always advances."""
     size = 0
     for count, item in enumerate(items):
         size += len(encode(item))
-        if count and size > BUDGET:
+        if count and size > budget:
             return items[:count]
     return items
 
@@ -254,7 +303,9 @@ def _paged(
                         _review(connections[name], selected, review)
         except sqlite3.DatabaseError as error:
             raise Error(CACHE) from error
-    items = fitting(items)
+    # A page's summaries, such as recently changed notes, share its budget: the items fill what they leave.
+    reserved = sum(len(encode({k: v for k, v in part.items() if k != "total"})) for _, part in parts)
+    items = fitting(items, BUDGET - reserved)
     total = sum(cast("int", part.pop("total")) for _, part in parts)
     reply: dict[str, object] = {
         "items": items,
@@ -346,6 +397,10 @@ def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now:
             item["review_reasons"] = reasons
 
 
+def _brief(item: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in item.items() if key != "excerpt"}
+
+
 def home(stores: list[Store], now: datetime | None = None, *, counted: bool = True) -> dict[str, object]:
     """What needs attention now: current project notes, recent actions and notes, activity and the coming week."""
     now = now or datetime.now(UTC)
@@ -371,11 +426,14 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
             "time DESC,i.ref DESC",
             SECTION,
         )
-        upcoming = _rows(connection, index.WITHIN, {"since": stamp, "until": ahead}, "time,i.ref", SECTION)
-        activity = [
-            {"source": source, "records": count, "page": f"memories/{source}/24h"}
-            for source, count in index.activity(connection, day, stamp)
-        ]
+        upcoming = _rows(
+            connection,
+            f"{index.WITHIN} AND {_LOUD}",
+            {"since": stamp, "until": ahead, "low": json.dumps(low(store))},
+            "time,i.ref",
+            SECTION,
+        )
+        activity = _counts(store, index.activity(connection, day, stamp), "24h")
         issues: list[dict[str, object]] = []
         try:
             alerts = attention(store, now)
@@ -400,9 +458,10 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
         "page": "",
         "projects": projects,
         "actions": sorted(_gather(parts, "actions"), key=lambda i: str(i["ref"]), reverse=True)[:10],
-        "changed": _newest(_gather(parts, "changed"), SECTION),
+        # Orientation previews: titles and times; read an item for its text.
+        "changed": [_brief(item) for item in _newest(_gather(parts, "changed"), SECTION)],
         "activity": _gather(parts, "activity"),
-        "upcoming": _newest(_gather(parts, "upcoming"), SECTION, oldest=True),
+        "upcoming": [_brief(item) for item in _newest(_gather(parts, "upcoming"), SECTION, oldest=True)],
         "attention": _gather(parts, "attention"),
         "pages": BROWSE,
         **extra,
@@ -412,26 +471,25 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
 def timeline(
     stores: list[Store], name: str, found: Period, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
-    """Items dated within a period, items modified within it, and each source's share of the period."""
-    params = {"since": found.since, "until": found.until}
+    """Items dated within a period, items modified within it, and each source's share of the period.
 
-    def summary(_store: Store, _brain: str, connection: sqlite3.Connection) -> dict[str, object]:
+    Low-priority sources, such as a news feed, appear only in `sources`: their records would crowd out the rest.
+    """
+
+    def build(store: Store, brain: str, connection: sqlite3.Connection) -> dict[str, object]:
+        params = {"since": found.since, "until": found.until, "low": json.dumps(low(store))}
         changed = _rows(
             connection,
-            f"{index.MODIFIED} AND NOT ({index.WITHIN})",
+            f"{index.MODIFIED} AND NOT ({index.WITHIN}) AND {_LOUD}",
             params,
             f"({index.UPDATED}) DESC,i.ref DESC",
             SECTION,
         )
-        sources = [
-            {"source": source, "records": count, "page": f"memories/{source}/{name}"}
-            for source, count in index.activity(connection, found.since, found.until)
-        ]
-        return {"changed": changed, "sources": sources}
+        sources = _counts(store, index.activity(connection, found.since, found.until), name)
+        rows, total = index.listing(connection, f"{index.WITHIN} AND {_LOUD}", params, "time DESC,i.ref DESC")
+        return {"changed": changed, "sources": sources, "rows": (label(brain, row) for row in rows), "total": total}
 
-    reply, parts = _listing(
-        stores, index.WITHIN, params, "time DESC,i.ref DESC", _time_key, PAGE, offset, counted=counted, summary=summary
-    )
+    reply, parts = _paged(stores, build, _time_key, PAGE, offset, counted=counted, reverse=True)
     return {
         "page": name,
         "since": found.since,
@@ -718,36 +776,66 @@ def readable(ref: str) -> str:
     return ref
 
 
+# A backlink preview names an item; its role page and exact read hold the rest.
+_PREVIEWED = ("brain", "ref", "uri", "title", "time", "kind", "source", "status", "type")
+
+
 def _backlinks(
     connection: sqlite3.Connection, brain: str, targets: set[str], exclude: str = ""
 ) -> list[dict[str, object]]:
-    groups = index.incoming(connection, targets, exclude=exclude)
+    groups = index.incoming(connection, targets, exclude=exclude, limit=PREVIEW)
     for group in groups:
-        for item in cast("list[dict[str, object]]", group["items"]):
-            claims, truncated = graph.explanations(connection, str(item["ref"]), targets)
-            if claims:
-                item["relations"] = claims
-            if truncated:
-                item["relations_truncated"] = True
-        group["items"] = [label(brain, item) for item in cast("list[dict[str, object]]", group["items"])]
+        group["items"] = [
+            {key: item[key] for key in _PREVIEWED if key in item}
+            for item in (label(brain, row) for row in cast("list[dict[str, object]]", group["items"]))
+        ]
     return groups
 
 
 def _merge(parts: Parts) -> list[dict[str, object]]:
-    """Combine each brain's relationship groups; items stay newest first within their relationship."""
+    """Combine each brain's relationship groups: declared roles by name, then untyped links, newest items first."""
     merged: dict[str, dict[str, object]] = {}
     for _, part in parts:
         for group in cast("list[dict[str, object]]", part["backlinks"]):
-            relation = str(group.get("relation", ""))
+            relation = str(group["relation"])
             into = merged.setdefault(relation, {"relation": relation, "total": 0, "items": []})
             into["total"] = cast("int", into["total"]) + cast("int", group["total"])
             into["items"] = [*cast("list", into["items"]), *cast("list", group["items"])]
-    result = []
-    for relation in sorted(merged, key=lambda value: (value == "", value)):
-        group = merged[relation]
-        group["items"] = _newest(cast("list[dict[str, object]]", group["items"]), SECTION)
-        result.append(group if relation else {key: value for key, value in group.items() if key != "relation"})
-    return result
+    return [
+        {**merged[relation], "items": _newest(cast("list[dict[str, object]]", merged[relation]["items"]), PREVIEW)}
+        for relation in sorted(merged, key=lambda value: (value == LINKS, value))
+    ]
+
+
+def role(
+    stores: list[Store],
+    targets: set[str],
+    relation: str,
+    *,
+    owner: Store | None = None,
+    ref: str = "",
+    offset: int = 0,
+    counted: bool = True,
+) -> dict[str, object]:
+    """Every item linking to the expanded targets through one relationship, newest first, 50 per page.
+
+    `relation` is a declared role, CITES or LINKS; the owning item is not its own backlink. Each brain also lists
+    the links of its relations declaring this one `broader`; an item carries its `relation` only when it differs
+    from the requested one.
+    """
+
+    def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+        exclude = ref if owner is not None and store.root == owner.root else ""
+        relations = [relation, *load(store).narrower(relation)]
+        rows, total = index.linking(connection, graph.local_refs(connection, targets), relations, exclude=exclude)
+        items = (label(name, row) for row in rows)
+        return {
+            "rows": ({k: v for k, v in item.items() if (k, v) != ("relation", relation)} for item in items),
+            "total": total,
+        }
+
+    reply, _ = _paged(stores, build, _time_key, PAGE, offset, counted=counted, reverse=True)
+    return {"page": "relation", "relation": relation, **reply}
 
 
 def _graph(targets: set[str], owner: Store | None = None, ref: str = "") -> Build:

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Print the brain's context for the current repository at agent session start; silent when unavailable."""
 
-import hashlib
 import json
 import re
 import subprocess
@@ -12,7 +11,7 @@ from datetime import datetime
 REPLY_BYTES = 4 << 20
 REMOTE_BYTES = 8 << 10
 NEWEST = 3
-# One lookup budget and page bound cover the repository read, its JSON chunks and the project listing.
+# One lookup budget and page bound cover the repository read and the project listing.
 LOOKUP_SECONDS = 20
 MAX_PAGES = 100
 # Only authored note paths are printed, in code spans; a record ref is provider-controlled text and stays out.
@@ -53,42 +52,6 @@ def read(ref: str, brain: str, offset: int = 0, timeout: float = LOOKUP_SECONDS)
     except ValueError:
         return None
     return reply if isinstance(reply, dict) else None
-
-
-def exact(ref: str, brain: str, deadline: float) -> dict | None:
-    """One whole exact read: assemble JSON chunks in order and verify their common SHA-256.
-
-    Replies above 65,536 characters arrive as chunks from offset 0; see
-    https://fmind.github.io/brain-framework/docs/retrieval/#large-exact-reads. A changed digest or a broken
-    continuation means no context, never a partial reply.
-    """
-    reply = read(ref, brain, 0, deadline - time.monotonic())
-    if not reply or "chunk" not in reply:
-        return reply
-    digest, parts, offset = reply.get("sha256"), [], 0
-    for _ in range(MAX_PAGES):
-        chunk = reply.get("chunk")
-        if not isinstance(chunk, str) or reply.get("sha256") != digest or type(reply.get("offset")) is not int:
-            return None
-        if reply["offset"] != offset:
-            return None
-        parts.append(chunk)
-        offset += len(chunk)
-        if "next_offset" not in reply:
-            text = "".join(parts)
-            if len(text) != reply.get("total_characters") or hashlib.sha256(text.encode()).hexdigest() != digest:
-                return None
-            try:
-                value = json.loads(text)
-            except ValueError:
-                return None
-            return value if isinstance(value, dict) else None
-        if type(reply["next_offset"]) is not int or reply["next_offset"] != offset:
-            return None
-        reply = read(ref, brain, offset, deadline - time.monotonic())
-        if not reply:
-            return None
-    return None
 
 
 def day(value: object) -> str:
@@ -153,7 +116,8 @@ def main(argv: list[str]) -> int:
     brain = argv[1] if len(argv) > 1 else ""
     repo = identity()
     deadline = time.monotonic() + LOOKUP_SECONDS
-    page = exact(repo, brain, deadline) if repo else None
+    # One read: a large note's first page still carries its ref and backlinks, all this hook prints.
+    page = read(repo, brain, 0, deadline - time.monotonic()) if repo else None
     if not page or page.get("problems") or page.get("stale"):
         return 0
     ref = str(page.get("ref", ""))
@@ -164,8 +128,13 @@ def main(argv: list[str]) -> int:
             listing = read("projects", brain, offset, deadline - time.monotonic())
             if not listing or listing.get("problems") or listing.get("stale"):
                 return 0
+            # Items name their brain only when several are selected; otherwise they share the page's brain.
             project = next(
-                (p for p in listing.get("items", []) if (p.get("brain"), p.get("ref")) == (page.get("brain"), ref)),
+                (
+                    p
+                    for p in listing.get("items", [])
+                    if (p.get("brain", page.get("brain")), p.get("ref")) == (page.get("brain"), ref)
+                ),
                 None,
             )
             if project is not None or "next_offset" not in listing:

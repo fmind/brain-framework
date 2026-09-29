@@ -21,6 +21,7 @@ from conftest import plain
         "build",
         "collect",
         "eval",
+        "export",
         "init",
         "mcp",
         "read",

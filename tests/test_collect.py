@@ -391,6 +391,42 @@ def test_allow_removal_accepts_one_deliberate_shrink(configured: Store) -> None:
     assert not state(configured)["folders"]["error"]
 
 
+def test_the_shrink_guard_counts_the_catalog_an_interrupted_commit_restores(configured: Store) -> None:
+    collect(configured, "folders", start=START, end=END, runner=catalog(40))
+    # A snapshot keeping 24 of 40 records is killed after its 16 removals, before its completion marker.
+    script = """
+import os, sys
+from pathlib import Path
+from bf import records
+from bf.models import Record
+from bf.storage import Store, writer
+store = Store(Path(sys.argv[1]))
+delete, removed = Store.delete, []
+def interrupted(self, name, *, durable=True):
+    delete(self, name, durable=durable)
+    removed.append(name)
+    if len(removed) == 16:
+        os._exit(73)
+Store.delete = interrupted
+with writer(store):
+    records.upsert(store, "folders", [Record(id=f"item-{n}", title=f"Item {n}") for n in range(24)], snapshot=True)
+"""
+    child = subprocess.run(  # noqa: S603 - terminate only a synthetic transaction in its temporary brain
+        [sys.executable, "-c", script, str(configured.root)],
+        env=os.environ.copy(),
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert child.returncode == 73, child.stderr.decode()
+    assert len(records.files(configured, "folders")) == 24
+    # Against the 24 files left, a truncated listing of 12 removes only half; the rollback restores all 40.
+    with pytest.raises(Error, match="would remove 28 of 40 records"):
+        collect(configured, "folders", start=START, end=END, runner=catalog(12))
+    assert len(records.files(configured, "folders")) == 40
+    assert not (configured.root / "memories/.pending").exists()
+
+
 def test_overlapping_source_run_cannot_overwrite_newer_snapshot(configured: Store) -> None:
     entered, release = Event(), Event()
 

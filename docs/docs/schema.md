@@ -38,7 +38,7 @@ bf schema --kind registry
 bf schema --kind eval
 ```
 
-Each command prints one JSON Schema object; their `title` values are `Config`, `UserConfig` and `Suite`, respectively. Unknown kinds fail with exit 2. The schemas contain their own definitions, so validation needs no external references. Save the relevant output and associate that local file with your editor's YAML validation for the installed version.
+Each command prints one JSON Schema object; their `title` values are `Config`, `UserConfig` and `Suite`, respectively. `--kind search-reply` and `--kind read-reply` print the [reply schemas](retrieval.md#reply-schemas) instead. Unknown kinds fail with exit 2. The schemas contain their own definitions, so validation needs no external references. Save the relevant output and associate that local file with your editor's YAML validation for the installed version.
 
 | Configuration                     | Published schema                    |
 | --------------------------------- | ----------------------------------- |
@@ -124,7 +124,7 @@ BF adds these normalized fields to the stored record (both snippets omit other r
 
 ### Types and cardinality
 
-Every field needs a description and scalar `type`. Defaults are `cardinality: optional`, `relation: false` and `examples: []`. Field names begin with a lowercase letter and contain lowercase letters, digits or hyphens, up to 64 characters. `tagged-with` is reserved for [tag membership](link-reference.md#tag-rules): `bf.yaml` cannot declare it and records cannot carry it.
+Every field needs a description and scalar `type`. Defaults are `cardinality: optional`, `relation: false` and `examples: []`; a relation may add [`broader` and `targets`](#narrower-roles-and-allowed-targets). Field names begin with a lowercase letter and contain lowercase letters, digits or hyphens, up to 64 characters. `tagged-with` is reserved for [tag membership](link-reference.md#tag-rules): `bf.yaml` cannot declare it and records cannot carry it. `links` is reserved too: it names the [backlink group](retrieval.md#role-pages) of untyped links. So is `cites`, the built-in relationship of [OKF `sources`](link-reference.md#relationship-links).
 
 Types are `string`, `integer`, `number`, `boolean`, `timestamp` and `identity`. A timestamp requires a timezone and is normalized to UTC. An identity is an explicit, case-sensitive `scheme:value`. A relationship requires `type: identity`.
 
@@ -137,6 +137,44 @@ Types are strict: `"42"` is a string, not a number; `true` is a boolean, not an 
 | `many`      | Up to 1,000 scalars in a list; missing or null omits the field. An empty list explicitly records no values. Exact duplicates are removed in input order. |
 
 Each schema example is a complete field value, validated against its type and cardinality. For `many`, examples contain lists, as `author` does above. Examples document meaning; they do not supply defaults.
+
+### Narrower roles and allowed targets
+
+A relation can name a `broader` relation and restrict its values to identity `targets`. For example, a calendar sensor maps organizers and attendees, and one role page should list everyone who took part:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/schema/
+schema:
+  participant:
+    description: Person who explicitly took part in the event.
+    type: identity
+    cardinality: many
+    relation: true
+    targets: ["person:email/"]
+  organizer:
+    description: Person who explicitly organized the event.
+    type: identity
+    cardinality: many
+    relation: true
+    broader: participant
+    targets: ["person:email/"]
+  attendee:
+    description: Person explicitly invited to the event.
+    type: identity
+    cardinality: many
+    relation: true
+    broader: participant
+    targets: ["person:email/"]
+```
+
+Map `organizer` and `attendee` from the sensor; mapping `participant` as well would store each person twice. Then `bf read person:email/alice@example.test --rel participant` lists Alice's events through all three roles, and each organizer or attendee item carries its own `"relation":"organizer"` or `"relation":"attendee"`. Her backlinks still group the events by their stored role, and `--rel organizer` lists only organized events.
+
+| Setting   | Rule                                                                                                                                                                                                                                         |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `broader` | Another declared relation without its own `broader`: one level, so a parent's role page adds its direct children only. It changes role pages at read time, never stored records or edges. Only relations can declare it.                     |
+| `targets` | 1 to 64 allowed prefixes, each a scheme, a colon and optionally the start of the value, such as `person:email/`, `repo:github.com/` or `bf://brain/people/`. Quote them in YAML: an unquoted `person:` in a flow list is not a plain string. |
+
+With `targets`, a collection whose mapped value, or a record link's `?rel=` target, starts with none of the prefixes fails before anything is saved, naming the record's zero-based position and the field, never the value: `record 3: schema field organizer: identity outside the declared targets`. `bf validate` reports stored records and typed note links outside them, such as `{"file":"projects/plan.md","error":"organizer link outside the declared targets: bf://brain/teams/core"}`; search and read keep those claims until the file changes. Constant mappings and `examples` must fit the targets too.
 
 ### Mapping rules
 
@@ -183,6 +221,19 @@ The read groups incoming links by role, such as `author` or `sender`, with their
 
 A `relation: true` field creates directed edges from the record ref to its identity values, labeled with the field name. Each edge retains the record as its source, with the upstream URL and available `updated`, `observed` and `partial` provenance. Field values are searchable words; field names are not. `attributes` remain exact-read details. Generic `links` remain untyped.
 
-The graph is a disposable SQLite projection of files. Replacing or deleting a record removes its old edges; the next rebuild reconstructs a deleted `.bf/` cache. Schema changes invalidate the cache.
+The graph is a disposable SQLite projection of files. Replacing or deleting a record removes its old edges; the next rebuild reconstructs a deleted `.bf/` cache. Structural schema changes, such as a field's `type`, `cardinality`, `relation`, `broader` or `targets`, rebuild the cache; rewording a `description` or changing `examples` does not. [`bf export edges`](commands.md#export-the-graph) prints every edge as JSON Lines for other graph tools.
 
-Changing a sensor mapping affects future collections. A schema edit never hides older records: search and pages still return them. A field the schema no longer declares as a relation adds no graph edges; a declared relation keeps every stored value that is an identity, whatever cardinality or type it was collected with, so a value collected as plain text claims nothing. `bf validate` names stored values the current schema rejects until you recollect the source or restore the field. To add fields to older evidence, explicitly backfill from retained structured evidence or recollect a chosen window. Never infer missing roles from flattened links or similar names. Notes state relationships with [typed links](link-reference.md#relationship-links); sensor mappings populate record fields.
+Changing a sensor mapping affects future collections. A schema edit never hides older records: search and pages still return them. A field the schema no longer declares as a relation adds no graph edges; a declared relation keeps every stored value that is an identity, whatever cardinality or type it was collected with, so a value collected as plain text claims nothing. `bf validate` names stored values the current schema rejects until you [reproject](#reproject-stored-records) or recollect the source, or restore the field. Never infer missing roles from flattened links or similar names. Notes state relationships with [typed links](link-reference.md#relationship-links); sensor mappings populate record fields.
+
+### Reproject stored records
+
+After renaming a role or changing a mapping, apply the current mappings to the records a sensor already collected, without running it:
+
+```bash
+bf build --reproject git-commits --dry-run
+bf build --reproject git-commits
+```
+
+For example, after renaming the `author` field to `creator` in both `schema` and the sensor's `fields`, `bf validate` reports `undeclared schema field author` for each stored commit. The preview counts what would change and writes nothing, such as `{"sensor":"git-commits","dry_run":true,"records":2,"changed":2,"unchanged":0,"failed":0}`. The second command rewrites those records' `fields`, then refreshes the cache and adds its counts under `index`; `bf validate` then returns `"valid":true`, and `bf read person:email/alice@example.test --rel creator` lists the commits.
+
+Reprojection reads each stored record as its sensor printed it: `title`, `url`, `links`, `aliases`, `attributes` and the other envelope fields, without the old `fields` and the `observed` time collection added. It keeps every other value, including `observed`, and never removes a record. It cannot map a value the sensor never printed, such as a provider field its script dropped: a record the current mappings reject, for example because a `cardinality: one` value is missing or outside its `targets`, keeps its stored fields, counts as `failed` and appears under `problems` with its file (up to 200, then `problems_truncated`); the command then exits 1. Update the sensor and recollect a window for those. Changed records are committed like a collection, under the brain's writer lock and the sensor's lock, in transactions of up to 1,000 records; after an interruption, `bf build` recovers the pending transaction and rerunning the reprojection completes it.

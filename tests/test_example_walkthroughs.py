@@ -18,10 +18,14 @@ ROOT = Path(__file__).parents[1]
     [
         ("brain", ['"score":"16/16"', '"state":"unchanged"', '"state":"changed"', '"brain":"example-team"']),
         ("context-hub", ['"score":"10/10"', "projects/new-website.md#launch-review", "Hold public launch"]),
-        ("retrieval", ['"score":"14/14"', '"valid":true']),
+        ("retrieval", ['"score":"17/17"', '"mrr":0.95', '"valid":true']),
         (
             "hooks",
-            ["Brain context for repo:github.com/example/new-website", "Next task: Run the keyboard navigation check."],
+            [
+                "Brain context for repo:github.com/example/new-website",
+                "Next task: Run the keyboard navigation check.",
+                "- New website — Next actions (`projects/new-website.md#next-actions`)",
+            ],
         ),
         ("routines", ['"status":"ran"', "weekly-review-", '"valid":true']),
         (

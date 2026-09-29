@@ -2,9 +2,9 @@
 name: bf-import
 description: Read a selected document, website, repository, export or brain and incorporate useful context, canonical links or selected evidence into Brain Framework. Use for an identified source; use bf-scan to discover candidates.
 license: MIT
-compatibility: Requires Brain Framework 14 (the bf command) on Linux or macOS.
+compatibility: Requires Brain Framework 15 (the bf command) on Linux or macOS.
 metadata:
-  version: "14.0.0"
+  version: "15.0.0"
 ---
 
 # bf-import

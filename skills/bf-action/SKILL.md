@@ -2,9 +2,9 @@
 name: bf-action
 description: Start, resume or close a Brain Framework action with its objective, evidence, outputs and next step. Use only when the user asks to track a work session; ordinary retrieval and note updates need no action.
 license: MIT
-compatibility: Requires Brain Framework 14 (the bf command) on Linux or macOS; bundled helpers need Python 3.11 or later.
+compatibility: Requires Brain Framework 15 (the bf command) on Linux or macOS; bundled helpers need Python 3.11 or later.
 metadata:
-  version: "14.0.0"
+  version: "15.0.0"
 ---
 
 # bf-action

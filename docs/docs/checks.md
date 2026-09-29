@@ -16,6 +16,20 @@ For example, a valid New website note can still omit the reason for its decision
 
 `bf validate` reports each problem with the brain-relative `file` or action folder to repair, for example `{"file":"projects/new-website.md","error":"broken link: absent.md"}`. It lists at most 200 problems; `"problems_truncated":true` means more remain, so fix these and validate again. Targets in other brains appear under [`unresolved`](link-reference.md#across-brains), with the same limit and an `unresolved_truncated` flag.
 
+`warnings` never make a brain invalid or change the exit code. Each is an object with a `warning` message; validation warns about identities that differ only by letter case, which name different subjects because identities are case-sensitive:
+
+```json
+{
+  "warning": "identities differ only by letter case",
+  "identities": [
+    { "identity": "repo:github.com/team/new-website", "files": 12 },
+    { "identity": "repo:github.com/Team/new-website", "files": 3 }
+  ]
+}
+```
+
+Each spelling counts the notes and records naming it as an alias, entity or link target, most used first. Choose one spelling: fix the sensor that emits the other and recollect a window covering its records, or edit the notes. Validation lists the 200 most used groups, then `"warnings_truncated":true`, and up to 20 spellings per group.
+
 Keep technical tests for your sensors and routines in `tests/`, and retrieval questions with expected evidence in `evals/`. `bf eval` uses deterministic assertions, with no LLM or provider execution: it checks evidence retrieval rather than grading generated answers.
 
 `bf init` creates a starter `evals/retrieval.yaml`. Its three cases search for the welcome note, read its answer through the brain-qualified address `bf://NAME/concepts/welcome.md` and check an absent topic. `bf eval` should return `"score":"3/3"`, including after you declare a [related brain](configuration.md#related-brains) that has its own welcome note. Add cases for your own notes as shown below.
@@ -80,6 +94,48 @@ Use questions people need answered. A small team pilot can start with one projec
 
 For a runnable example with competing project budgets, scopes, tags and missing evidence, see the [retrieval example](https://github.com/fmind/brain-framework/tree/main/examples/retrieval). Its cases also run in the framework's normal test suite.
 
+## Track ranking changes
+
+A case can keep passing while its answer slips from first to ninth place. Each search case with `expect` therefore reports `rank`: each expected ref's 1-based position among the results, or `null` when it is missing. The run reports `mrr`, the mean reciprocal rank over those cases: each contributes 1 divided by the position of its best-placed expected ref, or 0 when none appears or the search fails. The New website suite above reports `"mrr":1.0`.
+
+Save a reply outside the brain before you reorganize notes, change a sensor or upgrade Brain Framework:
+
+```bash
+bf eval --path evals/new-website.yaml > ~/new-website-eval.json
+```
+
+To see a regression, rename the `## Next actions` heading of `projects/new-website.md` to `## Later`, then compare:
+
+```bash
+bf eval --path evals/new-website.yaml --baseline ~/new-website-eval.json
+```
+
+The command exits 1 with `"score":"3/4"`, `"mrr":0.5` and this comparison (other fields omitted):
+
+```json
+{
+  "regressions": [
+    {
+      "suite": "evals/new-website.yaml",
+      "name": "find-the-next-action",
+      "passed": false,
+      "rank": { "projects/new-website.md#next-actions": null },
+      "baseline": { "passed": true, "rank": { "projects/new-website.md#next-actions": 1 } }
+    }
+  ],
+  "improvements": []
+}
+```
+
+Rename the heading back to `## Next actions` before continuing.
+
+| Field          | Lists                                                                                     |
+| -------------- | ----------------------------------------------------------------------------------------- |
+| `regressions`  | Cases that passed in the baseline and fail now, or whose expected refs rank lower.        |
+| `improvements` | Other cases that failed in the baseline and pass now, or whose expected refs rank higher. |
+
+Cases match by suite and name; added and removed cases are not compared. A lower rank alone does not change the exit status: `bf eval` exits 1 only when a case fails. `--baseline` reads a saved `bf eval` reply from a regular file of at most 16 MiB, relative to the working directory; a missing, linked or different file exits 2.
+
 ## Suite reference
 
 A case uses either `query` or `read`. Keep assertions short and stable:
@@ -96,7 +152,7 @@ A case uses either `query` or `read`. Keep assertions short and stable:
 
 Whole-note refs match any section; section and record refs match exactly. A `read` ref that exists in several selected brains fails its case, so read `bf://NAME/...` addresses once the brain declares related brains; `expect` and `forbid` match both returned refs and addresses.
 
-`text` must occur in returned search titles or excerpts, or in a read reply. `empty: true` requires no returned refs. Incomplete retrieval fails even for an empty case. Evaluation assembles exact reads above 65,536 characters from their chunks and verifies their digest before checking them.
+`text` must occur in returned search titles or excerpts, or in a read reply. `empty: true` requires no returned refs. Incomplete retrieval fails even for an empty case. Evaluation assembles exact reads above 32 KiB from their text pages, which must all name the same file digest, before checking them.
 
 For an absent query, use one distinctive alphanumeric token that does not occur in the evidence. Hyphens split words, and search matches any query word: `nonexistent-topic` can match an ordinary note about a topic.
 

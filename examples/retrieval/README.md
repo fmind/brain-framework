@@ -1,6 +1,6 @@
 # Runnable retrieval example
 
-Two fictional projects have different budgets. This example checks that questions find the right project's evidence, preserve scopes and explicit identities, and report absent evidence. Its 14 cases use `bf eval`, without an LLM, credentials or network calls.
+Two fictional projects have different budgets. This example checks that questions find the right project's evidence, rank it first among competing notes and duplicate records, preserve scopes and explicit identities, and report absent evidence. Its 17 cases use `bf eval`, without an LLM, credentials or network calls.
 
 Run from the Brain Framework checkout after `uv sync --locked`. This subshell copies the brain, isolates configuration and state, and removes its temporary files on exit:
 
@@ -22,9 +22,9 @@ Run from the Brain Framework checkout after `uv sync --locked`. This subshell co
 )
 ```
 
-Expect validation to return `"valid":true`, with three notes and two records, and evaluation to return `"passed":true` and `"score":"14/14"`. The cases require Atlas's budget of 4200 credits to rank first, excluding Zephyr's competing budget of 900 credits.
+Expect validation to return `"valid":true`, with 13 notes and four records, and evaluation to return `"passed":true`, `"score":"17/17"` and `"mrr":0.95`. The cases require Atlas's budget of 4200 credits to rank first, excluding Zephyr's competing budget of 900 credits.
 
-`bf.yaml`, `projects/`, `concepts/` and `memories/` form the brain; `evals/retrieval.yaml` holds its questions and expected results. There are no sensors, routines or related brains. The example pins UTC and uses fixed dates. Retrieval may refresh the disposable `.bf/` cache; it does not collect or count evaluation reads as user usage.
+`bf.yaml`, `projects/`, `concepts/`, `actions/` and `memories/` form the brain; `evals/retrieval.yaml` holds its questions and expected results. The records are checked in: a disabled `catalog` sensor entry only sets that source's `priority: low`, and nothing is collected. There are no routines or related brains. The example pins UTC and uses fixed dates. Retrieval may refresh the disposable `.bf/` cache; it does not collect or count evaluation reads as user usage.
 
 ## Run the test
 
@@ -43,7 +43,7 @@ From the checkout, `uv run bf schema --kind eval` prints the suite's editor sche
 - `query` with `expect` checks that answer-bearing refs appear within `limit` results. Use `limit: 1` when the right evidence must rank first.
 - `text` checks case-insensitive literal answer fragments in search titles/excerpts or a read reply. Pair a search case with an exact section or record read when the answer itself matters; avoid full-answer snapshots that fail on harmless edits.
 - `forbid` catches plausible distractors or evidence outside the intended scope. `empty: true` checks a genuinely absent topic or ref.
-- Any retrieval `problems` or `stale` markers fail the case. Search limits test the requested top results, not exhaustive recall; an exact reply above 65,536 characters arrives in JSON chunks, so read a smaller section instead.
+- Any retrieval `problems` or `stale` markers fail the case. Search limits test the requested top results, not exhaustive recall; evaluation assembles an exact reply above 32 KiB from its text pages, but a section keeps the case focused.
 
 These two cases in `evals/retrieval.yaml` check the Atlas budget. Zephyr has a different budget to expose confusion between projects:
 
@@ -64,10 +64,18 @@ cases:
 
 The first requires the right section in the first result. The second checks the original text. If either fails, inspect that case's diagnostics and its source note before changing the expected answer.
 
+Three more cases reproduce misses measured on real brains, with fictional notes and records:
+
+- `project-next-actions-first` searches `Atlas next actions` among three other projects' Next actions sections and six short action Resume sections that mention Atlas. It requires Atlas's own section first; before Brain Framework 15.0.0 it ranked fourth, because only a section's heading, not its note's title, ranked like a heading.
+- `one-result-per-document-url` finds the Atlas launch plan once. Its `documents` record and a shorter `catalog` entry share one URL, so search returns the document with `"also":["catalog:atlas-launch-plan"]` instead of two results. The catalog's `priority: low` halves its score, so the full document represents both.
+- `day-lists-low-priority-source-by-count` reads the `2026-09-11` page: it lists the document, while the catalog appears only as a count under `sources`, with its `memories/catalog/2026-09-11` page.
+
+Each search case with `expect` reports `rank`, the position of each expected ref, and the run reports `mrr`, the mean reciprocal rank; the launch plan ranks second behind a glossary definition, hence `0.95`. To check a ranking change, save a reply with `bf eval > ../baseline.json` before it and run `bf eval --baseline ../baseline.json` after it: `regressions` lists cases that fail or rank lower, and `improvements` those that pass or rank higher. See [track ranking changes](../../docs/docs/checks.md#track-ranking-changes).
+
 These assertions evaluate retrieval, not generated prose, semantic equivalence or source truth. Search `text` is matched across all returned excerpts, so it does not bind an answer fragment to a particular hit when several hits are allowed. A passing score covers only these cases and this corpus; it does not establish performance on arbitrary questions, live freshness or private brains.
 
 ## Add a useful case
 
-Capture a real retrieval miss using synthetic evidence. Preserve the question's useful difficulty: competing answers, scope, expected rank or missing evidence. Add a short expected answer fragment and its exact source ref; keep distractors. Run the focused pytest command before changing ranking, then again after the fix. Update the documented and tested case count when adding a case. Never change expectations merely to make a regression pass.
+Capture a real retrieval miss using synthetic evidence. Preserve the question's useful difficulty: competing answers, scope, expected rank or missing evidence. Add a short expected answer fragment and its exact source ref; keep distractors. Run the focused pytest command before changing ranking, then again after the fix. Update the documented and tested case count and `mrr` when adding a case. Never change expectations merely to make a regression pass.
 
 Keep parser errors, process cancellation, pagination mechanics and evaluator failure handling in `tests/`. Keep curated question-to-evidence cases alongside their runnable example. Do not add model grading, another evaluator or a new suite format; [the existing contract](../../docs/docs/checks.md#suite-reference) owns the fields. Personal brains keep their own `evals/` suites, run with `bf eval` inside the brain.

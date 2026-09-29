@@ -31,7 +31,7 @@ Judge a change by whether it helps someone gather relevant evidence, understand 
 ## Safety boundaries
 
 - Search and read never contact the network or run sensors or routines. Report skipped files and incomplete results through `problems` objects, `skipped` counts or `stale`; an incomplete empty result does not prove absence. Quote literal FTS terms and parameterize SQL.
-- Preserve pagination, chunk digests and source coverage across CLI and MCP. A page or chunk is not a complete result; a fresh cache does not prove fresh source evidence. See the [retrieval contract](docs/docs/search.md).
+- Preserve pagination, text-page digests and source coverage across CLI and MCP. A page is not a complete result; a fresh cache does not prove fresh source evidence. See the [retrieval contract](docs/docs/search.md).
 - Use `storage.Store` for brain access: reject symlinks and special files, bound traversal and bytes, write atomically and lock by physical brain identity. Keep locks, run state, usage and logs outside the brain; usage must not retain queries or refs.
 - Run sensors and routines only through explicit collection/update/watch commands, using configured argv without a shell. Strip startup-injection variables, bound time and output, and kill process groups on cancellation or failure. Keep provider output out of errors and stderr in bounded private logs.
 - Failed collection must not change evidence; reject snapshots that empty or mostly remove a catalog unless `--allow-removal` accepts it for one run, and preserve interrupted transactions for recovery. Validate routine Markdown before creating an action; never replace an existing action.
@@ -61,7 +61,7 @@ Non-obvious constraints:
 - `README.md` is also the PyPI page, so its links must be absolute (`tests/test_readme.py`).
 - `tests/test_guides.py` follows `docs/docs/getting-started.md` and `sensors.md#your-first-sensor`: each code block must be a command, a documented reply or a file change its prose names.
 - `skills/*/scripts/*.py` run with the agent's `python3`: standard library only, Python 3.11 syntax.
-- `docs/*.schema.json` describe brain (including watch), registry and evaluation configuration; `generate:schema` refreshes them from the runtime models and `check:schema` fails on drift.
+- `docs/*.schema.json` describe brain (including watch), registry and evaluation configuration, generated from the runtime models, and `search`/`read` replies, declared in `src/bf/replies.py`; `generate:schema` refreshes them and `check:schema` fails on drift. `tests/conftest.py` validates every search and read reply the suite produces against the reply schemas: describe a new reply field there first.
 - `THIRD_PARTY_NOTICES.md` and the site's license copies come from the synced environment; `generate:notices` refreshes them after a dependency change and `check:notices` fails on drift.
 
 ## Contribution checks

@@ -75,7 +75,7 @@ bf read actions
 - Python 3.11+ standard library only, `#!/usr/bin/env python3`, executable bit set, no shell.
 - Deterministic: the same pages produce the same Markdown. No model, network or provider call; read the brain through `bf read` and `bf search` with literal argv.
 - Stdout is one OKF action or empty. BF validates its metadata and declared links before writing. Use `status: draft|stable|deprecated` for note maturity and checkboxes for work progress.
-- Link only notes needing review, using returned `uri` values: links from a dated action count as newer evidence for their targets. Name other notes and collected records by ref; do not copy record titles into authored context.
+- Link only notes needing review, using returned `uri` values or, when one brain is selected and items omit them, paths relative to the action: links from a dated action count as newer evidence for their targets. Name other notes and collected records by ref; do not copy record titles into authored context.
 - A failed or incomplete page (`problems`, `stale`) exits nonzero with nothing on stdout and one generic sentence on stderr; Brain Framework then writes nothing and retries after the [failure backoff](../../docs/docs/sensors.md#collect-and-update).
 - Project review follows every `next_offset`, up to 100 pages (20,000 projects). A stalled continuation or exceeded limit fails before writing; the home page alone cannot establish that all projects are current. Other home-page sections remain previews.
 - Task counts cover the eligible note selection; up to ten open tasks are previewed with source refs and lines. Plain bullets and code-span refs avoid duplicating tasks or triggering new-evidence reminders. Follow `bf read tasks` continuations for the complete list.

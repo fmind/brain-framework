@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -120,6 +121,32 @@ def test_an_editor_lock_in_todays_action_skips_the_rerun_instead_of_failing(conf
     (configured.root / "actions").symlink_to(tmp_path / "elsewhere")
     with pytest.raises(Error, match="actions: expected a directory"):
         routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
+
+
+def test_a_retry_finds_todays_action_when_its_run_history_was_not_saved(
+    configured: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ids = iter(UUID(int=n) for n in (1, 2, 3))
+    monkeypatch.setattr(collector, "uuid4", lambda: next(ids))
+    original, calls = collector.remember, []
+
+    def lost(*args: Any, **kwargs: Any) -> None:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise OSError(errno.EIO, "synthetic lost history write")
+        original(*args, **kwargs)
+
+    monkeypatch.setattr(collector, "remember", lost)
+    # Another routine's action and a person's folder with a similar name do not count as today's digest.
+    configured.write(f"{FOLDER.replace('digest', 'weekly')}/ACTION.md", ACTION)
+    configured.write(f"{FOLDER.rsplit('-', 1)[0]}-notes/ACTION.md", ACTION)
+    with pytest.raises(Error, match="routine files are inaccessible"):
+        routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
+    assert configured.read(f"{FOLDER}/ACTION.md") == ACTION
+    assert "action" not in state(configured, ROUTINES)["digest"]
+    skipped = {"routine": "digest", "skipped": "an action for this routine already exists today"}
+    assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW) == skipped
+    assert not (configured.root / f"{FOLDER[:-1]}2").exists()
 
 
 def refs(reply: dict[str, object]) -> list[str]:

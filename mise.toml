@@ -125,7 +125,7 @@ description = "Scan the repository for vulnerabilities, secrets, licenses, and m
 run = "trivy --config trivy.yaml fs ."
 
 [tasks."check:schema"]
-description = "Verify every published configuration schema matches its loader"
+description = "Verify every published configuration and reply schema matches its source"
 run = "uv run --locked python scripts/schemas.py"
 
 [tasks."check:screenshot"]
@@ -184,7 +184,7 @@ description = "Sort Python imports"
 run = "uv run --locked ruff check --select=I --fix --force-exclude"
 
 [tasks."generate:schema"]
-description = "Generate and format all configuration schemas from their models"
+description = "Generate and format all configuration and reply schemas"
 run = [
   "uv run --locked python scripts/schemas.py --write",
   "dprint fmt docs/*.schema.json",

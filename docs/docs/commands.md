@@ -17,22 +17,25 @@ For recovery steps, use [Troubleshooting](troubleshooting.md). Examples below as
 
 ## Commands
 
-| Command                                                                      | Purpose                                                                                         |
-| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `build`                                                                      | Recover interrupted record writes and rebuild the disposable search cache.                      |
-| `collect SENSOR [--since TIME] [--until TIME] [--dry-run] [--allow-removal]` | Run one sensor now. Dry-run executes it and previews three samples without saving records.      |
-| `eval [--path evals]`                                                        | Run retrieval acceptance cases.                                                                 |
-| `init PATH [--name NAME] [--full]`                                           | Create a brain in a new, empty or freshly cloned directory. `--full` adds optional folders.     |
-| `mcp`                                                                        | Serve `search` and `read` over MCP stdio.                                                       |
-| `read [REF] [--offset N]`                                                    | Open home, a page, note, section, record or identity.                                           |
-| `register [PATH]`                                                            | Add a brain's name and path to the optional machine registry.                                   |
-| `schedule [--backend NAME] [--every N] [--output DIR]`                       | Generate optional native scheduling files and installation commands.                            |
-| `schema [--kind brain\|registry\|eval]`                                      | Print an offline editor schema; defaults to `bf.yaml`.                                          |
-| `search QUERY [--scope SCOPE] [--limit N] [--offset N]`                      | Find words or an identity, optionally within one scope.                                         |
-| `status [--check] [--watch]`                                                 | Report cache, evidence counts, source and routine health, logs and local usage.                 |
-| `update [--dry-run] [--sensor NAME] [--routine NAME]`                        | Run due sensors, then routines, then refresh the cache. Dry-run executes nothing.               |
-| `validate`                                                                   | Check notes, concepts, actions, links and record files.                                         |
-| `watch [--interval N] [--poll-interval N] [--notify MODE] [--json]`          | Refresh due information and show a live dashboard; preferences live under `watch` in `bf.yaml`. |
+| Command                                                                      | Purpose                                                                                                                                 |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `build [--reproject SENSOR [--dry-run]]`                                     | Recover interrupted record writes and rebuild the disposable search cache; `--reproject` re-applies current mappings to stored records. |
+| `collect SENSOR [--since TIME] [--until TIME] [--dry-run] [--allow-removal]` | Run one sensor now. Dry-run executes it and previews three samples without saving records.                                              |
+| `eval [--path evals] [--baseline FILE]`                                      | Run retrieval acceptance cases; compare ranks with a saved reply.                                                                       |
+| `export edges`                                                               | Print every claim of the selected brains as JSON Lines, from their caches.                                                              |
+| `init PATH [--name NAME] [--full]`                                           | Create a brain in a new, empty or freshly cloned directory. `--full` adds optional folders.                                             |
+| `mcp`                                                                        | Serve `search` and `read` over MCP stdio.                                                                                               |
+| `read [REF] [--rel ROLE] [--offset N]`                                       | Open home, a page, note, section, record or identity; `--rel` lists one relationship's links.                                           |
+| `register [PATH]`                                                            | Add a brain's name and path to the optional machine registry.                                                                           |
+| `schedule [--backend NAME] [--every N] [--output DIR]`                       | Generate optional native scheduling files and installation commands.                                                                    |
+| `schema [--kind KIND]`                                                       | Print an offline configuration or [reply schema](retrieval.md#reply-schemas); defaults to `bf.yaml`.                                    |
+| `search QUERY [--scope SCOPE] [--limit N] [--offset N]`                      | Find words or an identity, optionally within one scope.                                                                                 |
+| `status [--check] [--watch]`                                                 | Report cache, evidence counts, source and routine health, logs and local usage.                                                         |
+| `update [--dry-run] [--sensor NAME] [--routine NAME]`                        | Run due sensors, then routines, then refresh the cache. Dry-run executes nothing.                                                       |
+| `validate`                                                                   | Check notes, concepts, actions, links and record files.                                                                                 |
+| `watch [--interval N] [--poll-interval N] [--notify MODE] [--json]`          | Refresh due information and show a live dashboard; preferences live under `watch` in `bf.yaml`.                                         |
+
+`build --reproject SENSOR` applies the sensor's current field mappings to the records it already collected, without running it, then refreshes the cache; `--dry-run` counts the changes and writes nothing. See [reproject stored records](schema.md#reproject-stored-records).
 
 `watch` runs due programs in a keyboard-driven terminal dashboard; `status --watch` observes local program history without executing anything. Both dashboards [sort in-session](schedule.md#sort-the-dashboard). `schedule` previews native scheduler files and installation commands as JSON; `--output DIR` writes those files without activating them. All three use one brain. See [Watch and schedule updates](schedule.md).
 
@@ -74,6 +77,26 @@ Times accept `now`, `today`, `yesterday`, `12h`, `7d`, `2w`, `YYYY-MM-DD` and ti
 
 Use `--brain PATH` in scripts and schedules to name the one brain `update` acts on. An `update` of a brain that another update is running waits up to 10 minutes for it to finish, then computes its own due list; see [collector ownership](schedule.md#collector-ownership).
 
+### Export the graph
+
+`bf export edges` prints one JSON object per line for each claim in the selected brains and their direct `brains:` references, for tools such as DuckDB or networkx. Like search, it reads each brain's cache offline and never runs a sensor. On the [example brain](https://github.com/fmind/brain-framework/blob/main/examples/brain/README.md#export-the-graph):
+
+```bash
+bf export edges | head -1
+```
+
+```json
+{
+  "brain": "example",
+  "origin": "bf://example/actions/2026-09-19_retention/ACTION.md",
+  "relation": "tagged-with",
+  "subject": "bf://example/actions/2026-09-19_retention/ACTION.md",
+  "target": "bf://example/tags/retention"
+}
+```
+
+The command prints that object on one line. Each line has `brain`, `subject`, `relation`, `target` and `origin`, plus `time`, the event time of the note or record asserting the claim, and `observed` for a collected record, both omitted when absent. `relation` is a declared role, `cites`, `tagged-with` or `links` for an untyped link. Lines are sorted by subject, relation, target and origin within each brain. A stale cache is noted on stderr; an unreadable brain or skipped file prints `bf: BRAIN: FILE: ERROR` on stderr and exits 1 after the other lines, since their claims are missing. With `set -o pipefail`, a pipe that closes early, such as `head`, also makes the command exit 1.
+
 ### Shell completion
 
 Complete command and option names by loading the script for your shell, for example from its startup file:
@@ -97,7 +120,7 @@ Results use compact JSON on stdout; help and version use plain text. The interac
 | `2`   | Invalid command-line input.                                            |
 | `130` | Cancelled by Ctrl-C, SIGTERM or a closed terminal.                     |
 
-Invalid option values and malformed refs name the option or `REF` on stderr before selecting a brain when no brain configuration is needed to validate them. For example, `bf search "product" --limit 0` exits 2 with a `--limit` diagnostic and no JSON result; choose a limit from 1 to 50. Likewise, `bf read 2026-13` (no such month), `bf read bf://` and `bf read projects/../bf.yaml` exit 2, and so does `bf eval --path /etc`, whose path must be brain-relative. A query without any word or identity, such as `bf search "!!!"`, also exits 2, and so does a query shaped like a malformed BF address, such as `bf search bf://Me/x` or `bf search bf://brain` without its trailing slash. Query and scope errors name `QUERY` or `--scope`, such as `Invalid value for --scope: since must be earlier than until` for `--scope 0d`. A well-formed ref that names nothing exits 1. Collection windows require `--since` earlier than `--until`.
+Invalid option values and malformed refs name the option or `REF` on stderr before selecting a brain when no brain configuration is needed to validate them. For example, `bf search "product" --limit 0` exits 2 with a `--limit` diagnostic and no JSON result; choose a limit from 1 to 50. Likewise, `bf read 2026-13` (no such month), `bf read bf://` and `bf read projects/../bf.yaml` exit 2, and so does `bf eval --path /etc`, whose path must be brain-relative. A query without any word or identity, such as `bf search "!!!"`, also exits 2, and so does a query shaped like a malformed BF address, such as `bf search bf://Me/x` or `bf search bf://brain` without its trailing slash. Query and scope errors name `QUERY` or `--scope`, such as `Invalid value for --scope: since must be earlier than until` for `--scope 0d`. A relationship that no selected brain declares, such as `bf read projects/new-website.md --rel nope`, exits 2 and names the valid ones. A well-formed ref that names nothing exits 1. Collection windows require `--since` earlier than `--until`.
 
 Cancellation exits 130 without a message. JSON replies are UTF-8 whatever the terminal's locale; DEL and C1 control characters in collected text, which some terminals obey, are written as JSON escapes such as `\u009b`, which decode to the same value. A note that is not valid UTF-8 fails with its path, for example `bf: projects/latin.md: note is not UTF-8`.
 
@@ -107,7 +130,7 @@ Cancellation exits 130 without a message. JSON replies are UTF-8 whatever the te
 bf status --check
 ```
 
-`update` fails if collection, a routine or cache refresh fails; successful programs still retain their results. `build` and `update` also exit 1 when the refreshed cache skipped files: their `skipped` count says how many, and `bf status` or `bf validate` names them.
+`update` fails if collection, a routine or cache refresh fails; successful programs still retain their results. `build` and `update` also exit 1 when the refreshed cache skipped files: their `skipped` count says how many, and `bf status` or `bf validate` names them. `build --reproject` exits 1 when a record failed to reproject, and `export` when evidence was skipped. `validate` warnings never change its exit code.
 
 ## Using replies
 
@@ -159,7 +182,9 @@ For example, a fictional hourly `mail` sensor that collected one message over th
 
 A failed scheduled program instead carries `"failed":true`, its `error`, `failures` and `log`, and makes `bf status --check` exit 1.
 
-Inspect `problems`, `stale` and source coverage before treating an answer as complete. `problems` is always a list of objects with `error` and, when known, `brain` and `file`. Status reports each brain's `cache` state as `ready` or `stale`. Follow returned `next_offset` values and assemble large exact-read chunks as described in [continuations](retrieval.md#continuations). With several selected brains, read each result's `uri`; see [identity matching](retrieval.md#identity-matching).
+A brain entry also lists `warnings` when a record source or authored folder holds more than 80% of the [100,000-entry scan limit](limits.md#size-bounds), for example `"warnings":[{"warning":"directory nears the scan limit","directory":"memories/mail","entries":81234,"limit":100000}]`. Warnings never fail `bf status --check`; split that source's sensor or archive older records before a scan fails. Like [validation warnings](checks.md), each is an object with a `warning` message and its own details.
+
+Inspect `problems`, `stale` and source coverage before treating an answer as complete. `problems` is always a list of objects with `error` and, when known, `brain` and `file`. Status reports each brain's `cache` state as `ready` or `stale`. Follow returned `next_offset` values, including through the text pages of large exact reads, as described in [continuations](retrieval.md#continuations). With several selected brains, read each result's `uri`; see [identity matching](retrieval.md#identity-matching).
 
 With [jq](https://jqlang.org/), list projects needing review:
 

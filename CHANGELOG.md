@@ -4,11 +4,32 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
-### Breaking changes (next major release)
+## [v15.0.0](https://github.com/fmind/brain-framework/releases/tag/v15.0.0) - 2026-09-29
+
+Brain Framework 15 reshapes replies for agents: smaller, bounded, described by published JSON Schemas and easier to continue. It ranks sections by their note, collapses duplicate records across sources, pages relationships, adds graph settings and exports, and hardens collection and cache rebuilds. The brain storage format remains `version: 6`; the search cache rebuilds once after the upgrade.
+
+### Breaking changes
 
 - Watch preferences now live in the optional `watch` mapping in `bf.yaml`. `settings/watch.yaml` is no longer read, and `bf schema --kind watch` and `watch.schema.json` are removed; `bf schema` includes watch preferences. Defaults and CLI precedence are unchanged. All commands loading `bf.yaml` validate the section, even when CLI options override it.
+- Exact reads above 32 KiB return their note or record text in pages (`text` or `record.text`, with `offset`, `next_offset` and `total_characters`; the first page adds the section `outline` and the graph context) instead of JSON `chunk` strings. Every exact read adds `sha256` (of the whole file) and `modified`.
+- Backlink groups always name their `relation` (`links` for untyped links) and preview their 5 newest items with `ref`, `title`, `time`, `kind` and `source`, `status` or `type` only. `bf read REF --rel ROLE` lists a whole group.
+- OKF `sources` entries now claim the built-in `cites` relationship instead of an untyped link: backlinks list them under `cites`. `links` and `cites` join `tagged-with` as reserved schema names.
+- With one selected brain, result and listing entries omit `brain` and `uri`; records omit `type`, which `kind` already states.
+- Search `sources` lists the sources of returned records and those needing attention (failed, `stale` or `never`), with `sources_omitted` counting the rest; replies without items and `memories` scopes keep the full list.
+- Search shows one result per URL when several sources hold it, such as a Drive file and its catalog entry; the result's `also` lists up to five other refs, as `bf://` addresses when several brains are selected. One source's records, such as highlights of one document, stay separate.
+- Pages and searches end early near 32 KiB instead of 2 MiB, counting a page's summaries such as `changed`; follow `next_offset`. Result and listing titles are previews of at most 200 characters ending in `…`, and home `changed` and `upcoming` previews omit excerpts.
+- Period pages (`today`, `7d`, dates) and home `upcoming` omit records of `priority: low` sources; `sources` and `activity` keep their counts, marked `"priority":"low"`, with the page listing them.
+- Collection rejects a record whose fields other than `text` exceed 2 MiB serialized, and `bf validate` reports such stored files, so every record reads back; keep bulky content in `text`.
+- `bf init` writes a much shorter `AGENTS.md` (about 280 words instead of about 960); authoring rules live in the `bf-learn` skill.
+- The `bf-action` handoff check reports `characters` instead of `reply_characters`.
 
-Manual upgrade: stop the watcher, move the keys from `settings/watch.yaml` beneath `watch:` in your existing `bf.yaml` (indent them two spaces), remove the old file, run `bf validate` and restart the watcher. Remove the empty `settings/` directory only if nothing else uses it. Brains without custom watch preferences need no change; the brain storage format remains `version: 6`. Package versions will change at release time.
+Manual upgrade:
+
+1. Stop the watcher, move the keys from `settings/watch.yaml` beneath `watch:` in your existing `bf.yaml` (indent them two spaces), remove the old file, run `bf validate` and restart the watcher. Remove the empty `settings/` directory only if nothing else uses it. Brains without custom watch preferences need no change.
+2. Rename any `schema` field named `links` or `cites`, then run `bf validate`.
+3. Update scripts that parse replies: concatenate exact-read text pages while `next_offset` is present and require an unchanged `sha256`; list a backlink group with `bf read REF --rel ROLE` and explain a link with `bf search 'IDENTITY'`; read OKF sources under `cites`; build `bf://NAME/REF` from the reply's brain when you need an address with one brain selected; follow `also` where you expected every copy of a URL; read `memories/SOURCE/PERIOD` to list a low-priority source's records. Validate parsed replies with `bf schema --kind search-reply` and `bf schema --kind read-reply`.
+4. Re-copy the upstream `bf-use`, `bf-learn` and `bf-action` skills and any copied hook (`examples/hooks/session-context.py`), which read the new replies.
+5. Optionally compare your brain's `AGENTS.md` with a scratch `bf init` and keep what your brain still needs.
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schedule/#watch-preferences
@@ -19,16 +40,39 @@ watch:
 
 ### Added
 
+- Role pages: `bf read REF --rel ROLE [--offset N]` and MCP `read(ref, rel, offset)` list every item linking to a note, record or identity through one relationship, 50 per page; an undeclared role exits 2 naming the declared ones, and a `bf://` address with an undeclared `?rel=` reports a problem.
+- `broader: ROLE` on a relation field: the parent's role page also lists its narrower roles' items, each keeping its own `relation`.
+- `targets: [PREFIX, …]` on a relation field: collection rejects mapped values and typed record links outside them without changing evidence, and `bf validate` reports stored records and note links outside them.
+- `bf validate` lists non-failing `warnings` for identities that differ only by letter case; `bf status` lists `warnings` for a record source or authored folder above 80% of the scan limit. Neither changes the exit code.
+- `bf build --reproject SENSOR [--dry-run]` re-applies a sensor's current mappings to its stored records without running it or removing records.
+- `bf export edges` prints every claim of the selected brains as JSON Lines, offline, for DuckDB or networkx.
+- `sensors.NAME.priority: normal|low` in `bf.yaml`: low ranks a source at half weight in search and keeps its records out of period and home lists; applied at query time without `bf build`.
+- `bf eval` reports each search case's `rank` and the run's `mrr`; `bf eval --baseline FILE` lists `regressions` and `improvements` against a saved reply.
+- Published JSON Schemas for `bf search` and `bf read` replies: `bf schema --kind search-reply|read-reply`, `docs/search-reply.schema.json` and `docs/read-reply.schema.json`. The test suite validates every reply against them.
+- Typed claims carry the asserting item's `time`.
+- MCP tools gain titles, and the server sends a title and instructions with the orient, find, verify and answer loop, role pages and completeness checks.
+- Opt-in `examples/hooks/prompt-context.py` for Claude Code and Codex lists up to three matching note refs per prompt, counts records without quoting them, and stays silent after 2 seconds or on incomplete retrieval.
+- The `bf-learn` `scripts/guarded-write.py` helper replaces a note from stdin only while it still has the `sha256` of the agent's read.
 - Add an explicit `f` refresh shortcut to `bf watch` (`u` remains an alias): reload configured sources and check due work now, retaining one follow-up request during an active update while respecting pause, selectors and retry timing.
-
 - Add a reviewed GitHub history sensor and backfill walkthrough: selected-branch commits (one year of `main` by example), all-age issues and pull requests, incremental refresh and bounded pagination that preserves evidence on failure.
 
 ### Changed
 
+- The 100,000-entry scan limit applies per source directory under `memories/` and per authored folder, and its error names the crowded directory with a remedy.
+- `bf build` and automatic rebuilds fill `.bf/index.sqlite.new` beside the live cache and replace it atomically: searches and collections continue meanwhile, and an interrupted build leaves the live cache intact. Readers hold a brief cache lock while connected, so a replaced cache never attaches the new one's write-ahead log.
+- `bf update` and `bf watch` recover an interrupted record transaction before refreshing the cache; reads still refuse and name `bf build` or `bf update`.
+- Rewording a schema field's `description` or `examples` no longer rebuilds the cache; adding `broader` or `targets` does.
+- Rolling back an interrupted transaction syncs the source directory once instead of once per record.
+- Mapping errors at collection name the record's zero-based position.
+- The skills describe the new replies, role pages, low-priority sources, rank-aware evaluations, scan warnings and graph settings.
 - Synchronize the project description across the README, documentation, package metadata, CLI help and GitHub About to “🧠 Brain Framework: from information to informed actions.”
 
 ### Fixed
 
+- A section now ranks under its note's title as well as its heading, so "Atlas next actions" finds Atlas's own Next actions before other notes that mention Atlas; a query matching only a note's title still returns the whole note.
+- The snapshot shrink guard counted the catalog left by an interrupted commit, letting a truncated listing remove most records; recovery now runs first.
+- A routine retried after its run history failed to save no longer writes a second action for the same day.
+- Temporary `.write-*` files left by killed writes are removed by the next transaction or recovery of their source.
 - Reject ambiguous GitHub pagination and PR details that move outside the requested window, preserving saved evidence instead of accepting an incomplete or out-of-scope collection.
 
 ## [v14.0.0](https://github.com/fmind/brain-framework/releases/tag/v14.0.0) - 2026-09-28

@@ -11,12 +11,14 @@ from functools import cache
 from bf import links, ontology, pages, records
 from bf.config import load
 from bf.markdown import Note, authored, broken, editor_lock, note, okf, scheme, validate_okf
-from bf.models import AUTHORED, MAX_NOTE, Error
+from bf.models import AUTHORED, IDENTITY, MAX_NOTE, Error
 from bf.storage import UNNAMED, Store, relative, unnamed
 
 _ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
-# A reply lists at most this many problems and unresolved targets; a `*_truncated` flag marks the rest.
+# A reply lists at most this many problems, warnings and unresolved targets; a `*_truncated` flag marks the rest.
 LIMIT = 200
+# A warning lists at most this many spellings of one identity.
+VARIANTS = 20
 
 
 def _problem(file: str, message: str) -> dict[str, str]:
@@ -42,6 +44,38 @@ def _actions(files: list[str]) -> list[dict[str, str]]:
     return problems
 
 
+class _Spellings:
+    """How many files name each identity, grouped by its lowercase form: one subject spelled several ways."""
+
+    def __init__(self) -> None:
+        self.files: dict[str, dict[str, int]] = {}
+
+    def add(self, identities: set[str]) -> None:
+        """Count one file's identities once each; URLs and BF addresses are identities too."""
+        for identity in identities:
+            if re.fullmatch(IDENTITY, identity):
+                group = self.files.setdefault(identity.lower(), {})
+                group[identity] = group.get(identity, 0) + 1
+
+    def warnings(self) -> list[dict[str, object]]:
+        """Case variants within one scheme, most referenced first; identities are case-sensitive, so each spelling
+        names a different subject until the evidence agrees on one."""
+        groups = sorted(
+            (group for group in self.files.values() if len(group) > 1),
+            key=lambda group: (-sum(group.values()), min(group)),
+        )
+        return [
+            {
+                "warning": "identities differ only by letter case",
+                "identities": [
+                    {"identity": identity, "files": files}
+                    for identity, files in sorted(group.items(), key=lambda item: (-item[1], item[0]))[:VARIANTS]
+                ],
+            }
+            for group in groups
+        ]
+
+
 def validate(store: Store) -> dict[str, object]:
     """Report every problem instead of stopping at the first one."""
     with records.reading(store):
@@ -56,12 +90,13 @@ def _validate(store: Store) -> dict[str, object]:
     owners: dict[str, dict[str, str]] = {}
     # Each BF address a file writes as a link, with the files writing it.
     written: dict[str, set[str]] = {}
+    spellings = _Spellings()
     count = 0
     # Linked and special files are never followed; the check reports those that would hold evidence.
     skipped: dict[str, tuple[int, int, int, int]] = {}
     evidence = [
         name
-        for name in store.files("memories", skipped=skipped)
+        for name in store.files("memories", skipped=skipped, split=True)
         # Check every file collection and search read as a record, even a hidden AppleDouble `._<sha>.json`, and
         # report other visible files; ignore other hidden files, such as .DS_Store, and the pending transaction.
         if not name.startswith("memories/.pending/")
@@ -79,9 +114,11 @@ def _validate(store: Store) -> dict[str, object]:
             # A record's ref is one of its names: a note alias repeating it is ambiguous.
             for alias in [ref, ontology.qualify(config, ref), *record.aliases]:
                 owners.setdefault(links.target(alias), {})[ref] = name
-            for claim in ontology.record_claims(record, config, ref):
+            claims = ontology.record_claims(record, config, ref)
+            for claim in claims:
                 if links.parse(claim.target):
                     written.setdefault(claim.target, set()).add(name)
+            spellings.add({*map(links.target, record.aliases), *(claim.target for claim in claims)})
             # Edges follow the current schema; the check still names each stored value that schema now rejects.
             ontology.validate(record, config)
         except Error as error:
@@ -107,8 +144,16 @@ def _validate(store: Store) -> dict[str, object]:
         try:
             data = store.read(name, MAX_NOTE)
             parsed_note = note(name, data)
-            ontology.note_claims(parsed_note, config)
+            claims = ontology.note_claims(parsed_note, config)
             notes.append(parsed_note)
+            names = [*parsed_note.knowledge.names, parsed_note.knowledge.entity]
+            spellings.add({*(links.target(v) for v in names if v), *(claim.target for claim in claims)})
+            # Search keeps such a claim: the note states it, and only its author can correct it.
+            problems.extend(
+                _problem(name, f"{claim.relation} link outside the declared targets: {claim.target}")
+                for claim in claims
+                if ontology.outside(config, claim)
+            )
             if okf(name):
                 validate_okf(name, data)
         except (Error, UnicodeError) as error:
@@ -212,12 +257,15 @@ def _validate(store: Store) -> dict[str, object]:
             else:
                 errors.add("unresolved BF target")
         problems.extend(_problem(file, f"{error}: {value}") for file in sorted(files) for error in sorted(errors))
+    warnings = spellings.warnings()
     return {
         "valid": not problems,
         "notes": len(notes),
         "records": count,
         "problems": problems[:LIMIT],
         **({"problems_truncated": True} if len(problems) > LIMIT else {}),
+        **({"warnings": warnings[:LIMIT]} if warnings else {}),
+        **({"warnings_truncated": True} if len(warnings) > LIMIT else {}),
         **({"unresolved": sorted(unresolved)[:LIMIT]} if unresolved else {}),
         **({"unresolved_truncated": True} if len(unresolved) > LIMIT else {}),
     }

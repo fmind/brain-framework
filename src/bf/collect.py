@@ -10,7 +10,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, Protocol
@@ -22,7 +22,7 @@ from bf import ontology, records
 from bf.config import load
 from bf.history import ROUTINES, SENSORS, environment, log_path, remember, state
 from bf.markdown import note, validate_okf
-from bf.models import Error, Program, Record, decode, explain, timestamp
+from bf.models import Config, Error, Program, Record, Sensor, decode, explain, timestamp
 from bf.storage import Store, collecting, relative, writer
 
 _LOG = 256 << 10
@@ -34,6 +34,9 @@ CATCH_UP = timedelta(days=30)
 BACKOFF = timedelta(minutes=1)
 # A snapshot may remove half of its catalog, or up to this many records, without --allow-removal.
 SHRINK_FLOOR = 10
+# Reprojected records committed per transaction; a reply lists at most LIMIT records that failed.
+REPROJECT = 1000
+LIMIT = 200
 
 
 class Runner(Protocol):
@@ -181,6 +184,14 @@ def _coverage(
     return {"start": interval[0], "end": interval[1]}, latest
 
 
+def _project(position: int, record: Record, sensor: Sensor, config: Config) -> Record:
+    """Map one printed record; an error names its zero-based position in the output, never a value."""
+    try:
+        return ontology.project(record, sensor, config)
+    except Error as error:
+        raise Error(f"record {position}: {error}") from error
+
+
 def _check_shrink(store: Store, name: str, incoming: list[Record]) -> None:
     """A wrong account, a lost folder or a truncated listing also looks like a smaller catalog."""
     existing = records.files(store, name)
@@ -234,7 +245,7 @@ def collect(
                 # Record fields and item positions only: a key the provider printed may be private text.
                 known = {*Record.model_fields, "[key]"}
                 raise Error("collector must print one JSON array of records: " + explain(error, known)) from error
-            incoming = [ontology.project(record, sensor, config) for record in incoming]
+            incoming = [_project(position, record, sensor, config) for position, record in enumerate(incoming)]
             if len({r.id for r in incoming}) != len(incoming):
                 raise Error("collector returned duplicate record ids")
             observed = timestamp(started.isoformat())
@@ -257,6 +268,8 @@ def collect(
                     "samples": [r.model_dump(exclude_defaults=True) for r in incoming[:3]],
                 }
             with writer(store, wait=120):
+                # An interrupted commit may have removed files already: count the catalog it restores.
+                records.recover(store)
                 if sensor.mode == "snapshot" and not allow_removal:
                     _check_shrink(store, name, incoming)
                 result.update(records.upsert(store, name, incoming, snapshot=sensor.mode == "snapshot"))
@@ -289,22 +302,74 @@ def collect(
         return result
 
 
+def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, object]:
+    """Re-apply a sensor's current field mappings to its stored records; never runs the sensor or removes a record.
+
+    Changed records are committed like a window collection, in transactions of up to REPROJECT records that keep
+    memory bounded: an interrupted run leaves each record either reprojected or as it was, and a rerun completes it.
+    A record the current mappings reject keeps its stored fields and is counted as failed.
+    """
+    config = load(store)
+    sensor = config.sensors.get(name)
+    if sensor is None:
+        raise Error(f"sensor {name} is not declared in bf.yaml; reprojection applies its field mappings")
+    counts = {"records": 0, "changed": 0, "unchanged": 0, "failed": 0}
+    problems: list[dict[str, str]] = []
+    with ExitStack() as stack:
+        # The sensor's own lock keeps a collection from committing an older projection in between.
+        stack.enter_context(collecting(store, name))
+        if dry_run:
+            stack.enter_context(records.reading(store))
+        else:
+            stack.enter_context(writer(store, wait=120))
+            records.recover(store)
+        changed: list[Record] = []
+        for file in records.files(store, name):
+            counts["records"] += 1
+            try:
+                stored = records.load(store, file)
+                projected = ontology.reproject(stored, sensor, config)
+            except Error as error:
+                counts["failed"] += 1
+                problems.append({"file": file, "error": str(error).removeprefix(f"{file}: ")})
+                continue
+            if projected.fields == stored.fields:
+                counts["unchanged"] += 1
+                continue
+            counts["changed"] += 1
+            changed.append(projected)
+            if not dry_run and len(changed) >= REPROJECT:
+                records.upsert(store, name, changed, snapshot=False)
+                changed = []
+        if changed and not dry_run:
+            records.upsert(store, name, changed, snapshot=False)
+    return {
+        "sensor": name,
+        "dry_run": dry_run,
+        **counts,
+        **({"problems": problems[:LIMIT]} if problems else {}),
+        **({"problems_truncated": True} if len(problems) > LIMIT else {}),
+    }
+
+
 def _argv(store: Store, program: Program, start: str, end: str) -> list[str]:
     values = {"brain": str(store.root), "home": str(Path.home()), "start": start, "end": end}
     return [re.sub(r"\{\{(brain|home|start|end)\}\}", lambda match: values[match[1]], arg) for arg in program.command]
 
 
-def _used(store: Store, folder: str) -> bool:
-    """Whether an action folder holds anything, such as an ACTION.md or an editor's `.#ACTION.md` lock.
+def _written(store: Store, prefix: str) -> bool:
+    """Whether an `actions/{prefix}UUID` folder holds anything, such as an ACTION.md or an editor's `.#ACTION.md` lock.
 
-    A link or unaddressable name inside marks the folder as used instead of failing the run, so nothing is written
-    beside it; a linked folder or `actions/` still fails by name.
+    Folder names, not run history, find it: a retry counts an action whose run history was never saved. A linked
+    folder or a link or unaddressable name inside also counts, so nothing is written beside it; a linked `actions/`
+    fails by name.
     """
     skipped: dict[str, tuple[int, int, int, int]] = {}
-    found = store.files(folder, skipped=skipped)
-    if linked := sorted(name for name in skipped if not name.startswith(folder + "/")):
-        raise Error(f"{linked[0]}: expected a directory; symlinks and special files are forbidden")
-    return bool(found or skipped)
+    found = store.files("actions", skipped=skipped)
+    if "actions" in skipped:
+        raise Error("actions: expected a directory; symlinks and special files are forbidden")
+    today = re.compile(re.escape(f"actions/{prefix}") + r"[0-9a-f]{32}(?:/|$)")
+    return any(today.match(name) for name in (*found, *skipped))
 
 
 def routine(
@@ -320,7 +385,7 @@ def routine(
     """Run one routine over [start, end); its Markdown becomes today's action, written only after success.
 
     Empty output means there is nothing to review. An existing action folder is never overwritten,
-    so a routine writes at most one action per local day in this clone and never replaces a person's edits.
+    so a routine writes at most one action per local day in this brain and never replaces a person's edits.
     """
     start, end = _window(start, end)
     program = load(store).routines.get(name)
@@ -346,9 +411,7 @@ def routine(
             if dry_run:
                 return {**result, **({"text": text} if text.strip() else {})}
             with writer(store, wait=120):
-                previous = str(state(store, ROUTINES).get(name, {}).get("action", ""))
-                already_ran = previous.startswith(f"actions/{day}_{name}-") and _used(store, previous.rsplit("/", 1)[0])
-                if text.strip() and (already_ran or _used(store, folder)):
+                if text.strip() and _written(store, f"{day}_{name}-"):
                     del result["action"]
                     result["skipped"] = "an action for this routine already exists today"
                 elif text.strip():

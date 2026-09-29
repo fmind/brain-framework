@@ -355,3 +355,50 @@ def test_okf_status_and_reserved_files_are_valid(brain: Store, folder: str, stat
     assert validate(brain)["valid"]
     brain.write(f"{folder}/nested/index.md", b'---\nokf_version: "0.2"\n---\n# Index\n')
     assert not validate(brain)["valid"]
+
+
+def test_case_variant_identities_warn_without_failing(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 6\nname: fixture\nschema:\n"
+        b"  repository: {description: Repository., type: identity, cardinality: many, relation: true}\n",
+    )
+    records_file(
+        brain,
+        "github",
+        [
+            Record(id="pr-1", title="Fix", fields={"repository": ["repo:github.com/Team/x"]}),
+            Record(id="pr-2", title="Docs", links=["repo:github.com/team/x"], aliases=["person:email/Bo@example.test"]),
+        ],
+    )
+    brain.write("projects/x.md", b"---\ntype: project\naliases: [repo:github.com/team/x]\n---\n# X\n")
+    brain.write("concepts/bo.md", b"---\ntype: person\naliases: [person:email/bo@example.test]\n---\n# Bo\n")
+    result = validate(brain)
+    assert (result["valid"], result["problems"]) == (True, [])
+    # Most referenced first, each spelling with the number of files naming it.
+    assert result["warnings"] == [
+        {
+            "warning": "identities differ only by letter case",
+            "identities": [
+                {"identity": "repo:github.com/team/x", "files": 2},
+                {"identity": "repo:github.com/Team/x", "files": 1},
+            ],
+        },
+        {
+            "warning": "identities differ only by letter case",
+            "identities": [
+                {"identity": "person:email/Bo@example.test", "files": 1},
+                {"identity": "person:email/bo@example.test", "files": 1},
+            ],
+        },
+    ]
+    monkeypatch.setattr("bf.validate.LIMIT", 1)
+    monkeypatch.setattr("bf.validate.VARIANTS", 1)
+    bounded = validate(brain)
+    assert bounded["warnings_truncated"] is True
+    assert bounded["warnings"] == [
+        {
+            "warning": "identities differ only by letter case",
+            "identities": [{"identity": "repo:github.com/team/x", "files": 2}],
+        }
+    ]

@@ -7,3 +7,9 @@ schema:
     type: identity
     cardinality: many
     relation: true
+sensors:
+  # The catalog's records are checked in: this disabled entry only lowers the source's priority.
+  catalog:
+    command: [sensors/catalog.py]
+    enabled: false
+    priority: low

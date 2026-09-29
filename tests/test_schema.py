@@ -40,6 +40,18 @@ ROOT = Path(__file__).resolve().parents[1]
             "name": "brain",
             "schema": {"kind": {"description": "Kind", "type": "string", "relation": True}},
         },
+        *(
+            {"version": 6, "name": "brain", "schema": {"owner": {"description": "Owner", "type": "identity", **extra}}}
+            for extra in (
+                {"targets": ["repo:"]},
+                {"broader": "owner", "relation": False},
+                {"relation": True, "targets": []},
+                {"relation": True, "targets": ["Repo:"]},
+                {"relation": True, "targets": ["repo:\n"]},
+                {"relation": True, "targets": ["repo"]},
+                {"relation": True, "broader": "Owner"},
+            )
+        ),
         {
             "version": 6,
             "name": "brain",

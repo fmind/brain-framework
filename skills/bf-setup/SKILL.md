@@ -2,9 +2,9 @@
 name: bf-setup
 description: Set up a new or existing Brain Framework brain around recurring questions, verify retrieval and agent access, and hand selected integrations to bf-maintain. Use for first-use onboarding.
 license: MIT
-compatibility: Requires Brain Framework 14 (the bf command) on Linux or macOS.
+compatibility: Requires Brain Framework 15 (the bf command) on Linux or macOS.
 metadata:
-  version: "14.0.0"
+  version: "15.0.0"
 ---
 
 # bf-setup
@@ -32,7 +32,7 @@ Replace the query and ref with the saved note. Outside the directory, pass `--br
 
 ## Verify agent access
 
-For a terminal agent, try an explicit CLI search/read task before requiring skill installation. Install complete, reviewed folders using the [installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md); preserve host settings and installed customizations. If the host uses MCP, follow the [MCP guide](https://fmind.github.io/brain-framework/docs/mcp/). Host setup is optional for CLI-only use.
+For a terminal agent, try an explicit CLI search/read task before requiring skill installation. Install complete, reviewed folders using the [installation guide](https://github.com/fmind/brain-framework/blob/main/skills/README.md); preserve host settings and installed customizations. If the host uses MCP, follow the [MCP guide](https://fmind.github.io/brain-framework/docs/mcp/). Host setup is optional for CLI-only use. Optional [hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add the repository's project at session start and matching note refs to each prompt in Claude Code or Codex; register them only when the user wants that per-prompt search.
 
 Explain the data boundary before connecting a cloud agent: its provider may receive returned notes and records even though BF retrieval is offline. Personal and shared brains have different audiences; adding a related brain expands retrieval scope.
 

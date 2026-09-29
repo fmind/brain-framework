@@ -118,11 +118,14 @@ def explanations(connection: sqlite3.Connection, ref: str, targets: set[str]) ->
 
 
 def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> tuple[list[dict[str, object]], bool]:
-    """Typed claims whose explicit subject is one of these identities, wherever they were asserted."""
+    """Typed claims whose explicit subject is one of these identities, wherever they were asserted.
+
+    Each claim carries the `time` of the note or record asserting it, when that item is dated.
+    """
     rows = connection.execute(
-        "SELECT subject,relation,target,origin FROM edges WHERE relation!='' "
-        "AND subject IN (SELECT value FROM json_each(?)) "
-        "ORDER BY relation,target,origin,subject LIMIT 51",
+        f"SELECT e.subject,e.relation,e.target,e.origin,{index.TIME} AS time FROM edges e "  # noqa: S608 - fixed SQL
+        "JOIN items i ON i.id=e.item WHERE e.relation!='' AND e.subject IN (SELECT value FROM json_each(?)) "
+        "ORDER BY e.relation,e.target,e.origin,e.subject LIMIT 51",
         (json.dumps(sorted(subjects)),),
     ).fetchall()
     return _claims(rows[:50]), len(rows) > 50

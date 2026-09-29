@@ -138,7 +138,7 @@ bf read concepts/explain-before-signup.md
 bf validate
 ```
 
-The search finds the concept, and the exact read retains both its advice and its Limits section. Reading `projects/new-website.md` also shows a backlink from the concept's `sources` metadata.
+The search finds the concept, and the exact read retains both its advice and its Limits section. Reading `projects/new-website.md` also shows a backlink from the concept under `cites`, the built-in relationship of its `sources` metadata.
 
 Keep the source and limits when you revise the lesson. Promote it to `stable` only after review supports doing so; validation checks the [metadata structure](#notes), not whether the advice is true.
 

@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 from typer.testing import CliRunner
 
+from bf import index
 from bf.cli import app
 from bf.collect import collect, routine
 from bf.config import register
@@ -225,3 +226,19 @@ def test_status_reports_a_broken_brain_and_still_reports_the_others(tmp_path: Pa
     alone = CliRunner().invoke(app, ["status", "--brain", str(other.root)])
     assert alone.exit_code == 1
     assert "bf.yaml: invalid YAML at line 3" in str(alone.exception)
+
+
+def test_status_warns_without_failing_when_a_scanned_tree_nears_the_scan_limit(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command = ["status", "--check", "--brain", str(brain.root)]
+    assert "warnings" not in json.loads(CliRunner().invoke(app, command).stdout)["brains"][0]
+    # Pretend the two meeting records fill over 80% of what one source may hold.
+    monkeypatch.setattr(index, "CROWDED", 1)
+    result = CliRunner().invoke(app, command)
+    assert result.exit_code == 0, result.output
+    entry = json.loads(result.stdout)["brains"][0]
+    assert entry["warnings"] == [
+        {"warning": "directory nears the scan limit", "directory": "memories/meetings", "entries": 2, "limit": 100_000}
+    ]
+    assert json.loads(result.stdout)["healthy"]

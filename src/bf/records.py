@@ -78,27 +78,36 @@ def recover(store: Store) -> None:
         raise Error("invalid memories/.pending manifest; preserve it and repair the pending transaction") from error
     if len({change.name for change in journal.changes}) != len(journal.changes):
         raise Error("duplicate paths in memories/.pending manifest")
+    directory = f"memories/{journal.source}"
     if not journal.complete:
         # Check all backups before restoring any source file.
         for number, change in enumerate(journal.changes):
             if change.existed:
                 store.read(f"{_PENDING}/{number}.before", MAX_RECORD)
+        # Like a commit, each restored file's bytes are synced as it is written; one directory sync then makes
+        # every restored entry durable before the completion marker.
         for number, change in enumerate(journal.changes):
-            target = f"memories/{journal.source}/{change.name}"
+            target = f"{directory}/{change.name}"
             if change.existed:
-                store.write(target, store.read(f"{_PENDING}/{number}.before", MAX_RECORD))
+                store.write(target, store.read(f"{_PENDING}/{number}.before", MAX_RECORD), durable=False)
             else:
                 with suppress(FileNotFoundError):
-                    store.delete(target)
+                    store.delete(target, durable=False)
+        with suppress(FileNotFoundError):
+            # A commit interrupted before creating its source directory changed nothing there.
+            store.sync(directory)
         journal.complete = True
         store.write(_MANIFEST, encode(journal.model_dump()))
+    store.sweep(directory)
     _clear(store)
 
 
 def require_ready(store: Store) -> None:
     """Keep read operations from applying an untrusted on-disk recovery journal."""
     if _pending(store):
-        raise Error("records contain an interrupted transaction; run bf build to recover it before reading")
+        raise Error(
+            "records contain an interrupted transaction; run bf build or bf update to recover it before reading"
+        )
 
 
 @contextmanager
@@ -169,15 +178,19 @@ def stored(name: str) -> bool:
 
 
 def files(store: Store, source: str = "", *, skipped: dict[str, tuple[int, int, int, int]] | None = None) -> list[str]:
-    """Record files below memories/; `bf validate` also reports other visible files."""
+    """Record files below memories/, each source bounded on its own; `bf validate` also reports other visible files."""
     directory = f"memories/{source}" if source else "memories"
-    return [name for name in store.files(directory, skipped=skipped) if stored(name)]
+    return [name for name in store.files(directory, skipped=skipped, split=not source) if stored(name)]
 
 
 def load(store: Store, name: str) -> Record:
     """The one record a file holds; its SHA-256 filename must match its id."""
+    return parse(name, store.read(name, MAX_RECORD))
+
+
+def parse(name: str, data: bytes) -> Record:
+    """The record in one file's bytes, as `load` reads it."""
     source = source_of(name)
-    data = store.read(name, MAX_RECORD)
     try:
         record = Record.model_validate(decode(data))
     except ValidationError as error:
@@ -233,6 +246,8 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
     recover(store)
     if not re.fullmatch(NAME, source):
         raise Error("invalid record source")
+    # Only writers holding the brain lock write records: a temporary file there belongs to a killed write.
+    store.sweep(f"memories/{source}")
     wanted = {path(source, record.id): record for record in incoming}
     if len(wanted) != len(incoming):
         raise Error("duplicate incoming record ids; reconcile them before collecting")
@@ -272,8 +287,8 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
     return counts
 
 
-def find(store: Store, source: str, record_id: str, *, complete: bool = False) -> tuple[str, Record] | None:
-    """Exact identities resolve directly by their SHA-256 filename.
+def find(store: Store, source: str, record_id: str, *, complete: bool = False) -> tuple[str, Record, bytes, int] | None:
+    """Exact identities resolve directly by their SHA-256 filename, with the file's bytes and modification time.
 
     Malformed or misnamed evidence never proves absence: a missing file is confirmed by parsing the source,
     unless `complete` states that a ready search cache has already parsed all of it without a problem.
@@ -292,7 +307,8 @@ def find(store: Store, source: str, record_id: str, *, complete: bool = False) -
     with reading(store):
         name = path(source, record_id)
         try:
-            return name, load(store, name)
+            data, modified = store.stamped(name, MAX_RECORD)
+            return name, parse(name, data), data, modified
         except FileNotFoundError:
             if complete:
                 return None

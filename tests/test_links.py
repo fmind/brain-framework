@@ -124,9 +124,18 @@ def test_component_encoding_and_external_urls() -> None:
         links.identity("bf://team/people/marc?rel=friend")
 
 
-def group(reply: dict, relation: str = "") -> dict:
-    """One relationship group of a read's backlinks; the empty relation selects untyped links."""
-    return next(g for g in cast(list[dict], reply["backlinks"]) if g.get("relation", "") == relation)
+def group(reply: dict, relation: str = "links") -> dict:
+    """One relationship group of a read's backlinks; `links` groups untyped links."""
+    return next(g for g in cast(list[dict], reply["backlinks"]) if g["relation"] == relation)
+
+
+def explained(stores: list[Store], identity: str, ref: str) -> dict:
+    """The item an identity search returns for `ref`, with the claims by which it links to the identity.
+
+    Backlink previews name items only; the identity search explains each link.
+    """
+    items = cast(list[dict], search(stores, Query(text=identity, limit=50))["items"])
+    return next(item for item in items if item["ref"] == ref)
 
 
 def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
@@ -135,7 +144,7 @@ def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
     assert bob["ref"] == "projects/bob.md"
     items = group(bob, "friend")["items"]
     assert [i["ref"] for i in items] == ["projects/alice.md"]
-    claim = items[0]["relations"][0]
+    claim = explained([brain], "person:bob", "projects/alice.md")["relations"][0]
     assert claim == {
         "subject": "bf://fixture/people/alice",
         "relation": "friend",
@@ -146,12 +155,13 @@ def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
     assert read([brain], "person:bob")["backlinks"] == bob["backlinks"]
     # A typed claim is also listed on its subject, where it was asserted.
     alice = read([brain], "person:alice")
-    assert alice["claims"] == [{"brain": "fixture", **claim}]
+    assert alice["claims"] == [claim]
     assert alice["backlinks"] == []
-    # The identity's scope holds its owning note and what links to it, with the linking claims.
+    # The identity's scope holds its owning note and what links to it, with the linking claims. "About Bob"
+    # names Bob under its note's title too, so that section answers for the note.
     scoped = search([brain], Query(text="bob", target="person:bob"))["items"]
     assert [(i["ref"], i.get("relations")) for i in cast(list[dict], scoped)] == [
-        ("projects/bob.md", None),
+        ("projects/bob.md#about", None),
         ("projects/alice.md#friends", [claim]),
     ]
     assert validate(brain)["valid"]
@@ -175,7 +185,8 @@ fields:
     # Each file supports its own claim; frontmatter `fields` are ordinary data, not relationships.
     friends = group(read([brain], "person:bob"), "friend")
     assert friends["total"] == 2
-    evidence = next(i for i in friends["items"] if i["ref"] == "projects/evidence.md")
+    assert "projects/evidence.md" in {i["ref"] for i in friends["items"]}
+    evidence = explained([brain], "person:bob", "projects/evidence.md")
     assert evidence["relations"] == [
         {
             "subject": "bf://fixture/projects/evidence.md",
@@ -203,8 +214,8 @@ def test_okf_source_claims_keep_their_file_origin(brain: Store, path: str) -> No
         b"---\ntype: note\nsources:\n  - resource: bf://fixture/people/bob?rel=friend\n---\n# Source\n",
     )
     friends = group(read([brain], "person:bob"), "friend")
-    evidence = next((item for item in friends["items"] if item["ref"] == path), None)
-    assert evidence is not None
+    assert path in {item["ref"] for item in friends["items"]}
+    evidence = explained([brain], "person:bob", path)
     assert evidence["relations"] == [
         {
             "subject": f"bf://fixture/{path}",
@@ -336,7 +347,8 @@ def test_explanations_preserve_origin_and_report_truncation(brain: Store) -> Non
         f"## Event {i}\nMet at event {i}: [Bob](bf://fixture/people/bob?rel=friend)" for i in range(51)
     )
     brain.write("projects/alice.md", body.encode())
-    result = group(read([brain], "person:bob"), "friend")["items"][0]
+    assert group(read([brain], "person:bob"), "friend")["items"][0]["ref"] == "projects/alice.md"
+    result = explained([brain], "person:bob", "projects/alice.md")
     assert result["relations_truncated"]
     assert len(result["relations"]) == 50
     claim = result["relations"][0]
@@ -377,8 +389,8 @@ def test_shared_aliases_never_merge_backlinks_and_entity_sections_link(brain: St
 def test_canonical_record_backlinks_keep_evidence(brain: Store) -> None:
     reply = read([brain], "bf://fixture/meetings:decision-1")
     assert reply["ref"] == "meetings:decision-1"
-    item = group(reply)["items"][0]
-    assert item["ref"] == "projects/offline.md"
+    assert group(reply)["items"][0]["ref"] == "projects/offline.md"
+    item = explained([brain], "bf://fixture/meetings:decision-1", "projects/offline.md")
     assert item["relations"][0]["target"] == "meetings:decision-1"
     scoped = search([brain], Query(text="decided", target="bf://fixture/meetings:decision-1"))["items"]
     assert [i["ref"] for i in cast(list[dict], scoped)] == ["projects/offline.md"]
@@ -390,8 +402,8 @@ def test_repeated_links_in_one_section_are_one_claim(brain: Store) -> None:
         "projects/carol.md",
         b"# Carol\n## Friends\n[Bob](bf://fixture/people/bob?rel=friend) and again [Bob](bf://fixture/people/bob?rel=friend)\n",
     )
-    item = next(i for i in group(read([brain], "person:bob"), "friend")["items"] if i["ref"] == "projects/carol.md")
-    assert len(item["relations"]) == 1
+    assert "projects/carol.md" in {i["ref"] for i in group(read([brain], "person:bob"), "friend")["items"]}
+    assert len(explained([brain], "person:bob", "projects/carol.md")["relations"]) == 1
 
 
 def test_notes_cannot_claim_another_brains_alias(brain: Store) -> None:
@@ -476,8 +488,8 @@ def test_ordinary_markdown_declares_no_identity_or_membership(brain: Store) -> N
     # The copied document neither shadows an identity nor asserts claims in another entity's name.
     assert read([brain], "bf://fixture/people/alice")["ref"] == "projects/alice.md"
     assert read([brain], "person:bob")["ref"] == "projects/bob.md"
-    friend = next(i for i in group(read([brain], "person:bob"), "friend")["items"] if i["ref"] == capture)
-    assert friend["relations"][0]["subject"] == f"bf://fixture/{capture}"
+    assert capture in {i["ref"] for i in group(read([brain], "person:bob"), "friend")["items"]}
+    assert explained([brain], "person:bob", capture)["relations"][0]["subject"] == f"bf://fixture/{capture}"
     assert read([brain], "bf://fixture/tags/website")["items"] == []
     found = cast(list[dict], search([brain], Query(text="okapi"))["items"])
     assert [(i["ref"], i["title"]) for i in found] == [(capture, "Vendor capture")]
@@ -656,4 +668,39 @@ def test_folders_and_tag_membership_are_not_claimed(brain: Store) -> None:
     field = "  tagged-with: {description: Tags, type: identity, relation: true}\n"
     brain.write("bf.yaml", b"version: 6\nname: fixture\nschema:\n" + field.encode())
     with pytest.raises(Error, match="schema field tagged-with is reserved for tag membership"):
+        load(brain)
+    # `links` names the backlink group and role page of untyped links.
+    brain.write("bf.yaml", b"version: 6\nname: fixture\nschema:\n" + field.replace("tagged-with", "links").encode())
+    with pytest.raises(Error, match="schema field links is reserved for untyped backlinks"):
+        load(brain)
+
+
+def test_okf_sources_cite_their_resources(brain: Store) -> None:
+    people(brain)
+    brain.write(
+        "concepts/lesson.md",
+        b"---\ntype: concept\nentity: bf://fixture/lessons/offline\nsources:\n"
+        b"  - resource: ../projects/offline.md#decision\n  - resource: meetings:decision-1\n---\n"
+        b"# Lesson\n\nSee [the decision](../projects/offline.md).\n",
+    )
+    # A resource the note also links in its body is one backlink, under `cites`; the record links it untyped.
+    project = read([brain], "projects/offline.md")
+    assert [(g["relation"], [i["ref"] for i in g["items"]]) for g in cast(list[dict], project["backlinks"])] == [
+        ("cites", ["concepts/lesson.md"]),
+        ("links", ["meetings:decision-1"]),
+    ]
+    assert invoke("read", "meetings:decision-1", "--rel", "cites")["items"][0]["ref"] == "concepts/lesson.md"
+    claims = cast(list[dict], read([brain], "bf://fixture/lessons/offline")["claims"])
+    assert [(c["relation"], c["target"], c["origin"]) for c in claims if c["relation"] == "cites"] == [
+        ("cites", "bf://fixture/projects/offline.md#decision", "bf://fixture/concepts/lesson.md"),
+        ("cites", "meetings:decision-1", "bf://fixture/concepts/lesson.md"),
+    ]
+    # A link can name the built-in role too; a read following it reports nothing undeclared.
+    brain.write("projects/plan.md", b"---\ntype: plan\n---\n# Plan\n\n[Bob](bf://fixture/people/bob?rel=cites)\n")
+    assert group(read([brain], "person:bob"), "cites")["items"][0]["ref"] == "projects/plan.md"
+    assert "problems" not in read([brain], "bf://fixture/people/bob?rel=cites")
+    assert validate(brain)["valid"]
+    field = "  cites: {description: Derived from, type: identity, relation: true}\n"
+    brain.write("bf.yaml", b"version: 6\nname: fixture\nschema:\n" + field.encode())
+    with pytest.raises(Error, match="schema field cites is reserved for OKF sources"):
         load(brain)

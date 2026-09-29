@@ -79,6 +79,8 @@ class Note:
     targets: list[str] = field(default_factory=list)
     contexts: list[tuple[str, str]] = field(default_factory=list)
     tasks: list[Task] = field(default_factory=list)
+    # OKF `sources` resources: whole-note `cites` claims unless a BF link names another role.
+    sources: list[str] = field(default_factory=list)
 
     @property
     def links(self) -> list[str]:
@@ -344,7 +346,7 @@ def note(path: str, data: bytes) -> Note:
     lead = _plain(summary or introduction)
     if not lead and len(passages) > 1:
         lead = _plain(passages[1].text)
-    # OKF provenance has the same explicit-link semantics in each authored note format.
+    # OKF provenance cites its resources in each authored note format.
     # Working inputs and outputs remain ordinary Markdown, even when their filename is ACTION.md.
     sources = _sources(path, markdown.attributes) if okf(path) else []
     targets = sorted({target for target in [*markdown.links, *knowledge.links, *sources] if target})
@@ -363,8 +365,9 @@ def note(path: str, data: bytes) -> Note:
         passages=passages,
         slugs={h.slug for h in markdown.headings},
         targets=targets,
-        contexts=[*markdown.contexts, *((target, "") for target in [*knowledge.links, *sources])],
+        contexts=[*markdown.contexts, *((target, "") for target in knowledge.links)],
         tasks=markdown.tasks,
+        sources=sources,
     )
 
 

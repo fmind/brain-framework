@@ -13,6 +13,7 @@ from typing import cast
 import pytest
 
 from bf import retrieve
+from bf.models import Query
 from bf.storage import Store
 from conftest import Provider
 
@@ -108,7 +109,7 @@ def test_partial_baseline_stays_unknown_and_missing_source_is_not_unchanged() ->
     [
         {**NOTE, "problems": [{"error": "PRIVATE FAILURE"}]},
         {**NOTE, "stale": ["example"]},
-        {**NOTE, "chunk": "PRIVATE FAILURE"},
+        {**NOTE, "offset": 100},
         {**NOTE, "next_offset": 100},
         {"page": "projects", **NOTE},
         {**NOTE, "record": RECORD["record"]},
@@ -150,7 +151,7 @@ def test_capture_identity_and_integrity_are_required() -> None:
         (capture, {**NOTE, "brain": "other"}),
         (capture, {**NOTE, "ref": "projects/other.md"}),
         (capture, {**NOTE, "next_offset": 100}),
-        (capture, {**NOTE, "chunk": "PRIVATE FAILURE"}),
+        (capture, {**NOTE, "offset": 100}),
         ({**capture, "next_offset": 100}, NOTE),
         ({**capture, "capture_version": True}, NOTE),
         ({**capture, "captured_at": "2026-09-25"}, NOTE),
@@ -185,7 +186,12 @@ def test_real_reads_keep_history_after_replacement_and_explain_direct_impact(bra
     groups = [group for group in cast("list[dict]", whole["backlinks"]) if group["relation"] == "depends-on"]
     assert len(groups) == 1
     assert "projects/decision.md" in json.dumps(groups)
-    assert "origin" in json.dumps(groups)
+    # The role page lists every dependent; an identity search explains each claim with its origin.
+    dependents = retrieve.read([brain], "bf://fixture/projects/policy.md", rel="depends-on")["items"]
+    assert [item["ref"] for item in cast("list[dict]", dependents)] == ["projects/decision.md"]
+    found = retrieve.search([brain], Query(text="bf://fixture/projects/policy.md"))["items"]
+    claims = next(item for item in cast("list[dict]", found) if item["ref"] == "projects/decision.md")["relations"]
+    assert claims[0]["origin"] == "bf://fixture/projects/decision.md#decision"
     # Capture and compare read only stdin. A changed answer does not silently rewrite the conclusion.
     assert brain.read("projects/decision.md").startswith(b"# Decision")
 
@@ -193,19 +199,19 @@ def test_real_reads_keep_history_after_replacement_and_explain_direct_impact(bra
 LARGE = "## Retention {#retention}\n\n" + "Keep one revision per decision. " * 3000 + "\n"
 
 
-def chunks(brain: Store, ref: str) -> list[dict[str, object]]:
-    """The genuine chunked replies of one exact read, in order."""
+def paged(brain: Store, ref: str) -> list[dict[str, object]]:
+    """The genuine text pages of one exact read, in order."""
     replies = [retrieve.read([brain], ref)]
     while "next_offset" in replies[-1]:
         replies.append(retrieve.read([brain], ref, offset=cast("int", replies[-1]["next_offset"])))
     return replies
 
 
-def test_read_assembles_chunked_exact_replies_for_capture(brain: Store) -> None:
-    # Exact replies above 65,536 characters arrive in chunks; one chunk is never complete evidence.
+def test_read_assembles_paged_exact_replies_for_capture(brain: Store) -> None:
+    # Exact replies above 32 KiB arrive in text pages; one page is never complete evidence.
     brain.write("projects/large.md", ("# Large\n\n" + LARGE).encode())
     ref = "projects/large.md#retention"
-    assert len(chunks(brain, ref)) == 2
+    assert len(paged(brain, ref)) > 2
     assert execute("capture", retrieve.read([brain], ref)).returncode == 1
     reply = subprocess.run(  # noqa: S603 - the bundled helper runs this checkout's bf on a synthetic brain
         [sys.executable, str(HELPER), "read", ref, "--brain", str(brain.root)],
@@ -224,19 +230,22 @@ def test_read_assembles_chunked_exact_replies_for_capture(brain: Store) -> None:
 
 
 @pytest.mark.parametrize("tamper", ["changed", "corrupt", "offset", "truncated", "missing", "ended"])
-def test_read_rejects_changed_or_incomplete_chunks(brain: Store, provider: Provider, tamper: str) -> None:
+def test_read_rejects_changed_or_incomplete_pages(brain: Store, provider: Provider, tamper: str) -> None:
     brain.write("projects/large.md", ("# Large\n\n" + LARGE).encode())
-    ref = "projects/large.md#retention"
-    first, last = chunks(brain, ref)
+    # A whole note's pages rebuild its file, which the digest verifies; a section's pages only share it.
+    ref = "projects/large.md"
+    replies = paged(brain, ref)
+    first, second = replies[:2]
     replaced = {
-        "changed": {**last, "sha256": "0" * 64},
-        "corrupt": {**last, "chunk": str(last["chunk"]).replace("Keep", "Drop", 1)},
-        "offset": {**last, "offset": 1},
-        "truncated": {**last, "chunk": str(last["chunk"])[:-1]},
+        "changed": {**second, "sha256": "0" * 64},
+        "corrupt": {**second, "text": str(second["text"]).replace("Keep", "Drop", 1)},
+        "offset": {**second, "offset": 1},
+        "truncated": {**second, "text": str(second["text"])[:-1]},
         "missing": None,
         "ended": NOTE,
     }[tamper]
-    provider.install("bf", [{"match": ["read"], "stdout": reply} for reply in (first, replaced) if reply is not None])
+    sequence = [first, *([replaced] if replaced else []), *replies[2:]]
+    provider.install("bf", [{"match": ["read"], "stdout": reply} for reply in sequence])
     result = provider.run(
         "evidence.py", "read", ref, "--brain", "/brains/selected", folder="../skills/bf-learn/scripts"
     )

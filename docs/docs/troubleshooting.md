@@ -27,7 +27,7 @@ Read the named file, field or program in the diagnostic before retrying. `bf sta
 | Search misses a known answer                      | Read the exact note or record ref.                                  | Try words from that evidence without a scope; see [word matching](retrieval.md#word-matching).                     |
 | Search returns nothing with `problems` or `stale` | Skipped files, references or an active writer.                      | Resolve them and repeat; an incomplete result cannot establish absence.                                            |
 | `reference exists in several brains`              | Several selected brains hold that ref.                              | Read the result's `uri`, a `bf://NAME/...` address.                                                                |
-| An exact read returns a `chunk`                   | The reply exceeds 65,536 characters.                                | [Assemble the chunks](retrieval.md#large-exact-reads) or read one section.                                         |
+| An exact read returns `offset` and `next_offset`  | The reply exceeds 32 KiB, so its text arrives in pages.             | Read one section from its `outline`, or [follow the text pages](retrieval.md#large-exact-reads).                   |
 | A sensor fails                                    | `bf status` and the indicated private log.                          | Review its command, credentials, time window and output bounds; [sensor recovery](#a-sensor-fails).                |
 | A sensor never runs automatically                 | `enabled`, `refresh` and program selectors.                         | Zero refresh means manual; [preview due work](#updates-do-not-run).                                                |
 | An agent cannot connect                           | The same exact read in your terminal.                               | Check absolute executable/brain paths and restart the host; [MCP troubleshooting](mcp.md#if-the-connection-fails). |
@@ -64,6 +64,8 @@ bf status --check
 ```
 
 `build` recovers interrupted record writes and reconstructs the disposable cache. It exits 1 when its `skipped` count shows unreadable files; `bf validate` names them. Validation should return `"valid":true`; health can still fail if a scheduled source needs attention. Read the remaining diagnostic rather than deleting the pending journal. See [file safeguards](limits.md#files).
+
+`bf update`, and therefore `bf watch`, also recovers an interrupted record write before refreshing the cache; search and read refuse to apply the journal and name both commands. `build` fills the new cache beside the current one, as `.bf/index.sqlite.new`, and replaces it only when complete: searches keep answering from the current cache and collections keep committing meanwhile, and an interrupted build leaves the current cache intact. Files changed during the build are indexed again by the next search or update. If `build` reports that readers kept the search cache open, let long-running reads finish, then repeat it.
 
 ## Report a reproducible problem
 

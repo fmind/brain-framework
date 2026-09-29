@@ -85,8 +85,7 @@ Search returns JSON. In `items`, find the Decision section with these fields (ot
 ```json
 {
   "ref": "projects/new-website.md#decision",
-  "title": "New website — Decision",
-  "uri": "bf://brain/projects/new-website.md#decision"
+  "title": "New website — Decision"
 }
 ```
 
@@ -105,7 +104,7 @@ The reply's `text` contains the original section:
 }
 ```
 
-The `uri` also names the brain. Once you search [several brains](configuration.md#related-brains), read the `uri` instead: a plain ref that exists in two brains fails and asks for that `bf://` address.
+Once you search [several brains](configuration.md#related-brains), each item also names its `brain` and a `uri` such as `bf://brain/projects/new-website.md#decision`. Read the `uri` then: a plain ref that exists in two brains fails and asks for that `bf://` address.
 
 Read the evidence before relying on a search excerpt. If a reply includes `problems` or `stale`, follow the [retrieval guidance](search.md#incomplete-answers-and-freshness) before treating it as complete.
 

@@ -5,18 +5,32 @@ from __future__ import annotations
 import errno
 import json
 import os
+import stat
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from bf import index, records, retrieve
 from bf.config import register
-from bf.models import Error, Query, Record
+from bf.models import MAX_FIELDS, MAX_RECORD, Error, Query, Record
 from bf.storage import Store, writer
+from bf.update import update
 
 DECISION = records.path("meetings", "decision-1")
 NEW = records.path("meetings", "new")
+
+
+def test_fields_beside_text_stay_within_a_readable_size() -> None:
+    # An exact read pages only a record's text, so every other field must fit its first page.
+    half = "x" * (MAX_FIELDS // 2)
+    assert Record(id="long", title="Long text", text=half * 4).text
+    with pytest.raises(ValidationError, match="fields other than text exceed 2 MiB"):
+        Record(id="bulky", title="Bulky", attributes={"a": half, "b": half})
+    with pytest.raises(ValidationError, match="fields other than text exceed 2 MiB"):
+        Record(id="linked", title="Linked", links=[f"repo:example/{n}-" + "y" * 4000 for n in range(600)])
 
 
 def test_window_upsert_adds_updates_moves_and_keeps_unchanged(brain: Store) -> None:
@@ -78,13 +92,15 @@ def test_absent_record_parses_the_source_unless_a_ready_cache_already_did(
 ) -> None:
     index.refresh(brain)
     loaded: list[str] = []
-    original = records.load
+    original = brain.stamped
 
-    def counted(store: Store, name: str) -> Record:
-        loaded.append(name)
-        return original(store, name)
+    def counted(name: str, limit: int = MAX_RECORD) -> tuple[bytes, int]:
+        # The record files a lookup opens; other reads, such as bf.yaml, prove nothing about absence.
+        if name.startswith("memories/"):
+            loaded.append(name)
+        return original(name, limit)
 
-    monkeypatch.setattr(records, "load", counted)
+    monkeypatch.setattr(brain, "stamped", counted)
     absent = records.path("meetings", "absent")
     assert records.find(brain, "meetings", "absent") is None
     assert loaded == [absent, DECISION, records.path("meetings", "lunch")]
@@ -178,6 +194,72 @@ def test_a_commit_syncs_each_directory_once(brain: Store, monkeypatch: pytest.Mo
     # One sync per backup and per record file, plus a few directory and manifest syncs, not one per entry.
     assert calls <= 2 * 20 + 8
     assert all(records.load(brain, records.path("bulk", str(n))).title == "New" for n in range(20))
+
+
+def test_a_rollback_syncs_each_directory_once(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    records.upsert(brain, "bulk", [Record(id=str(n), title="Old") for n in range(20)], snapshot=False)
+    before = {name: brain.read(name) for name in records.files(brain, "bulk")}
+    fsync, write = os.fsync, Store.write
+    failed, directories = False, 0
+
+    def counted(fd: int) -> None:
+        nonlocal directories
+        directories += failed and stat.S_ISDIR(os.fstat(fd).st_mode)
+        fsync(fd)
+
+    def exhausted(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
+        nonlocal failed
+        if name == records.path("bulk", "19") and not failed:
+            failed = True
+            raise OSError(errno.ENOSPC, "synthetic full disk")
+        write(self, name, data, durable=durable)
+
+    monkeypatch.setattr(os, "fsync", counted)
+    monkeypatch.setattr(Store, "write", exhausted)
+    with pytest.raises(OSError, match="synthetic full disk"):
+        records.upsert(brain, "bulk", [Record(id=str(n), title="New") for n in range(20)], snapshot=False)
+    # Restoring 19 replaced records syncs the source, the completed manifest and the removed journal once each.
+    assert directories == 3
+    assert {name: brain.read(name) for name in records.files(brain, "bulk")} == before
+    assert not (brain.root / "memories/.pending").exists()
+
+
+def test_update_recovers_an_interrupted_transaction_that_reads_refuse(brain: Store) -> None:
+    original = brain.read(DECISION)
+    brain.write("memories/.pending/0.before", original)
+    brain.write(DECISION, b'{"id":"decision-1","title":"Half committed"}\n')
+    brain.write(
+        "memories/.pending/manifest.json",
+        json.dumps({"source": "meetings", "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": True}]}).encode(),
+    )
+    orphan = "memories/meetings/.write-" + "a" * 32
+    brain.write(orphan, b"a write killed before its rename")
+    with pytest.raises(Error, match="run bf build or bf update"):
+        retrieve.search([brain], Query(text="durable evidence"))
+    assert brain.read(DECISION) != original
+    # Update holds the writer lock like build: it rolls the journal back before refreshing the cache.
+    report = update(brain)
+    assert report["ok"], report
+    assert brain.read(DECISION) == original
+    assert not (brain.root / "memories/.pending").exists()
+    assert not (brain.root / orphan).exists()
+    assert retrieve.search([brain], Query(text="durable evidence"))["items"]
+
+
+def test_temporary_files_of_killed_writes_are_swept_and_never_count_as_records(brain: Store, tmp_path: Path) -> None:
+    orphan, other = "memories/meetings/.write-" + "b" * 32, "memories/meetings/.write-notes"
+    brain.write(orphan, b"a write killed before its rename")
+    brain.write(other, b"not a name Store.write chooses")
+    assert records.files(brain, "meetings") == sorted([DECISION, records.path("meetings", "lunch")])
+    (brain.root / f"memories/meetings/.write-{'c' * 32}").symlink_to(tmp_path)
+    records.upsert(brain, "meetings", [], snapshot=False)
+    assert not (brain.root / orphan).exists()
+    assert brain.read(other) == b"not a name Store.write chooses"
+    assert (brain.root / f"memories/meetings/.write-{'c' * 32}").is_symlink()
+    # Absent or linked directories have nothing to sweep; their own reads name a link.
+    (brain.root / "memories/linked").symlink_to(tmp_path, target_is_directory=True)
+    brain.sweep("memories/linked")
+    brain.sweep("memories/absent")
 
 
 @pytest.mark.parametrize("completed", [False, True])

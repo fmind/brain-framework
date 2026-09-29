@@ -80,7 +80,7 @@ def _update(
     report: dict[str, object] = {"brain": config.name, "sensors": results, "routines": ran}
     if not dry_run:
         try:
-            report["index"] = index.refresh(store, wait=120)
+            report["index"] = index.refresh(store, wait=120, recover=True)
             failed |= bool(report["index"]["skipped"])
         except (Error, OSError, UnicodeError) as error:
             report["index"] = {"error": _failure(error)}

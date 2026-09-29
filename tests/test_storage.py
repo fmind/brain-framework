@@ -337,8 +337,24 @@ def test_scan_bounds_name_the_directory(brain: Store, monkeypatch: pytest.Monkey
     brain.write("projects/a.md", b"# A\n")
     monkeypatch.setattr(storage, "MAX_FILES", 2)
     brain.write("projects/b.md", b"# B\n")
-    with pytest.raises(Error, match=r"^projects exceeds the 2-entry scan limit"):
+    with pytest.raises(Error, match=r"^projects exceeds the 2-entry scan limit; keep bulky files in the brain's root"):
         brain.files("projects")
+
+
+def test_the_scan_limit_bounds_each_source_of_memories(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(storage, "MAX_FILES", 3)
+    for name in ("mail/1.json", "mail/2.json", "notes/1.json", "notes/2.json", "notes/3.json"):
+        brain.write(f"memories/{name}", b"{}")
+    with pytest.raises(Error, match=r"^memories exceeds the 3-entry scan limit"):
+        brain.files("memories")
+    counts: dict[str, int] = {}
+    assert len(brain.scan("memories", split=True, counts=counts)) == 7
+    assert counts == {"memories": 3, "memories/meetings": 2, "memories/mail": 2, "memories/notes": 3}
+    brain.write("memories/notes/4.json", b"{}")
+    with pytest.raises(
+        Error, match=r"^memories/notes exceeds the 3-entry scan limit; split its sensor into several sources"
+    ):
+        brain.files("memories", split=True)
 
 
 def test_program_locks_follow_the_physical_brain(brain: Store, tmp_path: Path) -> None:

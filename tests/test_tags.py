@@ -26,9 +26,7 @@ def test_tags_distinguish_membership_from_mentions_and_links(brain: Store) -> No
         b"---\ntype: concept\n---\n# Retention guide\n\n[Retention](bf://fixture/tags/retention) evidence.\n",
     )
     tag = "bf://fixture/tags/retention"
-    assert items(read([brain], "tags")) == [
-        {"brain": "fixture", "tag": "retention", "ref": tag, "uri": tag, "total": 1}
-    ]
+    assert items(read([brain], "tags")) == [{"tag": "retention", "ref": tag, "total": 1}]
     assert {item["ref"] for item in items(read([brain], tag))} == {"projects/offline.md"}
     assert read([brain], "tags/retention") == read([brain], tag)
     for query in (Query(text=tag), Query(text="evidence", **pages.scope(tag))):
@@ -39,8 +37,9 @@ def test_tags_distinguish_membership_from_mentions_and_links(brain: Store) -> No
         assert relations[0]["relation"] == "tagged-with"
     assert validate(brain)["valid"]
     claims = cast("list[dict[str, object]]", read([brain], "projects/offline.md")["claims"])
+    # A claim carries the time of the note asserting it.
     assert {
-        "brain": "fixture",
+        "time": "2026-09-01T00:00:00.000000Z",
         "subject": "bf://fixture/projects/offline.md",
         "relation": "tagged-with",
         "target": tag,

@@ -67,13 +67,13 @@ The timestamp sets the note's date; the example reads the brain's current home, 
 
 A successful routine produces one of three outcomes:
 
-| Output or existing state                 | Result                                                                  |
-| ---------------------------------------- | ----------------------------------------------------------------------- |
-| Valid OKF Markdown                       | A new `actions/YYYY-MM-DD_NAME-UUID/ACTION.md`, using the local date.   |
-| Empty output                             | Success with no action.                                                 |
-| This clone already wrote an action today | Skipped; existing work stays intact and the review window remains open. |
+| Output or existing state               | Result                                                                  |
+| -------------------------------------- | ----------------------------------------------------------------------- |
+| Valid OKF Markdown                     | A new `actions/YYYY-MM-DD_NAME-UUID/ACTION.md`, using the local date.   |
+| Empty output                           | Success with no action.                                                 |
+| Today's action for this routine exists | Skipped; existing work stays intact and the review window remains open. |
 
-Today's action counts while its folder holds any file, even an editor's `.#ACTION.md` lock, so a rerun never writes beside unsaved edits. Failures, invalid OKF metadata or Markdown, and excessive output create no action. The routine retries with the same [failure backoff](sensors.md#collect-and-update) as a sensor, and the failure appears in `bf status` and the home page's `attention`.
+The routine recognizes today's action by its folder name, `actions/YYYY-MM-DD_NAME-UUID`, not by run history: a retry after an action was written but its history was not saved skips too, and so does an action another clone wrote and shared. Today's action counts while its folder holds any file, even an editor's `.#ACTION.md` lock, so a rerun never writes beside unsaved edits. Failures, invalid OKF metadata or Markdown, and excessive output create no action. The routine retries with the same [failure backoff](sensors.md#collect-and-update) as a sensor, and the failure appears in `bf status` and the home page's `attention`.
 
 ## Write a review routine
 
