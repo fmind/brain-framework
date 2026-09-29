@@ -4,6 +4,18 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v16.1.1](https://github.com/fmind/brain-framework/releases/tag/v16.1.1) - 2026-09-29
+
+A patch release from a review of 16.1.0: no format or reply change. Upgrade with `uv tool upgrade brain-framework`, then `bf skills DIR` to update unedited skills.
+
+### Fixed
+
+- A declared `number` field set to `.nan` or `.inf` in a note's frontmatter passed `bf validate` and then failed every search or read reply listing the note with a traceback. `bf validate` now reports the frontmatter as invalid, and retrieval skips the note with a problem like any other invalid note.
+- A path starting with an unknown `~user`, such as `bf search --brain ~typo/brain`, `bf init`, `bf register`, `bf skills` or `bf schedule --output`, fails with `bf: a path's ~ or ~user home directory cannot be resolved` instead of a traceback.
+- An exact read of two records that name each other as aliases no longer recurses when both files disappear between the cache check and the read.
+- `bf skills` treats a file you added at a path a newer version starts shipping as `modified` and keeps it, instead of overwriting it.
+- A routine whose action was written but whose run history could not be saved reports `wrote PATH but local run history could not be saved` instead of claiming no action was written.
+
 ## [v16.1.0](https://github.com/fmind/brain-framework/releases/tag/v16.1.0) - 2026-09-29
 
 A review release: no format or reply change is required. It fixes the published reply schemas, which rejected some valid replies, and several failure paths; the skills, examples and documentation are clearer and match the code.

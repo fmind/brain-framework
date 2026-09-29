@@ -961,6 +961,16 @@ def test_an_exact_record_ref_takes_precedence_over_a_colliding_alias(brain: Stor
     assert read([brain], "meetings:lunch")["ref"] == "meetings:lunch"
 
 
+def test_mutual_record_aliases_resolve_one_hop(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    records_file(brain, "jira", [Record(id="ABC-1", title="Issue", aliases=["github:o/r#1"])])
+    records_file(brain, "github", [Record(id="o/r#1", title="Mirror", aliases=["jira:ABC-1"])])
+    assert read([brain], "github:o/r#1")["ref"] == "github:o/r#1"
+    # Both files vanish between the cache check and the read: each alias names the other, which never recurses.
+    monkeypatch.setattr(retrieve, "_record", lambda *_args, **_kwargs: None)
+    with pytest.raises(Error):
+        read([brain], "jira:ABC-1")
+
+
 def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Store, tmp_path: Path) -> None:
     brain.write("projects/broken.md", b"---\nstale_after: typo\n---\n# Hidden answer\n")
     broken = tmp_path / "broken"

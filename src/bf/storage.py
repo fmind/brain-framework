@@ -334,6 +334,14 @@ def _crowded(tree: str) -> str:
     return "keep bulky files in the brain's root inputs/ or originals/, which are not scanned"
 
 
+def expand(path: Path) -> Path:
+    """Expand a leading ~ or ~user; a user without a home directory is an input error, not a crash."""
+    try:
+        return path.expanduser()
+    except RuntimeError as error:
+        raise Error("a path's ~ or ~user home directory cannot be resolved; check the user name") from error
+
+
 def xdg_setting(name: str) -> Path | None:
     """An explicit XDG base directory; like the specification, ignore empty and relative values."""
     try:

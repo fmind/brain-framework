@@ -8,7 +8,7 @@ from pathlib import Path
 
 from bf import __version__
 from bf.models import Error, decode, digest, encode
-from bf.storage import Store
+from bf.storage import Store, expand
 
 # The installed files and their digests: a later install replaces only files that still match them.
 MANIFEST = ".bf-skill.json"
@@ -58,6 +58,15 @@ def _state(store: Store, skill: str, wanted: dict[str, str]) -> tuple[str, list[
                 edited.append(name)
         except Error:
             edited.append(name)
+    for name in sorted(set(wanted) - set(recorded)):
+        # A file someone added where a newer version ships one is theirs until `--force` replaces it.
+        try:
+            if digest(store.read(f"{skill}/{name}")) != wanted[name]:
+                edited.append(name)
+        except FileNotFoundError:
+            continue
+        except Error:
+            edited.append(name)
     if edited:
         return "modified", edited, recorded
     return ("current" if recorded == wanted else "outdated"), [], recorded
@@ -70,7 +79,7 @@ def skills(destination: Path, *, check: bool = False, force: bool = False) -> di
     folders stay as they are unless `force` replaces them. `check` reports the same states without writing.
     Files a newer version no longer ships are removed only when unedited.
     """
-    root = destination.expanduser()
+    root = expand(destination)
     if not check:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
     store = Store(root.resolve()) if root.is_dir() else None

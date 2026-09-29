@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 
 from bf.markdown import note, reference, section, validate_okf
-from bf.models import Error, Query, Record
+from bf.models import Error, Query, Record, encode
 from bf.records import path as record_path
 from bf.retrieve import read, search
 from bf.storage import Store
@@ -70,6 +70,19 @@ def test_problems_are_collected_not_fail_fast(brain: Store) -> None:
         assert expected in problems
     assert "decision" not in problems
     assert "example.com" not in problems
+
+
+def test_non_finite_note_fields_are_invalid_not_unanswerable(brain: Store) -> None:
+    # YAML reads .nan and .inf as floats, which strict JSON replies cannot carry.
+    brain.write("bf.yaml", b"version: 7\nname: fixture\nfields:\n  weight:\n    description: W.\n    type: number\n")
+    for value in (b".nan", b"-.inf", b"[1, .inf]"):
+        brain.write("projects/weight.md", b"---\ntype: project\nfields:\n  weight: " + value + b"\n---\n# Weight\n")
+        assert "projects/weight.md: invalid frontmatter: fields" in "\n".join(located(validate(brain)))
+        # Retrieval skips the note and reports it; every other reply still encodes.
+        reply = search([brain], Query(text="offline"))
+        assert any(p.get("file") == "projects/weight.md" for p in cast("list[dict[str, str]]", reply["problems"]))
+        encode(reply)
+        encode(read([brain], "projects"))
 
 
 def test_link_schema_and_identity_problems_name_their_file_once(brain: Store) -> None:

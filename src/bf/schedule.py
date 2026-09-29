@@ -14,7 +14,7 @@ from typing import Literal
 from bf.config import load
 from bf.history import environment
 from bf.models import NAME, Error, digest
-from bf.storage import Store, writer, xdg_setting
+from bf.storage import Store, expand, writer, xdg_setting
 from bf.update import selection
 
 Backend = Literal["auto", "systemd", "launchd", "cron"]
@@ -68,7 +68,7 @@ def generate(
     if not any(program.enabled and program.refresh for program in selected):
         raise Error("selection contains no enabled scheduled programs; configure a nonzero refresh first")
     executable = executable or Path(sys.executable).parent / "bf"
-    executable = executable.expanduser().absolute()
+    executable = expand(executable).absolute()
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise Error("bf executable is unavailable; pass --executable with the absolute installed bf path")
     argv = [str(executable), "update", "--brain", str(store.root)]
@@ -102,7 +102,7 @@ def generate(
     status: list[list[str]]
     remove: list[list[str]]
     # Like other brain-relative options, a relative output directory resolves against the brain root.
-    source = Path(os.path.normpath(store.root / (output.expanduser() if output else "settings/schedules")))
+    source = Path(os.path.normpath(store.root / (expand(output) if output else "settings/schedules")))
     if backend == "systemd":
         service = label + ".service"
         timer = label + ".timer"

@@ -594,7 +594,7 @@ def _record(
     }
 
 
-def _read(store: Store, ref: str) -> dict[str, object] | None:
+def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | None:
     name = load(store).name
     if parsed := links.parse(ref):
         if parsed.brain != name:
@@ -664,4 +664,5 @@ def _read(store: Store, ref: str) -> dict[str, object] | None:
         raise Error("the search cache is unavailable; run bf build to resolve identities") from cache_error
     if len(aliases) > 1:
         raise Error("ambiguous identity; use bf search and read an exact ref")
-    return _read(store, aliases[0]["ref"]) if aliases and aliases[0]["ref"] != ref else None
+    # One hop: two records naming each other, both removed since the cache was built, never recurse.
+    return _read(store, aliases[0]["ref"], alias=False) if alias and aliases and aliases[0]["ref"] != ref else None

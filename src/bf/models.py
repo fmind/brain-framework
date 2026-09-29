@@ -374,7 +374,8 @@ def tag_name(value: str) -> str:
 class Knowledge(BaseModel):
     """Only the note metadata that changes retrieval is typed; other fields, such as OKF provenance, remain data."""
 
-    model_config = ConfigDict(extra="ignore", strict=True, defer_build=True)
+    # Replies are strict JSON: a YAML .nan or .inf field value would pass here and fail every reply listing the note.
+    model_config = ConfigDict(extra="ignore", strict=True, allow_inf_nan=False, defer_build=True)
     title: str = ""
     type: Annotated[str, Field(max_length=128)] = ""
     # OKF notes use draft, stable or deprecated (`bf validate`); ordinary attachments keep their own words.

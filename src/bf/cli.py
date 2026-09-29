@@ -45,7 +45,7 @@ from bf.models import (
 )
 from bf.retrieve import RelationError, edges, identities, read, relation, search
 from bf.schemas import Kind, document
-from bf.storage import Store, relative, writer
+from bf.storage import Store, expand, relative, writer
 from bf.update import run_routines, update
 from bf.validate import validate
 
@@ -209,7 +209,7 @@ def initialize(
     ] = False,
 ) -> None:
     """Create a brain at PATH (recommended: ~/brain); no global registration is needed."""
-    path = path.expanduser()
+    path = expand(path)
     if name:
         _name(name)
     else:
@@ -279,7 +279,7 @@ def enroll(
     path: Annotated[Path, typer.Argument(help="Existing brain directory; defaults to the current directory.")] = Path(),
 ) -> None:
     """Select an existing brain by name and search it from outside any brain; never runs its programs."""
-    path = path.expanduser()
+    path = expand(path)
     if not path.is_dir():
         raise Error("PATH is not an existing directory; pass the brain's directory")
     if not (path / "bf.yaml").is_file():

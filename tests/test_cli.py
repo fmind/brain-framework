@@ -70,6 +70,24 @@ def test_invalid_options_name_the_option_without_a_selected_brain(arguments: lis
     assert "Traceback" not in result.stderr
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["search", "word", "--brain", "~bf-no-such-user/brain"],
+        ["init", "~bf-no-such-user/brain"],
+        ["register", "~bf-no-such-user/brain"],
+        ["skills", "~bf-no-such-user/skills"],
+    ],
+)
+def test_an_unknown_home_directory_fails_without_a_traceback(arguments: list[str]) -> None:
+    result = subprocess.run(  # noqa: S603 - fixed interpreter and parametrized synthetic CLI arguments
+        [sys.executable, "-m", "bf", *arguments], capture_output=True, text=True, timeout=10, check=False
+    )
+    assert result.returncode == 1, result.stderr
+    assert not result.stdout
+    assert result.stderr == "bf: a path's ~ or ~user home directory cannot be resolved; check the user name\n"
+
+
 @pytest.mark.parametrize("command", ["build", "eval", "validate"])
 def test_single_root_commands_describe_their_selection(command: str) -> None:
     # These commands check one root: their help never promises every registered brain.

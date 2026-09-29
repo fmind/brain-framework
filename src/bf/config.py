@@ -16,7 +16,7 @@ import yaml.resolver
 from pydantic import ValidationError
 
 from bf.models import Config, Error, FormatError, Registration, UserConfig, check_version, digest, explain
-from bf.storage import Store, writer, xdg
+from bf.storage import Store, expand, writer, xdg
 
 _HEADER = "# https://fmind.github.io/brain-framework/\n"
 
@@ -295,7 +295,7 @@ def _located(value: str, *, execute: bool = False) -> Store:
     brain's own: a reference or a directory below the working directory needs a deliberate path.
     """
     if "/" in value or value in {".", "..", "~"}:
-        return Store(Path(value).expanduser())
+        return Store(expand(Path(value)))
     entry = user_config().brains.get(value)
     local, referenced = _claim(value, registered=entry is not None)
     if entry is not None:
@@ -309,7 +309,7 @@ def _located(value: str, *, execute: bool = False) -> Store:
     if execute and (local is None or referenced):
         raise Error(f"brain {value} is neither registered nor the enclosing brain; pass --brain PATH")
     # An unregistered name can still be a directory below the working directory.
-    return local or Store(Path(value).expanduser())
+    return local or Store(expand(Path(value)))
 
 
 def _nearest(*, required: bool = True) -> Store | None:

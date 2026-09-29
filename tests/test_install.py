@@ -62,6 +62,18 @@ def test_skills_install_update_and_never_replace_edits(tmp_path: Path) -> None:
     assert deleted["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["scripts/new-action.py"]}
     assert statuses(run(str(destination), "--force"))["bf-use"] == "updated"
     assert (destination / "bf-use/scripts/new-action.py").is_file()
+    # A file a person added where a newer version ships one is kept; the unchanged copy updates silently.
+    manifest = destination / "bf-use" / MANIFEST
+    recorded = json.loads(manifest.read_text())
+    for name in ("SKILL.md", "scripts/new-action.py"):
+        del recorded["files"][name]
+    manifest.write_text(json.dumps(recorded))
+    skill.write_text("My own skill.\n")
+    added = run(str(destination), code=1)
+    assert added["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["SKILL.md"]}
+    assert skill.read_text() == "My own skill.\n"
+    skill.write_bytes((packaged / "SKILL.md").read_bytes())
+    assert statuses(run(str(destination)))["bf-use"] == "updated"
 
 
 def test_skills_leave_foreign_and_linked_folders_alone(tmp_path: Path) -> None:

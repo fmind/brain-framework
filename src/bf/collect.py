@@ -445,6 +445,7 @@ def routine(
         # A short random suffix keeps actions written the same day by different clones apart.
         folder = f"actions/{day}_{name}-{uuid4().hex[-8:]}"
         path = f"{folder}/ACTION.md"
+        written = False
         try:
             raw = runner([*_argv(store, program, start, end), *args], program, store, name, stdin)
             result: dict[str, object] = {"routine": name}
@@ -467,6 +468,7 @@ def routine(
                     result["skipped"] = "an action for this routine already exists today"
                 elif text.strip():
                     store.write(path, raw)
+                    written = True
                 # A skipped review keeps its window open, so the next written action covers it.
                 reviewed = {} if "skipped" in result else {"start": start, "end": end}
                 at = timestamp(started.isoformat())
@@ -490,7 +492,9 @@ def routine(
                 if isinstance(error, Error)
                 else "routine files are inaccessible; check its executable, action folder permissions and free space"
             )
-            if program.output == "action":
+            if written:
+                message = f"wrote {path} but local run history could not be saved"
+            elif program.output == "action":
                 message += "; no action was written"
             _failed(store, name, ROUTINES, started, message, error, dry_run=dry_run)
         return result

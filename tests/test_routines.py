@@ -146,7 +146,8 @@ def test_a_retry_finds_todays_action_when_its_run_history_was_not_saved(
     # Another routine's action and a person's folder with a similar name do not count as today's digest.
     configured.write(f"{FOLDER.replace('digest', 'weekly')}/ACTION.md", ACTION)
     configured.write(f"{FOLDER.rsplit('-', 1)[0]}-notes/ACTION.md", ACTION)
-    with pytest.raises(Error, match="routine files are inaccessible"):
+    # The action exists: the failure says so instead of claiming nothing was written.
+    with pytest.raises(Error, match=rf"^digest: wrote {FOLDER}/ACTION.md but local run history could not be saved;"):
         routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
     assert configured.read(f"{FOLDER}/ACTION.md") == ACTION
     assert "action" not in state(configured, ROUTINES)["digest"]

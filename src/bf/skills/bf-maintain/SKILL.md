@@ -4,7 +4,7 @@ description: Keep a Brain Framework brain (the bf command) healthy and connected
 license: MIT
 compatibility: Requires Brain Framework 16 (the bf command) on Linux or macOS.
 metadata:
-  version: "16.1.0"
+  version: "16.1.1"
 ---
 
 # bf-maintain
