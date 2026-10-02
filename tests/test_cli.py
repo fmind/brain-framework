@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -58,6 +59,9 @@ def test_help_needs_no_valid_configuration(command: str, flag: str) -> None:
         (["schedule", "--name", "INVALID"], "--name"),
         (["watch", "--notify", "unknown"], "--notify"),
         (["init", "fresh", "--name", "INVALID"], "--name"),
+        # Before 17 a mistyped option reached the routine as an argument, and the routine ran for real.
+        (["run", "review", "--dryrun"], "--dryrun"),
+        (["read", "projects", "--rel", "related-to"], "--rel"),
     ],
 )
 def test_invalid_options_name_the_option_without_a_selected_brain(arguments: list[str], option: str) -> None:
@@ -68,6 +72,36 @@ def test_invalid_options_name_the_option_without_a_selected_brain(arguments: lis
     assert not result.stdout
     assert option in plain(result.stderr)
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("arguments", "option"),
+    [
+        (["search", "word", "--scope", "projects", "--scope", "concepts"], "--scope"),
+        (["search", "word", "--brain", "a", "--limit", "3", "--brain=b"], "--brain"),
+        (["read", "projects/a.md", "--rel", "cites", "--rel", "links"], "--rel"),
+        (["run", "--hook", "pre-push", "--hook", "post-merge"], "--hook"),
+        (["update", "--brain", "a", "--brain", "b"], "--brain"),
+    ],
+)
+def test_a_repeated_single_value_option_is_invalid_instead_of_keeping_the_last(
+    arguments: list[str], option: str
+) -> None:
+    # Before 17 Click kept the last value: a second scope or brain silently narrowed or redirected the answer.
+    result = CliRunner().invoke(app, arguments)
+    assert result.exit_code == 2, result.output
+    assert not result.stdout
+    assert f"Invalid value for '{option}': give it once" in " ".join(plain(result.stderr).replace("│", " ").split())
+
+
+def test_repeated_flags_and_multiple_options_stay_valid(tmp_path: Path) -> None:
+    result = CliRunner().invoke(app, ["init", str(tmp_path / "brain")])
+    assert result.exit_code == 0, result.output
+    brain = str(tmp_path / "brain")
+    assert CliRunner().invoke(app, ["update", "--brain", brain, "--dry-run", "--dry-run"]).exit_code == 0
+    # --sensor selects several programs by repetition; an unknown one is a failure, not a usage error.
+    result = CliRunner().invoke(app, ["update", "--brain", brain, "--sensor", "a", "--sensor", "b"])
+    assert result.exit_code == 1, result.output
 
 
 @pytest.mark.parametrize(

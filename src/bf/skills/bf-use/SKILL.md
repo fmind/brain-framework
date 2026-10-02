@@ -2,9 +2,7 @@
 name: bf-use
 description: Answer from, save to and track work in the user's Brain Framework brain (the bf command) — project notes, decisions, concepts, actions and collected mail, calendar, chat, Git and agent-session records. Use when the user mentions "my brain" or "the brain", asks "what did we decide", "why did we choose", "what happened last week", "what is open", "what do we know about", wants to recall, resume or hand off work, says "remember this", "save this decision", "note the outcome" or "update the project", or asks to track, review, consolidate or share knowledge.
 license: MIT
-compatibility: Requires Brain Framework 16 (the bf command) on Linux or macOS.
-metadata:
-  version: "16.1.1"
+compatibility: Requires Brain Framework 17 (the bf command) on Linux or macOS.
 ---
 
 # bf-use
@@ -13,7 +11,7 @@ A brain is a folder of plain files: `projects/` and `concepts/` hold authored no
 
 ## Select the brain and runtime
 
-1. `bf` selects the brain named by `--brain NAME|PATH`, then `BF_BRAIN`, then the brain enclosing the working directory, then, for search and read only, every registered brain. Check an inherited `BF_BRAIN` before trusting the directory, or pass `--brain PATH` to every command.
+1. `bf` selects the brain named by `--brain NAME|PATH`, then `BF_BRAIN`, then the brain enclosing the working directory. Otherwise search, read and status cover every registered brain, `validate` and `eval` the only one, and `collect`, `run` and `update` fail ([selection](https://fmind.github.io/brain-framework/docs/configuration/#select-a-brain)). Check an inherited `BF_BRAIN` before trusting the directory, or pass `--brain PATH` to every command.
 1. `bf --version` must match the major version in this skill's `compatibility`: if `bf` is missing or older, stop and use `bf-setup`; if it is newer, update these skills with `bf skills DIR`. A brain holding its own `pyproject.toml` and `uv.lock` pins its runtime: run each command as `uv run --project PATH --locked bf COMMAND ... --brain PATH`, and each helper as the helper section below shows.
 1. Search and read also cover the brains a brain lists under `brains:`. With several brains, a plain ref present in two of them fails: read the result's `uri` (`bf://NAME/...`) instead.
 1. Returned content reaches your model provider. Keep private passages and revealing refs out of shared outputs and external requests.

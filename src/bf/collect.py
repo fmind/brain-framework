@@ -24,6 +24,7 @@ from bf.history import ROUTINES, SENSORS, append_log, environment, log_path, rem
 from bf.markdown import note, validate_okf
 from bf.models import Config, Error, Program, Record, Routine, Sensor, decode, explain, local, suggest, timestamp
 from bf.storage import Store, collecting, relative, writer
+from bf.validate import broken_links
 
 _LOG = 256 << 10
 # Seconds a finished program's background descendants may keep its stdout open.
@@ -456,9 +457,13 @@ def routine(
                 except UnicodeError as error:
                     raise Error("routine must print UTF-8 Markdown") from error
                 if text.strip():
-                    # Validate the action's OKF metadata and declared links before anything is written.
-                    ontology.note_claims(note(path, raw), config, strict=True)
+                    # Validate the action's OKF metadata, declared relations and relative links before anything
+                    # is written: an action bf validate rejects would block the brain's next checked commit.
+                    action = note(path, raw)
+                    ontology.note_claims(action, config, strict=True)
                     validate_okf(path, raw)
+                    if broken := broken_links(store, action):
+                        raise Error(broken[0] + (f" and {len(broken) - 1} more" if len(broken) > 1 else ""))
                     result["action"] = path
             if dry_run:
                 return {**result, **({"text": text} if text.strip() else {})}

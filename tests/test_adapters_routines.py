@@ -204,6 +204,20 @@ def test_weekly_review_summarizes_open_work_without_duplicating_tasks(provider: 
     assert parsed.targets == []
 
 
+def test_weekly_review_reads_a_task_link_as_its_label(provider: Provider) -> None:
+    item = {
+        "text": "Run the [retention action](../actions/2026-09-19_retention/ACTION.md).",
+        "uri": "bf://brain/projects/work.md#next",
+        "line": 3,
+    }
+    tasks = {"page": "tasks", "total": 1, "summary": {"open": 1, "done": 0, "notes": 1}, "items": [item]}
+    pages(provider, {"projects": []}, {"total": 0}, tasks)
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert result.returncode == 0, result.stderr
+    # Before 17 only the delimiters were stripped: "Run the retention action../actions/2026-09-19_retention/...".
+    assert "- Run the retention action. (`bf://brain/projects/work.md#next`, line 3)." in result.stdout.splitlines()
+
+
 def test_weekly_review_rejects_incomplete_task_counts(provider: Provider) -> None:
     pages(provider, {"projects": [PROJECT]}, {"total": 1}, {**EMPTY_TASKS, "stale": ["brain"]})
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")

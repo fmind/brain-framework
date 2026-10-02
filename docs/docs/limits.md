@@ -53,7 +53,7 @@ Page sizes bound one reply, not the result: follow `next_offset`. SQLite still r
 
 ## Processes and logs
 
-Sensors and routines run from the brain folder with direct arguments, without a shell. Their standard input is closed, except for what `bf run` pipes to a routine. They receive `BF_BRAIN` set to that brain, so a nested `bf` call reads the brain running it.
+Sensors and routines run from the brain folder with direct arguments, without a shell. Their standard input is closed, except for what a hook or `bf run --stdin` pipes to a routine. They receive `BF_BRAIN` set to that brain, so a nested `bf` call reads the brain running it.
 
 BF removes environment variables that could load code **before your program starts**, such as `BASH_ENV` or `PYTHONPATH`:
 

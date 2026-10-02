@@ -16,12 +16,13 @@ from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import FrameType
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 import typer
 import yaml
 from pydantic import ValidationError
 from typer.completion import completion_init
+from typer.core import TyperCommand, TyperOption
 
 from bf import __version__, health, index, links, pages
 from bf.collect import collect
@@ -292,7 +293,18 @@ def serve(brain: BrainOption = "") -> None:
     """Serve search and read over MCP stdio for agents that prefer tools to the CLI."""
     from bf.mcp import server
 
-    server(select(brain)).run()
+    tools = server(select(brain))
+
+    def stop(_signum: int, _frame: FrameType | None) -> None:
+        # The SDK waits for a stdin line in a thread no signal interrupts. The tools only read: an interrupted
+        # cache refresh rolls back, and the kernel releases its locks.
+        os._exit(130)
+
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        # Like main(), keep SIGHUP ignored when it already is, as under nohup.
+        if signum != signal.SIGHUP or signal.getsignal(signum) is not signal.SIG_IGN:
+            signal.signal(signum, stop)
+    tools.run()
 
 
 @app.command("skills", rich_help_panel="Set up")
@@ -372,6 +384,9 @@ def exact(
 ) -> None:
     """Read the home page, another page, a note, a note section, a record or an identity with its backlinks."""
     _option("REF", pages.readable, ref)
+    if rel and links.reserved(parsed.path if (parsed := links.parse(ref.strip())) else ref.strip()):
+        # A page is recognizable before any brain is read: the combination is invalid input.
+        raise typer.BadParameter("rel lists the links to a note, record or identity, not a page", param_hint="--rel")
     stores = select(brain)
     if rel:
         # An undeclared relation is a usage error; an unreadable bf.yaml still fails the operation.
@@ -445,7 +460,9 @@ def capture(
 @app.command(
     "run",
     rich_help_panel="Collect and automate",
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    # Routine arguments that start with a dash follow `--`: a mistyped option, such as --dryrun, is invalid input
+    # instead of an argument to a routine that then runs for real.
+    context_settings={"allow_extra_args": True},
 )
 def perform(
     arguments: Annotated[
@@ -464,8 +481,14 @@ def perform(
     dry_run: Annotated[
         bool, typer.Option(help="Run the routines, but write no action and record no run; logs still grow.")
     ] = False,
+    forward: Annotated[
+        bool,
+        typer.Option(
+            "--stdin", help="Pass piped input to the routine. A hook always passes what Git pipes; otherwise none."
+        ),
+    ] = False,
 ) -> None:
-    """Run one routine, or every routine of a hook, now; piped input reaches each routine."""
+    """Run one routine, or every routine of a hook, now; a hook's piped input reaches each routine."""
     values = tuple(arguments or ())
     if hook:
         _option("--hook", _slug, hook)
@@ -474,7 +497,9 @@ def perform(
         names, args = values[:1], values[1:]
     else:
         raise typer.BadParameter("name a routine, or pass --hook EVENT", param_hint="ROUTINE")
-    result = run_routines(execution(brain), names=names, hook=hook, args=args, stdin=_input(), dry_run=dry_run)
+    # Git closes a hook's input; an agent's shell can hold its own open, so a direct run reads it only on request.
+    stdin = _input() if hook or forward else b""
+    result = run_routines(execution(brain), names=names, hook=hook, args=args, stdin=stdin, dry_run=dry_run)
     emit(result)
     if not result["ok"]:
         raise typer.Exit(1)
@@ -724,6 +749,27 @@ def _input() -> bytes:
     return data
 
 
+class _Command(TyperCommand):
+    """A command whose single-valued options appear at most once.
+
+    Click keeps the last of repeated values: a second --scope or --brain would silently narrow or redirect the
+    answer instead of combining, so repetition is invalid input.
+    """
+
+    # Typer keeps the base Click context it passes here private: Any matches it without importing that module.
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        if not ctx.resilient_parsing:
+            # The parser consumes its list; parsing a copy lists each option occurrence in command-line order.
+            _, _, order = self.make_parser(ctx).parse_args(args=list(args))
+            seen: set[str | None] = set()
+            for param in order:
+                if isinstance(param, TyperOption) and not (param.multiple or param.count or param.is_flag):
+                    if param.name in seen:
+                        raise typer.BadParameter("give it once; repeated values do not combine", ctx, param)
+                    seen.add(param.name)
+        return super().parse_args(ctx, args)
+
+
 def _cancel(_signum: int, _frame: FrameType | None) -> None:
     raise KeyboardInterrupt
 
@@ -762,3 +808,8 @@ def main() -> None:
         for signum, handler in previous.items():
             if handler is not None:
                 signal.signal(signum, handler)
+
+
+# Last in the module, so every command declared here rejects a repeated single-valued option.
+for _command in app.registered_commands:
+    _command.cls = _Command

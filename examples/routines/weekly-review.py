@@ -56,8 +56,9 @@ def projects(brain: str) -> list[dict]:
 
 
 def plain(value: object) -> str:
-    """Titles become link labels: one line, without Markdown link delimiters."""
-    return re.sub(r"\s+", " ", re.sub(r"[\[\]()<>`]", "", str(value))).strip() or "untitled"
+    """Titles become link labels: one line, a Markdown link reduced to its label, without link delimiters."""
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", str(value))
+    return re.sub(r"\s+", " ", re.sub(r"[\[\]()<>`]", "", text)).strip() or "untitled"
 
 
 def local(value: object) -> str:

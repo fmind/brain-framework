@@ -202,6 +202,31 @@ def test_mcp_and_evaluations_share_local_scope(tmp_path: Path) -> None:
     asyncio.run(check())
 
 
+def test_plain_eval_refs_name_only_the_evaluated_brain(tmp_path: Path) -> None:
+    first = make(tmp_path / "first", "first", {"second": "../second"})
+    make(tmp_path / "second", "second")
+    first.delete("projects/example.md")
+    first.write(
+        "evals/retrieval.yaml",
+        b"version: 7\ncases:\n"
+        b"- name: own\n  query: durable\n  expect: [projects/example.md]\n"
+        b"- name: referenced\n  query: durable\n  expect: [bf://second/projects/example.md]\n"
+        b"- name: forbidden\n  query: durable\n  expect: [bf://second/projects/example.md]\n"
+        b"  forbid: [projects/example.md]\n"
+        b"- name: read\n  read: bf://second/projects/example.md\n  expect: [projects/example.md]\n",
+    )
+    # Before 17 the referenced brain's note at the same path passed the first case and failed the third.
+    results = {case["name"]: case for case in cast("list[dict[str, object]]", evaluate(first)["cases"])}
+    assert {name: case["passed"] for name, case in results.items()} == {
+        "own": False,
+        "referenced": True,
+        "forbidden": True,
+        "read": False,
+    }
+    assert results["own"]["rank"] == {"projects/example.md": None}
+    assert results["own"]["returned"] == ["projects/example.md#decision"]
+
+
 def test_registry_paths_are_absolute_and_names_win_over_local_directories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

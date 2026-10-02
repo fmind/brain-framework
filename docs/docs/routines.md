@@ -65,7 +65,7 @@ bf validate
 
 When projects need review, tasks are open or items are dated in the last seven days, the reply names the new `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, with a random 8-character suffix. The action lists open-task counts, up to ten open tasks with their sections, and recent activity by source. Empty output creates nothing. With `refresh: 604800`, `bf update` and `bf watch` also run it weekly.
 
-An action routine writes at most one action per day in a brain: a second run that day reports `"status":"skipped"` and keeps the existing action, even one another clone wrote. BF validates the Markdown's OKF metadata and links before writing; invalid or excessive output, or a failure, creates nothing. Preview without writing with `bf run weekly-review --dry-run`: the reply includes the Markdown as `text`.
+An action routine writes at most one action per day in a brain: a second run that day reports `"status":"skipped"` and keeps the existing action, even one another clone wrote. BF validates the Markdown's OKF metadata, declared relations and relative links, including headings, before writing; invalid or excessive output, or a failure, creates nothing. `bf validate` also checks its `bf://` targets and cited records. Preview without writing with `bf run weekly-review --dry-run`: the reply includes the Markdown as `text`.
 
 ## Routine settings
 
@@ -84,11 +84,13 @@ Names start with a lowercase letter and use lowercase letters and digits joined 
 
 ## Run a routine now
 
-`bf run ROUTINE ARGS...` appends the arguments to the routine's command; put `--` before arguments that start with a dash. Piped input reaches the routine, up to 1 MiB, and a pipe must close within 10 seconds:
+`bf run ROUTINE ARGS...` appends the arguments to the routine's command; put `--` before arguments that start with a dash. `--stdin` passes piped input to the routine, up to 1 MiB, and a pipe must close within 10 seconds:
 
 ```bash
-echo "release notes" | bf run summarize -- --verbose
+echo "release notes" | bf run summarize --stdin -- --verbose
 ```
+
+Without `--stdin`, a direct run passes no input, so a shell that holds its standard input open, as some agent hosts do, never delays it. `bf run --hook EVENT` always passes what Git pipes, such as the refs of a push.
 
 The reply lists each routine with its `status`: `ran`, `skipped` or `failed` with an `error` naming its log. One failure never stops the other routines of a hook. `--dry-run` runs the routines but writes no action and records no run; logs still grow. `bf run` acts on one brain, like `bf update`.
 

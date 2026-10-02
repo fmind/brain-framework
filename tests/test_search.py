@@ -57,6 +57,17 @@ def test_all_terms_rank_before_any_term_and_notes_before_records(brain: Store) -
     assert refs(brain, "decisions keeping")[0] == "projects/offline.md#decision"
 
 
+def test_function_words_written_as_acronyms_stay_terms(brain: Store) -> None:
+    brain.write("concepts/act.md", b"# Act\n\nThe theatre act lasts an hour.\n")
+    brain.write("concepts/ai-act.md", b"# Regulation\n\nThe EU AI Act classifies systems by risk.\n")
+    # Before 17 the French function words eu and ai dropped, so this query searched only for act.
+    assert index.terms("EU AI Act") == ["EU", "AI", "Act"]
+    assert refs(brain, "EU AI Act")[0] == "concepts/ai-act.md"
+    # Lowercase function words and the habitual AND and OR operators still drop; one letter is no acronym.
+    assert index.terms("ai and the IT budget AND I") == ["IT", "budget"]
+    assert index.terms("launch OR budget") == ["launch", "budget"]
+
+
 def test_results_are_compact_and_cite_readable_refs(brain: Store) -> None:
     reply = search([brain], Query(text="durable evidence"))
     items = reply["items"]
@@ -1107,6 +1118,14 @@ def test_a_section_ranks_under_its_note_title_while_the_title_alone_finds_the_no
     # A section matching only through its note's title repeats the note, which answers instead.
     assert refs(brain, "Atlas")[0] == "projects/atlas.md"
     assert refs(brain, "Atlas latency")[0] == "projects/atlas.md#next-actions"
+    # Before 17 the title also ranked as a heading of every section: one mentioning it once outranked the note.
+    brain.write(
+        "projects/zephyr.md",
+        b"---\ntype: project\nsummary: A launch.\n---\n# Zephyr\n\nThe launch project, owned by the platform team.\n\n"
+        b"## Status\n\nZephyr ships in October.\n\n## Risks\n\nZephyr depends on one vendor.\n",
+    )
+    assert refs(brain, "Zephyr")[0] == "projects/zephyr.md"
+    assert refs(brain, "Zephyr vendor")[0] == "projects/zephyr.md#risks"
 
 
 def test_quoted_phrases_and_word_prefixes_match_while_other_syntax_stays_literal(brain: Store) -> None:
@@ -1502,6 +1521,76 @@ def test_read_only_brains_name_the_cache_they_need(brain: Store) -> None:
     finally:
         for folder in folders:
             folder.chmod(0o700)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+def test_an_unreadable_folder_is_reported_while_the_rest_of_the_brain_answers(brain: Store) -> None:
+    brain.write("projects/private/plan.md", b"# Plan\n\nOffline secrets.\n")
+    brain.write("memories/jira/.keep", b"")
+    folders = [brain.root / "projects/private", brain.root / "memories/jira"]
+    for folder in folders:
+        folder.chmod(0)
+    try:
+        # Before 17 one unreadable folder failed every search, status, validation and build of the brain.
+        reply = search([brain], Query(text="offline"))
+        assert "projects/offline.md" in [item["ref"] for item in cast("list[dict[str, str]]", reply["items"])]
+        assert {problem["file"] for problem in cast("list[dict[str, str]]", reply["problems"])} == {
+            "projects/private",
+            "memories/jira",
+        }
+        problems = cast("list[dict[str, str]]", validate(brain)["problems"])
+        assert {problem["file"]: problem["error"] for problem in problems} == dict.fromkeys(
+            ("memories/jira", "projects/private"),
+            "unreadable folder; grant read and search permission or move it out of the brain",
+        )
+    finally:
+        for folder in folders:
+            folder.chmod(0o700)
+
+
+def test_hashed_inode_numbers_beyond_signed_64_bits_still_index(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = storage._fingerprint  # noqa: SLF001 - the one place every fingerprint passes through
+
+    def hashed(info: os.stat_result) -> tuple[int, int, int, int]:
+        # mergerfs and some FUSE mounts report inode numbers with the top bit set.
+        return original(
+            cast(
+                "os.stat_result",
+                SimpleNamespace(
+                    st_size=info.st_size,
+                    st_mtime_ns=info.st_mtime_ns,
+                    st_ctime_ns=info.st_ctime_ns,
+                    st_ino=info.st_ino | 1 << 63,
+                ),
+            )
+        )
+
+    monkeypatch.setattr(storage, "_fingerprint", hashed)
+    # Before 17 SQLite rejected the inode and every refresh failed with a traceback.
+    assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
+
+
+def test_a_note_alias_named_like_a_source_reads_without_parsing_that_source(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    brain.write("concepts/atlas.md", b"---\ntype: concept\naliases: [meetings:atlas]\n---\n# Atlas\n\nThe plan.\n")
+    assert read([brain], "meetings:atlas")["ref"] == "concepts/atlas.md"
+    # Before 17 another malformed record of the source, or a busy writer, failed the read of the alias.
+    brain.write("memories/meetings/" + "0" * 64 + ".json", b"{broken")
+    assert read([brain], "meetings:atlas")["ref"] == "concepts/atlas.md"
+    monkeypatch.setattr(records, "WAIT", 0.1)
+    with writer(brain):
+        assert read([brain], "meetings:atlas")["ref"] == "concepts/atlas.md"
+    # An exact record ref still needs its own file: a missing one of an unreadable source is not proven absent.
+    with pytest.raises(Error, match="invalid JSON document"):
+        read([brain], "meetings:absent")
+
+
+def test_words_starting_with_a_bf_scheme_stay_words(brain: Store) -> None:
+    brain.write("concepts/setup.md", b"# Setup\n\nHow to configure sensors.\n")
+    # Before 17 any query starting with bf: was parsed as an address and failed as an invalid link.
+    assert refs(brain, "bf: how to configure sensors") == ["concepts/setup.md"]
+    assert refs(brain, "Bf:setup") == ["concepts/setup.md"]
 
 
 def test_the_cache_directory_must_be_your_own_directory(

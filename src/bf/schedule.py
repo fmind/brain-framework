@@ -193,7 +193,7 @@ def generate(
     written: list[str] = []
     if output is None:
         warnings.append(
-            "Preview only: no file was written; rerun with --output settings/schedules before the install commands."
+            "Preview only: no file was written; rerun with --output ~/.config/bf-schedules before the install commands."
         )
     else:
         if source.is_symlink():

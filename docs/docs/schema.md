@@ -186,7 +186,7 @@ bf search "website" --scope person:email/alice@example.test
 
 The read groups incoming links by relation, such as `author`, with their supporting records. The search covers the identity's owning note and the evidence linked to it. Each `relation: true` field creates claims from the record to its identity values, keeping the record as their origin. Field values are searchable; field names and `attributes` are not.
 
-The graph lives in the disposable cache. Replacing a record replaces its claims, and structural changes to `fields:`, such as a `type` or `targets`, rebuild the cache. A field no longer declared as a relation adds no claims; `bf validate` names stored values the current fields reject. [`bf export`](commands.md#export-the-graph) prints every claim.
+The graph lives in the disposable cache. Replacing a record replaces its claims, and structural changes to `fields:`, such as a `type` or `cardinality`, rebuild the cache; `description`, `examples`, `broader` and `targets` apply without one. A field no longer declared as a relation adds no claims; `bf validate` names stored values the current fields reject. [`bf export`](commands.md#export-the-graph) prints every claim.
 
 ### Reproject stored records
 

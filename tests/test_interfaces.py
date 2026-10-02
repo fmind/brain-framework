@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -170,7 +171,7 @@ def test_console_errors_are_private_and_on_stderr(
         (["read", "projects/../bf.yaml"], 2),
         (["read", "tags/a\\b"], 2),
         (["read", "projects/offline.md", "--rel", "nope"], 2),
-        (["read", "projects", "--rel", "links"], 1),
+        (["read", "projects", "--rel", "links"], 2),
         (["eval", "--path", "/etc"], 2),
         (["collect", "mail", "--since", "soon"], 2),
         (["collect", "mail", "--until", "2026-13-01"], 2),
@@ -602,6 +603,10 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
         ]:
             with pytest.raises(ToolError, match="Extra inputs are not permitted"):
                 await mcp.call_tool(name, arguments)
+        # Before 17 a mistyped value was coerced: a limit of true returned one result.
+        for arguments in ({"query": "x", "limit": True}, {"query": "x", "limit": "5"}, {"query": 5}):
+            with pytest.raises(ToolError, match="Input should be a valid"):
+                await mcp.call_tool("search", arguments)
         exact = await mcp.call_tool("read", {"ref": "bf://fixture/projects/offline.md#decision"})
         assert json.loads(text(exact))["brain"] == "fixture"
         assert "Provider retention" in json.loads(text(exact))["text"]
@@ -730,6 +735,33 @@ def test_mcp_stdio_handshake(tmp_path: Path) -> None:
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT], ids=["stop", "interrupt"])
+def test_mcp_stops_at_once_while_its_input_stays_open(brain: Store, signum: int) -> None:
+    with subprocess.Popen(  # noqa: S603 - synthetic CLI boundary
+        [sys.executable, "-m", "bf", "mcp", "--brain", str(brain.root)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    ) as child:
+        try:
+            assert child.stdin is not None
+            assert child.stdout is not None
+            parameters = {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            }
+            request = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": parameters}
+            child.stdin.write(json.dumps(request).encode() + b"\n")
+            child.stdin.flush()
+            assert json.loads(child.stdout.readline())["id"] == 1
+            # Before 17 the server kept waiting for another input line, and a host's stop request timed out.
+            child.send_signal(signum)
+            assert child.wait(timeout=10) == 130
+        finally:
+            child.kill()
+
+
 def test_edges_export_as_json_lines_across_selected_brains(
     brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -818,6 +850,26 @@ def test_replies_state_dates_as_written_and_datetimes_with_the_local_offset(brai
     )
     # Documents are printed as they are: an item schema describes both `date` and `time`.
     assert {"date", "time"} <= set(json.loads(schema.stdout)["$defs"]["Item"]["properties"])
+
+
+def test_a_far_future_review_date_keeps_its_utc_day_east_of_utc(brain: Store) -> None:
+    brain.write(
+        "projects/forever.md",
+        b"---\ntype: project\nstale_after: 9999-12-31T23:00:00Z\n---\n# Forever\n\n- [ ] Keep going.\n",
+    )
+    # Before 17 a "never" placeholder passed the last local day in Tokyo, and home and projects failed.
+    for ref in ("projects", ""):
+        result = subprocess.run(  # noqa: S603 - synthetic CLI boundary
+            [sys.executable, "-m", "bf", "read", *([ref] if ref else []), "--brain", str(brain.root)],
+            env={**os.environ, "TZ": "Asia/Tokyo"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        items = json.loads(result.stdout)["items" if ref else "projects"]
+        assert next(item for item in items if item["ref"] == "projects/forever.md")["review_due"] == "9999-12-31"
 
 
 def test_identities_export_lists_every_name_of_each_subject(brain: Store) -> None:

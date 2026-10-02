@@ -157,11 +157,11 @@ def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
     alice = read([brain], "person:alice")
     assert alice["claims"] == [claim]
     assert alice["backlinks"] == []
-    # The identity's scope holds its owning note and what links to it, with the linking claims. "About Bob"
-    # names Bob under its note's title too, so that section answers for the note.
+    # The identity's scope holds its owning note and what links to it, with the linking claims. The note answers
+    # its own title before its "About Bob" section, which names Bob under that title too.
     scoped = search([brain], Query(text="bob", target="person:bob"))["items"]
     assert [(i["ref"], i.get("relations")) for i in cast(list[dict], scoped)] == [
-        ("projects/bob.md#about", None),
+        ("projects/bob.md", None),
         ("projects/alice.md#friends", [claim]),
     ]
     assert validate(brain)["valid"]

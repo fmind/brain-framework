@@ -33,7 +33,7 @@ from bf.models import (
     suggest,
     timestamp,
 )
-from bf.storage import FileAncestorError, Store, relative
+from bf.storage import BusyError, FileAncestorError, Store, relative
 
 # What a later page of an exact read repeats beside its text: identity, digest, notice and completeness.
 _TEXT = ("brain", "ref", "uri", "sha256", "modified", "notice", "problems", "stale")
@@ -594,6 +594,18 @@ def _record(
     }
 
 
+def _complete(connection: sqlite3.Connection, state: str, source: str) -> bool:
+    """Whether a ready cache parsed every file of a source without a problem: a missing record file then proves
+    absence, so a read need not parse the whole source again."""
+    return (
+        state == "ready"
+        and not connection.execute(
+            "SELECT 1 FROM files WHERE path>? AND path<? AND error!='' LIMIT 1",
+            (f"memories/{source}/", f"memories/{source}0"),
+        ).fetchone()
+    )
+
+
 def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | None:
     name = load(store).name
     if parsed := links.parse(ref):
@@ -605,7 +617,11 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
         if authored(parsed.path):
             value = _read(store, parsed.path)
         elif separator and "/" not in source:
-            value = _record(store, name, parsed.path, source, record_id)
+            complete = False
+            # Without a usable cache, the record's own file still answers; only absence takes a full parse.
+            with suppress(Error, OSError, sqlite3.DatabaseError), index.database(store) as (connection, state):
+                complete = _complete(connection, state, source)
+            value = _record(store, name, parsed.path, source, record_id, complete=complete)
         else:
             with index.database(store) as (connection, _state):
                 owners = connection.execute(
@@ -646,20 +662,21 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
                 "SELECT i.ref FROM names n JOIN items i ON i.id=n.item WHERE n.name=? ORDER BY i.ref LIMIT 2",
                 (ref,),
             ).fetchall()
-            # A ready cache has parsed every file of the source: without a problem there, a missing
-            # record file proves absence, so the read need not parse the whole source again.
-            complete = (
-                state == "ready"
-                and not connection.execute(
-                    "SELECT 1 FROM files WHERE path>? AND path<? AND error!='' LIMIT 1",
-                    (f"memories/{source}/", f"memories/{source}0"),
-                ).fetchone()
-            )
+            complete = _complete(connection, state, source)
     except (Error, OSError, sqlite3.DatabaseError) as error:
         # An exact source:id still has a file recovery path when its disposable cache is unavailable.
         cache_error = error
-    if separator and (value := _record(store, name, ref, source, record_id, complete=complete)):
-        return value
+    if separator:
+        # A name the cache resolved, such as a note alias jira:ATL beside a jira source, answers the read when no
+        # record file holds it: proving that absence would parse the whole source and fail on any problem there.
+        try:
+            value = _record(store, name, ref, source, record_id, complete=complete or bool(aliases))
+        except BusyError:
+            if not aliases:
+                raise
+            value = None
+        if value:
+            return value
     if cache_error:
         raise Error("the search cache is unavailable; run bf build to resolve identities") from cache_error
     if len(aliases) > 1:

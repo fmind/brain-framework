@@ -194,7 +194,12 @@ def _whole(store: Store, ref: str) -> dict[str, object]:
 
 
 def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], list[str], str, list[tuple[str, str]]]:
-    """The reply, its refs, its portable addresses, the text it delivers and a search's refs and addresses to DEPTH."""
+    """The reply, its refs, the refs and addresses expectations match, its text and a search's ranking to DEPTH.
+
+    A plain ref names the evaluated brain's file: an item of a referenced brain, which can hold the same path,
+    matches only by its `bf://` address.
+    """
+    name = load(store).name
     if case.read is not None:
         try:
             reply = _whole(store, case.read)
@@ -202,27 +207,30 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
             # Nothing to read answers "is anything there?"; every other failure fails the case.
             reply = {}
         pairs = [(key, value) for key, value in _strings(reply) if key != "notice"]
-        name = load(store).name
+        # An entry without a brain belongs to the evaluated one, the only brain its reply selected.
+        entries = [(str(entry.get("brain", name)), entry) for entry in _entries(reply)]
         return (
             reply,
-            [value for key, value in pairs if key == "ref"],
-            # An entry without a brain belongs to the evaluated one, the only brain its reply selected.
-            [value for key, value in pairs if key == "uri"]
-            + [address(str(entry.get("brain", name)), entry) for entry in _entries(reply)],
+            [str(entry["ref"]) for _, entry in entries],
+            [str(entry["ref"]) for brain, entry in entries if brain == name]
+            + [value for key, value in pairs if key == "uri"]
+            + [address(brain, entry) for brain, entry in entries],
             "\n".join(value for _, value in pairs),
             [],
         )
     # The case's results are the leading items of a deeper search: continuing a search never reorders it.
     reply = search([store], _query(case.query, case.scope, max(case.limit, DEPTH)), counted=False)
     found = cast("list[dict[str, object]]", reply["items"])
-    name = load(store).name
     # With one selected brain, items omit their address: every item is the evaluated brain's.
-    ranking = [(str(item["ref"]), str(item.get("uri") or address(name, item))) for item in found]
+    ranking = [
+        (str(item["ref"]) if item.get("brain", name) == name else "", str(item.get("uri") or address(name, item)))
+        for item in found
+    ]
     items = found[: case.limit]
     return (
         reply,
-        [ref for ref, _ in ranking[: case.limit]],
-        [uri for _, uri in ranking[: case.limit]],
+        [str(item["ref"]) for item in items],
+        [ref for pair in ranking[: case.limit] for ref in pair if ref],
         "\n".join(f"{item.get('title', '')}\n{item.get('excerpt', '')}" for item in items),
         ranking,
     )
@@ -329,12 +337,11 @@ def evaluate(
     for path, case in cases:
         ranked = case.read is None and bool(case.expect)
         try:
-            reply, refs, uris, delivered, ranking = _answer(store, case)
+            reply, refs, matches, delivered, ranking = _answer(store, case)
         except Error as error:
             results.append({"suite": path, "name": case.name, "passed": False, "error": str(error)})
             reciprocal.extend([0.0] if ranked else [])
             continue
-        matches = [*refs, *uris]
         missing = [ref for ref in case.expect if not _matches(ref, matches)]
         forbidden = [ref for ref in case.forbid if _matches(ref, matches)]
         absent = [text for text in case.text if text.casefold() not in delivered.casefold()]

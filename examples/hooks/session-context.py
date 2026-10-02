@@ -76,7 +76,9 @@ def day(value: object) -> str:
 
 
 def plain(value: object, limit: int = 120) -> str:
-    text = re.sub(r"\s+", " ", re.sub(r"[`\[\]<>]", "", str(value))).strip()
+    # A task's Markdown link reads as its label, as the note shows it.
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", str(value))
+    text = re.sub(r"\s+", " ", re.sub(r"[`\[\]<>]", "", text)).strip()
     return text[: limit - 1] + "…" if len(text) > limit else text
 
 

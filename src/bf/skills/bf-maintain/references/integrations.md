@@ -54,7 +54,7 @@ routines:
 - `hooks` lists events that `bf run --hook EVENT` runs, every enabled routine listing the event in name order.
 - A failing routine writes no action, retries after the failure backoff and appears in `bf status` and the home page's `attention`.
 
-Run it on demand, passing extra arguments and piped input through; put `--` before arguments that start with a dash:
+Run it on demand, passing extra arguments through; put `--` before arguments that start with a dash, and add `--stdin` only to pass piped input:
 
 ```bash
 bf run weekly-review --dry-run

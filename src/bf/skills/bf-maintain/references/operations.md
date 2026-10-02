@@ -8,6 +8,7 @@ Use for failed or overdue collection, backfills, interrupted writes, watch and s
 
 - `cache`: `ready`; `busy` while another writer works, when search and read replies carry `stale` and serve the last generation; `stale` (the last generation) or `missing` (none) while an interrupted record transaction awaits recovery, also shown as `pending_transaction: true` and a problem naming the command to run.
 - `problems` for skipped files, scan-limit `warnings` and `usage`.
+- `attention`: the scheduled programs that failed or are `overdue` or `never` succeeded; start a diagnosis there.
 - Each source's `state` (`active`, `disabled`, or `historical` for records kept after a sensor left `bf.yaml`), `freshness`, `last_collected`, `window`, `last_run`, `records` and `bytes`; each routine's `state`, `freshness`, `last_success` and latest `action`.
 - `freshness`: `fresh`; `overdue` when an enabled program with a `refresh` has not succeeded within twice that `refresh`; `never` when it has not succeeded yet; `manual` without a `refresh`; `unknown` for a disabled or historical program.
 - For a failed program: `failed`, `error`, consecutive `failures` and its `log`.
@@ -33,7 +34,7 @@ Inspect a source's `state`, `last_collected`, `window` and `last_run` before int
 
 `bf watch` is the primary refresh mode: it runs due sensors, then due routines, in an interactive dashboard until the user quits. Repeat `--sensor NAME` or `--routine NAME` to restrict it; with any selector, only the named programs run. Preferences (check interval, notifications) live under `watch:` in `bf.yaml` and command options override them; restart the watcher after editing them. Agents observe with `bf status`, or stream `bf watch --json` rows when authorized to collect. Keep one execution owner per program in each brain: for a shared source, one collecting machine, so clones do not collect it twice. See [watch and schedule](https://fmind.github.io/brain-framework/docs/schedule/).
 
-With recurring-execution authority, `bf schedule --sensor SENSOR --output settings/schedules` writes native systemd, launchd or cron files and returns the activation, status and removal commands; without `--output` it previews them, and it never activates anything. The files capture this machine's `PATH`, home and brain paths, so keep them out of a shared brain's Git. Check more often than the shortest `refresh`, and regenerate schedules after an upgrade moves the `bf` executable. Report generated, enabled and observed runs separately.
+With recurring-execution authority, `bf schedule --sensor SENSOR --output ~/.config/bf-schedules` writes native systemd, launchd or cron files and returns the activation, status and removal commands; without `--output` it previews them, and it never activates anything. The files capture this machine's `PATH`, home and brain paths, so keep them out of a shared brain's Git. Check more often than the shortest `refresh`, and regenerate schedules after an upgrade moves the `bf` executable. Report generated, enabled and observed runs separately.
 
 ## Windows and freshness
 

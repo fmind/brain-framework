@@ -25,6 +25,8 @@ STOP = frozenset(
     quelle quelles quels qui quoi s sa se ses si son sont sur t te tes toi ton tu un une vos votre vous y à été être
     """.split()  # noqa: SIM905 - one readable word list, grouped by language, like the core's
 )
+# Written in capitals, a function word is an acronym bf search keeps (EU AI Act); AND and OR stay habitual operators.
+OPERATORS = frozenset({"AND", "OR"})
 # Only authored note refs are printed, in code spans; a record ref or title is provider-controlled text and stays out.
 NOTE = re.compile(
     r"(?:bf://[a-z][a-z0-9-]{0,63}/)?(?:projects|concepts|actions)/[^\x00-\x1f\x7f-\x9f]+?\.md(?:#[^\x00-\x1f\x7f-\x9f]*)?"
@@ -35,7 +37,7 @@ def query(prompt: str) -> str:
     """The prompt's first distinct content words, as plain words: no phrase, prefix or identity syntax."""
     found: dict[str, str] = {}
     for word in re.findall(r"[^\W_]+", prompt):
-        if word.lower() not in STOP:
+        if word.lower() not in STOP or (len(word) > 1 and word.isupper() and word not in OPERATORS):
             found.setdefault(word.lower(), word)
     return " ".join(list(found.values())[:WORDS])
 

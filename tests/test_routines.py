@@ -5,9 +5,11 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -213,7 +215,24 @@ def test_routines_require_enabled_programs_and_valid_windows(configured: Store, 
 
     shared = Store(clone)
     shared.write("bf.yaml", CONFIG.replace(b"name: fixture", b"name: clone"))
+    shared.write("projects/offline.md", b"# Offline\n")
     assert routine(shared, "digest", start=START, end=END, runner=printing(ACTION))["action"]
+
+
+@pytest.mark.parametrize(
+    ("link", "problem"),
+    [
+        ("projects/offline.md", "broken link: projects/offline.md"),
+        ("../../projects/offline.md#nowhere", "missing heading: ../../projects/offline.md#nowhere"),
+    ],
+)
+def test_an_action_with_a_broken_link_is_never_written(configured: Store, link: str, problem: str) -> None:
+    output = ACTION.replace(b"../../projects/offline.md", link.encode()) + b"\n## Notes {#notes}\n\n[Here](#notes)\n"
+    # Before 17 only metadata and relations were checked: bf validate then rejected the written action.
+    with pytest.raises(Error, match=re.escape(problem) + r"; no action was written"):
+        routine(configured, "digest", start=START, end=END, runner=printing(output), clock=lambda: NOW)
+    assert not configured.root.joinpath("actions").exists() or not list(configured.root.joinpath("actions").iterdir())
+    assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)["action"]
 
 
 def test_due_routines_cover_the_time_since_their_last_reviewed_window(configured: Store) -> None:
@@ -361,12 +380,17 @@ def hooked(brain: Store, monkeypatch: pytest.MonkeyPatch) -> Store:
 
 def test_log_routines_keep_their_output_and_hooks_run_every_listed_routine(hooked: Store) -> None:
     runner = CliRunner()
-    ran = runner.invoke(app, ["run", "check", "--brain", str(hooked.root), "--", "--flag", "x"], input="ref\n")
+    ran = runner.invoke(
+        app, ["run", "check", "--brain", str(hooked.root), "--stdin", "--", "--flag", "x"], input="ref\n"
+    )
     assert ran.exit_code == 0, ran.output
     assert json.loads(ran.stdout) == {"ok": True, "dry_run": False, "routines": [{"routine": "check", "status": "ran"}]}
     log = hooked.read(log_path("check")).decode()
-    # The configured arguments come first, then the caller's; piped input reaches the routine.
+    # The configured arguments come first, then the caller's; --stdin passes piped input to the routine.
     assert "args:first --flag x\nref\n-- stderr --\nnote\n" in log
+    # Without --stdin, a direct run passes none.
+    assert runner.invoke(app, ["run", "check", "--brain", str(hooked.root)], input="unread\n").exit_code == 0
+    assert "unread" not in hooked.read(log_path("check")).decode()
     assert log.rstrip().endswith("succeeded ==")
     assert not hooked.root.joinpath("actions").exists() or not list(hooked.root.joinpath("actions").iterdir())
     # A hook runs its enabled routines in name order; one failure never blocks the others.
@@ -389,7 +413,7 @@ def test_run_reads_files_and_devices_as_input(hooked: Store, tmp_path: Path, sou
     path.write_text("from a file\n")
     with Path(os.devnull if source == "devnull" else path).open("rb") as stdin:
         result = subprocess.run(  # noqa: S603 - synthetic CLI boundary
-            [sys.executable, "-m", "bf", "run", "check", "--brain", str(hooked.root)],
+            [sys.executable, "-m", "bf", "run", "check", "--stdin", "--brain", str(hooked.root)],
             stdin=stdin,
             capture_output=True,
             timeout=60,
@@ -403,7 +427,7 @@ def test_run_reads_files_and_devices_as_input(hooked: Store, tmp_path: Path, sou
 
 def test_run_forwards_piped_input_from_a_real_process(hooked: Store) -> None:
     result = subprocess.run(  # noqa: S603 - synthetic CLI boundary
-        [sys.executable, "-m", "bf", "run", "check", "--brain", str(hooked.root)],
+        [sys.executable, "-m", "bf", "run", "check", "--stdin", "--brain", str(hooked.root)],
         input=b"line one\nline two\n",
         capture_output=True,
         timeout=60,
@@ -412,6 +436,23 @@ def test_run_forwards_piped_input_from_a_real_process(hooked: Store) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "args:first\nline one\nline two\n" in hooked.read(log_path("check")).decode()
+
+
+def test_a_direct_run_never_waits_for_input_an_agent_shell_holds_open(hooked: Store) -> None:
+    # Before 17 a direct run waited for any open pipe to close and failed after 10 seconds in such shells.
+    with subprocess.Popen(  # noqa: S603 - synthetic CLI boundary
+        [sys.executable, "-m", "bf", "run", "check", "--brain", str(hooked.root)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PATH": "/usr/bin:/bin"},
+    ) as process:
+        started = time.monotonic()
+        assert process.wait(timeout=60) == 0
+        assert time.monotonic() - started < 10
+        assert process.stdin is not None
+        process.stdin.close()
+    assert "args:first\n-- stderr --" in hooked.read(log_path("check")).decode()
 
 
 @pytest.mark.parametrize(

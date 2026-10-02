@@ -101,6 +101,25 @@ def line(value: str, fallback: str) -> str:
 AUTOMATED = re.compile(r"(\[bot\]@users\.noreply\.github\.com|@([a-z0-9-]+\.)*(invalid|test|example|localhost))$")
 
 
+def linked(marker: Path) -> bool:
+    """Whether a `.git` file names a linked worktree, whose history its main checkout already holds.
+
+    `git worktree add` writes `gitdir: COMMON/worktrees/NAME`, a folder holding a `commondir` file; a submodule's
+    `.git` file names its own repository, without one.
+    """
+    if not marker.is_file():
+        return False
+    try:
+        with marker.open("rb") as stream:
+            line = stream.read(4096).decode(errors="replace").strip()
+    except OSError:
+        return False
+    if not line.startswith("gitdir: "):
+        return False
+    folder = Path(line.removeprefix("gitdir: "))
+    return (folder if folder.is_absolute() else marker.parent / folder).joinpath("commondir").is_file()
+
+
 def repositories(root: Path, skip: frozenset[str]) -> tuple[list[Path], int]:
     """Repositories one or two levels below root, and the count of folders that could not be used.
 
@@ -124,7 +143,8 @@ def repositories(root: Path, skip: frozenset[str]) -> tuple[list[Path], int]:
         relative = path.relative_to(root).as_posix()
         try:
             marker = path / ".git"
-            if not marker.exists() or marker.is_symlink() or relative in skip:
+            # A linked worktree would collect its repository's whole history again under another name.
+            if not marker.exists() or marker.is_symlink() or relative in skip or linked(marker):
                 continue
         except PermissionError:
             skipped.add(path)

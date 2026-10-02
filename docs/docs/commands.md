@@ -99,7 +99,7 @@ Results are compact UTF-8 JSON on stdout; help and version are plain text. Dashb
 | `2`   | Invalid command-line input.                                   |
 | `130` | Cancelled by Ctrl-C, SIGTERM or a closed terminal.            |
 
-Invalid input exits 2 and names the option or argument, before any brain is read when possible. Examples: `bf search "!!!"` (no word to search), `bf search product --limit 0`, `bf read 2026-13` (no such month), `bf read projects/../bf.yaml` and `bf read projects/new-website.md --rel nope`, which lists the valid relations.
+Invalid input exits 2 and names the option or argument, before any brain is read when possible. Examples: `bf search "!!!"` (no word to search), `bf search product --limit 0`, `bf read 2026-13` (no such month), `bf read projects/../bf.yaml` and `bf read projects/new-website.md --rel nope`, which lists the valid relations. An option that takes one value may appear once: `bf search launch --scope projects --scope concepts` is invalid instead of searching only the last scope. Only `--sensor` and `--routine` repeat, to select several programs.
 
 A well-formed ref that names nothing exits 1 and suggests what exists: a close page, note, sensor or routine name (`did you mean projects?`), or the note's sections for a missing `#section`.
 
@@ -113,12 +113,13 @@ An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors` and `routines`
 
 ### Status sources and routines
 
-`bf status` groups results under `brains`. Each brain has its `cache`, `notes`, `problems`, `sources`, `routines`, `coverage` totals and `usage`. A brain that cannot load appears with only `brain`, `error` and, when known, `path`.
+`bf status` groups results under `brains`. Each brain has its `cache`, `notes`, `problems`, `attention`, `sources`, `routines`, `coverage` totals and `usage`. `healthy` is false when any brain has a problem, an `attention` entry, an unavailable cache or cannot load. A brain that cannot load appears with only `brain`, `error` and, when known, `path`.
 
 | Field                                | Meaning                                                                                                                                                                               |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cache`                              | `ready`, or `busy` while a writer updates it. `stale` (the last cache) or `missing` (none) while an interrupted write awaits recovery, unlike the `stale` of search and read replies. |
 | `pending_transaction`                | `true` when `memories/.pending` holds an interrupted write; a problem names the command to recover it.                                                                                |
+| `attention`                          | Scheduled programs this machine runs that `failed` or are `overdue` or `never` succeeded, such as `{"sensor":"mail","freshness":"never","failed":true}`, as on the home page.         |
 | `state`                              | `active`, `disabled` or `historical` (records remain but `bf.yaml` no longer declares the sensor).                                                                                    |
 | `freshness`                          | `fresh`, `overdue`, `never`, `manual` or `unknown`; see [timing and health](schedule.md#timing-and-health).                                                                           |
 | `records`, `bytes`                   | Indexed records of the source and their size on disk.                                                                                                                                 |

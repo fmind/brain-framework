@@ -399,12 +399,19 @@ def test_reprojection_keeps_records_the_current_mappings_reject(brain: Store) ->
         assert invoke("build", "--brain", str(brain.root), *args, code=code) == {}
 
 
-def test_broader_and_targets_rebuild_the_cache_like_other_structure(brain: Store) -> None:
+def test_broader_and_targets_keep_the_cache_like_other_read_time_settings(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     index.refresh(brain)
+    # Before 17 either setting rebuilt the cache, though relation pages read broader at query time and only
+    # collection and validation check targets: a large brain spent minutes rebuilding identical rows.
     for changed in (
         TARGETED,
         CONFIG.replace(b"    cardinality: many\n", b"    cardinality: many\n    broader: sender\n"),
     ):
         brain.write("bf.yaml", changed)
-        assert index.refresh(brain)["changed"] == 4
+        assert index.refresh(brain)["changed"] == 0
+    # A structural change, such as a field's type, still rebuilds every row.
+    brain.write(
+        "bf.yaml", CONFIG.replace(b"    type: string\n  kind:", b"    type: string\n    cardinality: many\n  kind:")
+    )
+    assert index.refresh(brain)["changed"] == 4

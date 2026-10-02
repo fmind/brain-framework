@@ -453,6 +453,20 @@ def test_prompt_context_bounds_input_and_search_time(
     assert not capsys.readouterr().out
 
 
+def test_session_context_reads_a_task_link_as_its_label() -> None:
+    plain = load("session-context.py").plain
+    # Before 17 the brackets went and the target stayed: "Run the retention actionactions/...".
+    assert (
+        plain("Run the [retention action](../actions/2026-09-19_retention/ACTION.md).") == "Run the retention action."
+    )
+    assert plain("A `code` <tag> [label]") == "A code tag label"
+
+
 def test_prompt_context_mirrors_the_core_stopwords() -> None:
     # The hook drops exactly the words bf search ignores, so its eight words are the ones that can match.
-    assert load("prompt-context.py").STOP == index._STOP  # noqa: SLF001 - the core's list is the mirrored contract
+    hook = load("prompt-context.py")
+    assert hook.STOP == index._STOP  # noqa: SLF001 - the core's list is the mirrored contract
+    assert hook.OPERATORS == index._OPERATORS  # noqa: SLF001 - so are the operators acronyms exclude
+    # Like bf search, it keeps a function word written as an acronym.
+    assert hook.query("What does the EU AI Act say AND who owns IT?") == "EU AI Act say owns IT"
+    assert hook.query(" ".join(index.terms("What does the EU AI Act say AND who owns IT?"))) == "EU AI Act say owns IT"

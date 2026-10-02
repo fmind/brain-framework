@@ -64,7 +64,7 @@ GitHub history documents its scope and limits in [its guide](github-history.md#e
 - Requires Git 2.37 or later, for `git log --since-as-filter`. With an older or missing `git` on PATH, the run fails before reading any repository: `Git 2.37 or later is required`.
 - Scans repositories one or two levels below `ROOT`: select the folder holding your checkouts, such as `{{home}}/code`.
 - Reads branches, tags, remote branches and a detached `HEAD`, never stashes or notes. It includes commits with `START <= time < END`, even when commit dates are out of order.
-- Skips symlinked directories, hidden repositories, repositories named with `--skip` and bot or test authors.
+- Skips symlinked directories, hidden repositories, repositories named with `--skip` and bot or test authors. A linked worktree is skipped too: its main checkout holds the same history.
 - Skips folders it cannot list, or whose names are not UTF-8 or contain control characters, with a count on stderr. Window mode keeps records already saved.
 - Fails the run and names the repository when Git fails or times out there, such as a stale worktree, damaged objects, another owner's checkout or a stalled mount. Repair it or add `--skip RELATIVE_REPO`.
 - Links GitHub remotes as lowercase `repo:github.com/owner/name` and author emails as lowercase `person:email/` identities. Identities are case-sensitive: write note aliases the same way.

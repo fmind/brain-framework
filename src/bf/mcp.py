@@ -36,13 +36,15 @@ INSTRUCTIONS = (
 
 
 def _strict(tool: Tool, output: dict[str, object]) -> Tool:
-    """Unknown arguments fail, like unknown CLI options: a misspelled `scope` must not widen a search.
+    """Unknown or mistyped arguments fail, like CLI options: a misspelled `scope` must not widen a search, and a
+    `limit` of true or "5" is not a number.
 
-    The SDK validates arguments with the tool's generated model, which otherwise ignores extra keys. The tool
-    publishes the reply schema its structured content follows, the document `bf schema` prints.
+    The SDK validates arguments with the tool's generated model, which otherwise ignores extra keys and coerces
+    values. The tool publishes the reply schema its structured content follows, the document `bf schema` prints.
     """
     model = tool.fn_metadata.arg_model
     model.model_config["extra"] = "forbid"
+    model.model_config["strict"] = True
     model.model_rebuild(force=True)
     tool.parameters["additionalProperties"] = False
     tool.fn_metadata.output_schema = output

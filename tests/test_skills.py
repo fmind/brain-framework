@@ -181,8 +181,8 @@ def test_helpers_use_only_the_python311_standard_library() -> None:
 
 
 @pytest.mark.parametrize("skill", ENTRIES, ids=lambda path: path.parent.name)
-def test_distributed_skills_have_portable_versioned_metadata(skill: Path) -> None:
-    # bf skills records the package version beside each copy; the skill's own metadata must say the same.
+def test_distributed_skills_have_portable_metadata(skill: Path) -> None:
+    # bf skills records the package version beside each copy: a version line in the skill would change it every release.
     frontmatter = yaml.safe_load(skill.read_text(encoding="utf-8").split("---\n")[1])
     assert frontmatter["name"] == skill.parent.name
     assert re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", frontmatter["name"])
@@ -193,7 +193,7 @@ def test_distributed_skills_have_portable_versioned_metadata(skill: Path) -> Non
     assert isinstance(frontmatter["compatibility"], str)
     assert 1 <= len(frontmatter["compatibility"].strip()) <= 500
     assert set(frontmatter) <= {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
-    assert frontmatter["metadata"] == {"version": __version__}
+    assert "metadata" not in frontmatter
     assert f"Brain Framework {__version__.split('.')[0]} " in frontmatter["compatibility"]
 
 

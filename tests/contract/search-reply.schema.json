@@ -13,7 +13,7 @@
       "type": "object"
     },
     "Backlinks": {
-      "description": "Newest items linking with one relationship; `links` groups untyped links.",
+      "description": "Newest items linking with one relation; `links` groups untyped links.",
       "properties": {
         "items": {
           "items": {
@@ -115,7 +115,7 @@
       "type": "object"
     },
     "Item": {
-      "description": "A note, note section or record in a search result, listing or role page.",
+      "description": "A note, note section or record in a search result, listing or relation page.",
       "properties": {
         "also": {
           "description": "Other sources' records sharing this record's URL; bf:// addresses with several brains.",
@@ -146,7 +146,10 @@
         },
         "partial": { "const": true },
         "ref": { "description": "Read this exact ref; a section ref ends in #fragment.", "type": "string" },
-        "relation": { "description": "On a role page, the item's role when it is a child role.", "type": "string" },
+        "relation": {
+          "description": "On a relation page, the item's relation when it is a narrower relation.",
+          "type": "string"
+        },
         "relations": { "items": { "$ref": "#/$defs/Claim" }, "type": "array" },
         "relations_truncated": { "const": true },
         "review": { "const": true },

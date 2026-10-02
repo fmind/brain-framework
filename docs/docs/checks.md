@@ -127,7 +127,7 @@ A suite declares `version: 7`, the brain format, and a list of `cases`. `bf sche
 | `text`              | Answer fragments, case-insensitive, present in returned titles and excerpts or in the read reply. |
 | `empty: true`       | No returned refs; use instead of `expect` or `text`.                                              |
 
-A case uses either `query` or `read`. Whole-note refs match any of the note's sections; section and record refs match exactly. With related brains, `read` a `bf://NAME/...` address: a plain ref present in two brains fails its case. Evaluation assembles large exact reads from their text pages. Incomplete retrieval fails a case, even an `empty` one.
+A case uses either `query` or `read`. Whole-note refs match any of the note's sections; section and record refs match exactly. A plain `expect` or `forbid` ref names a file of the evaluated brain; name a related brain's note or record by its `bf://NAME/...` address. With related brains, `read` a `bf://NAME/...` address: a plain ref present in two brains fails its case. Evaluation assembles large exact reads from their text pages. Incomplete retrieval fails a case, even an `empty` one.
 
 Every suite is validated before retrieval starts: queries, scopes, read refs, `bf://` addresses and nonblank assertions. An invalid suite stops the run and names the file and field, such as `invalid evals/new-website.yaml: cases.1.scope: ...`. Fix the assertion instead of emptying it.
 

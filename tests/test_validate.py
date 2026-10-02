@@ -500,3 +500,26 @@ def test_notes_type_their_claims_in_declared_fields(brain: Store) -> None:
     assert "projects/launch.md: owner: declared fields belong under fields:, such as fields: {owner: ...}" in located(
         validate(brain)
     )
+
+
+def test_one_problem_never_hides_a_note_s_others_or_breaks_links_to_it(brain: Store) -> None:
+    brain.write("projects/beta.md", b"---\ntype: project\nupdated: 2026-9-1\n---\n# Beta\n")
+    brain.write(
+        "projects/alpha.md", b"---\ntype: project\n---\n# Alpha\n\n[Beta](bf://fixture/projects/beta.md#beta)\n"
+    )
+    brain.write(
+        "projects/gamma.md",
+        b"---\ntype: project\n---\n# Gamma\n\n[Typed](bf://fixture/projects/alpha.md?rel=nope), [gone](missing.md)\n"
+        b"and [heading](alpha.md#nowhere).\n",
+    )
+    problems = {
+        (problem["file"], problem["error"]) for problem in cast("list[dict[str, str]]", validate(brain)["problems"])
+    }
+    # Before 17 the invalid date also made alpha's link unresolved, and the undeclared relation hid gamma's links.
+    assert {file for file, _ in problems} == {"projects/beta.md", "projects/gamma.md"}
+    assert any("updated" in error for file, error in problems if file == "projects/beta.md")
+    assert {error for file, error in problems if file == "projects/gamma.md"} >= {
+        "broken link: missing.md",
+        "missing heading: alpha.md#nowhere",
+    }
+    assert any("nope" in error for file, error in problems if file == "projects/gamma.md")

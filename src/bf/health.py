@@ -10,7 +10,7 @@ from typing import cast
 from bf import index, usage
 from bf.config import ABSENT, Selection, brain_name, load, related
 from bf.history import ROUTINES, log_path, state
-from bf.models import Error, Program
+from bf.models import Config, Error, Program
 from bf.storage import Store
 
 # Counters of the last successful collection, reported apart from indexed totals.
@@ -104,27 +104,23 @@ def routine_health(store: Store, *, now: datetime | None = None) -> dict[str, di
     return result
 
 
+def _attention(
+    config: Config, sources: dict[str, dict[str, object]], routines: dict[str, dict[str, object]]
+) -> list[dict[str, object]]:
+    """Scheduled programs this machine runs that failed or have not succeeded recently: only those are late."""
+    result: list[dict[str, object]] = []
+    for kind, healths, programs in (("sensor", sources, config.sensors), ("routine", routines, config.routines)):
+        for name, health in healths.items():
+            settings, failed = programs.get(name), health.get("failed")
+            if settings and settings.enabled and settings.refresh and (failed or health["freshness"] in _LATE):
+                result.append({kind: name, "freshness": health["freshness"], **({"failed": True} if failed else {})})
+    return result
+
+
 def attention(store: Store, now: datetime | None = None) -> list[dict[str, object]]:
     """Scheduled sensors and routines this machine runs that failed or have not succeeded recently."""
     now = now or datetime.now(UTC)
-    config = load(store)
-    result: list[dict[str, object]] = []
-    for name, health in source_health(store, now=now).items():
-        settings = config.sensors.get(name)
-        if (
-            settings
-            and settings.enabled
-            and settings.refresh
-            and (health.get("failed") or health["freshness"] in _LATE)
-        ):
-            result.append(
-                {"sensor": name, "freshness": health["freshness"], **({"failed": True} if health.get("failed") else {})}
-            )
-    for name, health in routine_health(store, now=now).items():
-        settings, failed = config.routines[name], health.get("failed")
-        if settings.enabled and settings.refresh and (failed or health["freshness"] in _LATE):
-            result.append({"routine": name, "freshness": health["freshness"], **({"failed": True} if failed else {})})
-    return result
+    return _attention(load(store), source_health(store, now=now), routine_health(store, now=now))
 
 
 def report(stores: list[Store], now: datetime | None = None) -> dict[str, object]:
@@ -151,7 +147,6 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
         coverage = source_health(store, counts, now=now)
         sources: dict[str, dict[str, object]] = {}
         for name in sorted({*config.sensors, *counts}):
-            settings = config.sensors.get(name)
             run = history.get(name, {})
             # One shape shared with retrieval coverage, plus indexed totals and local run diagnostics.
             entry: dict[str, object] = {**coverage[name], **counts.get(name, {"records": 0, "bytes": 0})}
@@ -160,22 +155,18 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             if run.get("reconciled"):
                 entry["reconciled"] = run["reconciled"]
             entry.update(_failure(name, run))
-            # Like routines, only a scheduled program this machine runs fails the check: only those are late.
-            if settings is not None and settings.enabled and settings.refresh:
-                healthy &= coverage[name]["freshness"] not in _LATE and not entry.get("failed")
             sources[name] = {key: value for key, value in entry.items() if value != ""}
         routines = routine_health(store, now=now)
-        for name, entry in routines.items():
-            settings = config.routines[name]
-            if settings.enabled and settings.refresh:
-                healthy &= entry["freshness"] not in _LATE and not entry.get("failed")
+        # The reasons a brain is unhealthy, beside its problems: the home page's list of late or failed programs.
+        alerts = _attention(config, coverage, routines)
         # A busy cache still serves its last generation, marked stale in replies, while a live writer finishes.
-        healthy &= not summary["problems"] and summary["cache"] in {"ready", "busy"}
+        healthy &= not alerts and not summary["problems"] and summary["cache"] in {"ready", "busy"}
         brains.append(
             {
                 "brain": config.name,
                 "path": str(store.root),
                 **summary,
+                "attention": alerts,
                 "sources": sources,
                 **({"routines": routines} if routines else {}),
                 "coverage": {

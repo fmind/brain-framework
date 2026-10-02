@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 import re
 import stat
+from collections.abc import Callable
+from contextlib import suppress
 from datetime import date
 from functools import cache
 
 from bf import links, ontology, pages, records
 from bf.config import load
-from bf.markdown import Note, authored, broken, editor_lock, note, okf, parse, scheme, validate_okf
+from bf.markdown import Note, authored, broken, editor_lock, note, okf, parse, resolve, scheme, validate_okf
 from bf.models import AUTHORED, IDENTITY, MAX_NOTE, Config, Error, Knowledge
 from bf.storage import UNNAMED, Store, relative, unnamed
 
@@ -19,6 +21,53 @@ _ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
 LIMIT = 200
 # A warning lists at most this many spellings of one identity.
 VARIANTS = 20
+
+
+def _kinds(store: Store) -> Callable[[str], int]:
+    """The file type of an exactly named brain path; 0 when it is absent or named with another case."""
+
+    @cache
+    def entries(directory: str) -> frozenset[str]:
+        """Exact names: on a case-insensitive volume, stat would also accept a differently cased link."""
+        if not directory:
+            return frozenset(path.name for path in store.root.iterdir())
+        with store.parent(directory) as (parent, leaf):
+            descriptor = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            with os.scandir(descriptor) as found:
+                return frozenset(entry.name for entry in found)
+        finally:
+            os.close(descriptor)
+
+    def kind(name: str) -> int:
+        try:
+            parts = relative(name)
+            if any(part not in entries("/".join(parts[:i])) for i, part in enumerate(parts)):
+                return 0
+            with store.parent(name) as (parent, leaf):
+                return stat.S_IFMT(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode)
+        except Error, OSError:
+            return 0
+
+    return kind
+
+
+def broken_links(store: Store, item: Note) -> list[str]:
+    """A note's relative links that name no brain file or heading, as `validate` reports them, before it is saved.
+
+    The note may not exist yet, as a routine's action: its own path and headings answer links to itself.
+    """
+    kind = _kinds(store)
+    slugs = {item.path: item.slugs}
+    for target in item.targets:
+        if scheme(item.path, target) or target == "#":
+            continue
+        name, fragment = resolve(item.path, target)
+        if fragment and authored(name) and name not in slugs and kind(name) == stat.S_IFREG:
+            # An unreadable or invalid target is its own file's problem, not a broken link.
+            with suppress(Error, OSError, UnicodeError):
+                slugs[name] = note(name, store.read(name, MAX_NOTE)).slugs
+    return broken(item, lambda name: name == item.path or kind(name) in {stat.S_IFREG, stat.S_IFDIR}, slugs)
 
 
 def _problem(file: str, message: str) -> dict[str, str]:
@@ -151,64 +200,70 @@ def _validate(store: Store) -> dict[str, object]:
         directory: [name for name in store.files(directory, skipped=skipped) if not editor_lock(name)]
         for directory in AUTHORED
     }
+
+    def unread(name: str) -> str:
+        """Why the scan left a path out: its name, an unreadable folder, or a link or special file."""
+        if unnamed(name):
+            return UNNAMED
+        try:
+            folder = stat.S_ISDIR((store.root / name).lstat().st_mode)
+        except OSError:
+            folder = False
+        if folder:
+            return "unreadable folder; grant read and search permission or move it out of the brain"
+        return "symlinks and special files are not read; replace it with a regular file"
+
     problems.extend(
-        _problem(
-            name,
-            UNNAMED if unnamed(name) else "symlinks and special files are not read; replace it with a regular file",
-        )
+        _problem(name, unread(name))
         for name in sorted(skipped)
         if not (name.split("/")[0] in AUTHORED and editor_lock(name))
     )
     problems.extend(_actions(listed["actions"]))
     notes: list[Note] = []
+    # Notes that exist but cannot be parsed: their own problem is reported once, and links to them are not broken.
+    invalid: set[str] = set()
+    # Parsed notes whose identities or relations failed: their sections still resolve links, their names do not.
+    unnamed_notes: set[str] = set()
     # Typed note claims outside their relation's literal targets: the target's owner may declare a matching alias.
     targeted: list[tuple[str, links.Claim]] = []
     for name in (n for directory in AUTHORED for n in listed[directory] if authored(n)):
         try:
             data = store.read(name, MAX_NOTE)
             parsed_note = note(name, data)
+        except (Error, UnicodeError) as error:
+            problems.append(_problem(name, str(error)))
+            invalid.add(name)
+            continue
+        except OSError:
+            problems.append(_problem(name, "inaccessible file; check permissions"))
+            invalid.add(name)
+            continue
+        # Each later check reports on its own, so one problem never hides the note's others.
+        notes.append(parsed_note)
+        try:
             claims = ontology.note_claims(parsed_note, config, strict=True)
-            notes.append(parsed_note)
+        except Error as error:
+            problems.append(_problem(name, str(error)))
+            unnamed_notes.add(name)
+            claims = []
+        else:
             names = [*parsed_note.knowledge.names, parsed_note.knowledge.entity]
             spellings.add({*(links.target(v) for v in names if v), *(claim.target for claim in claims)})
             targeted.extend((name, claim) for claim in claims if ontology.outside(config, claim))
-            if okf(name):
+        if okf(name):
+            try:
                 validate_okf(name, data)
-                # OKF ignores unknown keys: a relation named at the top level would silently assert nothing.
-                problems.extend(
-                    _problem(name, f"{key}: declared fields belong under fields:, such as fields: {{{key}: ...}}")
-                    for key in sorted(parse(name, data).attributes)
-                    if key in config.ontology and key not in Knowledge.model_fields
-                )
-        except (Error, UnicodeError) as error:
-            problems.append(_problem(name, str(error)))
-        except OSError:
-            problems.append(_problem(name, "inaccessible file; check permissions"))
+            except Error as error:
+                problems.append(_problem(name, str(error)))
+            # OKF ignores unknown keys: a relation named at the top level would silently assert nothing.
+            problems.extend(
+                _problem(name, f"{key}: declared fields belong under fields:, such as fields: {{{key}: ...}}")
+                for key in sorted(parse(name, data).attributes)
+                if key in config.ontology and key not in Knowledge.model_fields
+            )
     slugs = {n.path: n.slugs for n in notes}
 
-    @cache
-    def entries(directory: str) -> frozenset[str]:
-        """Exact names: on a case-insensitive volume, stat would also accept a differently cased link."""
-        if not directory:
-            return frozenset(path.name for path in store.root.iterdir())
-        with store.parent(directory) as (parent, leaf):
-            descriptor = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
-        try:
-            with os.scandir(descriptor) as found:
-                return frozenset(entry.name for entry in found)
-        finally:
-            os.close(descriptor)
-
-    def kind(name: str) -> int:
-        """The file type of an exactly named brain path; 0 when it is absent or named with another case."""
-        try:
-            parts = relative(name)
-            if any(part not in entries("/".join(parts[:i])) for i, part in enumerate(parts)):
-                return 0
-            with store.parent(name) as (parent, leaf):
-                return stat.S_IFMT(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode)
-        except Error, OSError:
-            return 0
+    kind = _kinds(store)
 
     def exists(name: str) -> bool:
         return kind(name) in {stat.S_IFREG, stat.S_IFDIR}
@@ -241,10 +296,11 @@ def _validate(store: Store) -> dict[str, object]:
         return folder(path)
 
     for item in notes:
+        named = item.path not in unnamed_notes
         for alias in [
             ontology.qualify(config, item.path),
-            *item.knowledge.names,
-            *([item.knowledge.entity] if item.knowledge.entity else []),
+            *(item.knowledge.names if named else []),
+            *([item.knowledge.entity] if item.knowledge.entity and named else []),
         ]:
             owners.setdefault(links.target(alias), {})[item.path] = item.path
         problems.extend(_problem(item.path, message) for message in broken(item, exists, slugs))
@@ -292,6 +348,8 @@ def _validate(store: Store) -> dict[str, object]:
         errors = set()
         for path in owners.get(links.address(parsed.brain, parsed.path), {}) or {parsed.path}:
             source, separator, record_id = path.partition(":")
+            if path in invalid:
+                continue
             if path in slugs:
                 if parsed.fragment and parsed.fragment not in slugs[path]:
                     errors.add("missing BF section")

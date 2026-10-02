@@ -2,9 +2,7 @@
 name: bf-maintain
 description: Keep a Brain Framework brain (the bf command) healthy and connected — add or fix a sensor or field mapping, write or run a routine or Git hook, collect or backfill a source, run bf update, watch or schedule refreshes, read logs, diagnose overdue, failed or busy collection, recover interrupted writes, fix bf validate problems, update skills and resolve merge conflicts in a brain. Use when the user says "connect this source", "my brain is out of date", "collection failed", "why is this source overdue", "add a routine", "run it on pre-push", "schedule updates", "fix my brain" or "resolve the conflict".
 license: MIT
-compatibility: Requires Brain Framework 16 (the bf command) on Linux or macOS.
-metadata:
-  version: "16.1.1"
+compatibility: Requires Brain Framework 17 (the bf command) on Linux or macOS.
 ---
 
 # bf-maintain
@@ -45,7 +43,7 @@ Core commands for that work:
 
 - `bf collect SENSOR` runs one sensor now; `--since`/`--until` bound a backfill, `--dry-run` previews samples without saving, and `--allow-removal` accepts, for one run, a snapshot that would empty its catalog or remove more than half of it.
 - `bf build --reproject SENSOR` re-applies a sensor's current `fields:` mappings to its stored records without running it (`--dry-run` counts the changes); plain `bf build` recovers interrupted record writes and rebuilds the disposable `.bf/` cache.
-- `bf run ROUTINE [ARGS]...` runs one routine now and `bf run --hook EVENT` runs every enabled routine listing that hook; both pass arguments and piped input through. A Git hook calls it with `exec bf run --hook pre-push -- "$@"`.
+- `bf run ROUTINE [ARGS]...` runs one routine now and `bf run --hook EVENT` runs every enabled routine listing that hook; both pass arguments through. A hook also passes what Git pipes; a direct run passes piped input only with `--stdin`. A Git hook calls it with `exec bf run --hook pre-push -- "$@"`.
 - `bf update` runs due sensors, then due routines, then refreshes the cache; `bf watch` does so continuously in a dashboard (`--json` for rows); `bf schedule` writes native scheduler files and activates nothing.
 - `bf skills DIR --check` reports whether installed skills match this version; `bf skills DIR` updates the unedited ones.
 

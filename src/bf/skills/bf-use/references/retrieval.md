@@ -12,7 +12,7 @@ Quote refs in shell commands. A `#` inside a record ID is part of its identity; 
 
 ## Search precisely
 
-Search matches words case-, accent- and compatibility-insensitively. It ignores English and French function words when other words remain, and every distinct word after the first 32. Any word matches; a passage matching more of the query ranks higher, a section also ranks by its note's title, its heading and the note's tags, and equal scores list the newest first. A nested section's title reads `Note — Parent — Child`.
+Search matches words case-, accent- and compatibility-insensitively. It ignores English and French function words when other words remain, unless written in capitals as an acronym such as `AI` or `EU` (`AND` and `OR` still drop), and every distinct word after the first 32. Any word matches; a passage matching more of the query ranks higher, a section also ranks by its note's title, its heading and the note's tags, and equal scores list the newest first. A nested section's title reads `Note — Parent — Child`.
 
 - `"quoted phrase"` matches the words in order; `word*` matches every word starting with `word`.
 - `unmatched` lists query words, phrases or prefixes found nowhere in the selected brains, whatever the scope: respell them or search a variant.

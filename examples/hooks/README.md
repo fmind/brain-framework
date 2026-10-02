@@ -87,7 +87,7 @@ The prompt hook reads the host's event JSON from stdin. Preview it with a fictio
 printf '%s' '{"prompt":"Can you draft the product page?"}' | ~/brain/hooks/prompt-context.py ~/brain
 ```
 
-It searches at most 8 content words: the prompt's first distinct words after dropping the English and French function words that `bf search` ignores too, without quotes, prefixes or identities. For the same project, it lists the matching `projects/new-website.md#next-actions` section with its title, between the heading and reminder lines shown above. A prompt without content words, no match, a search slower than 5 seconds, `problems` or `stale` mean empty output.
+It searches at most 8 content words: the prompt's first distinct words after dropping the English and French function words that `bf search` ignores too (acronyms such as `AI` stay), without quotes, prefixes or identities. For the same project, it lists the matching `projects/new-website.md#next-actions` section with its title, between the heading and reminder lines shown above. A prompt without content words, no match, a search slower than 5 seconds, `problems` or `stale` mean empty output.
 
 ## Connect the host
 

@@ -400,8 +400,12 @@ def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now:
             due = row["stale_after"]
         item["review_source"] = "stale_after" if row["stale_after"] else "modified"
         if due:
-            # A review is due on a local day: state that date, compare its first instant.
-            item["review_due"] = datetime.fromisoformat(due).astimezone().date().isoformat()
+            # A review is due on a local day: state that date, compare its first instant. A far-future
+            # placeholder, such as 9999-12-31T23:00:00Z, can pass the last local day; it keeps its UTC date.
+            review = datetime.fromisoformat(due)
+            with suppress(OverflowError):
+                review = review.astimezone()
+            item["review_due"] = review.date().isoformat()
             if due <= stamp:
                 reasons.append("due")
         # Incoming evidence keeps its event-date semantics; copying another note is not new evidence.

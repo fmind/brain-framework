@@ -162,9 +162,12 @@ def reading(store: Store) -> Iterator[None]:
 def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) -> None:
     if not replacements:
         return
-    if len(replacements) > MAX_FILES:
+    # A commit's backups and its manifest share memories/.pending, which the scan limit bounds like any tree.
+    if len(replacements) >= MAX_FILES:
         # A failed operation, like any other collection failure: history records it and evidence stays as it was.
-        raise Error(f"one collection may change at most {MAX_FILES:,} records; narrow the window or split the source")
+        raise Error(
+            f"one collection may change at most {MAX_FILES - 1:,} records; narrow the window or split the source"
+        )
     changes = []
     for name in replacements:
         try:
@@ -173,6 +176,18 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
         except FileNotFoundError:
             existed = False
         changes.append(_Change(name=name.removeprefix(f"memories/{source}/"), existed=existed))
+    # A source past the scan limit would fail every search and read of the brain, so collection stops below it.
+    tree, entries = f"memories/{source}", {}
+    store.scan(tree, skipped={}, counts=entries)
+    grown = sum(
+        (data is not None and not change.existed) - (data is None and change.existed)
+        for change, data in zip(changes, replacements.values(), strict=True)
+    )
+    if entries.get(tree, 0) + grown > MAX_FILES:
+        raise Error(
+            f"{tree} would exceed the {MAX_FILES:,}-entry scan limit; split its sensor into several sources or "
+            "archive older records outside the brain"
+        )
     journal = _Journal(source=source, changes=changes)
     manifest = encode(journal.model_dump())
     if len(manifest) > _MANIFEST_LIMIT:
@@ -203,8 +218,8 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
         except (Error, OSError) as recovery_error:
             raise Error("record transaction needs recovery; preserve memories/.pending and retry") from recovery_error
         raise error
-    # A cleanup failure cannot turn a durable successful commit into a failed collection.
-    with suppress(OSError):
+    # A cleanup failure cannot turn a durable successful commit into a failed collection; recovery clears it later.
+    with suppress(Error, OSError):
         _clear(store)
 
 

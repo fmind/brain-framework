@@ -262,6 +262,7 @@ class Store:
                         raise Error(f"{tree} exceeds the {MAX_FILES:,}-entry scan limit; {_crowded(tree)}")
                     path = f"{prefix}/{entry.name}"
                     shown = _shown(entry.name)
+                    info = None
                     try:
                         info = entry.stat(follow_symlinks=False)
                         # An unaddressable folder is reported whole, like a linked one: its entries have no ref.
@@ -269,6 +270,14 @@ class Store:
                         child = os.open(entry.name, _DIR, dir_fd=fd) if opened else None
                     except FileNotFoundError:
                         # Removed after listing, as by an editor's atomic save; later refreshes compare again.
+                        continue
+                    except PermissionError:
+                        # An unreadable folder is reported whole too, while the rest of the brain still answers.
+                        if skipped is None:
+                            raise
+                        skipped[f"{prefix}/{shown}" if shown is not None else path] = (
+                            _fingerprint(info) if info else (0, 0, 0, 0)
+                        )
                         continue
                     if shown is not None:
                         if skipped is None:
@@ -324,7 +333,9 @@ class Store:
 
 
 def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
-    return info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino
+    # Hashed inode numbers, as mergerfs reports them, can exceed SQLite's signed 64-bit integers: wrap them.
+    inode = info.st_ino - (1 << 64) if info.st_ino >= 1 << 63 else info.st_ino
+    return info.st_size, info.st_mtime_ns, info.st_ctime_ns, inode
 
 
 def _crowded(tree: str) -> str:

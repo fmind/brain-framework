@@ -68,6 +68,10 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
         "log": log_path("folders"),
     }
     assert status["routines"]["review"] == {"state": "active", "freshness": "fresh", "last_success": at}
+    # Before 17 an unhealthy brain listed no reason: attention names the programs, as the home page does.
+    assert status["attention"] == [{"sensor": "folders", "freshness": "never", "failed": True}]
+    assert status["problems"] == []
+    assert not cast("dict", report([brain], now=now))["healthy"]
     # Every reply instant uses one canonical UTC form, so clients can compare them as strings.
     instants = re.findall(r'"(\d{4}-\d\d-\d\dT[^"]*)"', json.dumps(status))
     assert instants

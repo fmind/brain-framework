@@ -4,6 +4,48 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v17.0.0](https://github.com/fmind/brain-framework/releases/tag/v17.0.0) - 2026-10-02
+
+A review release. The brain format (`version: 7`), `bf.yaml` and the search and read reply schemas are unchanged. The command line is stricter, so input that was silently misread now fails, and failures that took down a whole brain are now contained.
+
+### Breaking changes
+
+- **Routine input.** `bf run ROUTINE` passes piped input only with `--stdin`. It used to read any open standard input and failed after 10 seconds in agent shells that hold it open. `bf run --hook EVENT` still passes what Git pipes, such as the refs of a push.
+- **Repeated options.** An option that takes one value may appear once: `bf search launch --scope projects --scope concepts`, a second `--brain`, `--rel` or `--hook` exits 2 naming it. The last value used to win, so the answer silently ignored the others. `--sensor` and `--routine` still repeat to select several programs.
+- **Routine arguments.** `bf run` rejects an unknown option before `--`, such as `--dryrun`, with exit 2. It used to pass it to the routine, which then ran for real.
+- **Read relations.** `bf read PAGE --rel RELATION` is invalid input (exit 2), as a page is recognizable before any brain is read.
+- **MCP arguments.** Tool arguments are validated strictly: a `limit` of `true` or `"5"` is an error instead of a coerced value.
+- **Retrieval cases.** A plain `expect` or `forbid` ref in `bf eval` names a file of the evaluated brain. A related brain's note at the same path used to satisfy it; name that note by its `bf://NAME/...` address.
+
+Upgrade: run `uv tool upgrade brain-framework` (or update a brain's pin), then `bf skills DIR`; the skills now require Brain Framework 17. Add `--stdin` where a script pipes input into a direct `bf run ROUTINE`, and put `--` before routine arguments that start with a dash. Re-copy the example `git-history.py`, `prompt-context.py`, `session-context.py` or `weekly-review.py` if your brain uses one. Then run `bf validate` and `bf eval`.
+
+### Added
+
+- `bf status` lists each brain's `attention`: the scheduled programs that failed or are `overdue` or `never` succeeded, as the home page does. A brain reported `"healthy": false` with `"problems": []` and left the reason to a scan of every source and routine.
+
+### Fixed
+
+- Search keeps a function word written as an acronym. `EU AI Act` searched only `act`, and `AI`, `IT` or `US` dropped from any query, because they spell French or English function words. Lowercase function words and the habitual `AND` and `OR` still drop. The example `prompt-context.py` hook mirrors the rule.
+- Searching a note's title finds the note before a section that mentions it: a section's note title and parents rank below a heading. `Atlas next actions` still finds that section.
+- One unreadable folder, such as a source restored with another owner, no longer fails every search, status, validation and build of the brain: it is skipped and reported, and `bf validate` names it as an unreadable folder.
+- Collection stops below the 100,000-entry scan limit of its source and fails like any other collection, so a growing window source can no longer make every search and read of the brain fail. A commit changing exactly as many records as the limit no longer leaves a pending transaction behind.
+- An action routine's relative links and headings are checked before writing, like its metadata and relations: an action that `bf validate` rejects, such as one linking `projects/x.md` instead of `../../projects/x.md`, is never written.
+- `bf validate` reports every problem of a note, and links to a note it cannot parse are no longer reported as unresolved: one invalid date or undeclared relation hid the note's other problems and broke the links of other notes.
+- A far-future `stale_after`, such as `9999-12-31T23:00:00Z`, no longer crashes the home and projects pages in timezones east of UTC.
+- `bf mcp` stops at once on SIGTERM or Ctrl-C with exit 130, instead of waiting for another input line.
+- Reading a note alias named like a source, such as `jira:ATL` beside a `jira` source, no longer fails on another malformed record of that source or while a writer holds the brain.
+- Filesystems reporting 64-bit hashed inode numbers, such as mergerfs, no longer fail every cache refresh with a traceback.
+- A query starting with `bf:`, such as `bf: how to configure sensors`, searches its words instead of failing as an invalid address.
+- The example `git-history.py` skips linked worktrees, which collected their repository's whole history again; records already collected stay. The example routine and session hook read a task's Markdown link as its label.
+- The meeting-notes recipe has the agent draft GitHub issues for review instead of creating them from calendar text that anyone who invites you can write.
+
+### Changed
+
+- Packaged skills no longer carry `metadata.version`, so a release changes a skill's files only when its content changes; `.bf-skill.json` still records the installing version.
+- Adding `broader` or `targets` to a relation no longer rebuilds the search cache: relation pages read `broader` at query time, and collection and validation check `targets`.
+- The schedule preview suggests `--output ~/.config/bf-schedules`, outside the brain, like the documentation: the generated files hold this machine's paths.
+- The documentation states exact reads across brains as they behave: while a brain is unavailable, a found ref returns with a `problems` entry and a missing one fails as incomplete.
+
 ## [v16.1.1](https://github.com/fmind/brain-framework/releases/tag/v16.1.1) - 2026-09-29
 
 A patch release from a review of 16.1.0: no format or reply change. Upgrade with `uv tool upgrade brain-framework`, then `bf skills DIR` to update unedited skills.

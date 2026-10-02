@@ -69,11 +69,30 @@ def test_snapshot_replaces_the_complete_catalog(brain: Store) -> None:
 
 
 def test_an_oversized_change_fails_like_other_collection_errors(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A first backfill beyond the journal's bound is a failed operation naming the fix, never invalid input.
-    monkeypatch.setattr(records, "MAX_FILES", 2)
+    # A first backfill beyond the journal's bound is a failed operation naming the fix, never invalid input. The
+    # bound leaves room for the manifest beside one backup per change in the scanned memories/.pending.
+    monkeypatch.setattr(records, "MAX_FILES", 3)
     with pytest.raises(Error, match="at most 2 records; narrow the window or split the source"):
         records.upsert(brain, "catalog", [Record(id=str(n), title=f"Item {n}") for n in range(3)], snapshot=True)
     assert not (brain.root / "memories/catalog").exists()
+
+
+def test_collection_stops_below_the_scan_limit_of_its_source(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(records, "MAX_FILES", 4)
+    records.upsert(brain, "catalog", [Record(id=str(n), title=f"Item {n}") for n in range(3)], snapshot=False)
+    # Before 17 a window kept adding past the limit, and every search and read of the brain then failed.
+    with pytest.raises(Error, match="memories/catalog would exceed the 4-entry scan limit; split its sensor"):
+        records.upsert(brain, "catalog", [Record(id=str(n), title=f"Item {n}") for n in range(3, 5)], snapshot=False)
+    assert len(list((brain.root / "memories/catalog").iterdir())) == 3
+    # Replacing records in place, or adding up to the limit, still commits.
+    assert records.upsert(
+        brain, "catalog", [Record(id="0", title="Changed"), Record(id="3", title="Item 3")], snapshot=False
+    ) == {
+        "added": 1,
+        "updated": 1,
+        "unchanged": 0,
+        "removed": 0,
+    }
 
 
 def test_collection_parses_only_the_files_it_replaces_or_removes(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:

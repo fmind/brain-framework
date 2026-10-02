@@ -160,6 +160,9 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
     subprocess.run(["git", "-C", str(hidden), "init", "-q"], env=env, check=True, capture_output=True, timeout=30)  # noqa: S603,S607
     window = (str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     assert len(provider.records("git-history.py", *window)) == 1
+    # Before 17 a linked worktree collected its repository's history again under its own folder name.
+    run("worktree", "add", "-q", "-b", "feature", str(root / "owner" / "project-feature"))
+    assert [record.id.partition("@")[0] for record in provider.records("git-history.py", *window)] == ["owner/project"]
     assert provider.records("git-history.py", *window, "--skip", "owner/project") == []
     assert provider.run("git-history.py", *window, "--bad").returncode == 1
 

@@ -105,6 +105,9 @@ _STOP = frozenset(
     quelle quelles quels qui quoi s sa se ses si son sont sur t te tes toi ton tu un une vos votre vous y à été être
     """.split()  # noqa: SIM905 - one readable word list, grouped by language
 )
+# Written in capitals, a function word is an acronym and stays a term (EU AI Act, IT budget); AND and OR are
+# habitual operators, which plain words already imply.
+_OPERATORS = frozenset({"AND", "OR"})
 _IDENTITY = re.compile(IDENTITY)
 # A quoted phrase, or a word with an optional trailing `*` for a prefix; other characters only separate terms.
 _TERM = re.compile(r'["“”]([^"“”]*)["“”]|([^\W_]+)(\*?)')
@@ -116,6 +119,9 @@ ALSO = 5
 SECTIONS = 3
 # A passage matching all of a query's several terms gains this fraction of its score; one matching a single term, none.
 COVERAGE = 0.2
+# The weight of a passage's context (a section's note title and parents, a note's tags) against a heading's 10: a
+# section mentioning its note's title still ranks below the note, while "Atlas next actions" finds that section.
+CONTEXT = 3.0
 # Result and listing titles are previews of at most this many characters; exact reads keep the whole title.
 TITLE = 200
 # A listed field value longer than this stays in the exact read: listings show short facts only.
@@ -241,9 +247,12 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 
 def _signature(store: Store) -> str:
-    """The configuration a generation's rows depend on; documentation, such as a field's description, is not."""
+    """The configuration a generation's rows depend on. Documentation, such as a field's description, is not, nor
+    are `broader`, which relation pages read at query time, and `targets`, which collection and validation check."""
     config = load(store)
-    schema = {n: f.model_dump(exclude={"description", "examples"}) for n, f in config.ontology.items()}
+    schema = {
+        n: f.model_dump(exclude={"description", "examples", "broader", "targets"}) for n, f in config.ontology.items()
+    }
     return digest(encode({"name": config.name, "fields": schema}))
 
 
@@ -662,7 +671,7 @@ def _fill(store: Store, connection: sqlite3.Connection, *, new: bool) -> dict[st
                 error = str(problem) or "invalid file"
             except OSError:
                 connection.execute("ROLLBACK TO file")
-                error = "inaccessible file; check permissions"
+                error = "inaccessible file or folder; check permissions"
             connection.execute("RELEASE file")
             connection.execute("INSERT INTO files VALUES(?,?,?,?,?,?)", (path, *current[path], error))
         for statement in _INDEXES if new else ():
@@ -762,15 +771,19 @@ def database(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
 def terms(text: str) -> list[str]:
     """Distinct query terms in the indexed form: words, `word*` prefixes and phrases as space-separated words.
 
-    Function words drop unless they are the whole query; a phrase keeps its own. FTS5 folds case itself.
-    Python's casefold would turn ß into ss, a spelling the index never holds.
+    Function words drop unless they are the whole query or written as an acronym; a phrase keeps its own. FTS5
+    folds case itself. Python's casefold would turn ß into ss, a spelling the index never holds.
     """
     found: dict[str, str] = {}
+    acronyms: set[str] = set()
     for match in _TERM.finditer(fold(text)):
         term = match[2] + match[3] if match[2] else " ".join(re.findall(r"[^\W_]+", match[1]))
         if term:
             found.setdefault(term.lower(), term)
-    return ([term for key, term in found.items() if key not in _STOP] or list(found.values()))[:WORDS]
+        if match[2] and len(match[2]) > 1 and match[2].isupper() and match[2] not in _OPERATORS:
+            acronyms.add(match[2].lower())
+    kept = [term for key, term in found.items() if key not in _STOP or key in acronyms]
+    return (kept or list(found.values()))[:WORDS]
 
 
 def identity(text: str) -> bool:
@@ -868,10 +881,10 @@ def _lexical(connection: sqlite3.Connection, params: dict[str, object]) -> Itera
     Every match is ranked on narrow rows; only the returned items read their display fields. Each row
     names its best passage: snippets cost far more than ranking, so only a reply's items get an excerpt.
 
-    `context` ranks like a heading: a note's tags, and a section's note title and enclosing headings (see _index).
-    "Atlas" and "Next actions" outrank another note's "Next actions" that merely mentions Atlas in its text. A
-    section matching through its context alone repeats its parent, which answers instead. Equal scores list the
-    newest item first, then by ref.
+    `context` ranks below a heading but above body text: a note's tags, and a section's note title and enclosing
+    headings (see _index). "Atlas" and "Next actions" outrank another note's "Next actions" that merely mentions
+    Atlas in its text, while "Atlas" alone finds the note before a section mentioning it. A section matching through
+    its context alone repeats its parent, which answers instead. Equal scores list the newest item first, then by ref.
 
     One window keeps each note's best passage and, for each URL, the records of its best-ranked record's source,
     before the window is cut: a record has one passage and a note no URL, and an item number never equals a URL
@@ -885,7 +898,7 @@ def _lexical(connection: sqlite3.Connection, params: dict[str, object]) -> Itera
              FROM json_each(:terms) t CROSS JOIN search s ON s.search MATCH t.value GROUP BY s.rowid),
            matches AS MATERIALIZED (
              SELECT p.item,p.id AS passage,p.fragment,i.ref,i.url,i.source,i.status='deprecated' AS closed,
-                    ({TIME}) AS time,-bm25(search,10.0,1.0,0.5,10.0)*i.weight
+                    ({TIME}) AS time,-bm25(search,10.0,1.0,0.5,{CONTEXT})*i.weight
                     *(CASE WHEN i.source IN (SELECT value FROM json_each(:low)) THEN 0.5 ELSE 1.0 END)
                     *(1+{COVERAGE}*(coalesce(h.n,1)-1)/max(json_array_length(:terms)-1,1)) AS score
              FROM search JOIN passages p ON p.id=search.rowid JOIN items i ON i.id=p.item
@@ -1017,7 +1030,8 @@ def search(
     their owner `_rank`.
     """
     text = query.text.strip()
-    if bf_links.tag(text) is not None:
+    # Only an identity-shaped query can be a tag address: "bf: how to configure sensors" stays words.
+    if identity(text) and bf_links.tag(text) is not None:
         text = bf_links.identity(text)
     params: dict[str, object] = {
         **query.model_dump(),

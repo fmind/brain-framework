@@ -40,7 +40,7 @@ Helpers are standalone Python 3.11+ scripts using only the standard library, run
 
 ## Structure and maintenance
 
-Each folder holds a short `SKILL.md` router (when to use the skill, its core loop, its boundaries and one line per reference or helper) plus `references/`, `scripts/` and `templates/` loaded only when a task needs them. `metadata.version` equals the package version, and `compatibility` names the Brain Framework major version the procedures assume. Links to the documentation site describe the current release; `bf --version` and `bf COMMAND --help` are authoritative for an installation.
+Each folder holds a short `SKILL.md` router (when to use the skill, its core loop, its boundaries and one line per reference or helper) plus `references/`, `scripts/` and `templates/` loaded only when a task needs them. `compatibility` names the Brain Framework major version the procedures assume; the installed `.bf-skill.json` records the exact version, so a release changes a skill's files only when its content changes. Links to the documentation site describe the current release; `bf --version` and `bf COMMAND --help` are authoritative for an installation.
 
 To adapt a skill, edit the installed copy: `bf skills` then reports it as `modified` and never overwrites it. To return to the packaged version, rerun `bf skills DIR --force` after keeping the edits you need. Brain-specific procedures belong in the brain itself, for example under its own `skills/` folder, rather than in these copies.
 
