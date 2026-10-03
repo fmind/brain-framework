@@ -78,14 +78,10 @@ def test_prepared_knowledge_transfer_works_without_the_source_brain(tmp_path: Pa
     assert not load(store).brains
 
 
-def test_example_graph_export_and_broader_role_match_the_readme(tmp_path: Path) -> None:
+def test_example_broader_relation_page_matches_the_readme(tmp_path: Path) -> None:
+    # The README's export lines follow its walkthrough, answer included: tests/test_example_walkthroughs.py runs it.
     brain = tmp_path / "example"
     shutil.copytree(Path(__file__).parents[1] / "examples/brain", brain)
-    readme = (Path(__file__).parents[1] / "examples/brain/README.md").read_text()
-    documented = readme.split("The first three lines are:\n\n```text\n", 1)[1].split("```", 1)[0].splitlines()
-    result = CliRunner().invoke(app, ["export", "--brain", str(brain)])
-    assert result.exit_code == 0, result.output
-    assert result.stdout.splitlines()[:3] == documented
     policy = "bf://example/concepts/archive-policy.md"
     reply = CliRunner().invoke(app, ["read", policy, "--rel", "related-to", "--brain", str(brain)])
     items = json.loads(reply.stdout)["items"]

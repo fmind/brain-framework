@@ -12,7 +12,7 @@ from pathlib import Path
 
 from pydantic import Field, ValidationError, field_validator
 
-from bf.models import NAME, Error, Model, decode, encode, timestamp
+from bf.models import NAME, Error, Model, decode, encode, explain, timestamp
 from bf.storage import Store, state_store
 
 SENSORS = "sensors.json"
@@ -98,7 +98,12 @@ def state(store: Store, file: str = SENSORS) -> dict[str, dict[str, object]]:
 def remember(store: Store, name: str, file: str = SENSORS, /, **values: object) -> None:
     """Update local history while the caller holds the brain writer lock."""
     current = state(store, file)
-    current[name] = {**current.get(name, {}), **values}
+    try:
+        entry = _Run.model_validate({**current.get(name, {}), **values})
+    except ValidationError as error:
+        # Fail the write: the next read would silently drop the program's whole history instead.
+        raise Error(f"{name}: invalid run history: {explain(error)}") from error
+    current[name] = entry.model_dump(exclude_unset=True)
     state_store(store.root).write(file, encode(current))
 
 

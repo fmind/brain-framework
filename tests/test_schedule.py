@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import shlex
 import sys
@@ -78,24 +79,39 @@ def test_invalid_selection_is_rejected_before_any_execution(scheduled: Store) ->
         update(scheduled, wait=0.1)
 
 
-def test_schedules_for_other_selections_queue_instead_of_failing(scheduled: Store) -> None:
+def test_schedules_for_other_selections_queue_instead_of_failing(
+    scheduled: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Named schedules fire at the same minutes; a second cycle waits for the first, then runs its own due list.
-    entered, release = Event(), Event()
+    entered, release, queued = Event(), Event(), Event()
+    released: list[bool] = []
+    lock = collecting
+
+    def asking(*args: Any, **kwargs: Any) -> Any:
+        if entered.is_set():
+            queued.set()
+        return lock(*args, **kwargs)
 
     def slow(_argv: list[str], program: Program, *_: object) -> bytes:
         if program.refresh == 3600:
             entered.set()
             assert release.wait(5)
+        else:
+            released.append(release.is_set())
         return b"[]"
 
+    monkeypatch.setattr("bf.update.collecting", asking)
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(update, scheduled, sensors=("mail",), runner=slow)
         assert entered.wait(5)
         second = executor.submit(update, scheduled, sensors=("git",), runner=slow)
+        # Once the second cycle asks for the brain, an unserialized one would reach its program well within this.
+        assert queued.wait(5)
         time.sleep(0.3)
-        assert not second.done()
         release.set()
         reports: list[Any] = [first.result(timeout=10), second.result(timeout=10)]
+    # The second cycle ran its program only after the first one finished.
+    assert released == [True]
     assert [report["ok"] for report in reports] == [True, True]
     assert [report["sensors"][0]["status"] for report in reports] == ["collected", "collected"]
 
@@ -150,8 +166,15 @@ def test_systemd_quotes_arguments_and_captures_only_safe_environment(
     assert "TimeoutStopSec=60s" in service
     assert "Persistent=true" in timer
     assert result["written"] == []
-    # The install commands copy files a preview did not write: say so before anyone runs them.
-    assert any(warning.startswith("Preview only: no file was written") for warning in result["warnings"])
+    # The install commands copy files a preview did not write: say so before anyone runs them, and copy them from
+    # where the rerun writes them, outside the brain, since they hold this machine's paths.
+    suggested = Path.home() / ".config/bf-schedules"
+    preview = (
+        "Preview only: no file was written; rerun with --output ~/.config/bf-schedules before the install commands."
+    )
+    assert preview in result["warnings"]
+    units = str(Path.home() / ".config/systemd/user")
+    assert result["install"][1] == ["cp", "-i", *(str(suggested / name) for name in files), units]
     assert result["remove"][0][:4] == ["systemctl", "--user", "disable", "--now"]
 
 
@@ -168,6 +191,12 @@ def test_launchd_preserves_literal_arguments_and_calendar_catchup(scheduled: Sto
     assert "RunAtLoad" not in plist
     assert plist["ExitTimeOut"] == 60
     assert result["install"][-1][0:2] == ["launchctl", "bootstrap"]
+    (filename,) = result["files"]
+    copied = str(Path.home() / ".config/bf-schedules" / filename)
+    assert result["install"][1:3] == [
+        ["plutil", "-lint", copied],
+        ["cp", "-i", copied, str(Path.home() / "Library/LaunchAgents" / filename)],
+    ]
 
 
 def test_cron_keeps_existing_crontab_and_escapes_percent(scheduled: Store, tmp_path: Path) -> None:
@@ -211,6 +240,34 @@ def test_relative_output_resolves_against_the_brain(
     assert not (tmp_path / "settings").exists()
     outside: dict = generate(scheduled, backend="cron", executable=Path(sys.executable), output=Path("../jobs"))
     assert Path(outside["written"][0]).parent == scheduled.root.parent / "jobs"
+
+
+def test_a_check_interval_reaching_a_refresh_warns(scheduled: Store) -> None:
+    def warned(**kwargs: Any) -> list[str]:
+        result: dict = generate(scheduled, backend="cron", executable=Path(sys.executable), **kwargs)
+        return [warning for warning in result["warnings"] if "refreshes every" in warning]
+
+    # Every program is selected by default; git has the shortest refresh: a 15-minute check runs it late.
+    late = (
+        "git refreshes every 300s, but the timer checks every 15 minutes: it will run late and status can report it "
+        "overdue. Choose an --every shorter than the shortest refresh."
+    )
+    assert warned() == [late]
+    # Equal intervals skip about every other check: scheduler jitter lands it just before the program is due.
+    assert warned(every=5)
+    assert not warned(every=4)
+    assert not warned(sensors=("mail",))
+    assert warned(sensors=("mail",), every=60)
+
+
+def test_an_output_folder_holding_the_state_directory_is_not_a_brain(scheduled: Store) -> None:
+    # The default state directory lies below home: before, --output ~ failed as if home were a brain holding it.
+    result: dict = generate(scheduled, backend="cron", executable=Path(sys.executable), output=Path("~"))
+    assert [Path(path).parent for path in result["written"]] == [Path.home()]
+    # Generation took the brain's own lock: no lock follows the output folder.
+    locks = Path(os.environ["XDG_STATE_HOME"]) / "bf/locks"
+    assert not (locks / f"{Store(Path.home()).identity}.lock").exists()
+    assert (locks / f"{scheduled.identity}.lock").exists()
 
 
 @pytest.mark.parametrize(

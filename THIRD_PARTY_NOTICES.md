@@ -214,15 +214,15 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## cryptography 50.0.1
+## cryptography 50.0.2
 
 Source: <https://github.com/pyca/cryptography/>
 
 License: `Apache-2.0 OR BSD-3-Clause`
 
-Evidence: `cryptography-50.0.1.dist-info/licenses/LICENSE`
+Evidence: `cryptography-50.0.2.dist-info/licenses/LICENSE`
 
-### cryptography-50.0.1.dist-info/licenses/LICENSE
+### cryptography-50.0.2.dist-info/licenses/LICENSE
 
 ```text
 This software is made available under the terms of *either* of the licenses
@@ -230,9 +230,9 @@ found in LICENSE.APACHE or LICENSE.BSD. Contributions to cryptography are made
 under the terms of *both* these licenses.
 ```
 
-Evidence: `cryptography-50.0.1.dist-info/licenses/LICENSE.APACHE`
+Evidence: `cryptography-50.0.2.dist-info/licenses/LICENSE.APACHE`
 
-### cryptography-50.0.1.dist-info/licenses/LICENSE.APACHE
+### cryptography-50.0.2.dist-info/licenses/LICENSE.APACHE
 
 ```text
                                  Apache License
@@ -438,9 +438,9 @@ Evidence: `cryptography-50.0.1.dist-info/licenses/LICENSE.APACHE`
    limitations under the License.
 ```
 
-Evidence: `cryptography-50.0.1.dist-info/licenses/LICENSE.BSD`
+Evidence: `cryptography-50.0.2.dist-info/licenses/LICENSE.BSD`
 
-### cryptography-50.0.1.dist-info/licenses/LICENSE.BSD
+### cryptography-50.0.2.dist-info/licenses/LICENSE.BSD
 
 ```text
 Copyright (c) Individual contributors.

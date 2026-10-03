@@ -36,6 +36,81 @@ _HEALTH: dict[str, object] = {
     "failed": {"const": True},
 }
 
+# An item's fields; a whole note read and a section read repeat some of them about the note.
+_ITEM: dict[str, object] = {
+    "ref": {
+        "type": "string",
+        "description": "Read this exact ref as written: a section ref ends in #fragment, and a record id may "
+        "itself contain #.",
+    },
+    "kind": {"enum": ["note", "record"]},
+    "title": _STRING,
+    "time": {**_INSTANT, "description": "A record's event time; notes state `date` instead."},
+    "date": {**_DATE, "description": "A note's `updated` date as written."},
+    "type": {"type": "string", "description": "A note's OKF type, such as project; records omit it."},
+    "status": {
+        "type": "string",
+        "description": "OKF notes use draft, stable or deprecated; other Markdown keeps its own word.",
+    },
+    "source": {"type": "string", "description": "A record's source."},
+    "excerpt": {"type": "string", "description": "A one-line preview; read the ref for exact text."},
+    "fields": _FACTS,
+    "url": {"type": "string", "description": "A record's source URL."},
+    "updated": {
+        **_INSTANT,
+        "description": "When the provider last modified the record (`attributes.updated`); period `changed` lists "
+        "and review signals use it.",
+    },
+    "observed": {**_INSTANT, "description": "When BF first collected this revision of the record."},
+    "partial": {
+        "const": True,
+        "description": "The record's text is deliberately incomplete, such as an excerpt the sensor kept; never quote "
+        "it as the whole source.",
+    },
+    "tasks": {"$ref": "#/$defs/Tasks"},
+    "next": {"type": "string", "description": "The note's first open task."},
+    "modified": _INSTANT,
+    "review": {"const": True},
+    "review_due": {**_DATE, "description": "The local day a review falls due."},
+    "review_source": {"enum": ["stale_after", "modified"]},
+    "review_reasons": {
+        "type": "array",
+        "items": {"enum": ["due", "newer_evidence", "future_modified", "unknown_modified"]},
+    },
+    "new_links": {
+        **_COUNT,
+        "description": "Items linking to the note, and records it links to, that happened or changed upstream "
+        "between its last edit and now.",
+    },
+    "newer": {
+        **_REFS,
+        "maxItems": 5,
+        "description": "Up to five of those items, newest first, to read before relying on the note; bf:// addresses "
+        "with several brains.",
+    },
+    "also": {
+        **_REFS,
+        "maxItems": 5,
+        "description": "Other sources' records sharing this record's URL; bf:// addresses with several brains.",
+    },
+    "sections": {
+        **_REFS,
+        "maxItems": 3,
+        "description": "Other matching sections of this note, best first; bf:// addresses with several brains.",
+    },
+    "relations": {"type": "array", "items": {"$ref": "#/$defs/Claim"}},
+    "relations_truncated": {"const": True},
+    "relation": {
+        "type": "string",
+        "description": "On a relation page, the item's relation when it is a narrower relation.",
+    },
+    "brain": {"type": "string", "description": "Present when several brains are selected."},
+    "uri": {
+        "type": "string",
+        "description": "Portable bf:// address; present when several brains are selected.",
+    },
+}
+
 _DEFS: dict[str, object] = {
     "Problem": {
         "type": "object",
@@ -69,57 +144,7 @@ _DEFS: dict[str, object] = {
         "type": "object",
         "description": "A note, note section or record in a search result, listing or relation page.",
         "required": ["ref", "kind"],
-        "properties": {
-            "ref": {"type": "string", "description": "Read this exact ref; a section ref ends in #fragment."},
-            "kind": {"enum": ["note", "record"]},
-            "title": _STRING,
-            "time": {**_INSTANT, "description": "A record's event time; notes state `date` instead."},
-            "date": {**_DATE, "description": "A note's `updated` date as written."},
-            "type": {"type": "string", "description": "A note's OKF type, such as project; records omit it."},
-            "status": {
-                "type": "string",
-                "description": "OKF notes use draft, stable or deprecated; other Markdown keeps its own word.",
-            },
-            "source": {"type": "string", "description": "A record's source."},
-            "excerpt": {"type": "string", "description": "A one-line preview; read the ref for exact text."},
-            "fields": _FACTS,
-            "url": _STRING,
-            "updated": _INSTANT,
-            "observed": _INSTANT,
-            "partial": {"const": True},
-            "tasks": {"$ref": "#/$defs/Tasks"},
-            "next": {"type": "string", "description": "The note's first open task."},
-            "modified": _INSTANT,
-            "review": {"const": True},
-            "review_due": {**_DATE, "description": "The local day a review falls due."},
-            "review_source": {"enum": ["stale_after", "modified"]},
-            "review_reasons": {
-                "type": "array",
-                "items": {"enum": ["due", "newer_evidence", "future_modified", "unknown_modified"]},
-            },
-            "new_links": _COUNT,
-            "also": {
-                **_REFS,
-                "maxItems": 5,
-                "description": "Other sources' records sharing this record's URL; bf:// addresses with several brains.",
-            },
-            "sections": {
-                **_REFS,
-                "maxItems": 3,
-                "description": "Other matching sections of this note, best first; bf:// addresses with several brains.",
-            },
-            "relations": {"type": "array", "items": {"$ref": "#/$defs/Claim"}},
-            "relations_truncated": {"const": True},
-            "relation": {
-                "type": "string",
-                "description": "On a relation page, the item's relation when it is a narrower relation.",
-            },
-            "brain": {"type": "string", "description": "Present when several brains are selected."},
-            "uri": {
-                "type": "string",
-                "description": "Portable bf:// address; present when several brains are selected.",
-            },
-        },
+        "properties": _ITEM,
         "additionalProperties": False,
     },
     "Coverage": {
@@ -211,8 +236,24 @@ _EXACT = {
     "outline": {"type": "array", "items": {"$ref": "#/$defs/OutlineEntry"}},
     "outline_truncated": {"const": True},
     "backlinks": {"type": "array", "items": {"$ref": "#/$defs/Backlinks"}},
-    "claims": {"type": "array", "items": {"$ref": "#/$defs/Claim"}},
+    "claims": {
+        "type": "array",
+        "items": {"$ref": "#/$defs/Claim"},
+        "description": "Typed claims the subject makes (declared relations, cites, tagged-with), up to 20 per relation "
+        "and 50 in all. Untyped links stay in the text, in each target's `links` backlinks and in bf export.",
+    },
     "claims_truncated": {"const": True},
+}
+# A section read names its note from the file; a whole read of a note that gets reminders adds its listing signals.
+_NOTE = {
+    "title": {"type": "string", "description": "On a section read, the title of the note holding the section."},
+    **{
+        key: _ITEM[key]
+        for key in (
+            *("type", "status", "date"),
+            *("tasks", "next", "review", "review_due", "review_source", "review_reasons", "new_links", "newer"),
+        )
+    },
 }
 
 
@@ -258,7 +299,16 @@ READ: dict[str, object] = {
             ["page", "projects", "actions", "changed", "activity", "upcoming", "attention", "pages"],
             {
                 "page": {"const": ""},
-                "projects": _ITEMS,
+                "projects": {
+                    **_ITEMS,
+                    "description": "Projects that are not deprecated, those needing review first, as many as "
+                    "fit the page.",
+                },
+                "projects_total": {
+                    **_COUNT,
+                    "description": "Every project that is not deprecated; when `projects` lists fewer, read the "
+                    "projects page for the rest.",
+                },
                 "actions": _ITEMS,
                 "changed": _ITEMS,
                 "activity": {"type": "array", "items": {"$ref": "#/$defs/Activity"}},
@@ -387,6 +437,7 @@ READ: dict[str, object] = {
                 "text": {"type": "string", "description": "Markdown; a slice of it while next_offset is present."},
                 "files": {**_REFS, "description": "An action's other files."},
                 "projects": {**_ITEMS, "description": "Projects an ACTION.md links to."},
+                **_NOTE,
             },
         ),
         _shape(

@@ -30,13 +30,13 @@ The exact read returns the saved reason:
 
 ## Follow the work from evidence to outcome
 
-| Step                 | In the website example                                        |
-| -------------------- | ------------------------------------------------------------- |
-| Gather               | A small sensor reads a selected brief.                        |
-| Normalize            | BF maps its fields and saves a record with a stable ref.      |
-| Organize and connect | The project links its decision to that record.                |
-| Act                  | You review the page and record the result in an action.       |
-| Learn                | You update the project and keep a useful lesson as a concept. |
+| Step                 | In the website example                                                                             |
+| -------------------- | -------------------------------------------------------------------------------------------------- |
+| Gather               | A small sensor reads a selected brief.                                                             |
+| Normalize            | BF maps its fields and saves a record with a stable ref.                                           |
+| Organize and connect | The project links its decision to that record.                                                     |
+| Act                  | You review the page and record the result in an action.                                            |
+| Learn                | When the brief changes, BF flags the project; you update it and keep a useful lesson as a concept. |
 
 Start with notes; add sources and routines as the work needs them. The [four-tool walkthrough](context-hub.md) runs the whole loop on fictional Workspace, Jira, GitHub and Gcloud evidence.
 

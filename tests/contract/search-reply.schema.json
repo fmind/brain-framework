@@ -137,15 +137,31 @@
           "format": "date-time",
           "type": "string"
         },
-        "new_links": { "minimum": 0, "type": "integer" },
+        "new_links": {
+          "description": "Items linking to the note, and records it links to, that happened or changed upstream between its last edit and now.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "newer": {
+          "description": "Up to five of those items, newest first, to read before relying on the note; bf:// addresses with several brains.",
+          "items": { "type": "string" },
+          "maxItems": 5,
+          "type": "array"
+        },
         "next": { "description": "The note's first open task.", "type": "string" },
         "observed": {
-          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "description": "When BF first collected this revision of the record.",
           "format": "date-time",
           "type": "string"
         },
-        "partial": { "const": true },
-        "ref": { "description": "Read this exact ref; a section ref ends in #fragment.", "type": "string" },
+        "partial": {
+          "const": true,
+          "description": "The record's text is deliberately incomplete, such as an excerpt the sensor kept; never quote it as the whole source."
+        },
+        "ref": {
+          "description": "Read this exact ref as written: a section ref ends in #fragment, and a record id may itself contain #.",
+          "type": "string"
+        },
         "relation": {
           "description": "On a relation page, the item's relation when it is a narrower relation.",
           "type": "string"
@@ -179,12 +195,12 @@
         "title": { "type": "string" },
         "type": { "description": "A note's OKF type, such as project; records omit it.", "type": "string" },
         "updated": {
-          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "description": "When the provider last modified the record (`attributes.updated`); period `changed` lists and review signals use it.",
           "format": "date-time",
           "type": "string"
         },
         "uri": { "description": "Portable bf:// address; present when several brains are selected.", "type": "string" },
-        "url": { "type": "string" }
+        "url": { "description": "A record's source URL.", "type": "string" }
       },
       "required": ["ref", "kind"],
       "type": "object"

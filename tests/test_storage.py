@@ -6,6 +6,7 @@ import errno
 import fcntl
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -19,12 +20,27 @@ from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from bf import config, storage
 from bf.config import load, one, register, related, select, user_config, user_path, yaml_object
 from bf.markdown import note
-from bf.models import Config, Error, Knowledge, Query, Record, Sensor, UserConfig, decode, digest, moment, timestamp
+from bf.models import (
+    RECORD_KEYS,
+    Config,
+    Error,
+    Knowledge,
+    Query,
+    Record,
+    Registration,
+    Sensor,
+    UserConfig,
+    decode,
+    digest,
+    explain,
+    moment,
+    timestamp,
+)
 from bf.retrieve import search
 from bf.storage import BusyError, Store, collecting, generation, lock_file, reader, relative, state_store, writer
 from bf.watch_settings import settings
@@ -84,6 +100,65 @@ def test_no_follow_reads_writes_and_traversal(tmp_path: Path) -> None:
     assert store.files("missing") == []
     with pytest.raises(Error, match="expected a regular file"):
         store.fingerprint("concepts/dir.md")
+
+
+def test_sockets_are_named_like_other_special_files(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A relative name keeps the socket path within the AF_UNIX limit, as short as 104 bytes on macOS.
+    monkeypatch.chdir(brain.root / "concepts")
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind("talk.md")
+        # Opening a socket fails before the type check: ENXIO on Linux, EOPNOTSUPP on macOS.
+        with pytest.raises(Error, match=r"^concepts/talk\.md: expected a regular file$"):
+            brain.read("concepts/talk.md")
+        skipped: dict[str, tuple[int, int, int, int]] = {}
+        assert brain.files("concepts", skipped=skipped) == ["concepts/evidence.md"]
+        assert list(skipped) == ["concepts/talk.md"]
+        problems = search([brain], Query(text="durable"))["problems"]
+        assert problems == [{"brain": "fixture", "file": "concepts/talk.md", "error": "expected a regular file"}]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+@pytest.mark.parametrize(("mode", "unreadable"), [(0, "memories"), (0o600, "memories/meetings")])
+def test_an_unreadable_scanned_folder_is_skipped_whole(brain: Store, mode: int, unreadable: str) -> None:
+    # Without read permission the scan cannot open memories/; without search permission, it cannot reach a source.
+    (brain.root / "memories").chmod(mode)
+    try:
+        skipped: dict[str, tuple[int, int, int, int]] = {}
+        assert brain.scan("memories/meetings", skipped=skipped) == {}
+        assert list(skipped) == [unreadable]
+        with pytest.raises(PermissionError):
+            brain.scan("memories/meetings")
+    finally:
+        (brain.root / "memories").chmod(0o700)
+
+
+def test_a_scan_without_fingerprints_lists_the_same_entries(brain: Store, tmp_path: Path) -> None:
+    brain.write("memories/meetings/nested/item.json", b"{}")
+    (brain.root / "memories/meetings/a\\b.json").write_bytes(b"{}")
+    (brain.root / "memories/meetings/link.json").symlink_to(tmp_path)
+    os.mkfifo(brain.root / "memories/meetings/pipe.json")
+    skipped, passed, counts, listed_counts = {}, {}, {}, {}
+    found = brain.scan("memories", skipped=skipped, split=True, counts=counts)
+    listed = brain.scan("memories", skipped=passed, split=True, counts=listed_counts, fingerprints=False)
+    # Counting a source before a commit, or listing its record names, once cost one stat per record.
+    assert (listed.keys(), passed.keys(), listed_counts) == (found.keys(), skipped.keys(), counts)
+    assert set(listed.values()) == {(0, 0, 0, 0)}
+    assert len(skipped) == 3
+    # Links and special files still fail a scan that does not report them.
+    (brain.root / "memories/meetings/a\\b.json").unlink()
+    with pytest.raises(Error, match=r"(link|pipe)\.json: symlinks and special files are forbidden"):
+        brain.scan("memories/meetings", fingerprints=False)
+
+
+def test_explanations_name_the_first_reasons_and_count_the_rest() -> None:
+    with pytest.raises(ValidationError) as invalid:
+        TypeAdapter(list[Record]).validate_python([{"id": str(n), "title": ""} for n in range(1000)])
+    # One invalid item per printed record once built a message larger than the output it described.
+    reasons = [f"{n}.title: String should have at least 1 character" for n in range(5)]
+    assert explain(invalid.value) == "; ".join([*reasons, "and 995 more"])
+    with pytest.raises(ValidationError) as redacted:
+        Record.model_validate({"id": "x", "title": "T", "private-a": 1, "private-b": 2})
+    assert explain(redacted.value, RECORD_KEYS) == "<key>: Extra inputs are not permitted"
 
 
 def test_missing_brain_is_named(tmp_path: Path) -> None:
@@ -457,9 +532,20 @@ def test_json_and_yaml_reject_ambiguity() -> None:
         with pytest.raises(Error):
             decode(bad)
     assert decode('{"text":"\u2028 日本"}') == {"text": "\u2028 日本"}
-    for bad in [b"a: 1\na: 2\n", b"a: &x 1\nb: *x\n", b"- 1\n", b"[" * 40 + b"]" * 40, b"\xff"]:
+    for bad in [b"a: 1\na: 2\n", b"a: &x 1\nb: *x\n", b"- 1\n", b"\xff"]:
         with pytest.raises(Error):
             yaml_object(bad)
+    # A mapping holds at most 31 nested lists, or 19,991 scalars in one list: each limit, not the shape, rejects more.
+    for depth, count, valid in ((31, 1, True), (32, 1, False), (1, 19_991, True), (1, 19_992, False)):
+        data = b"a: " + b"[" * depth + b",".join([b"1"] * count) + b"]" * depth
+        if valid:
+            assert yaml_object(data)
+        else:
+            with pytest.raises(Error, match=r"^YAML structure exceeds its limit$"):
+                yaml_object(data)
+    # The same limits protect the frontmatter of notes from shared brains.
+    with pytest.raises(Error, match=r"^concepts/deep\.md: YAML structure exceeds its limit$"):
+        note("concepts/deep.md", b"---\na: " + b"[" * 32 + b"]" * 32 + b"\n---\n# Deep\n")
     assert yaml_object(b"") == {}
     # Syntax errors name the file and the position, never the content.
     with pytest.raises(Error, match=r"^suite.yaml: invalid YAML at line 2, column 4$"):
@@ -491,9 +577,12 @@ def test_yaml_follows_the_1_2_core_schema(brain: Store) -> None:
 
 
 def test_yaml_scalar_conversion_errors_are_safe_file_diagnostics() -> None:
-    with pytest.raises(Error, match=r"^note.md: invalid YAML") as failure:
-        yaml_object(b"private-field: " + b"9" * 5000, "note.md")
-    assert "private-field" not in str(failure.value)
+    # Hex and octal integers keep the digit limit of decimal ones: replies and the cache print them in decimal.
+    for value in (b"9" * 5000, b"0x" + b"f" * 3600, b"0o" + b"7" * 4800):
+        with pytest.raises(Error, match=r"^note\.md: invalid YAML at line 2, column 16$") as failure:
+            yaml_object(b"ok: 1\nprivate-field: " + value, "note.md")
+        assert "private-field" not in str(failure.value)
+    assert yaml_object(b"n: 0x" + b"f" * 3500) == {"n": int("f" * 3500, 16)}
 
 
 def test_registry_fifo_fails_without_waiting_for_a_writer(tmp_path: Path) -> None:
@@ -620,7 +709,7 @@ def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.chdir(tmp_path)
     user_path().write_text(f"brains:\n  fixture:\n    path: {brain.root}\n  gone:\n    path: {tmp_path / 'gone'}\n")
     assert [s.root for s in select()] == [brain.root]
-    with pytest.raises(Error, match="does not exist"):
+    with pytest.raises(Error, match=r"^gone: registered brain directory is absent on this machine; restore it"):
         select("gone")
     user_path().write_text("brains:\n  bad:\n    path: 1\n")
     with pytest.raises(Error, match="invalid"):
@@ -628,6 +717,83 @@ def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.Mo
     user_path().write_text("brains: [oops\n")
     with pytest.raises(Error, match=f"^{user_path()}: invalid YAML at line 2"):
         user_config()
+
+
+def test_registering_a_moved_brain_replaces_its_absent_entry(brain: Store, tmp_path: Path) -> None:
+    moved = tmp_path / "moved"
+    brain.root.rename(moved)
+    with pytest.raises(Error, match=r"^fixture: registered brain directory is absent on this machine"):
+        one("fixture")
+    # Registration once refused, advising to rename one of two brains while only one existed: a rename breaks addresses.
+    reply = register(Store(moved))
+    assert reply == {"brain": "fixture", "path": str(moved), "config": str(user_path()), "replaced": str(brain.root)}
+    assert one("fixture").root == moved
+    assert "replaced" not in register(Store(moved))
+    # An entry reaching the same physical brain through another path moves too.
+    alias = tmp_path / "alias"
+    alias.symlink_to(moved, target_is_directory=True)
+    user_path().write_text(f"brains:\n  fixture:\n    path: {alias}\n")
+    assert register(Store(moved))["replaced"] == str(alias)
+    assert user_config().brains["fixture"].path == str(moved)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+def test_registering_keeps_an_entry_whose_directory_cannot_be_reached(brain: Store, tmp_path: Path) -> None:
+    # A locked folder or a disconnected mount may still hold the registered brain: only a missing path frees its name.
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    brain.root.rename(locked / "brain")
+    user_path().write_text(f"brains:\n  fixture:\n    path: {locked / 'brain'}\n")
+    clone, other = tmp_path / "clone", tmp_path / "other"
+    for root, name in ((clone, "fixture"), (other, "other")):
+        root.mkdir()
+        Store(root).write("bf.yaml", f"version: 7\nname: {name}\n".encode())
+    locked.chmod(0)
+    try:
+        with pytest.raises(
+            Error,
+            match=rf"^cannot reach the brain registered as fixture at {re.escape(str(locked / 'brain'))}; restore "
+            rf"access to it, or remove that entry from {re.escape(str(user_path()))}$",
+        ):
+            register(Store(clone))
+        # Another name still registers: the unreachable entry blocks only its own.
+        assert "replaced" not in register(Store(other))
+    finally:
+        locked.chmod(0o700)
+    assert {name: entry.path for name, entry in user_config().brains.items()} == {
+        "fixture": str(locked / "brain"),
+        "other": str(other),
+    }
+
+
+def test_registration_conflicts_name_the_entry_to_change(brain: Store, tmp_path: Path) -> None:
+    registry = re.escape(str(user_path()))
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    Store(clone).write("bf.yaml", b"version: 7\nname: fixture\n")
+    # Two present brains claim one name: the owner chooses which entry to keep.
+    with pytest.raises(
+        Error,
+        match=rf"^another brain is already registered as fixture at {re.escape(str(brain.root))}; remove that entry "
+        rf"from {registry}, or rename one of the brains in its bf\.yaml$",
+    ):
+        register(Store(clone))
+    brain.write("bf.yaml", b"version: 7\nname: renamed\n")
+    with pytest.raises(
+        Error, match=rf"^this brain is already registered as fixture; remove that entry from {registry}, then run"
+    ):
+        register(brain)
+    assert user_config().brains == {"fixture": Registration(path=str(brain.root))}
+
+
+def test_an_emptied_registry_still_registers(brain: Store) -> None:
+    # Deleting the last entry, as the configuration guide suggests, leaves `brains:` null.
+    user_path().write_text("# Machine-local brains\nbrains:\n")
+    assert user_config().brains == {}
+    with pytest.raises(Error, match="no brain selected"):
+        select()
+    register(brain)
+    assert user_path().read_text().startswith("# Machine-local brains\nbrains:\n  fixture:\n")
 
 
 def test_registration_keeps_the_owner_header(brain: Store) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -53,18 +54,19 @@ def test_github_main_commits_respect_half_open_window(provider: Provider) -> Non
     assert provider.records("github-history.py", "example/project", "commits", START, END, "--branch", "release")
 
 
+def pull(number: int, state: str, merged: str | None) -> dict[str, Any]:
+    """A PR as the repository issues endpoint lists it, with its merge time."""
+    url = f"https://api.github.com/repos/example/project/pulls/{number}"
+    return {**ISSUE, "number": number, "state": state, "pull_request": {"url": url, "merged_at": merged}}
+
+
 def test_github_old_closed_issues_and_merged_pulls_are_separate(provider: Provider) -> None:
-    pull = {**ISSUE, "number": 2, "pull_request": {"url": "https://api.github.com/repos/example/project/pulls/2"}}
     for kind, expected in (("issues", "closed"), ("pulls", "merged")):
         provider.install(
             "gh",
             [
                 {"match": ["page=1"], "stdout": response([ISSUE], more=True)},
-                {"match": ["page=2"], "stdout": response([pull])},
-                {
-                    "match": ["pulls/2"],
-                    "stdout": "HTTP/2.0 200 OK\n\n" + json.dumps({**ISSUE, "number": 2, "merged_at": START}),
-                },
+                {"match": ["page=2"], "stdout": response([pull(2, "closed", START)])},
             ],
         )
         [record] = provider.records("github-history.py", "example/project", kind, START, END)
@@ -72,14 +74,16 @@ def test_github_old_closed_issues_and_merged_pulls_are_separate(provider: Provid
         assert record.time.startswith("2015-01-01")
         assert record.updated.startswith("2026-09-01")
         assert "inspect the evidence" in record.text
-        assert len(provider.calls("gh")) == (3 if kind == "pulls" else 2)
+        # The listing states the merge time: no request per PR.
+        assert len(provider.calls("gh")) == 2
         assert {"state=all", "sort=updated", "direction=asc"} <= set(provider.calls("gh")[0])
 
 
 def test_github_bad_pages_and_duplicate_ids_emit_no_partial_records(provider: Provider) -> None:
     for bad in (
         {"code": 1, "stderr": "private upstream response"},
-        {"stdout": response([ISSUE])},
+        # Listed again with another modification time: it changed during the run.
+        {"stdout": response([{**ISSUE, "updated_at": "2026-09-01T00:00:01Z"}])},
         {"stdout": "HTTP/2.0 200 OK\n\n{}"},
         {"stdout": response([], more=True)},
         {"stdout": "HTTP/2.0 200 OK\nLink: broken\n\n[]"},
@@ -178,54 +182,101 @@ def test_github_failure_preserves_collected_evidence(
     assert "original decision" in result.output
 
 
-def test_github_pull_detail_failure_does_not_publish_the_listing(provider: Provider) -> None:
-    pull = {**ISSUE, "pull_request": {"url": "https://api.github.com/repos/example/project/pulls/1"}}
-    for detail in (
-        {},
-        {**ISSUE, "merged_at": None, "number": 99},
-        {**ISSUE, "merged_at": None, "updated_at": "2010-01-01T00:00:00Z"},
-    ):
-        provider.install(
-            "gh",
-            [
-                {"match": ["issues"], "stdout": response([pull])},
-                {"match": ["pulls/1"], "stdout": "HTTP/2.0 200 OK\n\n" + json.dumps(detail)},
-            ],
-        )
-        result = provider.run("github-history.py", "example/project", "pulls", START, END)
-        assert result.returncode == 1
-        assert result.stdout == ""
-
-
-@pytest.mark.parametrize("modified", [END, "2026-09-03T00:00:00Z"])
-def test_github_pull_modified_after_listing_is_left_to_the_next_window(provider: Provider, modified: str) -> None:
-    # PR 1 changed between the listing and its detail request: its latest modification is at or after END.
-    pulls = [
-        {
-            **ISSUE,
-            "number": number,
-            "pull_request": {"url": f"https://api.github.com/repos/example/project/pulls/{number}"},
-        }
-        for number in (1, 2)
+def test_github_pull_state_comes_from_the_listing(provider: Provider) -> None:
+    pulls = [pull(1, "closed", START), pull(2, "closed", None), pull(3, "open", None), ISSUE]
+    provider.install("gh", [{"match": ["issues"], "stdout": response(pulls)}])
+    records = provider.records("github-history.py", "example/project", "pulls", START, END)
+    assert [(record.id, record.attributes["state"]) for record in records] == [
+        ("example/project/pulls/1", "merged"),
+        ("example/project/pulls/2", "closed"),
+        ("example/project/pulls/3", "open"),
     ]
-    provider.install(
-        "gh",
-        [
-            {"match": ["issues"], "stdout": response(pulls)},
-            {
-                "match": ["pulls/1"],
-                "stdout": "HTTP/2.0 200 OK\n\n" + json.dumps({**ISSUE, "merged_at": None, "updated_at": modified}),
-            },
-            {
-                "match": ["pulls/2"],
-                "stdout": "HTTP/2.0 200 OK\n\n" + json.dumps({**ISSUE, "number": 2, "merged_at": START}),
-            },
-        ],
-    )
-    [record] = provider.records("github-history.py", "example/project", "pulls", START, END)
-    assert (record.id, record.attributes["state"]) == ("example/project/pulls/2", "merged")
-    # Each selected PR costs one detail request after the listing page.
-    assert len(provider.calls("gh")) == 3
+    assert records[0].attributes["merged"] == START
+    assert len(provider.calls("gh")) == 1
+    # Without its merge time, a merged PR would be saved as closed: the run fails instead.
+    unmerged = {
+        **pull(4, "closed", None),
+        "pull_request": {"url": "https://api.github.com/repos/example/project/pulls/4"},
+    }
+    provider.install("gh", [{"match": ["issues"], "stdout": response([unmerged])}])
+    result = provider.run("github-history.py", "example/project", "pulls", START, END)
+    assert (result.returncode, result.stdout) == (1, "")
+    assert "without its merge time" in result.stderr
+
+
+# A stateful issue listing: `since` is inclusive and pages hold 100 objects in modification order. Changes
+# scheduled for a call apply before it is answered, as an edit between two requests would.
+LISTING = """
+import json, sys
+from datetime import datetime
+from pathlib import Path
+
+state = Path(__file__).with_name("gh.json")
+data = json.loads(state.read_text())
+fields = dict(argument.split("=", 1) for argument in sys.argv[1:] if "=" in argument)
+data["calls"].append(fields)
+for change in data["changes"].pop(str(len(data["calls"])), []):
+    next(issue for issue in data["issues"] if issue["number"] == change["number"]).update(change)
+state.write_text(json.dumps(data))
+since, number = datetime.fromisoformat(fields["since"]), int(fields["page"])
+listed = sorted(
+    (issue for issue in data["issues"] if datetime.fromisoformat(issue["updated_at"]) >= since),
+    key=lambda issue: (datetime.fromisoformat(issue["updated_at"]), issue["number"]),
+)
+more = len(listed) > number * 100
+link = f'\\nLink: <https://api.github.com/repos/example/project/issues?page={number + 1}>; rel="next"' if more else ""
+sys.stdout.write(f"HTTP/2.0 200 OK{link}\\n\\n" + json.dumps(listed[(number - 1) * 100 : number * 100]))
+"""
+
+
+def listing(provider: Provider, issues: list[dict[str, Any]], changes: dict[str, list[dict[str, Any]]]) -> Path:
+    """Install the stateful listing as `gh`; the returned state file records each call's fields."""
+    executable = provider.bin / "gh"
+    executable.write_text(f"#!{sys.executable}" + LISTING)
+    executable.chmod(0o700)
+    state = provider.bin / "gh.json"
+    state.write_text(json.dumps({"issues": issues, "changes": changes, "calls": []}))
+    return state
+
+
+def minute(day: int, offset: int) -> str:
+    return f"2026-09-{day:02}T{offset // 60:02}:{offset % 60:02}:00Z"
+
+
+def test_github_issue_pages_survive_a_change_during_the_run(provider: Provider) -> None:
+    # A backfill window of 150 issues, one modified per minute, and 120 modified after the window.
+    issues = [{**ISSUE, "number": n, "updated_at": minute(1, n)} for n in range(1, 151)]
+    issues += [{**ISSUE, "number": n, "updated_at": minute(3, n)} for n in range(151, 271)]
+    # After the first page, issue 1 changes and moves to the end of the order. Page 2 by number would start one
+    # object later, so issue 101, shifted onto the page already read, went missing while the run succeeded.
+    state = listing(provider, issues, {"2": [{"number": 1, "updated_at": "2026-09-05T00:00:00Z"}]})
+    records = provider.records("github-history.py", "example/project", "issues", START, END)
+    assert sorted(int(record.id.rpartition("/")[2]) for record in records) == list(range(1, 151))
+    calls = json.loads(state.read_text())["calls"]
+    # The second request restarts after issue 100's modification time instead.
+    assert [(call["since"], call["page"]) for call in calls] == [
+        ("2026-08-31T23:59:59+00:00", "1"),
+        ("2026-09-01T01:39:59+00:00", "1"),
+    ]
+    # In a window reaching the present, the edited issue comes back after END on the last page: it belongs to a
+    # later window, and keyset pages hid nothing, so the run succeeds instead of reporting a repeated identity.
+    listing(provider, issues[:150], {"2": [{"number": 1, "updated_at": "2026-09-05T00:00:00Z"}]})
+    records = provider.records("github-history.py", "example/project", "issues", START, END)
+    assert sorted(int(record.id.rpartition("/")[2]) for record in records) == list(range(1, 151))
+
+
+def test_github_pages_through_a_busy_second_by_number(provider: Provider) -> None:
+    # 130 issues share one modification second, as after a bulk label change: no restart can pass it.
+    issues = [{**ISSUE, "number": n, "updated_at": "2026-09-01T10:00:00Z"} for n in range(1, 131)]
+    issues.append({**ISSUE, "number": 131, "updated_at": "2026-09-01T11:00:00Z"})
+    state = listing(provider, issues, {})
+    records = provider.records("github-history.py", "example/project", "issues", START, END)
+    assert len({record.id for record in records}) == 131
+    calls = json.loads(state.read_text())["calls"]
+    assert [(call["since"], call["page"]) for call in calls] == [
+        ("2026-08-31T23:59:59+00:00", "1"),
+        ("2026-08-31T23:59:59+00:00", "2"),
+    ]
 
 
 def test_github_empty_collection_and_invalid_scope(provider: Provider) -> None:

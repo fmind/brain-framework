@@ -35,7 +35,9 @@ exec bf run --hook pre-commit
 
 `bf run --hook pre-commit` runs every enabled routine listing that hook, in name order. On a valid brain, Git shows `{"dry_run":false,"hook":"pre-commit","ok":true,"routines":[{"routine":"validate","status":"ran"}]}` and commits. When a note links to a missing file, the routine reports `"status":"failed"`, `bf run` exits 1 and Git refuses the commit. The validation reply, naming the file to repair, is in `logs/validate.log`. The [routine examples](https://github.com/fmind/brain-framework/tree/main/examples/routines#validate-before-each-commit) run this walkthrough in a disposable Git repository.
 
-A hook that no routine lists runs nothing and succeeds, so the Git hook can exist before its routines. `bf validate` checks the working tree, including unstaged edits. For `pre-push`, write `exec bf run --hook pre-push "$@"`: Git's arguments and the ref lines it pipes reach each routine.
+A hook that no routine lists runs nothing, reads no input and succeeds, so the Git hook can exist before its routines. `bf validate` checks the working tree, including unstaged edits. For `pre-push`, write `exec bf run --hook pre-push -- "$@"`: Git's arguments and the ref lines it pipes reach each routine.
+
+The hook, like a routine's nested `bf` call, runs the first `bf` on `PATH`. In a brain that [pins its runtime](upgrades.md#pin-a-brains-runtime), write `exec uv run --locked bf run --hook pre-commit`: `uv` also puts the pinned `bf` first on its routines' `PATH`.
 
 ## Prepare a weekly review
 
@@ -65,20 +67,22 @@ bf validate
 
 When projects need review, tasks are open or items are dated in the last seven days, the reply names the new `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, with a random 8-character suffix. The action lists open-task counts, up to ten open tasks with their sections, and recent activity by source. Empty output creates nothing. With `refresh: 604800`, `bf update` and `bf watch` also run it weekly.
 
-An action routine writes at most one action per day in a brain: a second run that day reports `"status":"skipped"` and keeps the existing action, even one another clone wrote. BF validates the Markdown's OKF metadata, declared relations and relative links, including headings, before writing; invalid or excessive output, or a failure, creates nothing. `bf validate` also checks its `bf://` targets and cited records. Preview without writing with `bf run weekly-review --dry-run`: the reply includes the Markdown as `text`.
+An action routine writes at most one action per day in a brain: a second run that day reports `"status":"skipped"` and keeps the existing action, even one another clone wrote. Only a folder holding an `ACTION.md` counts as today's action, not one left with a killed write's temporary file or an editor's lock. BF validates the Markdown's OKF metadata, declared relations and relative links, including headings, before writing; invalid or excessive output, or a failure, creates nothing. `bf validate` also checks its `bf://` targets and cited records.
+
+Preview with `bf run weekly-review --dry-run`: it runs the routine but writes no action. The reply holds the Markdown as `text` and names no action folder, since the real run draws its own suffix; when today's action exists, it reports `"status":"skipped"` as the real run would.
 
 ## Routine settings
 
-| Setting     | Default  | Meaning                                                                                |
-| ----------- | -------- | -------------------------------------------------------------------------------------- |
-| `command`   | required | A program on PATH or in `routines/`, then up to 127 arguments.                         |
-| `output`    | `log`    | `log` keeps stdout in `logs/NAME.log`; `action` writes nonempty Markdown as an action. |
-| `hooks`     | `[]`     | Up to 16 events, such as `pre-commit`, that `bf run --hook EVENT` runs.                |
-| `enabled`   | `true`   | A disabled routine never runs.                                                         |
-| `refresh`   | `0`      | Seconds between due runs, up to 365 days; zero leaves it out of updates.               |
-| `lookback`  | `86400`  | Seconds covered by the first run.                                                      |
-| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                                           |
-| `max_bytes` | 1 MiB    | Maximum stdout; configurable up to 4 MiB.                                              |
+| Setting     | Default  | Meaning                                                                                                               |
+| ----------- | -------- | --------------------------------------------------------------------------------------------------------------------- |
+| `command`   | required | A program on PATH or in `routines/`, then up to 127 arguments.                                                        |
+| `output`    | `log`    | `log` keeps stdout in `logs/NAME.log`; `action` writes nonempty Markdown as an action.                                |
+| `hooks`     | `[]`     | Up to 16 events, such as `pre-commit`, that `bf run --hook EVENT` runs.                                               |
+| `enabled`   | `true`   | A disabled routine never runs: `bf run` names it and runs nothing.                                                    |
+| `refresh`   | `0`      | Seconds between due runs, up to 365 days; zero leaves it out of updates.                                              |
+| `lookback`  | `86400`  | Seconds covered by the first run.                                                                                     |
+| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                                                                          |
+| `max_bytes` | 1 MiB    | Maximum stdout of an `action` routine, up to 4 MiB; a `log` routine's log keeps the last 256 KiB of each run instead. |
 
 Names start with a lowercase letter and use lowercase letters and digits joined by single hyphens; sensor and routine names must differ. Arguments support `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. `start` is the end of the last reviewed window, or `lookback` before the first run; `end` is now.
 
@@ -90,17 +94,17 @@ Names start with a lowercase letter and use lowercase letters and digits joined 
 echo "release notes" | bf run summarize --stdin -- --verbose
 ```
 
-Without `--stdin`, a direct run passes no input, so a shell that holds its standard input open, as some agent hosts do, never delays it. `bf run --hook EVENT` always passes what Git pipes, such as the refs of a push.
+Without `--stdin`, a direct run passes no input, so a shell that holds its standard input open, as some agent hosts do, never delays it. `bf run --hook EVENT` passes what Git pipes, such as the refs of a push, to the routines listing the hook, and reads nothing when none does.
 
 The reply lists each routine with its `status`: `ran`, `skipped` or `failed` with an `error` naming its log. One failure never stops the other routines of a hook. `--dry-run` runs the routines but writes no action and records no run; logs still grow. `bf run` acts on one brain, like `bf update`.
 
 ## Logs
 
-Each sensor and routine appends to `logs/NAME.log` in the brain, newest entry last, and keeps the latest 1 MiB. An entry starts with a `== TIME OUTCOME ==` line, followed by a log routine's stdout and any stderr. Status and errors name these brain-relative paths. `bf init` ignores `/logs/` in Git, and search never reads logs. Logs can hold provider output: keep them private and never paste them into a public issue.
+Each sensor and routine appends to `logs/NAME.log` in the brain, newest entry last, and keeps the latest 1 MiB. An entry starts with a `== TIME OUTCOME ==` line, followed by the last 256 KiB of a log routine's stdout and of any stderr. Status and errors name these brain-relative paths. `bf init` ignores `/logs/` in Git, and search never reads logs. Logs can hold provider output: keep them private and never paste them into a public issue.
 
 ## Write a routine
 
-Read the brain with `bf read` and `bf search` using literal arguments. Programs receive `BF_BRAIN` set to the brain running them, so a nested `bf` call reads that brain whatever your shell selected. Keep routines offline and deterministic; do not edit notes or call a model. Name collected evidence by ref so a reviewer chooses what to open.
+Read the brain with `bf read` and `bf search` using literal arguments. Programs receive `BF_BRAIN` set to the brain running them, so a nested `bf` call reads that brain whatever your shell selected. Keep routines offline and deterministic; do not edit notes or call a model. Name each item by the `uri` it returns, or by its `ref` when it has none, so a reviewer chooses what to open; a link from a dated action would count as [newer evidence](brain.md#review-reminders) for its target.
 
 An `output: action` routine prints one complete OKF note with a nonempty `type`, such as:
 

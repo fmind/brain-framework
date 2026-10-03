@@ -2,10 +2,10 @@
 
 Standalone scripts that agent hosts run on their own events. Copy one into a brain (for example `hooks/`), review it, and register it in your host; Brain Framework neither bundles nor installs hooks. For the agent procedures themselves, install the skills with `bf skills DIR` (see the [skills guide](../../src/bf/skills/README.md)).
 
-| Hook                 | Event            | Arguments | Output                                                                                                                                                                                                 |
-| -------------------- | ---------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `session-context.py` | Session start    | `[BRAIN]` | For the working directory's GitHub repository: its owning project, status, review deadline, next task, linked evidence by relation, the newest linking notes and collection that is overdue or failed. |
-| `prompt-context.py`  | Prompt submitted | `[BRAIN]` | Titles and refs of up to three notes matching the prompt's content words, and how many collected records also matched. Opt-in: it runs one search per prompt.                                          |
+| Hook                 | Event            | Arguments | Output                                                                                                                                                                                                             |
+| -------------------- | ---------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session-context.py` | Session start    | `[BRAIN]` | For the working directory's GitHub repository: its owning project, status, review reasons and deadline, next task, linked evidence by relation, the newest linking notes and collection that is overdue or failed. |
+| `prompt-context.py`  | Prompt submitted | `[BRAIN]` | Titles and refs of the notes among the three best matches for the prompt's content words, and how many of them are collected records. Opt-in: it runs one search per prompt.                                       |
 
 ## Try it locally
 
@@ -61,7 +61,7 @@ In the brain's project frontmatter, name the repository it belongs to, with its 
 aliases: [repo:github.com/example/new-website]
 ```
 
-Run the copied hook from that repository with Python 3.11 or later as `python3` and `bf` 16 on PATH:
+Run the copied hook from that repository with Python 3.11 or later as `python3` and the `bf` release matching this checkout on PATH:
 
 ```bash
 ~/brain/hooks/session-context.py ~/brain
@@ -87,7 +87,7 @@ The prompt hook reads the host's event JSON from stdin. Preview it with a fictio
 printf '%s' '{"prompt":"Can you draft the product page?"}' | ~/brain/hooks/prompt-context.py ~/brain
 ```
 
-It searches at most 8 content words: the prompt's first distinct words after dropping the English and French function words that `bf search` ignores too (acronyms such as `AI` stay), without quotes, prefixes or identities. For the same project, it lists the matching `projects/new-website.md#next-actions` section with its title, between the heading and reminder lines shown above. A prompt without content words, no match, a search slower than 5 seconds, `problems` or `stale` mean empty output.
+It searches at most 8 content words: the prompt's first distinct words after dropping the English and French function words that `bf search` ignores too (acronyms such as `AI` stay), without quotes, prefixes or identities. For the same project, it lists the matching `projects/new-website.md#next-actions` section with its title, between the heading and reminder lines shown above. Collected records among the three best matches are only counted, as in `- 2 collected records also matched.`; `2+` means that further results may hold more. A prompt without content words, no match, a search slower than 5 seconds, `problems` or `stale` mean empty output.
 
 ## Connect the host
 
@@ -137,4 +137,4 @@ For an existing action, the `bf-use` skill's [handoff guide](../../src/bf/skills
 - Python 3.11+ standard library only, `#!/usr/bin/env python3`, executable bit set, no shell.
 - Read-only and offline: `git remote get-url origin`, `bf read` and `bf search` with literal argv, bounded time and output. The prompt hook passes plain words after `--`, so a prompt never becomes an option or search syntax.
 - Never block a session or a prompt: any failure, malformed event, incomplete reply (`problems` or `stale`, including the project and home pages) or unknown repository prints nothing and exits 0. The session hook's repository read, project pages and home page share one 20-second budget, with at most 100 project pages; an invalid continuation also prints nothing. Project metadata matches by both brain and ref, so identical filenames in different brains never share context. The prompt hook reads at most 4 MiB of event JSON and allows its one search 5 seconds.
-- A few hundred bytes of context: authored-note titles and refs only, in code spans no backtick can close; with several brains, the prompt hook prints each note's `bf://` address. Collected records are counted, never quoted: when a record owns the repository, the session hook says so without printing its ref. Excerpts and field values are never printed. The agent reads refs explicitly when it needs them.
+- A few hundred bytes of context: authored-note titles and refs only, in code spans no backtick can close; with several brains, both hooks print each note's `bf://` address, and the session hook always names an owning note outside `projects/` by its address. The session hook suggests reads that work whichever brains are selected: the owning project by the `uri` or ref its listing returns, any other owner by the repository identity. Collected records are counted, never quoted: when a record owns the repository, the session hook says so without printing its ref. Excerpts and field values are never printed. The agent reads refs explicitly when it needs them.

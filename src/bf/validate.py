@@ -14,7 +14,7 @@ from bf import links, ontology, pages, records
 from bf.config import load
 from bf.markdown import Note, authored, broken, editor_lock, note, okf, parse, resolve, scheme, validate_okf
 from bf.models import AUTHORED, IDENTITY, MAX_NOTE, Config, Error, Knowledge
-from bf.storage import UNNAMED, Store, relative, unnamed
+from bf.storage import UNNAMED, Store, relative, temporary, unnamed
 
 _ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
 # A reply lists at most this many problems, warnings and unresolved targets; a `*_truncated` flag marks the rest.
@@ -44,8 +44,7 @@ def _kinds(store: Store) -> Callable[[str], int]:
             parts = relative(name)
             if any(part not in entries("/".join(parts[:i])) for i, part in enumerate(parts)):
                 return 0
-            with store.parent(name) as (parent, leaf):
-                return stat.S_IFMT(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode)
+            return stat.S_IFMT(store.mode(name))
         except Error, OSError:
             return 0
 
@@ -125,24 +124,47 @@ class _Spellings:
         ]
 
 
+def _script(argument: str) -> bool:
+    """Whether a later command argument names a brain path in sensors/ or routines/, such as sensors/brief.py.
+
+    Normalized and without placeholders, like the program itself; whitespace marks a shell command line instead.
+    """
+    parts = argument.split("/")
+    return (
+        parts[0] in {"sensors", "routines"}
+        and len(parts) > 1
+        and not any(part in {"", ".", ".."} for part in parts)
+        and not re.search(r"[{}\\\s]", argument)
+    )
+
+
 def _programs(store: Store, config: Config) -> list[dict[str, str]]:
-    """Each enabled program the brain holds is a regular, executable file; commands on PATH vary by machine."""
+    """Each enabled program the brain holds exists; commands on PATH vary by machine.
+
+    A script run directly is an executable regular file. Behind a command on PATH, such as an interpreter, only the
+    first brain path among the arguments is checked: a script or a folder, such as a `uv run --project` project. Later
+    ones may name files the program creates.
+    """
     problems = []
     for kind, programs in (("sensors", config.sensors), ("routines", config.routines)):
         for name, program in sorted(programs.items()):
-            executable = program.command[0]
-            if not program.enabled or not executable.startswith(("sensors/", "routines/")):
+            # Program.command already requires a normalized path when the brain's own script runs directly.
+            direct = program.command[0].startswith(("sensors/", "routines/"))
+            path = program.command[0] if direct else next(filter(_script, program.command[1:]), "")
+            if not program.enabled or not path:
                 continue
             try:
-                with store.parent(executable) as (parent, leaf):
-                    mode = os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode
-                usable = stat.S_ISREG(mode) and mode & stat.S_IXUSR
+                mode = store.mode(path)
+                usable = (
+                    stat.S_ISREG(mode) and bool(mode & stat.S_IXUSR)
+                    if direct
+                    else stat.S_ISREG(mode) or stat.S_ISDIR(mode)
+                )
             except Error, OSError:
                 usable = False
             if not usable:
-                problems.append(
-                    _problem("bf.yaml", f"{kind}.{name}.command: {executable} is not an executable regular file")
-                )
+                required = "an executable regular file" if direct else "a regular file or folder"
+                problems.append(_problem("bf.yaml", f"{kind}.{name}.command: {path} is not {required}"))
     return problems
 
 
@@ -172,33 +194,55 @@ def _validate(store: Store) -> dict[str, object]:
         if not name.startswith("memories/.pending/")
         and (records.stored(name) or not name.rsplit("/", 1)[1].startswith("."))
     ]
+    # The record files of each source whose links hold text that is no identity: it is stored and searchable, but
+    # links only to a note whose path it spells exactly.
+    loose: dict[str, list[str]] = {}
     for name in evidence:
         try:
             source = records.source_of(name)
             record = records.load(store, name)
-            # A readable record exists even when its fields no longer match the schema.
-            count += 1
-            ref = f"{source}:{record.id}"
-            # The SHA-256 filename makes each id unique within its source.
-            ids.setdefault(source, set()).add(record.id)
-            # A record's ref is one of its names: a note alias repeating it is ambiguous.
-            for alias in [ref, ontology.qualify(config, ref), *record.aliases]:
-                owners.setdefault(links.target(alias), {})[ref] = name
-            claims = ontology.record_claims(record, config, ref, strict=True)
-            for claim in claims:
-                if links.parse(claim.target):
-                    written.setdefault(claim.target, set()).add(name)
-            spellings.add({*map(links.target, record.aliases), *(claim.target for claim in claims)})
-            # Edges follow the current schema; the check still names each stored value that schema now rejects.
-            ontology.validate(record, config)
         except Error as error:
             problems.append(_problem(name, str(error)))
+            continue
         except OSError:
             problems.append(_problem(name, "inaccessible file; check permissions"))
-    # Editor locks beside authored files, such as Emacs `.#note.md` links, come and go with an open editor.
+            continue
+        # A readable record exists even when its fields no longer match the schema.
+        count += 1
+        ref = f"{source}:{record.id}"
+        # The SHA-256 filename makes each id unique within its source.
+        ids.setdefault(source, set()).add(record.id)
+        # Edges follow the current schema; the check still names each stored value that schema now rejects.
+        messages: list[str] = []
+        ontology.validate(record, config, errors=messages)
+        problems.extend(_problem(name, message) for message in messages)
+        if not all(re.fullmatch(IDENTITY, target) for target in [*record.links, *([record.url] if record.url else [])]):
+            loose.setdefault(source, []).append(name)
+        try:
+            claims = ontology.record_claims(record, config, ref)
+        except Error:
+            # An alias that cannot name it or a malformed link, as reported above: retrieval drops the record.
+            continue
+        try:
+            # A record's ref is one of its names: a note alias repeating it is ambiguous.
+            identities = [links.target(alias) for alias in [ref, ontology.qualify(config, ref), *record.aliases]]
+        except Error as error:
+            # Only the ref of a source named bf, which reads as a malformed BF address.
+            problems.append(_problem(name, str(error)))
+            continue
+        for identity in identities:
+            owners.setdefault(identity, {})[ref] = name
+        for claim in claims:
+            if links.parse(claim.target):
+                written.setdefault(claim.target, set()).add(name)
+        spellings.add({*map(links.target, record.aliases), *(claim.target for claim in claims)})
+    # Editor locks beside authored files, such as Emacs `.#note.md` links, come and go with an open editor. A write
+    # killed before its rename leaves a temporary file: a warning names it, and its folder is not a broken action.
+    found = {directory: store.files(directory, skipped=skipped) for directory in AUTHORED}
+    leftovers = sorted(name for names in found.values() for name in names if temporary(name))
     listed = {
-        directory: [name for name in store.files(directory, skipped=skipped) if not editor_lock(name)]
-        for directory in AUTHORED
+        directory: [name for name in names if not editor_lock(name) and not temporary(name)]
+        for directory, names in found.items()
     }
 
     def unread(name: str) -> str:
@@ -207,6 +251,9 @@ def _validate(store: Store) -> dict[str, object]:
             return UNNAMED
         try:
             folder = stat.S_ISDIR((store.root / name).lstat().st_mode)
+        except PermissionError:
+            # A folder above it cannot be searched, such as a memories/ of mode 600: the advice is the same.
+            folder = True
         except OSError:
             folder = False
         if folder:
@@ -228,8 +275,9 @@ def _validate(store: Store) -> dict[str, object]:
     targeted: list[tuple[str, links.Claim]] = []
     for name in (n for directory in AUTHORED for n in listed[directory] if authored(n)):
         try:
-            data = store.read(name, MAX_NOTE)
-            parsed_note = note(name, data)
+            # One parse serves the projection and the OKF checks.
+            markdown = parse(name, store.read(name, MAX_NOTE))
+            parsed_note = note(name, markdown)
         except (Error, UnicodeError) as error:
             problems.append(_problem(name, str(error)))
             invalid.add(name)
@@ -240,25 +288,28 @@ def _validate(store: Store) -> dict[str, object]:
             continue
         # Each later check reports on its own, so one problem never hides the note's others.
         notes.append(parsed_note)
+        messages = []
         try:
-            claims = ontology.note_claims(parsed_note, config, strict=True)
+            claims = ontology.note_claims(parsed_note, config, errors=messages)
         except Error as error:
+            # Like retrieval, only a path or identity that cannot name the note drops its names; a wrong relation,
+            # field value or link leaves the links to the note intact.
             problems.append(_problem(name, str(error)))
             unnamed_notes.add(name)
-            claims = []
         else:
+            problems.extend(_problem(name, message) for message in messages)
             names = [*parsed_note.knowledge.names, parsed_note.knowledge.entity]
             spellings.add({*(links.target(v) for v in names if v), *(claim.target for claim in claims)})
             targeted.extend((name, claim) for claim in claims if ontology.outside(config, claim))
         if okf(name):
             try:
-                validate_okf(name, data)
+                validate_okf(name, markdown)
             except Error as error:
                 problems.append(_problem(name, str(error)))
             # OKF ignores unknown keys: a relation named at the top level would silently assert nothing.
             problems.extend(
                 _problem(name, f"{key}: declared fields belong under fields:, such as fields: {{{key}: ...}}")
-                for key in sorted(parse(name, data).attributes)
+                for key in sorted(markdown.attributes)
                 if key in config.ontology and key not in Knowledge.model_fields
             )
     slugs = {n.path: n.slugs for n in notes}
@@ -302,13 +353,21 @@ def _validate(store: Store) -> dict[str, object]:
             *(item.knowledge.names if named else []),
             *([item.knowledge.entity] if item.knowledge.entity and named else []),
         ]:
-            owners.setdefault(links.target(alias), {})[item.path] = item.path
+            # A path holding a control character or backslash has no BF address: note_claims reported it.
+            with suppress(Error):
+                owners.setdefault(links.target(alias), {})[item.path] = item.path
         problems.extend(_problem(item.path, message) for message in broken(item, exists, slugs))
         for target in item.targets:
             source = scheme(item.path, target)
-            if (
+            written_source, _, record_id = target.partition(":")
+            if (source in ids or source in config.sensors) and written_source != source:
+                # A URL scheme ignores case, but a record ref names its source exactly: Mail:m1 never links mail:m1.
+                problems.append(
+                    _problem(item.path, f"record refs are case-sensitive; write {source}:{record_id}, not {target}")
+                )
+            elif (
                 (source in ids or source in config.sensors)
-                and target.partition(":")[2] not in ids.get(source, set())
+                and record_id not in ids.get(source, set())
                 # A record's provider alias, such as calendar:primary/ID beside calendar:ID, names it too.
                 and target not in owners
             ):
@@ -343,7 +402,10 @@ def _validate(store: Store) -> dict[str, object]:
         if parsed is None or parsed.brain != config.name:
             unresolved.add(value)
             continue
-        if not parsed.fragment and page(parsed.path):
+        if page(parsed.path):
+            # `bf read` opens a page whole: a fragment selects nothing on it.
+            if parsed.fragment:
+                problems.extend(_problem(file, f"page cannot select a section: {value}") for file in sorted(files))
             continue
         errors = set()
         for path in owners.get(links.address(parsed.brain, parsed.path), {}) or {parsed.path}:
@@ -359,7 +421,23 @@ def _validate(store: Store) -> dict[str, object]:
             else:
                 errors.add("unresolved BF target")
         problems.extend(_problem(file, f"{error}: {value}") for file in sorted(files) for error in sorted(errors))
-    warnings = spellings.warnings()
+    # Few sources and interrupted writes, each with one warning, come before the case variants a large brain can hold
+    # many of.
+    warnings: list[dict[str, object]] = [
+        {
+            "warning": "record links are not namespaced identities or URLs",
+            "source": source,
+            "records": len(files),
+            "file": min(files),
+        }
+        for source, files in sorted(loose.items())
+    ]
+    warnings.extend(
+        {"warning": "an interrupted write left this temporary file; delete it", "file": name} for name in leftovers
+    )
+    warnings.extend(spellings.warnings())
+    # One problem per file and error: a link repeated across a note or a record never crowds out the others.
+    problems = list({(problem["file"], problem["error"]): problem for problem in problems}.values())
     return {
         "valid": not problems,
         "notes": len(notes),

@@ -90,7 +90,10 @@ class Notifications:
     warned: bool = False
 
     def completed(self, *, failures: tuple[str, ...], worked: bool, now: float) -> str:
-        """Notify on failure transitions/recovery or successful work, never idle cycles."""
+        """Notify on failure transitions/recovery or successful work, never idle cycles.
+
+        Work completes even while another program keeps failing, such as one waiting out its retry backoff.
+        """
         mode = self.preferences.notifications
         if mode == "off":
             return ""
@@ -102,7 +105,7 @@ class Notifications:
             else "recovered"
             if recovery
             else "completed"
-            if not failures and worked and mode in {"success", "all"}
+            if worked and mode in {"success", "all"}
             else ""
         )
         if not event:

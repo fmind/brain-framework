@@ -74,7 +74,11 @@ A project needs review 14 days after its file was last edited. Any note can set 
 stale_after: 2026-10-13T00:00:00+02:00
 ```
 
-From that instant on, listings and the home page mark the note `"review":true`, with `"review_reasons":["due"]` and `"review_source":"stale_after"`. Other notes get reminders only with `stale_after`. A note also needs review when evidence dated after its last edit links to it (`newer_evidence`). Editing the file resets the 14-day interval; copying or cloning it can too, so set `stale_after` for a deadline that must survive. See [review signals](retrieval.md#ordering-and-review-signals).
+From that instant on, folder listings, the home page and the note's whole read mark it `"review":true`, with `"review_reasons":["due"]` and `"review_source":"stale_after"`. Other notes get reminders only with `stale_after`. `bf read` lists the projects needing review first.
+
+A project, or a note with `stale_after`, also needs review when linked evidence is newer than its last edit (`newer_evidence`): an item linking to it, or a record it links to, happened or changed upstream since. `newer` names up to five of them, newest first: read them before relying on the note. [Getting started](getting-started.md#collect-your-first-source) shows this flag when a linked brief changes.
+
+An edit clears `newer_evidence` until newer evidence arrives, and restarts a project's 14 days. Copying or cloning the file can do the same, since both follow its modification time: set `stale_after` for a deadline that must survive. See [review signals](retrieval.md#ordering-and-review-signals).
 
 ## Tags
 
@@ -116,7 +120,7 @@ The search finds the concept, and its exact read keeps both the advice and its l
 
 ## Actions
 
-An action is one session of work in its own folder, `actions/YYYY-MM-DD_topic/`, holding an `ACTION.md`. Add a short suffix, such as `actions/2026-09-27_website-review-3f9a1c2e/`, when teammates might start the same topic on the same day: separate folders never conflict in Git. Routines add such a suffix to the actions they write.
+An action is one session of work in its own folder, `actions/YYYY-MM-DD_topic/`, holding an `ACTION.md`. Add a 12-character suffix, such as `actions/2026-09-27_website-review-3f9a1c2e5b7d/`, when teammates might start the same topic on the same day: separate folders never conflict in Git. Routines mark the actions they write with an 8-character suffix.
 
 Create `actions/2026-09-27_website-review/ACTION.md`, using the session's date:
 
@@ -194,6 +198,7 @@ BF stores each record as one JSON file in `memories/SOURCE/`, named by the SHA-2
 ```text
 bf.yaml                                  # name, fields, sensors, routines and watch preferences
 AGENTS.md                                # instructions for agents working in the brain
+CLAUDE.md                                # optional: only @AGENTS.md, so Claude Code loads it
 projects/<project>.md                    # one OKF note per project
 concepts/index.md, concepts/<concept>.md # reusable OKF knowledge
 actions/YYYY-MM-DD_topic/ACTION.md       # one work session, with its inputs/ and outputs/

@@ -20,7 +20,15 @@ Install the skills of the installed `bf` into the directory your agent host disc
 bf skills ~/.agents/skills
 ```
 
-The reply lists each skill as `installed`, `updated` or `current`. A manifest (`.bf-skill.json`) in each folder records the digests of the installed files, so a later `bf skills` updates only files nobody edited: a skill with an edited or deleted file is reported as `modified`, and a folder BF did not install (or a link) as `unmanaged`, and both stay as they are unless you pass `--force`. Files a newer version no longer ships are removed only when unedited.
+The reply lists each skill as `installed`, `updated` or `current`. A manifest (`.bf-skill.json`) in each folder records the digests of the installed files, so a later `bf skills` updates a skill only while none of its files was edited: it then finishes an interrupted install and removes the files a newer version no longer ships. Three statuses leave a folder unchanged and make the command exit 1:
+
+| Status      | Meaning                                                                                           | Recovery                                                                                           |
+| ----------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `modified`  | You edited or deleted an installed file, listed under `edited`.                                   | Keep the edits you need, then pass `--force`.                                                      |
+| `unmanaged` | BF did not install the folder, or it is a link.                                                   | Move it aside, or pass `--force` to install over it.                                               |
+| `newer`     | A newer `bf`, such as a brain's pinned runtime sharing the directory, installed a different copy. | Upgrade this `bf`, or run `bf skills` with the newer one: `--force` would install this older copy. |
+
+`--force` never replaces a linked folder: it stops before writing anything until you remove the link.
 
 After upgrading `bf`, check for drift without writing anything:
 
@@ -36,11 +44,13 @@ It exits 1 unless every skill is `current`. Start a fresh host session after ins
 - `bf-setup`: installation, brain creation, agent access and verification in `SKILL.md`; references for scoped discovery, discovery methods and imports; the `inventory.py` helper.
 - `bf-maintain`: diagnosis and core commands in `SKILL.md`; references for integrations, operations and conflicts.
 
-Helpers are standalone Python 3.11+ scripts using only the standard library, run with the agent's `python3` by their path inside the skill folder. They never contact a network; the ones that read the brain call the offline `bf read` of the first `bf` on PATH, so a brain that pins its runtime runs them through `uv run --project PATH --locked`.
+Helpers are standalone Python 3.11+ scripts using only the standard library, run with the agent's `python3` by their path inside the skill folder. When that `python3` is older, agents run them with the Python 3.14 that `uv python find --system --no-config --no-project 3.14` names, never through `uv run`: even with `--no-project`, it adopts a `.venv` in the working directory or a parent, so a brain could supply the interpreter, code it runs at startup and the `bf` first on PATH. They never contact a network; the ones that read the brain call the offline `bf read` of the installed `bf`, the first on PATH.
+
+Agents run every read-only command and helper with the installed `bf`, never through a brain's pinned runtime (`pyproject.toml` and `uv.lock`), which installs and runs code the brain supplies. Only `bf-maintain` runs a pin, for execution in a brain the user created or whose `pyproject.toml`, `uv.lock`, `uv.toml` and `.python-version` they reviewed, and never with a `.venv/` the brain supplied ([pin a brain's runtime](https://fmind.github.io/brain-framework/docs/upgrades/#pin-a-brains-runtime)).
 
 ## Structure and maintenance
 
-Each folder holds a short `SKILL.md` router (when to use the skill, its core loop, its boundaries and one line per reference or helper) plus `references/`, `scripts/` and `templates/` loaded only when a task needs them. `compatibility` names the Brain Framework major version the procedures assume; the installed `.bf-skill.json` records the exact version, so a release changes a skill's files only when its content changes. Links to the documentation site describe the current release; `bf --version` and `bf COMMAND --help` are authoritative for an installation.
+Each folder holds a short `SKILL.md` router (when to use the skill, its core loop, its boundaries and one line per reference or helper) plus `references/`, `scripts/` and `templates/` loaded only when a task needs them. `compatibility` names the Brain Framework major version the procedures assume; the installed `.bf-skill.json` records the exact version, so a release changes a skill's files only when its content changes. The documentation site follows the latest code, which can be newer than an installation; `bf --version` and `bf COMMAND --help` are authoritative for it.
 
 To adapt a skill, edit the installed copy: `bf skills` then reports it as `modified` and never overwrites it. To return to the packaged version, rerun `bf skills DIR --force` after keeping the edits you need. Brain-specific procedures belong in the brain itself, for example under its own `skills/` folder, rather than in these copies.
 

@@ -135,6 +135,27 @@ def test_notification_modes(
     assert sent == expected
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("off", []),
+        ("failure", ["failed"]),
+        ("success", ["completed", "completed", "completed"]),
+        ("all", ["failed", "completed", "completed"]),
+    ],
+)
+def test_work_alerts_while_another_program_keeps_failing(
+    monkeypatch: pytest.MonkeyPatch, mode: Literal["off", "failure", "success", "all"], expected: list[str]
+) -> None:
+    sent = []
+    monkeypatch.setattr("bf.watch_settings.desktop", lambda title, _: sent.append(title.split()[-1]) or True)
+    notices = Notifications(WatchSettings(notifications=mode, notification_cooldown=0))
+    # One source stays failed, waiting out its retry backoff, while the others keep collecting.
+    for now, worked in enumerate([True, True, False, True]):
+        notices.completed(failures=("sensor:broken:program exited with status 1",), worked=worked, now=now)
+    assert sent == expected
+
+
 def test_unavailable_desktop_warns_once_and_does_not_stop_collection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("bf.watch_settings.desktop", lambda *_: False)
     notices = Notifications(WatchSettings(notification_cooldown=0))

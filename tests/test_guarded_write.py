@@ -36,7 +36,7 @@ def write(
 
 
 def leftovers(brain: Store) -> list[Path]:
-    return sorted(brain.root.rglob(".guarded-write-*"))
+    return sorted(brain.root.rglob(".write-*"))
 
 
 def test_write_replaces_the_note_that_was_read(brain: Store) -> None:
@@ -112,6 +112,37 @@ def test_write_follows_no_symlink_in_the_path(brain: Store, tmp_path: Path) -> N
     )
     assert result.returncode == 0, result.stderr
     assert (brain.root / NOTE).read_text() == "# New\n"
+
+
+def test_write_expands_a_quoted_home(brain: Store) -> None:
+    # A quoted ~ reaches the helper unexpanded, as it reaches bf, which expands it too.
+    read = retrieve.read([brain], NOTE)
+    text = str(read["text"])
+    passage = text.rstrip("\n").splitlines()[-1]
+    (brain.root.parent / "new.txt").write_text("Revised line.")
+
+    def run(path: str, *options: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
+            [sys.executable, str(HELPER), path, "--expect-sha256", str(read["sha256"]), *options],
+            env={**os.environ, "HOME": str(brain.root.parent)},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+
+    result = run(f"~/{brain.root.name}/{NOTE}", "--old", passage, "--new-file", "~/new.txt")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["written"] == str(brain.root / NOTE)
+    assert (brain.root / NOTE).read_text() == text.replace(passage, "Revised line.")
+    # A home that cannot be resolved, in the path or a passage file, is invalid input, never a traceback.
+    written = (brain.root / NOTE).read_bytes()
+    for options in (["~bf-no-such-user/x.md", "--old", "a"], [NOTE, "--old-file", "~bf-no-such-user/old.txt"]):
+        result = run(*options, "--new", "b")
+        assert result.returncode == 2
+        assert "home directory cannot be resolved" in result.stderr
+        assert "Traceback" not in result.stderr
+    assert (brain.root / NOTE).read_bytes() == written
 
 
 def test_write_checks_again_before_the_rename(

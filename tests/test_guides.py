@@ -63,6 +63,8 @@ def _follow(text: str, home: Path, env: dict[str, str], release: str) -> None:
         assert installs in ([], [INSTALL]), installs
         # Example files come from this checkout, served where the documented release tag would serve them.
         commands = [line.replace(REPOSITORY, release) for line in blocks[0][1].splitlines() if line not in installs]
+        # A URL in another form would download the published file instead of testing this checkout, and need a network.
+        assert not re.search(r"https?://", "\n".join(commands)), commands
         result = subprocess.run(  # noqa: S603 - execute the reviewed guide's commands on a disposable brain
             ["bash", "--noprofile", "--norc", "-euc", "\n".join(commands)],  # noqa: S607
             cwd=brain if brain.is_dir() else home,

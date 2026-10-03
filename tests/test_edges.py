@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import json
+import re
+import runpy
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
-from bf import index, links, pages
+from bf import index, links, models, pages
 from bf.markdown import note
-from bf.models import Error, Knowledge, Query, Record
+from bf.models import Error, Knowledge, Query, Record, SchemaField, invisible, printable, terminal
 from bf.retrieve import read, search
 from bf.storage import Store
 from bf.validate import validate
+from bf.watch import clean
 from conftest import records_file
 
 
@@ -161,7 +166,9 @@ def test_a_note_path_with_a_control_character_still_reads(brain: Store) -> None:
     path = "projects/tab\tname.md"
     brain.write(path, b"# Tab\n\ntabneedle\n")
     skipped = cast("list[dict[str, object]]", search([brain], Query(text="tabneedle"))["problems"])
-    assert [problem["file"] for problem in skipped] == [path]
+    assert [(problem["file"], problem["error"]) for problem in skipped] == [
+        (path, "path holds a control character or backslash, which no BF address can; rename it")
+    ]
     reply = read([brain], path)
     assert reply["text"] == "# Tab\n\ntabneedle\n"
     assert reply["problems"] == [
@@ -169,6 +176,13 @@ def test_a_note_path_with_a_control_character_still_reads(brain: Store) -> None:
     ]
     with pytest.raises(Error, match="links are unavailable for this path; rename it"):
         read([brain], path, rel="links")
+    # Validation names the file instead of aborting, and still reports the brain's other problems.
+    brain.write("projects/broken.md", b"---\ntype: project\n---\n# Broken\n\n[gone](absent.md)\n")
+    assert [(p["file"], p["error"]) for p in cast("list[dict]", validate(brain)["problems"])] == [
+        (path, "path holds a control character or backslash, which no BF address can; rename it"),
+        (path, "OKF documents require a nonempty type in YAML frontmatter"),
+        ("projects/broken.md", "broken link: absent.md"),
+    ]
 
 
 def test_headings_and_file_names_stay_addressable(brain: Store) -> None:
@@ -185,3 +199,62 @@ def test_headings_and_file_names_stay_addressable(brain: Store) -> None:
         b"---\ntype: action\n---\n# Import\n\nSee [the data](inputs/data%231.csv).\n",
     )
     assert validate(brain)["valid"], validate(brain)["problems"]
+
+
+def test_a_note_with_1000_aliases_reads_with_all_its_names(brain: Store) -> None:
+    aliases = ", ".join(f"person:alias-{n}" for n in range(1000))
+    head = "---\ntype: person\nentity: bf://fixture/people/many\nresource: https://example.test/many\n"
+    brain.write("concepts/many.md", f"{head}aliases: [{aliases}]\n---\n# Many\n".encode())
+    brain.write("projects/x.md", b"---\ntype: project\n---\n# X\n\n[Many](person:alias-999)\n")
+    assert validate(brain)["valid"]
+    # Its path, entity, resource and 1,000 aliases all expand, like a record's ref and its 1,000 aliases.
+    for ref in ("bf://fixture/people/many", "concepts/many.md"):
+        reply = read([brain], ref)
+        assert "problems" not in reply
+        assert [i["ref"] for g in cast("list[dict]", reply["backlinks"]) for i in g["items"]] == ["projects/x.md"]
+
+
+@pytest.mark.parametrize(
+    "character", ["\u200b", "\u200e", "\u202e", "\u2060", "\ufeff", "\u00ad", "\u200c", "\U000e0041"]
+)
+def test_identities_reject_invisible_format_characters(brain: Store, character: str) -> None:
+    # Two identities that look alike must not silently differ: every format character counts, even a joiner that
+    # Persian spelling or an emoji sequence uses.
+    lookalike = f"bob{character}"
+    for key, value in (
+        ("entity", f"bf://fixture/people/{lookalike}"),
+        ("aliases", f"[person:{lookalike}]"),
+        ("resource", f"https://example.test/{lookalike}"),
+    ):
+        brain.write("concepts/bob.md", f"---\ntype: person\n{key}: {value}\n---\n# Bob\n".encode())
+        assert [problem["error"] for problem in cast("list[dict]", validate(brain)["problems"])] == [
+            f"invalid frontmatter: {key}: identities must not contain invisible format characters, such as U+200B"
+        ]
+    # A resource describing a population, with spaces, is data rather than an identity.
+    brain.write("concepts/bob.md", f"---\ntype: person\nresource: photos of {lookalike} family\n---\n# Bob\n".encode())
+    assert validate(brain)["valid"]
+    with pytest.raises(ValidationError, match="invisible format characters"):
+        Record(id="x", title="X", aliases=[f"person:{lookalike}"])
+    with pytest.raises(ValueError, match="invisible format characters"):
+        SchemaField(description="Owner.", type="identity").normalize(f"person:{lookalike}")
+
+
+def test_format_characters_have_one_definition_that_matches_unicode() -> None:
+    # bf lists Unicode's format characters (Cf) rather than scan every code point in each command: the list must be
+    # the running Python's. Identities reject them; replies, diagnostics and the evidence helper escape them.
+    everything = "".join(map(chr, range(0x110000)))
+    formats = "".join(character for character in everything if unicodedata.category(character) == "Cf")
+    assert "".join(re.findall(f"[{models._FORMAT}]", everything)) == formats  # noqa: SLF001 - the listed contract
+    assert all(map(invisible, formats))
+    assert not invisible("person:name/علیرضا")
+    helper = runpy.run_path(str(Path(__file__).parents[1] / "src/bf/skills/bf-use/scripts/evidence.py"))
+    assert helper["CONTROLS"].pattern == models._TERMINAL.pattern  # noqa: SLF001 - the helper mirrors it
+    for escaped in (terminal(formats), helper["terminal"](formats)):
+        assert escaped.isascii()
+        assert json.loads(escaped) == formats
+    assert printable(formats).isascii()
+    # Beyond U+FFFF, JSON spells a character as a surrogate pair: `\ue0041` would decode as U+E004 and "1".
+    assert terminal("\U000e0041") == helper["terminal"]("\U000e0041") + b"\n" == b'"\\udb40\\udc41"\n'
+    assert printable("tag \U000e0041") == "tag \\udb40\\udc41"
+    # The watch dashboard blanks every character it cannot print, these included.
+    assert clean(formats) == " " * len(formats)

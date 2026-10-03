@@ -22,7 +22,7 @@ from bf.collect import collect
 from bf.config import user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
-from bf.models import MAX_OFFSET, Error, NotFoundError, Query, Record, digest, encode
+from bf.models import MAX_OFFSET, Error, InputError, NotFoundError, Query, Record, digest, encode
 from bf.records import path as record_path
 from bf.storage import Store
 from bf.validate import validate
@@ -271,8 +271,8 @@ def test_claim_preview_keeps_every_relation_and_reports_truncation(brain: Store)
         "bf.yaml",
         b"version: 7\nname: fixture\nfields:\n"
         + b"".join(
-            f"  {role}:\n    description: A role.\n    type: identity\n    cardinality: many\n    relation: true\n".encode()
-            for role in ("attendee", "depends-on", "organizer")
+            f"  {name}:\n    description: A relation.\n    type: identity\n    cardinality: many\n    relation: true\n".encode()
+            for name in ("attendee", "depends-on", "organizer")
         ),
     )
     links = "\n".join(f"[Person {n}](bf://fixture/concepts/person-{n}?rel=attendee)" for n in range(62))
@@ -287,8 +287,8 @@ def test_claim_preview_keeps_every_relation_and_reports_truncation(brain: Store)
     assert [claim["target"] for claim in claims if claim["relation"] == "organizer"] == ["bf://fixture/concepts/host"]
     assert reply["claims_truncated"] is True
     many = "\n".join(
-        f"[{role} {n}](bf://fixture/concepts/{role}-{n}?rel={role})"
-        for role in ("attendee", "depends-on", "organizer")
+        f"[{name} {n}](bf://fixture/concepts/{name}-{n}?rel={name})"
+        for name in ("attendee", "depends-on", "organizer")
         for n in range(graph.RELATION)
     )
     brain.write("projects/many.md", f"# Many claims\n\n{many}\n".encode())
@@ -302,18 +302,15 @@ def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(b
     brain.write("projects/mid.md", data)
     first = retrieve.read([brain], "projects/mid.md", counted=False)
     assert (first["offset"], first["total_characters"], first["sha256"]) == (0, len(data), digest(data))
+    # The outline lists the sections inside the read: not the H1 title spanning the note, nor a read section.
     assert first["outline"] == [
-        {"ref": "projects/mid.md#mid", "title": "Mid", "characters": len(data)},
         {"ref": "projects/mid.md#part-one", "title": "Part one", "characters": len(data) - 7 - 17},
         {"ref": "projects/mid.md#detail", "title": "Detail", "characters": 18},
         {"ref": "projects/mid.md#part-two", "title": "Part two", "characters": 17},
     ]
     section = retrieve.read([brain], "projects/mid.md#part-one", counted=False)
     assert section["sha256"] == first["sha256"]
-    assert [entry["ref"] for entry in cast("list[dict]", section["outline"])] == [
-        "projects/mid.md#part-one",
-        "projects/mid.md#detail",
-    ]
+    assert [entry["ref"] for entry in cast("list[dict]", section["outline"])] == ["projects/mid.md#detail"]
 
     def assemble(read: Callable[[int], dict]) -> str:
         pieces, offset = [], 0
@@ -448,3 +445,62 @@ def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> N
         _WATCHING.pop()
     assert events == set()
     assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        # A read-only checkout: bf build would fail with the same cause, so the read names it.
+        (
+            Error("search and read need write access to the brain's .bf cache directory; grant it or use a copy"),
+            "search and read need write access to the brain's .bf cache directory; grant it or use a copy",
+        ),
+        (sqlite3.DatabaseError("database disk image is malformed"), "run bf build to resolve identities"),
+    ],
+)
+def test_an_identity_read_without_a_cache_keeps_its_cause(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, failure: Exception, message: str
+) -> None:
+    def unavailable(_store: Store) -> contextlib.AbstractContextManager[tuple[sqlite3.Connection, str]]:
+        raise failure
+
+    monkeypatch.setattr(index, "database", unavailable)
+    # Before 18 every cause read "the search cache is unavailable; run bf build".
+    with pytest.raises(Error, match=message):
+        retrieve.read([brain], "repo:example/project")
+
+
+def test_a_brain_whose_bf_yaml_fails_is_named_with_its_cause(brain: Store, tmp_path: Path) -> None:
+    (tmp_path / "other").mkdir()
+    other = Store(tmp_path / "other")
+    other.write("bf.yaml", b"version: 7\nname: other\nbogus: true\n")
+    problem = {"brain": "other", "error": "invalid bf.yaml: bogus: Extra inputs are not permitted"}
+    # Like search and status, a read names the key to fix, where it said only "bf.yaml is invalid" before 18.
+    assert problem in cast("list[dict]", retrieve.read([brain, other], "projects/offline.md")["problems"])
+    assert problem in cast("list[dict]", retrieve.search([brain, other], Query(text="offline"))["problems"])
+
+
+def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
+    brain.write("projects/archive/old.md", b"# Old\n")
+    for call, argument, message in (
+        (lambda: retrieve.read([brain], "2026-13"), "ref", "invalid period: 2026-13"),
+        (lambda: retrieve.read([brain], "memories/meetings/2026-13"), "ref", "invalid period: 2026-13"),
+        (lambda: retrieve.read([brain], "projects", offset=-1), "offset", "offset must be an integer"),
+        (lambda: retrieve.read([brain], "projects/", rel="links"), "rel", "not a page"),
+        # An existing folder is a page only in its brain: the read finds it, then rejects the relation page.
+        (lambda: retrieve.read([brain], "projects/archive", rel="links"), "rel", "not a page"),
+        (lambda: retrieve.read([brain], "projects/offline.md#decision", rel="links"), "rel", "without its #section"),
+        (lambda: retrieve.read([brain], "projects/offline.md", rel="owner"), "rel", "undeclared relation"),
+        (lambda: pages.query("!!!"), "query", "give words or an identity"),
+        (lambda: pages.query("bf://Me/x"), "query", "invalid BF link"),
+        (lambda: pages.query("x", "0d"), "scope", "since must be earlier than until"),
+        (lambda: pages.query("x", "projects/" + "a" * 5000), "scope", "String should have at most 4096"),
+        # Items carry note paths: a section ref, as search returns it, would scope nothing.
+        (lambda: pages.query("x", "projects/offline.md#decision"), "scope", "whole note without its #section"),
+    ):
+        with pytest.raises(InputError, match=message) as raised:
+            call()
+        assert raised.value.argument == argument
+    # A folder whose name holds a `#` is no section.
+    assert pages.scope("projects/x#y") == {"prefix": "projects/x#y"}
+    assert pages.scope("projects/offline.md") == {"prefix": "projects/offline.md"}

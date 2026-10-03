@@ -21,7 +21,7 @@ fields:
     cardinality: many
     relation: true
   related-to:
-    description: An explicit association without a more specific known role.
+    description: An explicit association without a more specific known relation.
     type: identity
     cardinality: many
     relation: true

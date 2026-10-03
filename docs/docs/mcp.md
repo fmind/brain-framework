@@ -16,7 +16,7 @@ command -v bf
 bf read projects/new-website.md#decision
 ```
 
-Give the host absolute paths to `bf` and to the brain: hosts may start the server from another folder, so `--brain` is useful here.
+Give the host absolute paths to `bf` and to the brain: hosts may start the server from another folder, so `--brain` is useful here. The server checks its brain at startup and selects it again for each call, so registering or restoring a brain needs no restart; an empty `--brain` is invalid input.
 
 ## Claude Code
 
@@ -91,12 +91,12 @@ The answer should cite the ref. A configured entry does not prove the server run
 
 ## What the host can read
 
-- The selected brain and its direct `brains:` references: review their audience first.
+- The selected brain and its direct `brains:` references: review their audience first. Started outside any brain without `--brain` or `BF_BRAIN`, the server reads every registered brain, including one registered while it runs.
 - Nothing else: BF's server exposes no collection, program, write or network tool. Retrieval only refreshes the disposable `.bf/` cache and private usage counts.
 - The host may have other tools and may send what it reads to a cloud model; see [privacy](privacy.md#your-agent-has-its-own-privacy-rules).
 
 Arguments match the CLI. To read from one brain when a ref exists in several, pass its `bf://NAME/...` address. To list every item linking to a note through one relation, pass it as `rel`, as `bf read REF --rel RELATION` does: `{"ref":"projects/new-website.md","rel":"cites"}`.
 
-Hosts show the tools as **Search the brain** and **Read a brain page, note or record**, both annotated read-only. Each tool publishes its reply schema as `outputSchema`, the document `bf schema --kind search-reply` or `--kind read-reply` prints.
+Hosts show the tools as **Search the brain** and **Read a brain page, note or record**, both annotated read-only.
 
-At connection, the server sends instructions with the loop the generated `AGENTS.md` teaches: orient, search a few words, read each ref relied on, follow `next_offset` and inspect `problems` and `stale`. Whether a host passes them to its model depends on the host. The [MCP tool contract](retrieval.md#mcp-tool-contract) lists parameters and errors.
+At connection, the server sends instructions with the loop the generated `AGENTS.md` teaches: orient, search a few words, read each ref relied on, follow `next_offset` and inspect `problems` and `stale`. Whether a host passes them to its model depends on the host. The [MCP tool contract](retrieval.md#mcp-tool-contract) lists parameters, reply schemas and errors.

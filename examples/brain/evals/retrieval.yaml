@@ -16,7 +16,7 @@ cases:
   - name: absent-evidence
     query: nonexistent-quasar
     empty: true
-  - name: explicit-repository-relationship
+  - name: explicit-repository-relation
     read: "repo:example/project"
     expect: ["demo:retention"]
     text: [repository]

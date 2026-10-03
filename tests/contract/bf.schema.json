@@ -106,7 +106,7 @@
         },
         "lookback": {
           "default": 86400,
-          "description": "Initial collection or review window in seconds when no local history exists.",
+          "description": "Seconds covered by a sensor's first run, each snapshot run and bf collect without --since, and by a routine run without history.",
           "maximum": 31536000,
           "minimum": 1,
           "title": "Lookback",
@@ -114,7 +114,7 @@
         },
         "max_bytes": {
           "default": 1048576,
-          "description": "Maximum stdout in bytes; bounded by the note read limit.",
+          "description": "Maximum stdout of an action routine in bytes, up to the note read limit; a log routine's log keeps its last 256 KiB instead.",
           "maximum": 4194304,
           "minimum": 1,
           "title": "Max Bytes",
@@ -165,7 +165,7 @@
           "then": { "properties": { "relation": { "const": true } }, "required": ["relation"] }
         }
       ],
-      "description": "A shared meaning; cardinality applies when a sensor maps this field.",
+      "description": "A shared meaning; its type and cardinality check sensor mappings, stored records and note fields.",
       "properties": {
         "broader": {
           "anyOf": [
@@ -178,7 +178,7 @@
         },
         "cardinality": {
           "default": "optional",
-          "description": "Required scalar, optional scalar, or up to 1000 scalars; applies only when mapped.",
+          "description": "Required scalar, optional scalar, or up to 1000 scalars, for sensor mappings and note fields; only collection requires a one value.",
           "enum": ["one", "optional", "many"],
           "title": "Cardinality",
           "type": "string"
@@ -253,16 +253,21 @@
           "type": "boolean"
         },
         "fields": {
-          "additionalProperties": false,
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Mapping" } },
+              "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+              "type": "object"
+            },
+            { "type": "null" }
+          ],
           "description": "Map declared shared fields to output paths or constants; unmapped fields do not apply.",
-          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Mapping" } },
-          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-          "title": "Fields",
-          "type": "object"
+          "title": "Fields"
         },
         "lookback": {
           "default": 86400,
-          "description": "Initial collection or review window in seconds when no local history exists.",
+          "description": "Seconds covered by a sensor's first run, each snapshot run and bf collect without --since, and by a routine run without history.",
           "maximum": 31536000,
           "minimum": 1,
           "title": "Lookback",
@@ -370,21 +375,31 @@
   "description": "One brain: its name, related brains, declared fields, and the sensors and routines it may run.",
   "properties": {
     "brains": {
-      "additionalProperties": false,
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "maxProperties": 32,
+          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/BrainReference" } },
+          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+          "type": "object"
+        },
+        { "type": "null" }
+      ],
       "description": "Direct references keyed by the target name; retrieval only, without recursion or execution.",
-      "maxProperties": 32,
-      "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/BrainReference" } },
-      "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-      "title": "Brains",
-      "type": "object"
+      "title": "Brains"
     },
     "fields": {
-      "additionalProperties": false,
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/SchemaField" } },
+          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+          "type": "object"
+        },
+        { "type": "null" }
+      ],
       "description": "Declared shared fields and relations that sensors map, records store and notes set.",
-      "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/SchemaField" } },
-      "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-      "title": "Fields",
-      "type": "object"
+      "title": "Fields"
     },
     "name": {
       "description": "Stable namespace in bf:// addresses; unique among selected brains.",
@@ -394,20 +409,30 @@
       "type": "string"
     },
     "routines": {
-      "additionalProperties": false,
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "patternProperties": { "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": { "$ref": "#/$defs/Routine" } },
+          "propertyNames": { "maxLength": 64, "not": { "pattern": "[^a-z0-9-]" } },
+          "type": "object"
+        },
+        { "type": "null" }
+      ],
       "description": "Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ from sensors.",
-      "patternProperties": { "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": { "$ref": "#/$defs/Routine" } },
-      "propertyNames": { "maxLength": 64, "not": { "pattern": "[^a-z0-9-]" } },
-      "title": "Routines",
-      "type": "object"
+      "title": "Routines"
     },
     "sensors": {
-      "additionalProperties": false,
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Sensor" } },
+          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+          "type": "object"
+        },
+        { "type": "null" }
+      ],
       "description": "Reviewed evidence collectors.",
-      "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Sensor" } },
-      "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-      "title": "Sensors",
-      "type": "object"
+      "title": "Sensors"
     },
     "version": {
       "const": 7,
@@ -416,7 +441,7 @@
       "type": "integer"
     },
     "watch": {
-      "$ref": "#/$defs/WatchSettings",
+      "anyOf": [{ "$ref": "#/$defs/WatchSettings" }, { "type": "null" }],
       "description": "Watch timing and desktop alerts; CLI options override these values."
     }
   },

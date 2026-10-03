@@ -164,7 +164,66 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
     run("worktree", "add", "-q", "-b", "feature", str(root / "owner" / "project-feature"))
     assert [record.id.partition("@")[0] for record in provider.records("git-history.py", *window)] == ["owner/project"]
     assert provider.records("git-history.py", *window, "--skip", "owner/project") == []
+    assert provider.records("git-history.py", *window, "--skip", "owner/project-feature") == []
     assert provider.run("git-history.py", *window, "--bad").returncode == 1
+
+
+def test_git_history_collects_repositories_scanned_only_through_worktrees(provider: Provider, tmp_path: Path) -> None:
+    # 17.0.0 skipped every linked worktree, so these repositories were never collected, without a diagnostic.
+    root, outside = tmp_path / "code", tmp_path / "outside"
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig")}
+    for who in ("AUTHOR", "COMMITTER"):
+        env.update({f"GIT_{who}_NAME": "Owner", f"GIT_{who}_EMAIL": "owner@fmind.dev"})
+        env[f"GIT_{who}_DATE"] = "2026-09-01T10:00:00+00:00"
+
+    def git(folder: Path, *args: str) -> None:
+        subprocess.run(["git", "-C", str(folder), *args], env=env, check=True, capture_output=True, timeout=30)  # noqa: S603,S607
+
+    def commit(folder: Path, message: str) -> None:
+        git(folder, "commit", "-q", "--allow-empty", "-m", message)
+
+    source = outside / "source"
+    source.mkdir(parents=True)
+    git(source, "init", "-q", "-b", "main")
+    commit(source, "Start")
+    # A bare clone below ROOT with two worktrees, one of them two levels down.
+    git(tmp_path, "clone", "-q", "--bare", str(source), str(root / "project.git"))
+    git(root / "project.git", "worktree", "add", "-q", str(root / "project-main"), "main")
+    git(root / "project.git", "worktree", "add", "-q", "-b", "feature", str(root / "team" / "project-feature"))
+    commit(root / "team" / "project-feature", "Feature")
+    # The clone's source: a main checkout outside ROOT, with one worktree below it.
+    git(source, "worktree", "add", "-q", "-b", "review", str(root / "review"))
+    commit(root / "review", "Review")
+    # A hidden main checkout below ROOT, scanned only through a visible worktree.
+    archive = root / ".archive" / "legacy"
+    archive.mkdir(parents=True)
+    git(archive, "init", "-q", "-b", "main")
+    commit(archive, "Legacy")
+    git(archive, "worktree", "add", "-q", "-b", "port", str(root / "legacy-port"))
+    window = (str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+
+    def collected(*skip: str) -> dict[str, list[str]]:
+        found: dict[str, list[str]] = {}
+        for record in provider.records("git-history.py", *window, *skip):
+            found.setdefault(cast(str, record.attributes["repository"]), []).append(record.title.partition(": ")[2])
+        return {name: sorted(subjects) for name, subjects in found.items()}
+
+    # Each repository once: named after its own folder below ROOT, else after its first worktree.
+    expected = {".archive/legacy": ["Legacy"], "project.git": ["Feature", "Start"], "review": ["Review", "Start"]}
+    assert collected() == expected
+    records = provider.records("git-history.py", *window)
+    assert {link for record in records for link in record.links if link.startswith("repo:")} == {
+        "repo:local/.archive/legacy",
+        "repo:local/project.git",
+        "repo:local/review",
+    }
+    # Another worktree keeps the bare repository's name, and so its record ids.
+    git(root / "project.git", "worktree", "add", "-q", "-b", "hotfix", str(root / "a-hotfix"))
+    assert collected() == expected
+    # --skip with the repository's name or any of its worktrees skips the whole repository.
+    for skip in ("project.git", "project-main", "team/project-feature"):
+        assert "project.git" not in collected("--skip", skip)
+    assert collected("--skip", "legacy-port") == {key: expected[key] for key in ("project.git", "review")}
 
 
 def test_people_and_repository_identities_join_across_providers(
@@ -307,8 +366,11 @@ def test_git_history_skips_unreadable_and_unnameable_folders(provider: Provider,
     except OSError:
         skipped -= 1  # APFS stores only UTF-8 names
     (root / "code/bad\x01name/.git").mkdir(parents=True)
-    private = root / "private"
-    private.mkdir()
+    # A first-level folder it cannot list, and a listed second-level one it cannot search for a `.git` marker:
+    # from Python 3.14 pathlib reported the second as holding no repository, so it went uncounted.
+    private, locked = root / "private", root / "code/locked"
+    for folder in (private, locked):
+        folder.mkdir()
     provider.install(
         "git",
         [
@@ -318,14 +380,16 @@ def test_git_history_skips_unreadable_and_unnameable_folders(provider: Provider,
             {"match": ["remote"], "code": 2, "repeat": True},
         ],
     )
-    private.chmod(0)
+    for folder in (private, locked):
+        folder.chmod(0)
     try:
         result = provider.run("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
     finally:
-        private.chmod(0o700)
+        for folder in (private, locked):
+            folder.chmod(0o700)
     assert result.returncode == 0, result.stderr
     assert [record["id"] for record in json.loads(result.stdout)] == ["code/project@abc"]
-    assert f"skipped {skipped + 1} " in result.stderr
+    assert f"skipped {skipped + 2} " in result.stderr
     assert "caf" not in result.stderr
 
 

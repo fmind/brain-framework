@@ -6,6 +6,7 @@ import difflib
 import hashlib
 import json
 import re
+import sqlite3
 import unicodedata
 from collections.abc import Collection, Iterable
 from datetime import UTC, date, datetime, timedelta
@@ -14,6 +15,7 @@ from typing import Annotated, Literal
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator, model_validator
+from pydantic.json_schema import JsonDict
 
 MAX_FILE = 16 << 20
 MAX_RECORD = 16 << 20
@@ -52,6 +54,40 @@ class Error(Exception):
 
 class NotFoundError(Error):
     """A complete lookup found no such page or reference; an incomplete read is never NotFoundError."""
+
+
+class InputError(Error):
+    """Invalid input, not a failed operation: the CLI exits 2 and MCP replies `invalid input:`.
+
+    `argument` names the rejected argument as the services call it (query, scope, ref, rel or offset); each
+    interface spells it its own way, such as `--rel` or `rel`.
+    """
+
+    def __init__(self, message: str, argument: str = "") -> None:
+        super().__init__(message)
+        self.argument = argument
+
+
+CACHE = "the search cache is unavailable; run bf build"
+# The failures the CLI and MCP report as one message; any other exception is a bug.
+FAILURES = (Error, OSError, UnicodeError, sqlite3.DatabaseError)
+
+
+def failure(error: Error | OSError | UnicodeError | sqlite3.DatabaseError) -> str:
+    """Why an operation failed, without a path: an Error's own message, or a file, encoding or cache cause."""
+    if isinstance(error, Error):
+        return str(error)
+    if isinstance(error, UnicodeDecodeError):
+        return "a file is not valid UTF-8; run bf validate to locate it"
+    if isinstance(error, UnicodeError):
+        # Brain files decode strictly and scans escape undecodable names: text that cannot be encoded is not theirs.
+        return "an argument or the terminal encoding is not UTF-8; use UTF-8 arguments and a UTF-8 locale"
+    if isinstance(error, sqlite3.DatabaseError):
+        # Retrieval recovers a damaged cache itself; one it cannot open is a cache problem, not a bug.
+        return CACHE
+    # strerror names the cause; the exception's own text would add the absolute path.
+    cause = f" ({error.strerror})" if error.strerror else ""
+    return f"inaccessible file or directory{cause}; check the brain and path"
 
 
 def suggest(value: str, known: Iterable[str]) -> str:
@@ -94,6 +130,18 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False, defer_build=True)
 
 
+def empty(value: object) -> object:
+    """YAML reads a key whose entries are all commented out as null: an optional section is then empty."""
+    return {} if value is None else value
+
+
+def _nullable(schema: JsonDict) -> None:
+    """An optional section's editor schema, or the null `empty` accepts: a mapping closed to its declared names, or
+    a `$ref` to settings that close their own."""
+    value = {key: schema.pop(key) for key in [*schema] if key not in {"title", "description"}}
+    schema["anyOf"] = [value if "$ref" in value else {**value, "additionalProperties": False}, {"type": "null"}]
+
+
 def encode(value: object) -> bytes:
     """One compact UTF-8 JSON representation, including its final newline."""
     return (
@@ -101,8 +149,20 @@ def encode(value: object) -> bytes:
     ).encode()
 
 
-# DEL and C1 controls, which JSON leaves raw and some terminals obey, such as U+009B CSI.
-_TERMINAL = re.compile("[\x7f-\x9f]")
+# Every Unicode format character (category Cf, Unicode 16.0 as in Python 3.14), such as the soft hyphen, zero-width
+# characters, bidi controls and tag characters, which hide text or change how it displays. Identities reject them;
+# replies and diagnostics escape them. Listed, as finding them would scan every code point in each command; a test
+# compares the list with the running Python's Unicode data.
+_FORMAT = (
+    "\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064"
+    "\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
+    "\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f"
+)
+_INVISIBLE = re.compile(f"[{_FORMAT}]")
+# DEL and C1 controls, which JSON leaves raw and some terminals obey, such as U+009B CSI, and format characters.
+_TERMINAL = re.compile(f"[\x7f-\x9f{_FORMAT}]")
+# Diagnostics are text, not JSON: C0 controls, including a newline that would forge another `bf:` line, too.
+_UNPRINTABLE = re.compile(f"[\x00-\x1f\x7f-\x9f{_FORMAT}]")
 # The canonical UTC instant that files, run history and the cache store.
 _CANONICAL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z")
 # Reply keys holding instants; record `fields` keep their stored values.
@@ -161,15 +221,30 @@ def present(value: object) -> object:
     return value
 
 
+def _escape(match: re.Match[str]) -> str:
+    """A character's JSON escape: one `\\uXXXX` per UTF-16 code unit, so a surrogate pair beyond U+FFFF."""
+    units = match[0].encode("utf-16-be").hex()
+    return "".join(f"\\u{units[start : start + 4]}" for start in range(0, len(units), 4))
+
+
 def terminal(value: object) -> bytes:
-    """`encode` for a terminal: DEL and C1 controls become JSON escapes, so the decoded value is unchanged.
+    """`encode` for a terminal: DEL, C1 controls and Unicode format characters become JSON escapes, so the decoded
+    value is unchanged.
 
     JSON structure is ASCII, so these characters only occur inside strings, where an escape is equivalent.
     """
     text = encode(value).decode()
     if _TERMINAL.search(text):
-        text = _TERMINAL.sub(lambda match: f"\\u{ord(match[0]):04x}", text)
+        text = _TERMINAL.sub(_escape, text)
     return text.encode()
+
+
+def printable(text: str) -> str:
+    """A diagnostic as a terminal shows it: brain file names and keys are data, never terminal instructions.
+
+    C0, DEL and C1 controls and Unicode format characters become the same `\\uXXXX` escapes replies use.
+    """
+    return _UNPRINTABLE.sub(_escape, text)
 
 
 def _object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -193,8 +268,16 @@ def decode(data: bytes | str) -> object:
         raise Error("invalid JSON document") from error
 
 
+# Distinct reasons an explanation names before counting the rest: errors grow with each invalid item, while
+# run history, logs, the cache and replies keep the message.
+_EXPLAINED = 5
+
+
 def explain(error: ValidationError, known: Collection[str] | None = None) -> str:
-    """Name each invalid field with pydantic's reason, never the rejected value.
+    """Name the first invalid fields in validation order, then count the rest; give pydantic's reason, never the value.
+
+    Validation order follows each model's declared fields, then its unknown keys; entries and list items keep their
+    input order.
 
     With `known`, other location keys are redacted: a provider's output controls its own keys.
     """
@@ -202,13 +285,19 @@ def explain(error: ValidationError, known: Collection[str] | None = None) -> str
     def part(key: str | int) -> str:
         return str(key) if known is None or isinstance(key, int) or key in known else "<key>"
 
-    # A custom validator's reason is already a sentence: drop pydantic's "Value error, " label. A reason about
-    # the whole document, such as a sensor mapping an undeclared field, names its own location.
-    parts = {
-        ".".join(map(part, item["loc"])): item["msg"].removeprefix("Value error, ")
-        for item in error.errors(include_input=False)
-    }
-    return "; ".join(f"{location}: {reason}" if location else reason for location, reason in sorted(parts.items()))
+    shown: list[str] = []
+    errors = error.errors(include_url=False, include_context=False, include_input=False)
+    for number, item in enumerate(errors):
+        # A custom validator's reason is already a sentence: drop pydantic's "Value error, " label. A reason about
+        # the whole document, such as a sensor mapping an undeclared field, names its own location.
+        location, reason = ".".join(map(part, item["loc"])), item["msg"].removeprefix("Value error, ")
+        clause = f"{location}: {reason}" if location else reason
+        if clause in shown:
+            continue
+        if len(shown) == _EXPLAINED:
+            return "; ".join([*shown, f"and {len(errors) - number} more"])
+        shown.append(clause)
+    return "; ".join(shown)
 
 
 def digest(data: bytes) -> str:
@@ -275,11 +364,22 @@ def identities(values: list[str]) -> list[str]:
     return sorted({clean(v) for v in values})
 
 
+INVISIBLE = "identities must not contain invisible format characters, such as U+200B"
+
+
+def invisible(value: str) -> bool:
+    """Whether an identity holds a format character, such as U+200B or U+FEFF: two identities that look alike would
+    silently differ. ASCII holds none, so most identities need no scan."""
+    return not value.isascii() and _INVISIBLE.search(value) is not None
+
+
 def aliased(values: list[str]) -> list[str]:
     """Aliases are exact identities another note or record can link to, never display names."""
     values = identities(values)
     if not all(re.fullmatch(IDENTITY, value) for value in values):
         raise ValueError("aliases must be namespaced identities, such as person:email/alice@example.test")
+    if any(map(invisible, values)):
+        raise ValueError(INVISIBLE)
     return values
 
 
@@ -320,6 +420,14 @@ class Record(Model):
             raise ValueError(f"id exceeds {MAX_ENCODED} characters once percent-encoded in a BF address")
         return value
 
+    @field_validator("fields", mode="before")
+    @classmethod
+    def few_fields(cls, value: object) -> object:
+        # Bounded before its keys are checked: pydantic reports every invalid key, and a 16 MiB file holds millions.
+        if isinstance(value, dict) and len(value) > 1000:
+            raise ValueError("fields hold at most 1,000 names")
+        return value
+
     @field_validator("url")
     @classmethod
     def valid_url(cls, value: str) -> str:
@@ -344,13 +452,14 @@ class Record(Model):
             raise ValueError("attributes.partial requires a boolean")
         return value
 
-    @model_validator(mode="after")
     def readable(self) -> Record:
-        # An exact read pages only `text`: everything else must fit its first page within the reply limit.
+        """An exact read pages only `text`: everything else must fit its first page within the reply limit."""
         size = sum(map(len, (self.id, self.title, self.url, *self.links, *self.aliases)))
         if size > MAX_FIELDS or size + len(encode(self.attributes)) + len(encode(self.fields)) > MAX_FIELDS:
             raise ValueError("fields other than text exceed 2 MiB; keep bulky content in text")
         return self
+
+    _readable = model_validator(mode="after")(readable)
 
     @property
     def updated(self) -> str:
@@ -361,6 +470,11 @@ class Record(Model):
     def observed(self) -> str:
         value = self.attributes.get("observed", "")
         return value if isinstance(value, str) else ""
+
+
+# The location keys a record's explanation names: its fields and pydantic's mark of an invalid mapping key. Any other
+# key, which the record's provider printed, may be private text.
+RECORD_KEYS = frozenset({*Record.model_fields, "[key]"})
 
 
 def tag_name(value: str) -> str:
@@ -387,14 +501,23 @@ class Knowledge(BaseModel):
     resource: Annotated[str, Field(max_length=8192)] = ""
     summary: str = ""
     description: str = ""
+    # Bounded like a record's: one error then names the whole list instead of each of its items.
     tags: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
-    aliases: list[str] = Field(default_factory=list)
-    links: list[str] = Field(default_factory=list)
+    aliases: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
+    links: Annotated[list[str], Field(max_length=1000)] = Field(default_factory=list)
     entity: Annotated[str, Field(max_length=8192)] = ""
     # Values of fields declared in bf.yaml, checked against their declaration like a record's.
     fields: dict[str, JsonValue] = Field(default_factory=dict)
 
     _identities = field_validator("aliases", "links")(identities)
+
+    @field_validator("entity", "resource", "aliases")
+    @classmethod
+    def visible(cls, value: str | list[str]) -> str | list[str]:
+        """Identities hold no format characters; a resource or alias with spaces is data, which names nothing."""
+        if any(re.fullmatch(IDENTITY, v) and invisible(v) for v in ([value] if isinstance(value, str) else value)):
+            raise ValueError(INVISIBLE)
+        return value
 
     @property
     def names(self) -> list[str]:
@@ -433,7 +556,7 @@ class Knowledge(BaseModel):
 
 
 class SchemaField(Model):
-    """A shared meaning; cardinality applies when a sensor maps this field."""
+    """A shared meaning; its type and cardinality check sensor mappings, stored records and note fields."""
 
     model_config = ConfigDict(
         frozen=True,
@@ -460,10 +583,13 @@ class SchemaField(Model):
     type: Literal["string", "integer", "number", "boolean", "timestamp", "identity"]
     cardinality: Literal["one", "optional", "many"] = Field(
         default="optional",
-        description="Required scalar, optional scalar, or up to 1000 scalars; applies only when mapped.",
+        description=(
+            "Required scalar, optional scalar, or up to 1000 scalars, for sensor mappings and note fields; only "
+            "collection requires a one value."
+        ),
     )
     relation: bool = Field(default=False, description="Create directed graph claims; requires type: identity.")
-    # Read time only: a role page of the parent also lists this role's links; stored edges keep their own role.
+    # Read time only: the parent's relation page also lists this relation's links; stored edges keep their own.
     broader: Name | None = Field(
         default=None,
         description="A declared relation, without its own broader, whose relation page also lists this relation's links.",
@@ -506,6 +632,8 @@ class SchemaField(Model):
                 return timestamp(value)
             if self.type == "identity" and not re.fullmatch(IDENTITY, value):
                 raise ValueError("expected an explicit namespaced identity")
+            if self.type == "identity" and invisible(value):
+                raise ValueError(INVISIBLE)
         return value
 
     def normalize(self, value: JsonValue) -> JsonValue:
@@ -526,9 +654,13 @@ class SchemaField(Model):
             raise ValueError("relation fields require type: identity")
         if (self.broader is not None or self.targets is not None) and not self.relation:
             raise ValueError("broader and targets require relation: true")
-        for example in self.examples:
-            if not self.allows(self.normalize(example)):
-                raise ValueError("examples must start with one of the declared targets")
+        for number, example in enumerate(self.examples):
+            try:
+                value = self.normalize(example)
+            except ValueError as error:
+                raise ValueError(f"examples.{number}: {error}") from error
+            if not self.allows(value):
+                raise ValueError(f"examples.{number}: value outside the declared targets")
         return self
 
 
@@ -595,7 +727,11 @@ class Program(Model):
         default=0, description="Seconds between due runs; zero excludes this program from update and watch."
     )
     lookback: Annotated[int, Field(ge=1, le=31_536_000)] = Field(
-        default=86_400, description="Initial collection or review window in seconds when no local history exists."
+        default=86_400,
+        description=(
+            "Seconds covered by a sensor's first run, each snapshot run and bf collect without --since, and by a "
+            "routine run without history."
+        ),
     )
 
     @field_validator("command")
@@ -641,7 +777,7 @@ class Sensor(Program):
 
     fields: dict[Name, Mapping] = Field(
         default_factory=dict,
-        json_schema_extra={"additionalProperties": False},
+        json_schema_extra=_nullable,
         description="Map declared shared fields to output paths or constants; unmapped fields do not apply.",
     )
     # A window sensor upserts the items it returns; a snapshot sensor replaces its complete catalog.
@@ -661,6 +797,8 @@ class Sensor(Program):
         "on period and home pages.",
     )
 
+    _empty = field_validator("fields", mode="before")(empty)
+
     @model_validator(mode="after")
     def reconciliation_mode(self) -> Sensor:
         if self.reconcile is not None and self.mode != "window":
@@ -673,7 +811,9 @@ class Routine(Program):
 
     # An action is an authored note: keep its output within the note read limit.
     max_bytes: Annotated[int, Field(ge=1, le=MAX_NOTE)] = Field(
-        default=1 << 20, description="Maximum stdout in bytes; bounded by the note read limit."
+        default=1 << 20,
+        description="Maximum stdout of an action routine in bytes, up to the note read limit; a log routine's log "
+        "keeps its last 256 KiB instead.",
     )
     hooks: Annotated[list[Slug], Field(max_length=16)] = Field(
         default_factory=list,
@@ -739,36 +879,43 @@ class Config(Model):
     brains: dict[Name, BrainReference] = Field(
         default_factory=dict,
         max_length=32,
-        json_schema_extra={"additionalProperties": False},
+        json_schema_extra=_nullable,
         description="Direct references keyed by the target name; retrieval only, without recursion or execution.",
     )
     ontology: dict[Name, SchemaField] = Field(
         default_factory=dict,
         alias="fields",
-        json_schema_extra={"additionalProperties": False},
+        json_schema_extra=_nullable,
         description="Declared shared fields and relations that sensors map, records store and notes set.",
     )
     sensors: dict[Name, Sensor] = Field(
         default_factory=dict,
-        json_schema_extra={"additionalProperties": False},
+        json_schema_extra=_nullable,
         description="Reviewed evidence collectors.",
     )
     watch: WatchSettings = Field(
-        default_factory=WatchSettings, description="Watch timing and desktop alerts; CLI options override these values."
+        default_factory=WatchSettings,
+        json_schema_extra=_nullable,
+        description="Watch timing and desktop alerts; CLI options override these values.",
     )
     # A routine name is the slug of the action folder it writes.
     routines: dict[Slug, Routine] = Field(
         default_factory=dict,
-        json_schema_extra={"additionalProperties": False},
+        json_schema_extra=_nullable,
         description="Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ from sensors.",
     )
+
+    _empty = field_validator("brains", "ontology", "sensors", "watch", "routines", mode="before")(empty)
 
     @model_validator(mode="after")
     def mapped(self) -> Config:
         if self.name in self.brains:
             raise ValueError("a brain cannot reference its own name")
-        if self.sensors.keys() & self.routines.keys():
-            raise ValueError("sensor and routine names must be distinct; they share logs and locks")
+        if shared := sorted(self.sensors.keys() & self.routines.keys()):
+            raise ValueError(
+                f"sensors.{shared[0]} and routines.{shared[0]}: sensor and routine names must be distinct; they share "
+                "logs and locks"
+            )
         if TAGGED in self.ontology:
             raise ValueError(f"fields.{TAGGED} is reserved for tag membership")
         if LINKS in self.ontology:
@@ -777,7 +924,7 @@ class Config(Model):
             raise ValueError(f"fields.{CITES} is reserved for OKF sources; choose another name")
         for name, field in self.ontology.items():
             parent = self.ontology.get(field.broader) if field.broader else None
-            # One level keeps a role page one lookup: a parent lists its children, never their children.
+            # One level keeps a relation page one lookup: a parent lists its children, never their children.
             if field.broader and (parent is None or not parent.relation or parent.broader or field.broader == name):
                 raise ValueError(f"fields.{name}.broader: name another declared relation without its own broader")
         for sensor_name, sensor in self.sensors.items():
@@ -785,9 +932,13 @@ class Config(Model):
                 if name not in self.ontology:
                     # bf.yaml is owner-authored: naming its keys points at the line to fix.
                     raise ValueError(f"sensors.{sensor_name}.fields.{name}: not declared in fields")
-                if mapping.path is None and not self.ontology[name].allows(
-                    self.ontology[name].normalize(mapping.value)
-                ):
+                if mapping.path is not None:
+                    continue
+                try:
+                    value = self.ontology[name].normalize(mapping.value)
+                except ValueError as error:
+                    raise ValueError(f"sensors.{sensor_name}.fields.{name}.value: {error}") from error
+                if not self.ontology[name].allows(value):
                     raise ValueError(f"sensors.{sensor_name}.fields.{name}: value outside the declared targets")
         return self
 
@@ -820,9 +971,12 @@ class UserConfig(Model):
 
     brains: dict[Name, Registration] = Field(
         default_factory=dict,
-        json_schema_extra={"additionalProperties": False},
+        json_schema_extra=_nullable,
         description="Names and local paths selected outside a brain when no explicit selection is supplied.",
     )
+
+    # Deleting the last entry, as the documentation suggests, leaves `brains:` null.
+    _empty = field_validator("brains", mode="before")(empty)
 
 
 def fold(text: str) -> str:

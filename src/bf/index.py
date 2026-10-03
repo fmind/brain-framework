@@ -12,13 +12,14 @@ import time
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager, suppress
 from contextvars import ContextVar
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import cast
 
 from pydantic import JsonValue
 
 from bf import links as bf_links
-from bf import ontology, records
+from bf import models, ontology, records
 from bf.config import load
 from bf.markdown import LEAD, authored, editor_lock, entry_note, note
 from bf.models import (
@@ -38,7 +39,7 @@ from bf.models import (
 )
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, writer
 
-SCHEMA = 30
+SCHEMA = 31
 CACHE = ".bf/index.sqlite"
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
@@ -49,6 +50,17 @@ _PUBLISH = 30
 _DISCARD = 5
 # `bf status` warns about a scanned tree once it holds more entries than this.
 CROWDED = MAX_FILES * 4 // 5
+# A skipped file's problem keeps at most this many bytes: a reply's 200 problems per brain stay far below MAX_REPLY.
+_PROBLEM = 1024
+# The oldest SQLite with every feature the cache uses; `AS MATERIALIZED` came last.
+_SQLITE = (3, 35, 0)
+# Query features that SQLite builds can leave out or predate: a materialized CTE, a JSON table and a named window.
+_PROBE = (
+    "WITH t AS MATERIALIZED (SELECT value FROM json_each('[1]')) "
+    "SELECT row_number() OVER w FROM t WINDOW w AS (ORDER BY value)"
+)
+# Size, modification and change times in nanoseconds, and inode, of each brain-relative path.
+Fingerprints = dict[str, tuple[int, int, int, int]]
 # `file` binds a generation to the database file bf created: a cache copied, cloned or extracted from
 # elsewhere has another inode, so it is rebuilt from the brain's files instead of trusted.
 _DDL = """
@@ -92,17 +104,20 @@ _INDEXES = (
     "CREATE INDEX names_item ON names(item)",
     "CREATE INDEX links_target ON links(target)",
     "CREATE INDEX tags_target ON tags(target)",
+    # Every reply looks for skipped files, usually none: only their rows are indexed.
+    "CREATE INDEX files_problems ON files(path) WHERE error!=''",
 )
-# Only English and French function words are dropped: a subject such as "resume" or "active" stays literal.
+# Only English and French function words are dropped: a subject such as "resume", "active" or "comment" stays
+# literal. English words that stem to one of them, such as "one" to "on", drop too: they would match nearly every text.
 _STOP = frozenset(
     """
-    a about am an and any are as at be been being but by can could did do does for from had has have he her him his how
-    i if in into is it its me might must my not of on or our please shall she should so than that the their them
-    there these they this those to us was we were what when where which who whom whose why will with would yet you
-    your
-    ai au aux avec c ce ces cet cette comment d dans de des donc du elle elles en est et eu eux il ils j je l la le les
-    leur leurs lui m mais me mes moi mon n ne nos notre nous on ont ou où par pas pour pourquoi qu quand que quel
-    quelle quelles quels qui quoi s sa se ses si son sont sur t te tes toi ton tu un une vos votre vous y à été être
+    a about am an and any are as at be been being but by can could did do does doing for from had has have having he
+    her hers him his how i if in into is it its me might must my not of on one ones or our ours please shall she
+    should so than that the their theirs them there these they this those to us was we were what when where which who
+    whom whose why will with would yet you your yours
+    ai au aux avec c ce ces cet cette d dans de des donc du elle elles en est et eu eux il ils j je l la le les leur
+    leurs lui m mais me mes moi mon n ne nos notre nous on ont ou où par pas pour pourquoi qu quand que quel quelle
+    quelles quels qui quoi s sa se ses si son sont sur t te tes toi ton tu un une vos votre vous y à été être
     """.split()  # noqa: SIM905 - one readable word list, grouped by language
 )
 # Written in capitals, a function word is an acronym and stays a term (EU AI Act, IT budget); AND and OR are
@@ -137,7 +152,7 @@ ENTRY = (
 )
 
 
-def inputs(store: Store, counts: dict[str, int] | None = None) -> dict[str, tuple[int, int, int, int]]:
+def inputs(store: Store, counts: dict[str, int] | None = None) -> Fingerprints:
     """Authored notes and record files with their file fingerprints.
 
     Every symlink, special entry or unaddressable name stays an input so its exclusion is reported. A link can
@@ -145,9 +160,9 @@ def inputs(store: Store, counts: dict[str, int] | None = None) -> dict[str, tupl
     locks beside authored files are neither: an open editor must not fail updates. The scan limit bounds each
     authored folder and each source of memories/ on its own; `counts` receives their entries.
     """
-    found: dict[str, tuple[int, int, int, int]] = {}
+    found: Fingerprints = {}
     for directory in (*AUTHORED, "memories"):
-        skipped: dict[str, tuple[int, int, int, int]] = {}
+        skipped: Fingerprints = {}
         scanned = store.scan(directory, skipped=skipped, split=directory == "memories", counts=counts)
         if directory == "memories":
             found.update({name: info for name, info in scanned.items() if records.stored(name)})
@@ -196,10 +211,13 @@ def _remove(store: Store, name: str, suffixes: Sequence[str] = _SIDECARS) -> Non
                 os.unlink(leaf + suffix, dir_fd=directory)
 
 
-def _open(store: Store) -> sqlite3.Connection | None:
-    """The current cache generation, or None when it is missing, outdated or unreadable."""
+def _open(store: Store, config: Config | None = None) -> sqlite3.Connection | None:
+    """The current cache generation, or None when it is missing, outdated or unreadable.
+
+    A refresh passes the configuration it indexes with, so the rows it adds match the generation's signature.
+    """
     path = _path(store)
-    signature = _signature(store)
+    signature = _signature(load(store) if config is None else config)
     try:
         # A concurrent full build may rename its generation over the file between this check and the connection:
         # that generation's identity then fails below, and the caller checks again.
@@ -207,8 +225,9 @@ def _open(store: Store) -> sqlite3.Connection | None:
     except FileNotFoundError:
         return None
     connection = _connect(path)
-    # Queries shared with page builders place notes in time on the reading machine.
-    connection.create_function("note_time", 1, _note_time, deterministic=True)
+    # Queries shared with page builders place notes in time on the reading machine. A note's date resolves once per
+    # connection: a page compares the same few dates on every row, and the next reply sees a changed timezone.
+    connection.create_function("note_time", 1, lru_cache(maxsize=4096)(_note_time), deterministic=True)
     try:
         # bf never creates triggers or views: rows they would add on refresh exist in no brain file.
         planted = connection.execute("SELECT count(*) FROM sqlite_master WHERE type IN ('trigger','view')")
@@ -237,7 +256,8 @@ def _open(store: Store) -> sqlite3.Connection | None:
     return None
 
 
-def _connect(path: Path) -> sqlite3.Connection:
+def _connect(path: Path | str) -> sqlite3.Connection:
+    _supported()
     connection = sqlite3.connect(path, timeout=30)
     # The cache is data found on disk: its schema may not run functions or allow corrupting writes.
     connection.setconfig(sqlite3.SQLITE_DBCONFIG_TRUSTED_SCHEMA, False)
@@ -246,10 +266,31 @@ def _connect(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _signature(store: Store) -> str:
+@cache
+def _supported() -> None:
+    """Name a Python whose SQLite cannot hold the cache, whose errors would otherwise read as damage or a full disk.
+
+    Checked once per process when it passes: the library cannot change meanwhile.
+    """
+    try:
+        with closing(sqlite3.connect(":memory:")) as connection:
+            # The schema needs FTS5 with its tokenizer options; queries need the probed features.
+            connection.executescript(_DDL)
+            connection.execute(_PROBE).fetchall()
+        capable = sqlite3.sqlite_version_info >= _SQLITE
+    except sqlite3.Error:
+        capable = False
+    if not capable:
+        raise Error(
+            f"the search cache needs SQLite {'.'.join(map(str, _SQLITE))} or newer with FTS5 and JSON functions, which "
+            f"this Python's SQLite {sqlite3.sqlite_version} lacks; reinstall bf on a uv-managed Python: "
+            "uv tool install --reinstall --managed-python --python 3.14 brain-framework"
+        )
+
+
+def _signature(config: Config) -> str:
     """The configuration a generation's rows depend on. Documentation, such as a field's description, is not, nor
     are `broader`, which relation pages read at query time, and `targets`, which collection and validation check."""
-    config = load(store)
     schema = {
         n: f.model_dump(exclude={"description", "examples", "broader", "targets"}) for n, f in config.ontology.items()
     }
@@ -265,7 +306,7 @@ def _file(path: Path) -> str:
     return str(path.lstat().st_ino)
 
 
-def _create(store: Store) -> sqlite3.Connection:
+def _create(store: Store, config: Config) -> sqlite3.Connection:
     """An empty generation beside the live cache in rollback-journal mode; the build switches it to WAL once filled.
 
     A new file needs almost no rollback journal, while WAL would write every page twice: once to the log
@@ -277,18 +318,19 @@ def _create(store: Store) -> sqlite3.Connection:
         # Private from creation: SQLite gives its journal and WAL files the database file's mode.
         os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
     connection = _connect(path)
-    # Version zero withholds this generation until the ingestion transaction commits.
-    connection.executescript(_DDL)
-    connection.execute("INSERT INTO ontology VALUES(?,?)", (_signature(store), _file(path)))
+    # Version zero withholds this generation until the ingestion transaction commits. One transaction creates the
+    # schema: executescript adds none, and each statement would otherwise commit and sync on its own.
+    connection.executescript("BEGIN;" + _DDL)
+    connection.execute("INSERT INTO ontology VALUES(?,?)", (_signature(config), _file(path)))
     connection.commit()
     return connection
 
 
-def _known(connection: sqlite3.Connection) -> dict[str, tuple[int, int, int, int]]:
-    return {
-        row["path"]: (row["size"], row["mtime"], row["ctime"], row["inode"])
-        for row in connection.execute("SELECT * FROM files")
-    }
+def _known(connection: sqlite3.Connection) -> Fingerprints:
+    cursor = connection.cursor()
+    # Plain tuples: every reply's freshness check reads the fingerprint of every indexed file.
+    cursor.row_factory = None
+    return {row[0]: row[1:] for row in cursor.execute("SELECT path,size,mtime,ctime,inode FROM files")}
 
 
 def _drop(connection: sqlite3.Connection, path: str) -> None:
@@ -381,11 +423,10 @@ def _facts(values: Mapping[str, JsonValue], config: Config) -> str:
     return json.dumps(facts, ensure_ascii=False, sort_keys=True) if facts else ""
 
 
-def _index(connection: sqlite3.Connection, store: Store, path: str) -> None:
+def _index(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
     """Insert one file; a parse failure raises. Refs cannot repeat: a note ref is its path, and a record
     ref `source:id` names the one file whose SHA-256 filename matches that id.
     """
-    config = load(store)
     if unnamed(path):
         # Only the scan's escaped form of the name exists: nothing can open it.
         raise Error(UNNAMED)
@@ -502,22 +543,31 @@ def lead(record: Record) -> str:
         size *= 4
 
 
-def refresh(store: Store, *, full: bool = False, wait: float = 30, recover: bool = False) -> dict[str, object]:
+def refresh(
+    store: Store,
+    *,
+    full: bool = False,
+    wait: float = 30,
+    recover: bool = False,
+    compared: tuple[Fingerprints, Fingerprints] | None = None,
+) -> dict[str, object]:
     """Re-index only changed files; a file that fails to parse is skipped and reported, not fatal.
 
     `full`, or a cache that is missing or incompatible, builds a new generation. `full` and `recover` first roll
     back an interrupted record transaction, as build and update do; reads refuse to apply its journal instead.
     `recover` also checks every page of the live generation: a damaged one is discarded and built again.
+    `compared` holds the cache's fingerprints and the brain's that a freshness check just compared: while the
+    cache still holds the former, the refresh indexes from that scan instead of scanning the brain again.
     """
     try:
         try:
-            return _refresh(store, full=full, wait=wait, recover=full or recover)
+            return _refresh(store, full=full, wait=wait, recover=full or recover, compared=compared)
         except sqlite3.DatabaseError as error:
             if not _damaged(error):
                 raise
         # SQLite never repairs a damaged file in place, and the cache holds nothing the brain's files do not.
         _discard(store, wait)
-        return _refresh(store, full=full, wait=wait, recover=full or recover)
+        return _refresh(store, full=full, wait=wait, recover=full or recover, compared=compared)
     except sqlite3.DatabaseError as error:
         raise Error("could not refresh the search cache; check free space and run bf build") from error
 
@@ -556,34 +606,39 @@ def _discard(store: Store, wait: float) -> None:
         _remove(store, CACHE)
 
 
-def _refresh(store: Store, *, full: bool, wait: float, recover: bool) -> dict[str, object]:
-    if not full and (result := _incremental(store, wait=wait, recover=recover)) is not None:
+def _refresh(
+    store: Store, *, full: bool, wait: float, recover: bool, compared: tuple[Fingerprints, Fingerprints] | None
+) -> dict[str, object]:
+    if not full and (result := _incremental(store, wait=wait, recover=recover, compared=compared)) is not None:
         return result
     with building(store, wait):
         if full:
             with writer(store, wait):
                 records.recover(store)
         # Another build may have published a compatible generation while this one waited.
-        elif (result := _incremental(store, wait=wait, recover=recover)) is not None:
+        elif (result := _incremental(store, wait=wait, recover=recover, compared=compared)) is not None:
             return result
         return _build(store, wait)
 
 
-def _incremental(store: Store, *, wait: float, recover: bool) -> dict[str, object] | None:
+def _incremental(
+    store: Store, *, wait: float, recover: bool, compared: tuple[Fingerprints, Fingerprints] | None
+) -> dict[str, object] | None:
     """Update the live generation in place; None when there is no compatible one."""
     with writer(store, wait):
         if recover:
             records.recover(store)
         else:
             records.require_ready(store)
-        connection = _open(store)
+        config = load(store)
+        connection = _open(store, config)
         if connection is None:
             return None
         with closing(connection):
             # Refreshes read only the pages of changed files: damage elsewhere would fail every later search.
             if recover and connection.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok":
                 raise _DamagedError("the search cache is damaged")
-            return _fill(store, connection, new=False)
+            return _fill(store, connection, config, new=False, compared=compared)
 
 
 def _build(store: Store, wait: float) -> dict[str, object]:
@@ -593,9 +648,10 @@ def _build(store: Store, wait: float) -> dict[str, object]:
     reading the live cache, incremental refreshes keep updating it, and collections keep committing. A file that
     changes after the build fingerprinted it no longer matches its fingerprint, so the next refresh indexes it again.
     """
+    config = load(store)
     try:
-        with closing(_create(store)) as connection:
-            result = _fill(store, connection, new=True)
+        with closing(_create(store, config)) as connection:
+            result = _fill(store, connection, config, new=True)
             # Incremental refreshes then commit beside readers instead of blocking them.
             connection.execute("PRAGMA journal_mode=WAL")
         # Rather than discard a finished build, wait out a collection's commit.
@@ -641,12 +697,25 @@ def _replace(store: Store) -> None:
         os.replace(Path(BUILD).name, leaf, src_dir_fd=directory, dst_dir_fd=directory)
 
 
-def _fill(store: Store, connection: sqlite3.Connection, *, new: bool) -> dict[str, object]:
-    """Index changed files in one transaction; a new generation has nothing to drop and then gains its indexes."""
+def _fill(
+    store: Store,
+    connection: sqlite3.Connection,
+    config: Config,
+    *,
+    new: bool,
+    compared: tuple[Fingerprints, Fingerprints] | None = None,
+) -> dict[str, object]:
+    """Index changed files in one transaction; a new generation has nothing to drop and then gains its indexes.
+
+    Every file is indexed with `config`, whose signature the generation carries: a bf.yaml edit during the fill
+    makes the next refresh rebuild instead of failing the files indexed meanwhile.
+    """
     # Keep the index B-trees being written in memory: up to 64 MiB, released when the refresh closes.
     connection.execute("PRAGMA cache_size=-65536")
-    current = inputs(store)
     known = _known(connection)
+    # A freshness check's scan still applies while the cache holds the fingerprints it was compared with, so no
+    # other refresh has committed since; as during a build, a file changed after the scan no longer matches.
+    current = compared[1] if compared is not None and compared[0] == known else inputs(store)
     # A file's problem depends on its own bytes and the configuration signature: an unchanged
     # fingerprint keeps its result.
     changed = sorted(path for path, info in current.items() if known.get(path) != info)
@@ -659,7 +728,7 @@ def _fill(store: Store, connection: sqlite3.Connection, *, new: bool) -> dict[st
             connection.execute("SAVEPOINT file")
             error = ""
             try:
-                _index(connection, store, path)
+                _index(connection, store, path, config)
             except FileNotFoundError:
                 # Removed after the scan, as by a commit during a build or an editor's atomic save: without a
                 # fingerprint, the next refresh compares it again.
@@ -668,7 +737,9 @@ def _fill(store: Store, connection: sqlite3.Connection, *, new: bool) -> dict[st
                 continue
             except (Error, UnicodeError) as problem:
                 connection.execute("ROLLBACK TO file")
-                error = str(problem) or "invalid file"
+                # Most parse errors name their file first, which `path` already holds: a long path would leave no
+                # room for the reason.
+                error = _capped(str(problem).removeprefix(f"{path}: ") or "invalid file")
             except OSError:
                 connection.execute("ROLLBACK TO file")
                 error = "inaccessible file or folder; check permissions"
@@ -682,14 +753,36 @@ def _fill(store: Store, connection: sqlite3.Connection, *, new: bool) -> dict[st
     return {"files": len(current), "changed": len(changed), "removed": len(removed), "skipped": skipped}
 
 
-def fresh(store: Store) -> str:
+def _capped(text: str) -> str:
+    """At most _PROBLEM bytes of a problem, cut with an ellipsis: a validation error names every invalid field."""
+    data = text.encode()
+    return text if len(data) <= _PROBLEM else data[: _PROBLEM - 3].decode(errors="ignore") + "…"
+
+
+def _sweep(store: Store) -> None:
+    """Delete the file a killed build left beside the cache, which can be as large as the cache.
+
+    Only the build lock holder fills BUILD, so holding the lock proves a file there abandoned; a running build
+    keeps it. The cleanup never fails a read: the next build replaces what remains.
+    """
+    with suppress(Error, OSError):
+        # Checked first, so a read takes the build lock only when there is something to delete.
+        store.lstat(BUILD)
+        with building(store, 0):
+            _remove(store, BUILD)
+
+
+def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
     """Refresh a changed cache, or keep serving it as `busy` while another writer or build holds the brain.
 
+    `counts` receives the entries of each scanned tree, as from `inputs`, when the check scans the brain.
     Never call it while holding the generation lock: its refresh may publish a rebuilt generation.
     """
     # The cache folder's own checks come first: they name the problem more precisely than a lock would.
     _path(store)
+    _sweep(store)
     connection = None
+    compared: tuple[Fingerprints, Fingerprints] | None = None
     try:
         with generation(store, shared=True, wait=_PUBLISH):
             connection = _open(store)
@@ -697,8 +790,12 @@ def fresh(store: Store) -> str:
                 with reader(store, wait=0):
                     # A live writer may have a pending journal; only an abandoned one blocks cached reads.
                     records.require_ready(store)
-                    if connection is not None and _known(connection) == inputs(store):
-                        return "ready"
+                    if connection is not None:
+                        if counts is not None:
+                            counts.clear()
+                        compared = (_known(connection), inputs(store, counts))
+                        if compared[0] == compared[1]:
+                            return "ready"
             finally:
                 if connection is not None:
                     connection.close()
@@ -712,7 +809,7 @@ def fresh(store: Store) -> str:
         connection = None
     try:
         # Without any usable generation there is nothing to serve, so wait for the other writer or build.
-        refresh(store, wait=0 if connection is not None else 120)
+        refresh(store, wait=0 if connection is not None else 120, compared=compared)
     except BusyError:
         return "busy"
     return "ready"
@@ -733,14 +830,15 @@ def session() -> Iterator[None]:
 
 
 @contextmanager
-def database(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
+def database(store: Store, counts: dict[str, int] | None = None) -> Iterator[tuple[sqlite3.Connection, str]]:
+    """The fresh cache generation and its state, within one read snapshot; `counts` as for `fresh`."""
     checked = _CHECKED.get()
     state = checked.get(store.root, "") if checked is not None else ""
     # A full rebuild may replace the generation between the freshness check and open: check again, twice at most.
     # fresh() waits for an in-progress generation instead of serving it, so it runs outside the generation lock.
     for attempt in range(3):
         if attempt or not state:
-            state = fresh(store)
+            state = fresh(store, counts)
             if checked is not None:
                 checked[store.root] = state
         try:
@@ -765,24 +863,25 @@ def database(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
                 _discard(store, _DISCARD)
             raise
         return
-    raise Error("the search cache is unavailable; run bf build")
+    # The shared message: this module's CACHE is the cache's path.
+    raise Error(models.CACHE)
 
 
 def terms(text: str) -> list[str]:
     """Distinct query terms in the indexed form: words, `word*` prefixes and phrases as space-separated words.
 
-    Function words drop unless they are the whole query or written as an acronym; a phrase keeps its own. FTS5
-    folds case itself. Python's casefold would turn ß into ss, a spelling the index never holds.
+    Function words drop unless they are the whole query, quoted or written as an acronym; a phrase keeps its own.
+    FTS5 folds case itself. Python's casefold would turn ß into ss, a spelling the index never holds.
     """
     found: dict[str, str] = {}
-    acronyms: set[str] = set()
+    literal: set[str] = set()
     for match in _TERM.finditer(fold(text)):
         term = match[2] + match[3] if match[2] else " ".join(re.findall(r"[^\W_]+", match[1]))
         if term:
             found.setdefault(term.lower(), term)
-        if match[2] and len(match[2]) > 1 and match[2].isupper() and match[2] not in _OPERATORS:
-            acronyms.add(match[2].lower())
-    kept = [term for key, term in found.items() if key not in _STOP or key in acronyms]
+        if match[1] is not None or (len(match[2]) > 1 and match[2].isupper() and match[2] not in _OPERATORS):
+            literal.add(term.lower())
+    kept = [term for key, term in found.items() if key not in _STOP or key in literal]
     return (kept or list(found.values()))[:WORDS]
 
 
@@ -1096,10 +1195,10 @@ _GROUPS = f"""{_INCOMING} SELECT k.relation,count(*) AS total FROM linked k JOIN
   WHERE i.ref!=:exclude GROUP BY k.relation ORDER BY k.relation='',k.relation LIMIT 64"""  # noqa: S608
 _GROUP = f"""{_INCOMING} SELECT {_ROW} FROM linked k JOIN items i ON i.id=k.item
   WHERE k.relation=:relation AND i.ref!=:exclude ORDER BY time DESC,i.ref DESC LIMIT :limit"""  # noqa: S608
-_ROLE = "k.relation IN (SELECT value FROM json_each(:relations)) AND i.ref!=:exclude"
-_ROLE_TOTAL = f"{_INCOMING} SELECT count(*) FROM linked k JOIN items i ON i.id=k.item WHERE {_ROLE}"  # noqa: S608
-_ROLE_ROWS = f"""{_INCOMING} SELECT {_ROW},k.relation FROM linked k JOIN items i ON i.id=k.item
-  WHERE {_ROLE} ORDER BY time DESC,i.ref DESC,k.relation"""  # noqa: S608
+_RELATION = "k.relation IN (SELECT value FROM json_each(:relations)) AND i.ref!=:exclude"
+_RELATION_TOTAL = f"{_INCOMING} SELECT count(*) FROM linked k JOIN items i ON i.id=k.item WHERE {_RELATION}"  # noqa: S608
+_RELATION_ROWS = f"""{_INCOMING} SELECT {_ROW},k.relation FROM linked k JOIN items i ON i.id=k.item
+  WHERE {_RELATION} ORDER BY time DESC,i.ref DESC,k.relation"""  # noqa: S608
 
 
 def incoming(
@@ -1127,24 +1226,83 @@ def linking(
         "exclude": exclude,
         "relations": json.dumps(["" if relation == LINKS else relation for relation in relations]),
     }
-    total = connection.execute(_ROLE_TOTAL, values).fetchone()[0]
-    rows = connection.execute(_ROLE_ROWS, values)
+    total = connection.execute(_RELATION_TOTAL, values).fetchone()[0]
+    rows = connection.execute(_RELATION_ROWS, values)
     return ({**_clean(dict(row)), "relation": row["relation"] or LINKS} for row in rows), total
 
 
-def newer_links(connection: sqlite3.Connection, ref: str, after: str) -> int:
-    """How many other items link to a note and are dated after `after`: evidence the note may not reflect."""
-    row = connection.execute("SELECT id FROM items WHERE ref=?", (ref,)).fetchone()
-    if row is None:
-        return 0
-    names = {name for (name,) in connection.execute("SELECT name FROM names WHERE item=?", (row[0],))} | {ref}
-    return int(
-        connection.execute(
-            f"""SELECT count(*) FROM items i
-                WHERE i.id IN ({_LINKING}) AND i.id!=:item AND i.time!='' AND ({TIME})>=:after""",  # noqa: S608
-            {**_parameters(names), "item": row[0], "after": after},
-        ).fetchone()[0]
+def _shared(name: str, item: str) -> str:
+    """Fixed SQL: whether an item other than `item` also holds `name`, as a name or its ref.
+
+    Like graph.local_refs, a name that several items claim identifies none of them.
+    """
+    return (
+        f"(EXISTS (SELECT 1 FROM names o WHERE o.name={name} AND o.item!={item}) "  # noqa: S608 - fixed SQL
+        f"OR EXISTS (SELECT 1 FROM items o WHERE o.ref={name} AND o.id!={item}))"
     )
+
+
+# For each reviewed note, given as [id, last edit] in :reviewed and [id, name, takes sections] in :names: the items
+# linking to it by a name or a section of one, as _LINKING finds them, and the records it links to by ref or name.
+# As for backlinks, a name that another item also holds identifies neither: :names omits it, and a link by it names
+# no record, unless it is that record's own ref, which reads resolve exactly.
+# CROSS JOIN keeps the few reviewed notes as the outer loop of each index search, never every record or link.
+# Each newer item counts once, ranked by the instant that makes it newer; a note keeps its total and :limit refs.
+_NEWER = f"""WITH reviewed(note,after) AS MATERIALIZED (
+    SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(:reviewed)),
+  named(note,name,sections) AS MATERIALIZED (
+    SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]'),json_extract(value,'$[2]') FROM json_each(:names)),
+  linked(note,item) AS (
+    SELECT m.note,l.item FROM named m CROSS JOIN links l ON l.target=m.name
+    UNION SELECT m.note,l.item FROM named m CROSS JOIN links l
+      ON m.sections AND l.target>m.name||'#' AND l.target<m.name||'$'
+    UNION SELECT r.note,i.id FROM reviewed r CROSS JOIN links l ON l.item=r.note
+      CROSS JOIN items i ON i.ref=l.target WHERE i.kind='record'
+    UNION SELECT r.note,n.item FROM reviewed r CROSS JOIN links l ON l.item=r.note
+      CROSS JOIN names n ON n.name=l.target CROSS JOIN items i ON i.id=n.item
+      WHERE i.kind='record' AND NOT {_shared("l.target", "n.item")}),
+  newer AS (
+    SELECT k.note,i.ref,max(
+      CASE WHEN ({TIME})>=r.after AND ({TIME})<=:now THEN ({TIME}) ELSE '' END,
+      CASE WHEN i.kind='record' AND i.updated>=r.after AND i.updated<=:now THEN i.updated ELSE '' END) AS at
+    FROM linked k JOIN reviewed r ON r.note=k.note JOIN items i ON i.id=k.item WHERE i.id!=k.note)
+SELECT note,ref,total FROM (
+  SELECT note,ref,count(*) OVER (PARTITION BY note) AS total,
+    row_number() OVER (PARTITION BY note ORDER BY at DESC,ref) AS n FROM newer WHERE at!='')
+WHERE n<=:limit ORDER BY note,n"""  # noqa: S608 - fixed SQL fragments
+
+
+def newer_links(
+    connection: sqlite3.Connection, edits: Mapping[int, str], now: str, limit: int
+) -> dict[int, tuple[int, list[str]]]:
+    """Per note id, how many linked items hold evidence newer than its last edit in `edits`, and the newest refs.
+
+    Linked items link to the note or are records it links to. One counts when its event time or, for a record, its
+    upstream `updated` falls between the edit and `now`: a future event counts once it happens, so an edit clears
+    the count until newer evidence arrives. `observed` never counts: a first collection is not a change. As for
+    backlinks, a name that another item also holds, such as a shared alias, identifies neither: links by it never count,
+    except a link by a record's own ref, which reads resolve exactly.
+    """
+    if not edits:
+        return {}
+    found: dict[int, set[str]] = {}
+    for item, name in connection.execute(
+        "SELECT item,name FROM (SELECT id AS item,ref AS name FROM items "  # noqa: S608 - fixed SQL
+        "WHERE id IN (SELECT value FROM json_each(:ids)) "
+        "UNION ALL SELECT item,name FROM names WHERE item IN (SELECT value FROM json_each(:ids))) m "
+        f"WHERE NOT {_shared('m.name', 'm.item')}",
+        {"ids": json.dumps(sorted(edits))},
+    ):
+        found.setdefault(item, set()).add(name)
+    names = []
+    for item, known in found.items():
+        taking = set(sections(known))
+        names.extend([item, name, name in taking] for name in sorted(known))
+    values = {"reviewed": json.dumps(sorted(edits.items())), "names": json.dumps(names), "now": now, "limit": limit}
+    result: dict[int, tuple[int, list[str]]] = {}
+    for item, ref, total in connection.execute(_NEWER, values):
+        result.setdefault(item, (total, []))[1].append(ref)
+    return result
 
 
 def _clean(row: dict[str, object]) -> dict[str, object]:
@@ -1180,12 +1338,12 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
 
 
 def problems(connection: sqlite3.Connection) -> list[dict[str, object]]:
-    """Skipped files shared by search, pages and status, up to 200 and a count of the rest; bf validate lists all."""
+    """Skipped files shared by search, pages and status, up to 200 and a count of the rest; bf validate lists all.
+
+    Each error keeps at most _PROBLEM bytes, so a few files with long errors cannot push a reply past its limit.
+    """
     rows = connection.execute("SELECT path,error FROM files WHERE error!='' ORDER BY path LIMIT 201").fetchall()
-    # Most parse errors already name their file; name it once.
-    result: list[dict[str, object]] = [
-        {"file": row["path"], "error": row["error"].removeprefix(row["path"] + ": ")} for row in rows[:200]
-    ]
+    result: list[dict[str, object]] = [{"file": row["path"], "error": _capped(row["error"])} for row in rows[:200]]
     if len(rows) > 200:
         more = connection.execute("SELECT count(*) FROM files WHERE error!=''").fetchone()[0] - 200
         result.append({"error": f"{more} more files were skipped; run bf validate"})
@@ -1214,10 +1372,14 @@ def activity(connection: sqlite3.Connection, since: str, until: str) -> list[tup
     ]
 
 
-def capacity(store: Store) -> list[dict[str, object]]:
-    """Scanned trees, each authored folder and each source of memories/, holding more than CROWDED entries."""
-    counts: dict[str, int] = {}
-    inputs(store, counts)
+def capacity(store: Store, counts: dict[str, int] | None = None) -> list[dict[str, object]]:
+    """Scanned trees, each authored folder and each source of memories/, holding more than CROWDED entries.
+
+    `counts`, the entries per tree of a scan this reply already made, spares scanning the brain again.
+    """
+    if not counts:
+        counts = {}
+        inputs(store, counts)
     return [
         {"warning": "directory nears the scan limit", "directory": tree, "entries": entries, "limit": MAX_FILES}
         for tree, entries in sorted(counts.items())
@@ -1232,7 +1394,9 @@ def status(store: Store) -> dict[str, object]:
     describes the last generation as `stale`, or an empty `missing` one, instead of failing.
     """
     pending = _abandoned(store)
-    with _last(store) if pending else database(store) as (connection, state):
+    # The freshness check's scan of the brain also counts the entries that capacity warns about.
+    entries: dict[str, int] = {}
+    with _last(store) if pending else database(store, entries) as (connection, state):
         counts = sources(connection)
         notes = connection.execute("SELECT count(*) FROM items WHERE kind='note'").fetchone()[0]
         skipped = problems(connection)
@@ -1248,7 +1412,7 @@ def status(store: Store) -> dict[str, object]:
     if pending:
         issue = "memories/.pending holds an interrupted record transaction; run bf update or bf build to recover it"
         skipped.insert(0, {"error": issue})
-    crowded = capacity(store)
+    crowded = capacity(store, entries)
     return {
         "cache": state,
         **({"pending_transaction": True} if pending else {}),
@@ -1275,8 +1439,7 @@ def _last(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
     with generation(store, shared=True, wait=_PUBLISH):
         connection, state = _open(store), "stale"
         if connection is None:
-            connection, state = sqlite3.connect(":memory:"), "missing"
-            connection.row_factory = sqlite3.Row
+            connection, state = _connect(":memory:"), "missing"
             connection.executescript(_DDL)
         with closing(connection):
             yield connection, state

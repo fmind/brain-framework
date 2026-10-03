@@ -17,11 +17,11 @@ An action holds one requested work session at `actions/YYYY-MM-DD_topic/ACTION.m
    python3 "$SKILL_DIR/scripts/new-action.py" website-review --brain ~/brain
    ```
 
-   Expect `{"action": "actions/2026-09-29_website-review/ACTION.md"}` with today's date: a draft holding the template's empty sections. When that folder already exists, the helper adds an 8-hex suffix (`actions/2026-09-29_website-review-3f9a1c2e/`) instead of joining it. In a brain that several people or clones share, pass `--unique` to always add the suffix, so sessions started elsewhere on the same day never meet in one folder after a merge. `--brain` takes a directory, not a registered name. The helper makes no provider call, refuses linked `actions/` folders, creates only the folder and its `ACTION.md`, and removes them again when writing fails.
+   Expect `{"action": "actions/2026-09-29_website-review/ACTION.md"}` with today's date: a draft holding the template's empty sections. When that folder already exists, the helper adds a 12-hex suffix (`actions/2026-09-29_website-review-3f9a1c2e5b7d/`) instead of joining it: routine actions take 8, so a session named after a routine never counts as that routine's action for the day. In a brain that several people or clones share, pass `--unique` to always add the suffix, so sessions started elsewhere on the same day never meet in one folder after a merge. `--brain` takes a directory, not a registered name. The helper makes no provider call, refuses linked `actions/` folders, creates only the folder and its `ACTION.md`, and removes them again when writing fails.
 1. Fill the sections following the [action template](../templates/action.md): the authorized objective, a relative link to the owning project, constraints and the next step. Use observed decisions and refs, never the template's sample text; omit unused sections. Create `inputs/` and `outputs/` only for approved files the session needs.
 1. Link the action from the project's next actions only when durable next steps change.
 
-Without the helper, create the folder exclusively, add a suffix from `python3 -c 'import uuid; print(uuid.uuid4().hex[-8:])'` on a collision or in a shared brain, and never reuse or rename an existing action.
+Without the helper, create the folder exclusively, add a suffix from `python3 -c 'import uuid; print(uuid.uuid4().hex[-12:])'` on a collision or in a shared brain, and never reuse or rename an existing action.
 
 Use the [decision guide](decisions.md) for consequential choices, conditional intentions and blocking questions: record expectations before outcomes.
 

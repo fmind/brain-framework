@@ -4,14 +4,14 @@ description: Look up Brain Framework commands, previews, graph exports, replies,
 
 # Command reference
 
-`bf --help` lists the commands from setup to repair; `bf COMMAND --help` (or `-h`) lists a command's arguments, defaults and choices. Help reads no brain and runs no program. Start with [Getting started](getting-started.md) for a first session, and [Troubleshooting](troubleshooting.md) for recovery.
+`bf --help` lists the commands from setup to repair; `bf COMMAND --help` (or `-h`) lists a command's arguments, defaults and choices. Help reads no brain, runs no program and answers even when other values on the line are invalid. Start with [Getting started](getting-started.md) for a first session, and [Troubleshooting](troubleshooting.md) for recovery.
 
 ## Commands
 
 | Command                                                                                  | Purpose                                                                                                                                  |
 | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `init PATH [--name NAME] [--full]`                                                       | Create a brain in a new, empty or freshly cloned folder; `--full` adds optional folders.                                                 |
-| `register [PATH]`                                                                        | Add a brain's name and path to the optional machine registry.                                                                            |
+| `register [PATH]`                                                                        | Add or move a brain's entry in the optional [machine registry](configuration.md#optional-machine-registration).                          |
 | `mcp`                                                                                    | Serve `search` and `read` over MCP stdio.                                                                                                |
 | `skills DIR [--check] [--force]`                                                         | Install or update the packaged agent skills; see [skills](agents.md#install-the-skills).                                                 |
 | `schema [--kind KIND]`                                                                   | Print a configuration or [reply schema](retrieval.md#reply-schemas); defaults to `bf.yaml`.                                              |
@@ -19,7 +19,7 @@ description: Look up Brain Framework commands, previews, graph exports, replies,
 | `read [REF] [--rel RELATION] [--offset N]`                                               | Open home, a page, note, section, record or identity; `--rel` lists one relation's links.                                                |
 | `export [--kind edges\|identities]`                                                      | Print the graph of the selected brains as JSON Lines, from their caches.                                                                 |
 | `collect SENSOR [--since TIME] [--until TIME] [--dry-run] [--allow-removal]`             | Run one sensor now.                                                                                                                      |
-| `run [ROUTINE] [ARGS]... [--hook EVENT] [--dry-run]`                                     | Run one routine, or every routine of a hook, now; see [routines](routines.md).                                                           |
+| `run [ROUTINE] [ARGS]... [--hook EVENT] [--stdin] [--dry-run]`                           | Run one routine, or every routine of a hook, now; see [routines](routines.md).                                                           |
 | `update [--sensor NAME] [--routine NAME] [--dry-run]`                                    | Run due sensors, then due routines, then refresh the cache.                                                                              |
 | `watch [--interval N] [--poll-interval N] [--notify MODE] [--json]`                      | Run due programs until you quit, with a live dashboard; see [watch](schedule.md).                                                        |
 | `schedule [--backend NAME] [--every N] [--name NAME] [--output DIR] [--executable PATH]` | Generate native scheduler files and their installation commands; run nothing.                                                            |
@@ -37,7 +37,7 @@ bf update --dry-run
 bf collect local-documents --dry-run
 ```
 
-`update --dry-run` lists due programs with their windows, names enabled manual programs under `manual`, and runs nothing. `collect --dry-run` **runs** the sensor and returns up to three sample records without saving them or its run; it can contact providers and still appends to the sensor's log. The second example needs the [local-documents sensor](sensors.md#your-first-sensor).
+`update --dry-run` lists due programs with their windows, names enabled manual programs under `manual`, and runs nothing. `collect --dry-run` **runs** the sensor and returns up to three sample records without saving them or its run; it can contact providers and still appends to the sensor's log. Likewise, `run --dry-run` **runs** its routines but writes no action and records no run. The second example needs the [local-documents sensor](sensors.md#your-first-sensor).
 
 Without time options, `collect` covers the sensor's `lookback` through now. `--since` and `--until` accept `now`, `today`, `yesterday`, `12h`, `7d`, `2w`, `YYYY-MM-DD` and ISO 8601 timestamps with a timezone. A snapshot sensor still returns its whole list, and `--allow-removal` accepts [a large removal](sensors.md#define-the-scope-before-adding-a-sensor) once.
 
@@ -90,24 +90,32 @@ Typing `bf sea` and Tab then completes `search`.
 
 ## Exit codes and errors
 
-Results are compact UTF-8 JSON on stdout; help and version are plain text. Dashboards use the full terminal, and `watch --json` streams JSON Lines. Diagnostics go to stderr, prefixed `bf:`, and name files and positions without quoting your content. Control characters in collected text are escaped, such as `\u009b`.
+Results are compact UTF-8 JSON on stdout; help and version are plain text. Dashboards use the full terminal, and `watch --json` streams JSON Lines. Each diagnostic is one stderr line starting with `bf:`; it names files and positions without quoting your content.
 
-| Code  | Meaning                                                       |
-| ----- | ------------------------------------------------------------- |
-| `0`   | Success.                                                      |
-| `1`   | Operation or check failed, including output to a closed pipe. |
-| `2`   | Invalid command-line input.                                   |
-| `130` | Cancelled by Ctrl-C, SIGTERM or a closed terminal.            |
+Collected text and file names are data. Results, `export` lines, `watch --json` snapshots and MCP text escape DEL, C1 controls and Unicode format characters, such as soft hyphens and zero-width, bidi or tag characters, as JSON `\uXXXX` escapes, with a surrogate pair beyond U+FFFF; decoded values are unchanged. Diagnostics and MCP errors also escape the other control characters, including newlines, so a file name cannot forge another `bf:` line.
 
-Invalid input exits 2 and names the option or argument, before any brain is read when possible. Examples: `bf search "!!!"` (no word to search), `bf search product --limit 0`, `bf read 2026-13` (no such month), `bf read projects/../bf.yaml` and `bf read projects/new-website.md --rel nope`, which lists the valid relations. An option that takes one value may appear once: `bf search launch --scope projects --scope concepts` is invalid instead of searching only the last scope. Only `--sensor` and `--routine` repeat, to select several programs.
+| Code  | Meaning                                                                                                    |
+| ----- | ---------------------------------------------------------------------------------------------------------- |
+| `0`   | Success.                                                                                                   |
+| `1`   | Operation or check failed, including standard output that is closed, full or stops reading before the end. |
+| `2`   | Invalid command-line input.                                                                                |
+| `130` | Cancelled by Ctrl-C, SIGTERM or a closed terminal.                                                         |
 
-A well-formed ref that names nothing exits 1 and suggests what exists: a close page, note, sensor or routine name (`did you mean projects?`), or the note's sections for a missing `#section`.
+Invalid input exits 2 with one line naming the argument, the reason and the help to read, before any brain is read when possible:
 
-`update` and `run` exit 1 when a program fails, and `update` and `build` when the refreshed cache skipped files; successful programs keep their results. `status --check` exits 1 on problems, unavailable brains or references, or scheduled programs that failed, are `overdue` or `never` succeeded. `validate` exits 1 on problems, never on warnings.
+```text
+bf: invalid input: --limit: 0 is not in the range 1<=x<=50 (see bf search -h)
+```
+
+Other examples: `bf search "!!!"` (no word to search), `bf read 2026-13` (no such month), `bf read projects/../bf.yaml`, `bf read tasks#next` (pages have no sections), `bf read projects --rel cites` (a page lists no relation), `bf read projects/new-website.md --rel nope`, which lists the valid relations, and an empty value choosing where a command acts, such as `--brain ""`, `bf init ""` or `schedule --output ""`. An option that takes one value may appear once: `bf search launch --scope projects --scope concepts` is invalid instead of searching only the last scope. Only `--sensor` and `--routine` repeat, to select several programs.
+
+A well-formed ref that names nothing exits 1 and suggests what exists: a close page, note, sensor or routine name (`did you mean projects?`), or the note's sections for a missing `#section`. `collect` and `run` suggest only enabled programs and fail on a disabled one with `sensor NAME is disabled in bf.yaml; set enabled: true to run it`.
+
+`update` and `run` exit 1 when a program fails, and `update` and `build` when the refreshed cache skipped files; successful programs keep their results. `status --check` exits 1 on problems, unavailable brains or references, or scheduled programs that failed, are `overdue` or `never` succeeded. `validate` exits 1 on problems, never on warnings. `skills` exits 1 when it keeps a folder holding your edits, foreign files or a newer bf's copy, and `--check` unless every skill is current; see [skills](agents.md#install-the-skills).
 
 ## Using replies
 
-Replies state a note's day as `date` (`2026-09-27`), as written in its `updated`, and other datetimes with your local offset, to the second (`2026-09-29T09:00:00+02:00`). Values under `attributes` and `fields` are returned exactly as stored. Files, run history and the cache keep UTC. Search and read replies follow the [retrieval reference](retrieval.md); `problems` is always a list of objects with `error` and, when known, `brain` and `file`.
+Every reply states times with your local offset, and dates and field values as the [retrieval reference](retrieval.md) describes, while files, run history and the cache keep UTC. Search and read replies follow that reference; `problems` is always a list of objects with `error` and, when known, `brain` and `file`.
 
 An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors` and `routines` it ran or found due, `manual` for skipped manual programs, and the refreshed `index`. A `run` reply has `ok`, `dry_run`, any `hook` and its `routines`, each with a `status` of `ran`, `skipped` or `failed`.
 
@@ -120,15 +128,16 @@ An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors` and `routines`
 | `cache`                              | `ready`, or `busy` while a writer updates it. `stale` (the last cache) or `missing` (none) while an interrupted write awaits recovery, unlike the `stale` of search and read replies. |
 | `pending_transaction`                | `true` when `memories/.pending` holds an interrupted write; a problem names the command to recover it.                                                                                |
 | `attention`                          | Scheduled programs this machine runs that `failed` or are `overdue` or `never` succeeded, such as `{"sensor":"mail","freshness":"never","failed":true}`, as on the home page.         |
-| `state`                              | `active`, `disabled` or `historical` (records remain but `bf.yaml` no longer declares the sensor).                                                                                    |
+| `state`                              | As in [source coverage](retrieval.md#source-coverage); a routine is `active` or `disabled`.                                                                                           |
 | `freshness`                          | `fresh`, `overdue`, `never`, `manual` or `unknown`; see [timing and health](schedule.md#timing-and-health).                                                                           |
-| `records`, `bytes`                   | Indexed records of the source and their size on disk.                                                                                                                                 |
+| `records`, `bytes`, `latest`         | Indexed records of the source, their size on disk and the newest event time.                                                                                                          |
 | `mode`, `window`                     | Sensor mode and, for window sensors, the contiguous collected interval `{since, until}`.                                                                                              |
-| `last_collected`                     | The last collection that brought coverage up to date; routines report `last_success`.                                                                                                 |
-| `last_run`                           | Counters of the last success: `records`, `added`, `updated`, `unchanged`, `removed`, `requested_start`, `requested_end`, `reconcile`, `elapsed_seconds`, `output_bytes`.              |
+| `last_collected`                     | The last collection that brought the source up to date, which freshness counts from; a [backfill](sensors.md#backfills-and-coverage) never does. Routines report `last_success`.      |
+| `last_run`                           | Counters of the last committed run: `records`, `added`, `updated`, `unchanged`, `removed`, `requested_start`, `requested_end`, `reconcile`, `elapsed_seconds`, `output_bytes`.        |
 | `reconciled`                         | The last scheduled [reconciliation](sensors.md#frequent-updates-and-periodic-reconciliation).                                                                                         |
 | `action`                             | A routine's latest action.                                                                                                                                                            |
 | `failed`, `error`, `failures`, `log` | The last attempt failed: its diagnostic, consecutive failures and `logs/NAME.log`.                                                                                                    |
+| `usage`                              | `7d` and `30d` counts of `search`, `empty` (searches without results) and `read`; `since`, the oldest event counted, when [rotation](limits.md#processes-and-logs) cut that window.   |
 
 For example, an hourly `mail` sensor that collected one message reports:
 
@@ -141,6 +150,7 @@ For example, an hourly `mail` sensor that collected one message reports:
   "window": { "since": "2026-09-28T15:00:00+02:00", "until": "2026-09-29T15:00:00+02:00" },
   "records": 1,
   "bytes": 612,
+  "latest": "2026-09-29T14:20:00+02:00",
   "last_run": { "records": 1, "added": 1, "updated": 0, "unchanged": 0, "removed": 0, "elapsed_seconds": 0.02 }
 }
 ```
@@ -150,8 +160,15 @@ A brain also lists `warnings` when a source or authored folder holds more than 8
 With [jq](https://jqlang.org/), list projects needing review:
 
 ```bash
-set -o pipefail
-bf read projects | jq -r '.items[] | select(.review) | [.ref, .next // ""] | @tsv'
+(
+  set -e
+  offset=0
+  while [ -n "$offset" ]; do
+    page=$(bf read projects --offset "$offset")
+    jq -r '.items[] | select(.review) | [.ref, .next // ""] | @tsv' <<<"$page"
+    offset=$(jq -r '.next_offset // empty' <<<"$page")
+  done
+)
 ```
 
-Each line holds a project ref and its first open task. `pipefail` keeps a failed `bf` exit status even when `jq` succeeds; follow `next_offset` for brains with more than 200 projects.
+Each line holds a project ref and its first open task. Pages end near 32 KiB, often after a few dozen projects, so the loop follows `next_offset` until it is absent. The subshell stops at the first failed command and keeps its exit status without closing your shell.

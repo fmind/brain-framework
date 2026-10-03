@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, ValidationError
 
-from bf.models import MAX_FILES, MAX_RECORD, NAME, Error, Model, Record, decode, digest, encode, explain
+from bf.models import MAX_FILES, MAX_RECORD, NAME, RECORD_KEYS, Error, Model, Record, decode, digest, encode, explain
 from bf.storage import BusyError, Store, reader
 
 _PENDING = "memories/.pending"
@@ -38,11 +38,14 @@ class _Journal(Model):
 
 def _pending(store: Store) -> bool:
     try:
-        # An excluded memories root cannot contain an accessible transaction. Retrieval reports
-        # the root through its scan; a linked .pending inside a real root still fails closed.
-        with store.parent("memories") as (parent, leaf):
-            if not stat.S_ISDIR(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode):
-                return False
+        # An excluded or unreadable memories root cannot contain an accessible transaction. Retrieval reports the
+        # root through its scan; a linked or unreadable .pending inside a readable root still fails closed.
+        if not stat.S_ISDIR(store.mode("memories")):
+            return False
+        try:
+            store.mode(_PENDING)
+        except PermissionError:
+            return False
         with store.parent(_MANIFEST):
             return True
     except FileNotFoundError:
@@ -178,7 +181,7 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
         changes.append(_Change(name=name.removeprefix(f"memories/{source}/"), existed=existed))
     # A source past the scan limit would fail every search and read of the brain, so collection stops below it.
     tree, entries = f"memories/{source}", {}
-    store.scan(tree, skipped={}, counts=entries)
+    store.scan(tree, skipped={}, counts=entries, fingerprints=False)
     grown = sum(
         (data is not None and not change.existed) - (data is None and change.existed)
         for change, data in zip(changes, replacements.values(), strict=True)
@@ -238,9 +241,13 @@ def stored(name: str) -> bool:
 
 
 def files(store: Store, source: str = "", *, skipped: dict[str, tuple[int, int, int, int]] | None = None) -> list[str]:
-    """Record files below memories/, each source bounded on its own; `bf validate` also reports other visible files."""
+    """Record files below memories/, each source bounded on its own; `bf validate` also reports other visible files.
+
+    Callers hold a brain lock, so no writer changes records meanwhile: the listing types them without a stat each.
+    """
     directory = f"memories/{source}" if source else "memories"
-    return [name for name in store.files(directory, skipped=skipped, split=not source) if stored(name)]
+    listed = store.scan(directory, skipped=skipped, split=not source, fingerprints=False)
+    return sorted(name for name in listed if stored(name))
 
 
 def load(store: Store, name: str) -> Record:
@@ -254,7 +261,7 @@ def parse(name: str, data: bytes) -> Record:
     try:
         record = Record.model_validate(decode(data))
     except ValidationError as error:
-        raise Error(f"{name}: invalid record: {explain(error, {*Record.model_fields, '[key]'})}") from error
+        raise Error(f"{name}: invalid record: {explain(error, RECORD_KEYS)}") from error
     except Error as error:
         raise Error(f"{name}: {error}") from error
     if path(source, record.id) != name:
@@ -360,10 +367,8 @@ def find(
     if not re.fullmatch(NAME, source):
         return None
     try:
-        with store.parent(f"memories/{source}") as (parent, leaf):
-            info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-            if not stat.S_ISDIR(info.st_mode):
-                raise Error(f"source {source} is unreadable; run bf validate")
+        if not stat.S_ISDIR(store.mode(f"memories/{source}")):
+            raise Error(f"source {source} is unreadable; run bf validate")
     except FileNotFoundError:
         return None
     except OSError as error:

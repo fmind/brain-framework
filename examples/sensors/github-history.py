@@ -154,7 +154,11 @@ def record(repository: str, kind: str, item: dict[str, Any]) -> dict[str, Any]:
         state = item["state"]
         if state not in ("open", "closed"):
             raise InvalidError("GitHub returned an invalid issue state")
-        merged = item.get("pull_request", {}).get("merged_at")
+        pull = item.get("pull_request", {})
+        # The listing states each PR's merge time; without it a merged PR would be saved as closed.
+        if not isinstance(pull, dict) or (kind == "pulls" and "merged_at" not in pull):
+            raise InvalidError("GitHub listed a pull request without its merge time")
+        merged = pull.get("merged_at")
         if merged is not None:
             instant(merged)
             state = "merged"
@@ -188,46 +192,38 @@ def collect(repository: str, kind: str, start: str, end: str, branch: str) -> li
         raise InvalidError("START must precede END")
     endpoint = f"repos/{repository}/" + ("commits" if kind == "commits" else "issues")
     # Provider lower bounds can be exclusive; fetch one extra second and filter locally.
-    since = (begin - timedelta(seconds=1)).isoformat()
+    cursor = begin - timedelta(seconds=1)
     parameters = (
-        {"sha": branch, "since": since, "until": end}
+        {"sha": branch, "since": cursor.isoformat(), "until": end}
         if kind == "commits"
-        else {"state": "all", "sort": "updated", "direction": "asc", "since": since}
+        else {"state": "all", "sort": "updated", "direction": "asc"}
     )
     records = []
-    seen: set[str] = set()
+    seen: dict[str, datetime] = {}
     size = 2
-    for number in range(1, MAX_PAGES + 1):
-        items, more = page(endpoint, parameters, number)
+    number = 1
+    for _ in range(MAX_PAGES):
+        query = parameters if kind == "commits" else {**parameters, "since": cursor.isoformat()}
+        items, more = page(endpoint, query, number)
         reached_end = False
         for item in items:
             when = instant(item["commit"]["committer"]["date"] if kind == "commits" else item["updated_at"])
-            identity = string(item["sha"]) if kind == "commits" else str(item["number"])
-            if identity in seen:
-                raise InvalidError("GitHub repeated an identity; retry the window")
-            seen.add(identity)
             if when >= finish:
+                # Issues and PRs come in modification order: the rest belongs to later windows.
                 reached_end = kind != "commits"
                 continue
+            identity = string(item["sha"]) if kind == "commits" else str(item["number"])
+            if identity in seen:
+                # A restarted issue page repeats the last second read; any other repeat means a change mid-run.
+                if kind == "commits" or seen[identity] != when:
+                    raise InvalidError("GitHub repeated an identity; retry the window")
+                continue
+            seen[identity] = when
             if when < begin:
                 continue
-            # The repository issues endpoint discovers updated PRs; detail supplies the merge outcome.
+            # The repository issues endpoint lists PRs too, with their merge time.
             if kind != "commits" and ("pull_request" in item) != (kind == "pulls"):
                 continue
-            if kind == "pulls":
-                if type(item["number"]) is not int or item["number"] <= 0:
-                    raise InvalidError("GitHub returned an invalid pull request identity")
-                # One extra request per selected PR: only the detail states whether it was merged.
-                details, _ = request(f"repos/{repository}/pulls/{item['number']}", {})
-                if not isinstance(details, dict) or details.get("number") != item["number"]:
-                    raise InvalidError("GitHub returned an invalid pull request detail")
-                modified = instant(details["updated_at"])
-                if modified < when:
-                    raise InvalidError("GitHub returned pull request detail older than its listing; retry the window")
-                if modified >= finish:
-                    # Modified again after the listing: its latest modification belongs to the next window.
-                    continue
-                item = {**details, "pull_request": {"merged_at": details["merged_at"]}}
             value = record(repository, kind, item)
             size += len(json.dumps(value, ensure_ascii=True).encode()) + 2
             if size > MAX_BYTES or len(records) >= MAX_RECORDS:
@@ -235,6 +231,14 @@ def collect(repository: str, kind: str, start: str, end: str, branch: str) -> li
             records.append(value)
         if not more or reached_end:
             return records
+        number += 1
+        if kind != "commits":
+            # Restart after the last modification read rather than at the next page number: a change during
+            # the run moves an object to the end of the order, which would shift an unread object onto a page
+            # already read. Only a page within two seconds cannot advance so; it continues by page number.
+            following = instant(items[-1]["updated_at"]) - timedelta(seconds=1)
+            if instant(items[0]["updated_at"]) < following:
+                cursor, number = following, 1
     raise InvalidError("collection exceeds 100 pages; narrow the window")
 
 

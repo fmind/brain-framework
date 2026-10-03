@@ -8,14 +8,14 @@ A team brain is a **private Git repository**, with one local clone per teammate.
 
 ## Agree on the basics
 
-| Decision         | Recommended starting point                                                  |
-| ---------------- | --------------------------------------------------------------------------- |
-| Audience         | Only information every repository member may read and retain.               |
-| Brain name       | One stable name, such as `team-brain`, in every clone.                      |
-| Knowledge owner  | A maintainer for each project's decisions and next tasks.                   |
-| Collection owner | One laptop per shared source, with reviewed programs and local credentials. |
-| Contributions    | Focused changes reviewed through your usual Git process.                    |
-| Runtime          | The same BF release on every clone and collecting laptop.                   |
+| Decision         | Recommended starting point                                                                                        |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Audience         | Only information every repository member may read and retain.                                                     |
+| Brain name       | One stable name, such as `team-brain`, in every clone.                                                            |
+| Knowledge owner  | A maintainer for each project's decisions and next tasks.                                                         |
+| Collection owner | One laptop per shared source, with reviewed programs and local credentials.                                       |
+| Contributions    | Focused changes reviewed through your usual Git process.                                                          |
+| Runtime          | The same BF release on every clone and collecting laptop, [pinned](upgrades.md#pin-a-brains-runtime) if you like. |
 
 Keep personal mail, chat and laptop history in personal brains. A private repository does not lift your organization's rules on retention or sharing.
 
@@ -40,7 +40,7 @@ git commit -m "feat: create the team brain"
 git push
 ```
 
-Validation returns `"valid":true`; the starter questions return `"score":"3/3"`.
+Validation returns `"valid":true` and `bf eval` returns `"passed":true`.
 
 ## Join it
 
@@ -54,7 +54,7 @@ bf validate
 bf eval
 ```
 
-Use `git pull` to receive changes; BF refreshes its search cache on its own. To search the team brain from anywhere, register it with `bf register ~/team-brain`, then pass `--brain team-brain`. Registration and reading never run the brain's programs. Review `bf.yaml`, `sensors/` and `routines/` before running them inside the clone, as with `bf update --brain ~/team-brain`.
+Use `git pull` to receive changes; BF refreshes its search cache on its own. Review reminders follow each file's modification time on your machine, so a pull that rewrites a note restarts them: set `stale_after` for a deadline the team shares. To search the team brain from anywhere, register it with `bf register ~/team-brain`, then pass `--brain team-brain`. Registration and reading never run the brain's programs. Review `bf.yaml`, `sensors/`, `routines/` and any [runtime pin](upgrades.md#pin-a-brains-runtime) before running them inside the clone, as with `bf update --brain ~/team-brain`.
 
 ## Collect on a laptop
 
@@ -86,7 +86,7 @@ Commit after review. Git history keeps committed evidence. A sleeping laptop doe
 ## Contribute without overwriting each other
 
 - **Notes:** make focused edits; keep one current decision and next step in the owning note.
-- **Actions:** give each session its own folder with a short suffix, as in `actions/2026-09-27_review-3f9a1c2e/`, so teammates picking the same topic on the same day never collide. The `bf-use` [new-action helper](agents.md#resume-an-action) adds one with `--unique`.
+- **Actions:** give each session its own folder with a 12-character suffix, as in `actions/2026-09-27_review-3f9a1c2e5b7d/`, so teammates picking the same topic on the same day never collide. The `bf-use` [new-action helper](agents.md#resume-an-action) adds one with `--unique`.
 - **Records:** different ids live in different files. Competing revisions of one id need review.
 - **Sources:** use different source names for different permission scopes. A snapshot replaces its whole source, so never let a partial view replace a shared one.
 - **Conflicts:** keep both sides, reconcile them from evidence, then validate and evaluate. Never resolve evidence by last writer wins.

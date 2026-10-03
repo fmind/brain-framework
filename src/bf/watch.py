@@ -12,7 +12,7 @@ import termios
 import time
 import tty
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -29,7 +29,7 @@ from rich.text import Text
 from bf.collect import next_due
 from bf.config import load
 from bf.history import ROUTINES, SENSORS, environment, log_path, state
-from bf.models import Error, WatchSettings, decode, encode, present, terminal, timestamp
+from bf.models import Error, WatchSettings, decode, encode, local, present, terminal, timestamp
 from bf.storage import BusyError, Store, collecting
 from bf.update import selection
 from bf.watch_settings import Notifications, settings
@@ -317,7 +317,7 @@ class Dashboard:
             "j/k or arrows select · Tab attention · ? close guide · q quit",
             "Newest/largest first; name, state, due, refresh and kind ascend.",
             "Unknown values stay last; ties use name. Sorting is session-only.",
-            "Items: records returned by the last successful sensor run, not total stored.",
+            "Items: records the last committed collection returned, not total stored.",
             "+ added / ~ updated / - removed; changes sorts their sum. * marks routines.",
             "Failed runs keep prior counts. — means unknown or not applicable.",
             *mode,
@@ -342,7 +342,7 @@ class Dashboard:
         elif row.action:
             detail.append("Latest action: " + clean(row.action) + "\n")
         detail.append(f"Refresh: {duration(row.refresh) if row.refresh else 'manual only'}\n")
-        detail.append("Last success: " + (row.success or "never") + "\n")
+        detail.append("Last OK: " + (local(row.success) if row.success else "never") + "\n")
         detail.append("Last run items: " + ("—" if row.records is None else f"{row.records:,}") + "\n")
         if row.elapsed_seconds is not None and row.output_bytes is not None:
             detail.append(f"Last run: {row.elapsed_seconds:.2f}s · {row.output_bytes:,} bytes\n")
@@ -525,7 +525,9 @@ def keyboard(stream: TextIO) -> Iterator[int]:
         tty.setcbreak(descriptor)
         yield descriptor
     finally:
-        termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
+        # A closed terminal needs no restoring, and its error must not replace the interrupt that closing it raised.
+        with suppress(termios.error):
+            termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
 
 
 def read_keys(descriptor: int, timeout: float) -> list[str]:
@@ -554,7 +556,10 @@ def watch(
 ) -> None:
     """A foreground controller; no daemon, scheduler installation or provider credentials are created."""
     preferences = settings(store, interval=interval, poll_interval=poll_interval, notifications=notifications)
-    if not json_output and (not sys.stdin.isatty() or not sys.stdout.isatty() or os.environ.get("TERM") == "dumb"):
+    # Python sets sys.stdin to None when descriptor 0 was closed at startup: no terminal either.
+    if not json_output and (
+        sys.stdin is None or not sys.stdin.isatty() or not sys.stdout.isatty() or os.environ.get("TERM") == "dumb"
+    ):
         # Never suggest an executing command to someone who asked only to observe.
         raise Error(
             "status --watch needs an interactive terminal; use bf status for a JSON snapshot"
@@ -604,7 +609,7 @@ def _loop(
     notifications = Notifications(preferences)
     previous: dict[tuple[str, str], str] = {}
     completed: int | None = None
-    refresh_requested = False
+    refresh_requested = invalid = False
     while True:
         now = time.monotonic()
         if dashboard.running and (code := job.poll()) is not None:
@@ -625,7 +630,9 @@ def _loop(
         if now >= next_read:
             try:
                 dashboard.replace_rows(snapshot(store, sensors, routines))
-                valid = True
+                if invalid:
+                    dashboard.message = "Configuration recovered"
+                invalid = False
                 if completed is not None:
                     failures = tuple(
                         sorted(
@@ -648,14 +655,18 @@ def _loop(
                         # The dashboard shows it; stderr text written under the alternate screen is lost.
                         if live is None:
                             sys.stderr.write(encode({"warning": warning}).decode())
-                if dashboard.message.startswith("Cannot read"):
-                    dashboard.message = "Configuration recovered"
-            except Error, OSError, UnicodeError:
+            except (Error, OSError, UnicodeError) as error:
                 dashboard.rows = []
-                dashboard.message = "Cannot read bf.yaml or history; run bf status for diagnostics"
-                valid = False
+                # BF's own diagnostic names the invalid field, YAML position or unknown selected program without
+                # quoting content: bf status cannot diagnose this watcher's selection.
+                dashboard.message = (
+                    clean(str(error))
+                    if isinstance(error, Error)
+                    else "Cannot read bf.yaml or history; run bf status for diagnostics"
+                )
+                invalid = True
             if (
-                valid
+                not invalid
                 and not dashboard.observe
                 and not dashboard.paused
                 and not dashboard.running

@@ -10,23 +10,29 @@ Choose one outcome: link the passage from an existing decision or lesson; keep i
 
 ## Retain a revision
 
-Read the exact note section or record with `bf read`. Record its original ref, when it became known, when the claim applies (if stated) and any dispute in a dated decision note. Use an existing action's `outputs/` and `inputs/` when that action owns the work; otherwise keep the dated note under `projects/` and the capture under `assets/`, linked from the owning project. Never create an action only to retain evidence. The capture time is when this local copy was made, not necessarily when the underlying event happened.
+Read the exact note section or record with `bf read`. Record its original ref, when it became known, when the claim applies (if stated) and any dispute in a dated decision note: in an existing action's `outputs/` when that action owns the work, otherwise under `projects/`, linked from the owning project. Never create an action only to retain evidence. Keep the capture where the evidence's own Git policy puts it:
+
+- For a record of a source that Git ignores, as `bf init` does for all of `memories/`, use the brain's `originals/` folder, which Git ignores too. Cite the capture's path in a code span, not a Markdown link: other clones lack the file, and a link to it fails `bf validate` there.
+- For an authored note, or a record of a team source re-included with `!/memories/SOURCE/`, which Git already versions, use the owning action's `inputs/`, otherwise `assets/`.
+
+The capture time is when this local copy was made, not necessarily when the underlying event happened.
 
 The standard-library [evidence helper](../scripts/evidence.py) never contacts a network. `read REF --brain PATH` runs the offline `bf read` and prints the whole reply: above 32 KiB it follows each `next_offset`, checks that every page names the same file `sha256` (and, for a whole note, that the joined text has it) and joins the pages, up to 4 MiB. `capture` and `compare` read only stdin. `capture` keeps one exact read's text or record, its source metadata, a local capture time and a content digest; it drops backlinks and other context and refuses listing pages, lone text pages and incomplete or `stale` reads. Partial or not-fresh records keep explicit limitations. A capture is a local observation, not proof of authorship, truth or live provider state.
 
-In the commands below, `$brain_path` is the brain directory and `$evidence_ref` the exact ref; with several selected brains, use the returned `uri` (`bf://NAME/...`), since a plain ref present in two brains fails. `$new_capture` is an unused `.json` path where the capture belongs (the owning action's `inputs/`, otherwise `assets/`, as above) and `$saved_capture` an earlier capture. This subshell creates an owner-only capture at an unused path, never replaces an earlier one and removes only a capture it failed to write:
+In the commands below, `$brain_path` is the brain directory and `$evidence_ref` the exact ref; with several selected brains, use the returned `uri` (`bf://NAME/...`), since a plain ref present in two brains fails. `$new_capture` is an unused `.json` path where the capture belongs, as above, and `$saved_capture` an earlier capture. This subshell creates an owner-only capture, and any missing folder, at an unused path, never replaces an earlier one and removes only a capture it failed to write:
 
 ```bash
 (
   set -o pipefail -o noclobber
   umask 077
+  mkdir -p -- "$(dirname -- "$new_capture")" || exit 1
   exec 3> "$new_capture" || exit 1
   python3 "$SKILL_DIR/scripts/evidence.py" read "$evidence_ref" --brain "$brain_path" |
     python3 "$SKILL_DIR/scripts/evidence.py" capture >&3 || { rm -f -- "$new_capture"; exit 1; }
 )
 ```
 
-Captures may contain private or external text: give them the original's audience and backup protection. Action inputs and assets are not ignored by Git by default; inspect the brain's ignore rules before committing. Capture JSON is not indexed, but anyone with file access can read it; use an approved private location when a shared brain's audience is too broad. Cite the original ref and the relative capture file from the decision note when both belong in that brain. A later record update or deletion cannot reconstruct a revision nobody captured.
+Captures may contain private or external text: give them the original's audience and backup protection. A `bf init` brain keeps `originals/` out of Git but not action inputs or assets; inspect the brain's ignore rules before committing. Capture JSON is not indexed, but anyone with file access can read it; use an approved private location when a shared brain's audience is too broad. Cite the original ref and the capture's relative path from the decision note when both belong in that brain. A later record update or deletion cannot reconstruct a revision nobody captured.
 
 To compare, supply the saved capture followed by a new exact read:
 
@@ -50,6 +56,6 @@ Declare only the relations you use, such as `supersedes`, under `fields:` in `bf
 
 ## Review impact lightly
 
-When selected evidence changes, list its dependents with `bf read 'REF' --rel depends-on` on the whole note, record or identity (a section has no relation page), following `next_offset`: a whole read's backlink group previews only 5. For each dependent, read it and check its `depends-on` `claims`: `target` tells a dependency on the changed section from one on another section, and `origin` names the section making the claim. `bf search 'IDENTITY'` gives the same `relations` for every linking item at once. Review direct dependents first, then at most one more layer: **two hops, ten distinct dependents, one visit per qualified ref**, which also stops cycles. Equal relation names in different brains need their declared meanings checked before you follow them.
+When selected evidence changes, list its dependents with `bf read 'REF' --rel depends-on` on the whole note, record or identity (a section has no relation page), following `next_offset`: a whole read's backlink group previews only 5. For each dependent, read it and check its `depends-on` `claims`: `target` tells a dependency on the changed section from one on another section, and `origin` names the section making the claim. `bf search 'IDENTITY'` gives the same `relations` for every linking item at once. A project, or a note with `stale_after`, linking to evidence that happened or changed upstream after its last edit also lists that evidence under `newer`. Review direct dependents first, then at most one more layer: **two hops, ten distinct dependents, one visit per qualified ref**, which also stops cycles. Equal relation names in different brains need their declared meanings checked before you follow them.
 
 For each affected conclusion, report the dependency path and whether it needs review, remains justified after inspection or lacks evidence. Change alone never proves falsity, and generic or `supersedes` links do not propagate impact. An unfollowed `next_offset`, truncated claims, a missing brain or an exhausted limit makes the review explicitly incomplete; never silently clear the remaining dependents. Reuse a previous review when both the evidence digest and the conclusion are unchanged. This is an agent review over graph reads, not an automatic invalidation engine.

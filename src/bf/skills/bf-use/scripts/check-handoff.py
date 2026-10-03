@@ -57,10 +57,13 @@ def read(action: str, brain: str, section: str) -> tuple[str, str | int]:
             raise ValueError("read resolved to another action")
         if paged:
             return name, cast("int", size)
-        if not isinstance(text, str) or not text.partition("\n")[2].strip():
-            raise ValueError("empty section")
+        if not isinstance(text, str):
+            raise ValueError("expected section text")
     except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, RecursionError) as error:
         raise ValueError(f"{section} is unavailable or incomplete; run bf read {ref} to see why") from error
+    # The read succeeded: a heading without a body, as new-action.py writes it, is unfinished, not unavailable.
+    if not text.partition("\n")[2].strip():
+        raise ValueError(f"{section} is empty; write it before a handoff")
     return name, text
 
 
@@ -104,6 +107,9 @@ def main() -> int:
     args = parser.parse_args()
     if len(args.action) > 1024 or not ACTION.fullmatch(args.action):
         parser.error("expected an action entry ref without a section")
+    if not args.brain.strip():
+        # bf rejects an empty --brain instead of selecting another brain: say so before reading.
+        parser.error("--brain needs a brain name or path")
     report = check(args.action, args.brain)
     output: dict[str, object] = report
     if args.hook:

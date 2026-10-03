@@ -23,9 +23,6 @@ jobs:
       - name: Match release version to tag
         if: github.ref_type == 'tag'
         run: test "$GITHUB_REF_NAME" = "v$(uv version --short)"
-      - name: Validate release notes
-        # Every push checks the current version's section, so the script is exercised before a tag needs it.
-        run: scripts/release-notes "v$(uv version --short)" > /dev/null
       - name: Run shared checks
         run: mise run check
       - name: List checkout changes

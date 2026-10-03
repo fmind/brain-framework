@@ -3,6 +3,7 @@
 /.agents/tmp/
 /.cache/
 /.coverage
+/.coverage.*
 /.env
 /.env.*
 !/.env.example

@@ -7,22 +7,36 @@ import re
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import NoReturn, Protocol
+from typing import Annotated, NoReturn, Protocol
 from uuid import uuid4
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import FailFast, TypeAdapter, ValidationError
 
 from bf import ontology, records
 from bf.config import load
 from bf.history import ROUTINES, SENSORS, append_log, environment, log_path, remember, state
-from bf.markdown import note, validate_okf
-from bf.models import Config, Error, Program, Record, Routine, Sensor, decode, explain, local, suggest, timestamp
+from bf.markdown import note, parse, validate_okf
+from bf.models import (
+    RECORD_KEYS,
+    Config,
+    Error,
+    Program,
+    Record,
+    Routine,
+    Sensor,
+    decode,
+    explain,
+    local,
+    suggest,
+    timestamp,
+)
 from bf.storage import Store, collecting, relative, writer
 from bf.validate import broken_links
 
@@ -38,6 +52,7 @@ SHRINK_FLOOR = 10
 # Reprojected records committed per transaction; a reply lists at most LIMIT records that failed.
 REPROJECT = 1000
 LIMIT = 200
+_EXISTS = "an action for this routine already exists today"
 
 
 class Runner(Protocol):
@@ -46,6 +61,17 @@ class Runner(Protocol):
 
 def _now() -> str:
     return local(timestamp(datetime.now(UTC).isoformat()))
+
+
+def enabled[P: Program](programs: Mapping[str, P], kind: str, name: str) -> P:
+    """The enabled program called `name`; an unknown or disabled name fails, suggesting only programs that can run."""
+    program = programs.get(name)
+    if program is None:
+        runnable = [known for known, settings in programs.items() if settings.enabled]
+        raise Error(f"unknown {kind} {name}; check names in bf.yaml{suggest(name, runnable)}")
+    if not program.enabled:
+        raise Error(f"{kind} {name} is disabled in bf.yaml; set enabled: true to run it")
+    return program
 
 
 def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes = b"", /) -> bytes:
@@ -86,6 +112,8 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
         raise Error("could not start the program; check its executable bit and interpreter") from error
     stdout, stderr = child.stdout, child.stderr
     output, errors = bytearray(), bytearray()
+    # A log routine's stdout only feeds its log: keep a rolling tail, as for stderr, instead of failing at max_bytes.
+    logged = isinstance(sensor, Routine) and sensor.output == "log"
     deadline = started + sensor.timeout
     exited: float | None = None
     outcome = "failed"
@@ -133,7 +161,9 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
                         selector.unregister(key.fileobj)
                         continue
                     key.data.extend(chunk)
-                    if len(output) > sensor.max_bytes:
+                    if logged:
+                        del output[:-_LOG]
+                    elif len(output) > sensor.max_bytes:
                         raise Error("program output exceeded max_bytes")
                     del errors[:-_LOG]
         # Keep diagnostics written before the exit; a bounded read never waits for descendants.
@@ -143,6 +173,15 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
                     break
                 errors.extend(chunk)
         code = child.wait()
+        if code < 0:
+            # BF's own kills fail above: the program crashed, or another process, such as the out-of-memory killer,
+            # ended it.
+            try:
+                killer = signal.Signals(-code).name
+            except ValueError:
+                # Real-time signals between SIGRTMIN and SIGRTMAX have no name.
+                killer = f"signal {-code}"
+            raise Error(f"program was killed by {killer}")
         outcome = f"exited with status {code}"
         if code:
             raise Error(f"program exited with status {code}")
@@ -158,7 +197,7 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
         for pipe in (child.stdin, child.stdout, child.stderr):
             if pipe is not None and not pipe.closed:
                 pipe.close()
-        shown = bytes(output[-_LOG:]) if isinstance(sensor, Routine) and sensor.output == "log" else b""
+        shown = bytes(output[-_LOG:]) if logged else b""
         diagnostics = bytes(errors[-_LOG:])
         body = shown + (b"-- stderr --\n" + diagnostics if shown and diagnostics else diagnostics)
         # A log is a diagnostic: failing to write it never changes the run's own outcome.
@@ -193,40 +232,47 @@ def _failed(
 
 
 def _coverage(
-    previous: dict[str, object], start: str, end: str, observed: str, *, resumes: bool
+    previous: dict[str, object], start: str, end: str, observed: str, sensor: Sensor
 ) -> tuple[dict[str, str], bool]:
-    """The contiguous collected interval after a run, and whether the run is the latest window.
+    """The contiguous collected interval after a run, and whether the run is the latest: a fresh success.
 
-    Coverage never extends past the run itself: later items can still appear upstream. A backfill that
-    ends before the recorded coverage neither moves the resume point nor counts as a fresh success, and
-    coverage never claims an uncollected gap. When updates resume from the coverage (scheduled window
-    sensors), a later run leaving a gap inside the catch-up horizon is not the latest either, so the
-    next update still fills that gap. Nothing revisits a manual sensor's gap, so its later run is the latest.
+    Coverage never extends past the run itself: later items can still appear upstream. A run contiguous with the
+    coverage extends it, a backfill that ends before it keeps the resume point, and coverage never claims an
+    uncollected gap. When updates resume from the coverage (scheduled window sensors), a later run leaving a gap
+    inside the catch-up horizon is not contiguous, so the next update still fills that gap; nothing revisits a
+    manual sensor's gap, so its later run counts as contiguous. A window run is the latest only when its end also
+    reaches the time it ran: an earlier window, even a first or adjacent one, never claims fresh evidence, and the
+    next update resumes from its end. A snapshot replaces its whole catalog, so its end need not reach the run.
     """
     covered = min(end, observed)
     before_start, before_end = str(previous.get("start", "")), str(previous.get("end", ""))
     if before_end:
-        # Saved state may predate the coverage bound or follow a clock correction. It cannot
-        # prove coverage beyond its successful run, nor prevent a current run becoming fresh.
-        before_end = min(timestamp(before_end), timestamp(str(previous.get("success") or observed)), observed)
+        # Saved state may predate the coverage bound or follow a clock correction. It cannot prove coverage
+        # beyond the last run, which recorded it, nor prevent a current run becoming fresh.
+        last = previous.get("run") or previous.get("success") or observed
+        before_end = min(timestamp(before_end), timestamp(str(last)), observed)
         before_start = timestamp(before_start) if before_start else ""
         if before_start >= before_end:
             before_start = before_end = ""
     if start >= covered:
         return ({"start": before_start, "end": before_end} if before_end else {}), False
     horizon = timestamp((datetime.fromisoformat(observed) - CATCH_UP).isoformat())
-    latest = not before_end or (covered >= before_end and (not resumes or start <= max(before_end, horizon)))
-    interval = (start, covered) if latest else (before_start, before_end)
+    resumes = sensor.mode == "window" and sensor.refresh > 0
+    contiguous = not before_end or (covered >= before_end and (not resumes or start <= max(before_end, horizon)))
+    interval = (start, covered) if contiguous else (before_start, before_end)
     if before_start and before_end and start <= before_end and covered >= before_start:
         interval = (min(start, before_start), max(covered, before_end))
-    return {"start": interval[0], "end": interval[1]}, latest
+    return {"start": interval[0], "end": interval[1]}, contiguous and (sensor.mode == "snapshot" or end >= observed)
 
 
-def _project(position: int, record: Record, sensor: Sensor, config: Config) -> Record:
-    """Map one printed record; an error names its zero-based position in the output, never a value."""
+def _project(position: int, record: Record, sensor: Sensor, config: Config, observed: str) -> Record:
+    """Map one printed record and stamp when it was observed; an error names its zero-based position, never a value."""
     try:
-        return ontology.project(record, sensor, config)
-    except Error as error:
+        projected = ontology.project(record, sensor, config)
+        stamped = projected.model_copy(update={"attributes": {**projected.attributes, "observed": observed}})
+        # Already valid, and `observed` is BF's own canonical instant: the stamp can only exceed the size bound.
+        return stamped.readable()
+    except (Error, ValueError) as error:
         raise Error(f"record {position}: {error}") from error
 
 
@@ -261,36 +307,37 @@ def collect(
     """
     start, end = _window(start, end)
     config = load(store)
-    sensor = config.sensors.get(name)
-    if sensor is None or not sensor.enabled:
-        raise Error(f"sensor {name} is unknown or disabled{suggest(name, config.sensors)}")
+    sensor = enabled(config.sensors, "sensor", name)
     if reconcile and sensor.reconcile is None:
         raise Error("reconciliation requires the sensor's reconcile setting")
     argv = _argv(store, sensor, start, end)
     with collecting(store, name):
         started = clock()
+        observed = timestamp(started.isoformat())
         measured = time.monotonic()
         if reconcile and sensor.reconcile is not None:
             horizon = timestamp((started - timedelta(seconds=sensor.reconcile.lookback)).isoformat())
-            if start > horizon or end < timestamp(started.isoformat()):
+            if start > horizon or end < observed:
                 raise Error("reconciliation must cover its lookback through the current run")
         committed = False
         try:
             raw = runner(argv, sensor, store, name, b"")
+            printed = decode(raw)
+            for position, item in enumerate(printed if isinstance(printed, list) else ()):
+                # Collection maps fields itself. Checked before validation, which would name invalid keys or the
+                # 1,000-name bound instead of this rule.
+                if isinstance(item, dict) and item.get("fields"):
+                    raise Error(f"record {position}: sensors must supply mapped output, not precomputed fields")
             try:
-                incoming = TypeAdapter(list[Record]).validate_python(decode(raw))
+                # Stop at the first invalid record: a large invalid array must not build one diagnostic per item.
+                incoming = TypeAdapter(Annotated[list[Record], FailFast()]).validate_python(printed)
             except ValidationError as error:
-                # Record fields and item positions only: a key the provider printed may be private text.
-                known = {*Record.model_fields, "[key]"}
-                raise Error("collector must print one JSON array of records: " + explain(error, known)) from error
-            incoming = [_project(position, record, sensor, config) for position, record in enumerate(incoming)]
+                raise Error("collector must print one JSON array of records: " + explain(error, RECORD_KEYS)) from error
+            incoming = [
+                _project(position, record, sensor, config, observed) for position, record in enumerate(incoming)
+            ]
             if len({r.id for r in incoming}) != len(incoming):
                 raise Error("collector returned duplicate record ids")
-            observed = timestamp(started.isoformat())
-            incoming = [
-                record.model_copy(update={"attributes": {**record.attributes, "observed": observed}})
-                for record in incoming
-            ]
             result: dict[str, object] = {
                 "sensor": name,
                 "records": len(incoming),
@@ -313,9 +360,7 @@ def collect(
                 result.update(records.upsert(store, name, incoming, snapshot=sensor.mode == "snapshot"))
                 committed = True
                 result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
-                previous = state(store).get(name, {})
-                resumes = sensor.mode == "window" and sensor.refresh > 0
-                coverage, latest = _coverage(previous, start, end, observed, resumes=resumes)
+                coverage, latest = _coverage(state(store).get(name, {}), start, end, observed, sensor)
                 remember(
                     store,
                     name,
@@ -403,18 +448,22 @@ def _argv(store: Store, program: Program, start: str, end: str) -> list[str]:
 
 
 def _written(store: Store, prefix: str) -> bool:
-    """Whether an `actions/{prefix}SUFFIX` folder holds anything, such as an ACTION.md or an editor's `.#ACTION.md` lock.
+    """Whether an `actions/{prefix}SUFFIX` folder holds an ACTION.md, which alone makes it an action.
 
-    Folder names, not run history, find it: a retry counts an action whose run history was never saved. A linked
-    folder or a link or unaddressable name inside also counts, so nothing is written beside it; a linked `actions/`
-    fails by name.
+    Folder names, not run history, find it: a retry counts an action whose run history was never saved. An ACTION.md
+    link, or a linked or unreadable folder BF cannot look into, also counts; a linked or unreadable `actions/` fails
+    by name. A folder holding only the temporary file of a killed write, or an editor's lock, does not stop today's
+    action.
     """
     skipped: dict[str, tuple[int, int, int, int]] = {}
     found = store.files("actions", skipped=skipped)
     if "actions" in skipped:
+        # The scan skips a folder it cannot read as it skips a link: name the cause the owner must fix.
+        if stat.S_ISDIR(store.mode("actions")):
+            raise Error("actions: unreadable folder; grant read and search permission")
         raise Error("actions: expected a directory; symlinks and special files are forbidden")
-    today = re.compile(re.escape(f"actions/{prefix}") + r"[0-9a-f]{8}(?:/|$)")
-    return any(today.match(name) for name in (*found, *skipped))
+    today = re.compile(re.escape(f"actions/{prefix}") + r"[0-9a-f]{8}(?:/ACTION\.md)?")
+    return any(today.fullmatch(name) for name in (*found, *skipped))
 
 
 def routine(
@@ -432,14 +481,13 @@ def routine(
     """Run one routine over [start, end), appending `args` to its command and feeding it `stdin`.
 
     A `log` routine keeps its output in its log. An `action` routine's Markdown becomes today's action, written only
-    after success; empty output means there is nothing to review. An existing action folder is never overwritten,
-    so an action routine writes at most one action per local day in this brain and never replaces a person's edits.
+    after success in a new folder; empty output means there is nothing to review. While today's action exists, a run
+    skips, so an action routine keeps at most one action per local day in this brain and never replaces a person's
+    edits. A dry run reports the same skip.
     """
     start, end = _window(start, end)
     config = load(store)
-    program = config.routines.get(name)
-    if program is None or not program.enabled:
-        raise Error(f"routine {name} is unknown or disabled{suggest(name, config.routines)}")
+    program = enabled(config.routines, "routine", name)
     with collecting(store, name):
         started = clock()
         day = started.astimezone().date().isoformat()
@@ -459,21 +507,23 @@ def routine(
                 if text.strip():
                     # Validate the action's OKF metadata, declared relations and relative links before anything
                     # is written: an action bf validate rejects would block the brain's next checked commit.
-                    action = note(path, raw)
+                    action = note(path, markdown := parse(path, raw))
                     ontology.note_claims(action, config, strict=True)
-                    validate_okf(path, raw)
+                    validate_okf(path, markdown)
                     if broken := broken_links(store, action):
                         raise Error(broken[0] + (f" and {len(broken) - 1} more" if len(broken) > 1 else ""))
-                    result["action"] = path
             if dry_run:
+                # A preview predicts the skip, but names no action: the real run draws its own folder suffix.
+                if text.strip() and _written(store, f"{day}_{name}-"):
+                    result["skipped"] = _EXISTS
                 return {**result, **({"text": text} if text.strip() else {})}
             with writer(store, wait=120):
                 if text.strip() and _written(store, f"{day}_{name}-"):
-                    del result["action"]
-                    result["skipped"] = "an action for this routine already exists today"
+                    result["skipped"] = _EXISTS
                 elif text.strip():
                     store.write(path, raw)
                     written = True
+                    result["action"] = path
                 # A skipped review keeps its window open, so the next written action covers it.
                 reviewed = {} if "skipped" in result else {"start": start, "end": end}
                 at = timestamp(started.isoformat())

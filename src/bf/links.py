@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
-from bf.models import AUTHORED, CITES, IDENTITY, NAME, TAGGED, Config, Error, clean, tag_name
+from bf.models import AUTHORED, CITES, IDENTITY, LINKS, NAME, TAGGED, Config, Error, clean, tag_name
 
 # The one period syntax, parsed by pages.period(): a day, a range of days, a month or a trailing window, even an
 # invalid date.
@@ -36,37 +37,46 @@ def address(brain: str, path: str, fragment: str = "") -> str:
 def parse(value: str) -> Address | None:
     if not value.lower().startswith("bf:"):
         return None
+    # The whole rule, unless a failed check names its exact correction.
+    hint = (
+        "use bf://brain/path?rel=relation#section, with rel as the only query, "
+        "spaces and a literal % percent-encoded as %20 and %25, and without userinfo or traversal"
+    )
     try:
         clean(value)
         if len(value) > 8192 or re.search(r"\s|%(?![0-9a-fA-F]{2})", value):
             raise ValueError
         uri = urlsplit(value)
         # No userinfo, ports, credentials, implicit authority or dot-segment rewriting.
-        if not re.fullmatch(NAME, uri.netloc) or not uri.path.startswith("/"):
+        if not re.fullmatch(NAME, uri.netloc):
             raise ValueError
-        # An empty path, as in bf://brain/, is the home page.
+        if not uri.path.startswith("/"):
+            hint = "end a brain's address with /, as in bf://brain/ for its home"
+            raise ValueError
+        # An empty path, as in bf://brain/, is the home page. A page's fragment selects nothing: `bf validate` names
+        # such a link, like one to a missing section, instead of failing the note that holds it.
         path = unquote(uri.path[1:], errors="strict")
         fragment = unquote(uri.fragment, errors="strict")
         if path:
             clean(path)
         if fragment:
             clean(fragment)
-            if path in {"", "tasks"}:
-                raise ValueError
         source, separator, record_id = path.partition(":")
         record = bool(separator and re.fullmatch(NAME, source) and record_id)
         # A source:id is an opaque lookup key, never a filesystem path. Existing ids can contain URLs.
-        if path and not record and ("\\" in path or any(p in {"", ".", ".."} for p in path.split("/"))):
+        segments = path.split("/")
+        if path and not record and ("\\" in path or any(p in {".", ".."} for p in segments)):
+            raise ValueError
+        if path and not record and "" in segments:
+            hint = "remove the trailing / or empty path segment, as in bf://brain/projects"
             raise ValueError
         pairs = parse_qsl(uri.query, keep_blank_values=True, strict_parsing=True, max_num_fields=1, errors="strict")
         if pairs and (pairs[0][0] != "rel" or not re.fullmatch(NAME, pairs[0][1])):
             raise ValueError
         return Address(uri.netloc, path, fragment, pairs[0][1] if pairs else "")
-    except ValueError, UnicodeError:
-        raise Error(
-            "invalid BF link; use bf://brain/path?rel=role#section, with rel as the only query, "
-            "spaces and a literal % percent-encoded as %20 and %25, and without userinfo or traversal"
-        ) from None
+    except ValueError:
+        # Including the UnicodeError of strict percent-decoding.
+        raise Error(f"invalid BF link; {hint}") from None
 
 
 def identity(value: str) -> str:
@@ -115,16 +125,6 @@ def reserved(path: str) -> bool:
     )
 
 
-def computed(value: str) -> bool:
-    """A page address cannot be claimed as the identity of a note or record."""
-    return (parsed := parse(value)) is not None and reserved(parsed.path)
-
-
-def record_address(value: str) -> bool:
-    """A BF path whose first segment contains ':' names a source:id record, never an entity or alias."""
-    return (parsed := parse(value)) is not None and ":" in parsed.path.partition("/")[0]
-
-
 @dataclass(frozen=True)
 class Claim:
     """A directed link from a subject to a target, supported by the section or record that contains it."""
@@ -149,12 +149,26 @@ def claim(
         return None
     if parsed.relation == CITES:
         return Claim(subject, CITES, parsed.identity, origin)
+    # bf.yaml cannot declare tagged-with or links, so neither is ever a declared relation here.
     definition = config.ontology.get(parsed.relation)
-    if parsed.relation != TAGGED and definition is not None and definition.relation:
+    if definition is not None and definition.relation:
         return Claim(subject, parsed.relation, parsed.identity, origin)
     if not strict:
         return Claim(subject, "", parsed.identity, origin)
-    if parsed.relation == TAGGED:
-        raise Error(f"link relation {TAGGED} is reserved for tag membership; add the tag to the note instead")
-    named = f" {parsed.relation}" if authored else ""
-    raise Error(f"link relation{named} is undeclared; declare it in bf.yaml fields with relation: true")
+    raise Error(undeclared(parsed.relation, config.ontology, named=authored))
+
+
+def undeclared(relation: str, fields: Collection[str], *, named: bool = True) -> str:
+    """How to correct a `?rel=` naming no declared relation, the one wording of reads, validation and collection.
+
+    A reserved word or a declared field that is no relation is quoted: each is built in or declared in bf.yaml. Any
+    other relation is quoted only when `named`: a sensor's output controls a record's.
+    """
+    if relation == TAGGED:
+        return f"link relation {TAGGED} is reserved for tag membership; add the tag to the note instead"
+    if relation == LINKS:
+        return f"untyped links need no ?rel=; remove ?rel={LINKS}"
+    if relation in fields:
+        return f"field {relation} is not a relation; relations need type: identity and relation: true"
+    quoted = f" {relation}" if named else ""
+    return f"link relation{quoted} is undeclared; declare it in bf.yaml fields with type: identity and relation: true"

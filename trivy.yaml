@@ -12,7 +12,8 @@ scan:
     - misconfig
     - secret
     - vuln
-  # Ignored generated output, as in .gitleaks.toml: local scans see what a CI checkout sees.
+  # Ignored generated output, as in .gitleaks.toml. Trivy skips these directories even where Git tracks a file, so
+  # check:leaks fails when Git tracks an ignored file.
   skip-dirs:
     - .agents/tmp
     - .cache

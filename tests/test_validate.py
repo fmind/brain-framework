@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import time
 from typing import cast
 
 import pytest
 
-from bf.markdown import note, reference, section, validate_okf
+from bf import markdown
+from bf.markdown import note, parse, reference, section, validate_okf
 from bf.models import Error, Query, Record, encode
 from bf.records import path as record_path
 from bf.retrieve import read, search
 from bf.storage import Store
 from bf.validate import validate
 from conftest import records_file
+from test_guarded_write import HELPER
 
 
 def located(result: dict[str, object]) -> list[str]:
@@ -89,7 +93,8 @@ def test_link_schema_and_identity_problems_name_their_file_once(brain: Store) ->
     brain.write("bf.yaml", b"version: 7\nname: fixture\n")
     brain.write("concepts/foreign.md", b"---\ntype: person\nentity: bf://other/people/alice\n---\n# Foreign\n")
     brain.write(
-        "concepts/role.md", b"---\ntype: concept\n---\n# Role\n\n[x](bf://fixture/projects/offline.md?rel=nope)\n"
+        "concepts/relation.md",
+        b"---\ntype: concept\n---\n# Relation\n\n[x](bf://fixture/projects/offline.md?rel=nope)\n",
     )
     brain.write(
         "concepts/dup.md", b"---\ntype: concept\n---\n# Dup\n\n[x](../projects/absent.md) [y](evidence.md#missing)\n"
@@ -109,15 +114,17 @@ def test_link_schema_and_identity_problems_name_their_file_once(brain: Store) ->
     assert f"{record_path('fake', 'fields')}: field nope is not declared in bf.yaml fields" in problems
     assert f"{record_path('fake', 'alias')}: BF aliases must belong to their own brain namespace" in problems
     assert f"{record_path('fake', 'linked')}: unresolved BF target: bf://fixture/projects/absent.md" in problems
-    assert "concepts/foreign.md: a note entity must belong to its own brain namespace" in problems
     assert (
-        "concepts/role.md: link relation nope is undeclared; declare it in bf.yaml fields with relation: true"
-        in problems
+        "concepts/foreign.md: BF entities, aliases and resources must belong to their own brain namespace" in problems
+    )
+    assert (
+        "concepts/relation.md: line 6: link relation nope is undeclared; declare it in bf.yaml fields with type: "
+        "identity and relation: true" in problems
     )
     assert {p.split(": ", 1)[0] for p in problems} == {
         "concepts/dup.md",
         "concepts/foreign.md",
-        "concepts/role.md",
+        "concepts/relation.md",
         record_path("fake", "alias"),
         record_path("fake", "fields"),
         record_path("fake", "linked"),
@@ -149,6 +156,10 @@ def test_problem_lists_are_capped_with_a_flag(brain: Store) -> None:
 def test_okf_concept_structure() -> None:
     validate_okf("concepts/index.md", b'---\nokf_version: "0.2"\n---\n# Concepts\n')
     validate_okf("concepts/log.md", b"# Log\n\n## 2026-09-01\n\n- Change.\n")
+    # A caller that already parsed the note passes its parse.
+    validate_okf("concepts/log.md", parse("concepts/log.md", b"# Log\n\n## 2026-09-01\n\n- Change.\n"))
+    with pytest.raises(Error, match="OKF log dates"):
+        validate_okf("concepts/log.md", parse("concepts/log.md", b"# Log\n\n## September\n"))
     validate_okf(
         "concepts/a.md",
         b"---\ntype: concept\nsources:\n  - resource: https://x\nverified:\n  by: human:me\n  at: 2026-09-01T00:00:00Z\n---\n# A\n",
@@ -280,7 +291,7 @@ def test_malformed_links_report_one_file_without_blocking_validation(brain: Stor
     brain.write("projects/bad-url.md", b'---\nlinks: ["https://["]\n---\n# Invalid link\n')
     result = validate(brain)
     assert not result["valid"]
-    assert "projects/bad-url.md: invalid link" in located(result)
+    assert "projects/bad-url.md: links: invalid link" in located(result)
 
 
 @pytest.mark.parametrize("path", ["projects/new.md", "concepts/new.md", "actions/2026-09-27_new/ACTION.md"])
@@ -420,6 +431,36 @@ def test_case_variant_identities_warn_without_failing(brain: Store, monkeypatch:
     ]
 
 
+def test_an_interrupted_edit_warns_before_case_variants(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    brain.write("projects/x.md", b"---\ntype: project\naliases: [repo:example/x]\n---\n# X\n")
+    brain.write("projects/y.md", b"---\ntype: project\naliases: [repo:example/X]\n---\n# Y\n")
+    # An agent's guarded edit killed before its rename leaves its temporary file beside the note.
+    kill = (
+        "import os, runpy, sys; os.replace = lambda *_, **__: os._exit(9); sys.argv = sys.argv[1:]; "
+        "runpy.run_path(sys.argv[0], run_name='__main__')"
+    )
+    digest = str(read([brain], "projects/x.md")["sha256"])
+    killed = subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
+        [sys.executable, "-c", kill, str(HELPER), "projects/x.md", "--expect-sha256", digest],
+        cwd=brain.root,
+        input="# Edited\n",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert killed.returncode == 9
+    [leftover] = [path.name for path in (brain.root / "projects").iterdir() if path.name.startswith(".")]
+    # Before, the helper's own temporary name went unnamed, and the case variants a large brain can hold many of
+    # pushed a temporary file past the warnings a reply lists.
+    monkeypatch.setattr("bf.validate.LIMIT", 1)
+    result = validate(brain)
+    assert (result["valid"], result["warnings_truncated"]) == (True, True)
+    assert result["warnings"] == [
+        {"warning": "an interrupted write left this temporary file; delete it", "file": f"projects/{leftover}"}
+    ]
+
+
 GRAPH = (
     b"version: 7\nname: fixture\nfields:\n"
     b"  owner:\n    description: Responsible person.\n    type: identity\n    cardinality: many\n"
@@ -523,3 +564,199 @@ def test_one_problem_never_hides_a_note_s_others_or_breaks_links_to_it(brain: St
         "missing heading: alpha.md#nowhere",
     }
     assert any("nope" in error for file, error in problems if file == "projects/gamma.md")
+
+
+def test_claim_errors_neither_hide_each_other_nor_unname_the_note(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 7\nname: fixture\nfields:\n"
+        b"  owner: {description: Owner., type: identity, cardinality: many, relation: true}\n"
+        b"  weight: {description: Weight., type: number}\n",
+    )
+    brain.write(
+        "concepts/alice.md",
+        b"---\ntype: person\nentity: bf://fixture/people/alice\nfields:\n  weight: heavy\n---\n# Alice\n\n"
+        b"[Offline](bf://fixture/projects/offline.md?rel=works-on) [Again](bf://fixture/projects/offline.md?rel=links)\n"
+        b"[Weighed](bf://fixture/projects/offline.md?rel=weight)\n\n## Work\n\nShips the website.\n",
+    )
+    brain.write(
+        "projects/b.md",
+        b"---\ntype: project\n---\n# B\n\n[Alice](bf://fixture/people/alice?rel=owner), [her work](bf://fixture/people/alice#work)\n",
+    )
+    brain.write("projects/c.md", b"---\ntype: project\n---\n# C\n\n[Alice](bf://fixture/people/alice)\n")
+    # The first undeclared relation used to hide the note's other problems and break the links to its entity.
+    assert located(validate(brain)) == [
+        (
+            "concepts/alice.md: line 9: link relation works-on is undeclared; declare it in bf.yaml fields with type: "
+            "identity and relation: true"
+        ),
+        "concepts/alice.md: line 9: untyped links need no ?rel=; remove ?rel=links",
+        "concepts/alice.md: line 10: field weight is not a relation; relations need type: identity and relation: true",
+        "concepts/alice.md: fields.weight: expected number",
+    ]
+    # Validation and retrieval agree: the entity still names the note.
+    alice = read([brain], "bf://fixture/people/alice")
+    groups = {g["relation"]: [i["ref"] for i in g["items"]] for g in cast("list[dict]", alice["backlinks"])}
+    assert groups == {"owner": ["projects/b.md"], "links": ["projects/c.md"]}
+
+
+def test_a_problem_repeated_across_links_is_reported_once_where_it_first_occurs(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 7\nname: fixture\nfields:\n"
+        b"  owner: {description: Owner., type: identity, cardinality: many, relation: true, targets: ['person:']}\n",
+    )
+    # A relation removed from bf.yaml leaves links naming it in frontmatter and in 250 sections, beside as many owner
+    # claims outside the declared targets.
+    body = "".join(
+        f"## Part {n}\n\n[Plan](bf://fixture/projects/offline.md?rel=reviewer) "
+        f"[Plan](bf://fixture/projects/offline.md?rel=owner)\n\n"
+        for n in range(250)
+    )
+    frontmatter = "type: project\nlinks: ['bf://fixture/projects/offline.md?rel=reviewer']"
+    brain.write("projects/atlas.md", f"---\n{frontmatter}\n---\n# Atlas\n\n{body}".encode())
+    brain.write("projects/zeta.md", b"---\ntype: project\n---\n# Zeta\n\n[Missing](../concepts/missing.md)\n")
+    # Before, the 250 copies of each filled the 200 problems a reply lists, and zeta's broken link went unreported.
+    assert located(validate(brain)) == [
+        (
+            "projects/atlas.md: links: link relation reviewer is undeclared; declare it in bf.yaml fields with type: "
+            "identity and relation: true"
+        ),
+        "projects/zeta.md: broken link: ../concepts/missing.md",
+        "projects/atlas.md: owner link outside the declared targets: bf://fixture/projects/offline.md",
+    ]
+
+
+def test_a_link_no_bf_address_can_hold_hides_neither_its_note_nor_other_problems(brain: Store) -> None:
+    # A Windows path in a copied document, or a control character, names no BF address: the link is broken, while its
+    # note stays searchable, keeps its other problems and still names its entity.
+    brain.write(
+        "projects/web.md",
+        b"---\ntype: project\nentity: bf://fixture/people/webby\n---\n# Web\n\n"
+        b"webneedle [Owner](bf://fixture/projects/offline.md?rel=nope), [guide](docs\\guide.md), [x](a%01b.md)\n",
+    )
+    brain.write("projects/other.md", b"---\ntype: project\n---\n# Other\n\n[Webby](bf://fixture/people/webby)\n")
+    vendor = "actions/2026-09-27_import/inputs/vendor.md"
+    brain.write("actions/2026-09-27_import/ACTION.md", b"---\ntype: action\n---\n# Import\n")
+    brain.write(vendor, b"# Vendor\n\nwinneedle [guide](docs\\guide.md)\n")
+    assert located(validate(brain)) == [
+        (
+            "projects/web.md: line 7: link relation nope is undeclared; declare it in bf.yaml fields with type: "
+            "identity and relation: true"
+        ),
+        "projects/web.md: broken link: a%01b.md",
+        "projects/web.md: broken link: docs\\guide.md",
+        f"{vendor}: broken link: docs\\guide.md",
+    ]
+    for word, ref in (("webneedle", "projects/web.md"), ("winneedle", vendor)):
+        assert [i["ref"] for i in cast("list[dict]", search([brain], Query(text=word))["items"])] == [ref]
+    webby = read([brain], "bf://fixture/people/webby")
+    assert [i["ref"] for g in cast("list[dict]", webby["backlinks"]) for i in g["items"]] == ["projects/other.md"]
+
+
+def test_every_problem_of_a_record_is_reported(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 7\nname: fixture\nfields:\n  owner: {description: Owner., type: identity, relation: true}\n",
+    )
+    records_file(
+        brain,
+        "mail",
+        [
+            Record(
+                id="m1",
+                title="Mail",
+                fields={"owner": "Alice", "label": "x"},
+                links=["bf://fixture/x?rel=first", "bf://fixture/y?rel=second"],
+            )
+        ],
+    )
+    # One record's mistakes are reported together; the same unquoted link problem appears once.
+    assert located(validate(brain)) == [
+        f"{record_path('mail', 'm1')}: field label is not declared in bf.yaml fields",
+        f"{record_path('mail', 'm1')}: field owner: expected an explicit namespaced identity",
+        (
+            f"{record_path('mail', 'm1')}: link relation is undeclared; declare it in bf.yaml fields with type: "
+            "identity and relation: true"
+        ),
+        f"{record_path('mail', 'm1')}: unresolved BF target: bf://fixture/x",
+        f"{record_path('mail', 'm1')}: unresolved BF target: bf://fixture/y",
+    ]
+    # The ref bf:x of a source named bf reads as a malformed BF address: its file is named, the check goes on.
+    records_file(brain, "bf", [Record(id="x", title="X")])
+    assert [problem.split(": ", 1)[0] for problem in located(validate(brain))] == [
+        record_path("bf", "x"),
+        *[record_path("mail", "m1")] * 5,
+    ]
+
+
+def test_record_links_that_are_no_identities_warn_without_failing(brain: Store) -> None:
+    records_file(
+        brain,
+        "mail",
+        [
+            Record(id="a", title="A", links=["Alice", "repo:example/project"]),
+            Record(id="b", title="B", links=["plain words here"]),
+            Record(id="c", title="C", url="www.example.test/c"),
+            Record(id="d", title="D", links=["https://example.test/d"], url="https://example.test/d"),
+        ],
+    )
+    result = validate(brain)
+    assert (result["valid"], result["problems"]) == (True, [])
+    # The sensor's text is never quoted: the warning names its source, a count and one file to inspect.
+    assert result["warnings"] == [
+        {
+            "warning": "record links are not namespaced identities or URLs",
+            "source": "mail",
+            "records": 3,
+            "file": min(record_path("mail", name) for name in "abc"),
+        }
+    ]
+
+
+def test_scripts_run_through_an_interpreter_must_exist(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 7\nname: fixture\nsensors:\n"
+        b"  brief:\n    command: [uv, run, --no-project, sensors/brief.py, '{{start}}']\n"
+        b"  packaged:\n    command: [uv, run, --project, sensors/news, news]\n"
+        b"  piped:\n    command: [sh, -c, sensors/a.sh | sensors/b.sh]\n"
+        b"routines:\n  review:\n    command: [python3, routines/review.py, routines/report.md]\n",
+    )
+    assert located(validate(brain)) == [
+        "bf.yaml: sensors.brief.command: sensors/brief.py is not a regular file or folder",
+        "bf.yaml: sensors.packaged.command: sensors/news is not a regular file or folder",
+        "bf.yaml: routines.review.command: routines/review.py is not a regular file or folder",
+    ]
+    # The interpreter runs the first brain path it is given, so it needs no executable bit; later arguments, such as
+    # a file the routine may create, and shell command lines are not checked.
+    brain.write("sensors/brief.py", b"print('[]')\n")
+    brain.write("sensors/news/pyproject.toml", b"[project]\nname = 'news'\n")
+    brain.write("routines/review.py", b"print('')\n")
+    assert validate(brain)["valid"]
+
+
+def test_record_refs_are_case_sensitive(brain: Store) -> None:
+    # A URL scheme ignores case, so the scheme of Meetings:decision-1 reads as meetings, but a record ref never does.
+    brain.write(
+        "projects/web.md",
+        b"---\ntype: project\n---\n# Web\n\n[the meeting](Meetings:decision-1) [site](HTTPS://example.test/)\n",
+    )
+    assert located(validate(brain)) == [
+        "projects/web.md: record refs are case-sensitive; write meetings:decision-1, not Meetings:decision-1"
+    ]
+
+
+def test_validation_parses_each_note_once(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    brain.write("concepts/log.md", b"# Log\n\n## 2026-09-01\n\n- Change.\n")
+    parsed: list[str] = []
+    original = markdown.parse
+
+    def counted(path: str, data: bytes) -> markdown.Markdown:
+        parsed.append(path)
+        return original(path, data)
+
+    monkeypatch.setattr("bf.markdown.parse", counted)
+    monkeypatch.setattr("bf.validate.parse", counted)
+    assert validate(brain)["valid"]
+    assert sorted(parsed) == ["concepts/evidence.md", "concepts/log.md", "projects/offline.md"]

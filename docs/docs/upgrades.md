@@ -15,6 +15,8 @@ bf --version
 
 `--python 3.14` selects the tested Python, which uv downloads if needed. Without it, uv may pick a newer Python for which some dependencies publish no prebuilt packages yet. uv remembers the choice for later upgrades. If your shell cannot find `bf`, run `uv tool update-shell` and open a new shell. Then follow [Getting started](getting-started.md).
 
+The search cache needs SQLite 3.35.0 or newer with FTS5 and JSON functions, which uv's managed Pythons include. When a system Python lacks them, search, read, status and build stop with a message naming the fix: `uv tool install --reinstall --managed-python --python 3.14 brain-framework`.
+
 ## Match the docs to your version
 
 This site follows the repository's current code, which can be newer than your installation. `bf --version` names your runtime, and `bf COMMAND --help` lists its options. Copy example sensors, routines and demos from the release tag matching `bf --version`, as the guides' commands do. The brain format, declared as `version:` in `bf.yaml` and each `evals/*.yaml`, is separate from the package version.
@@ -37,7 +39,7 @@ bf eval
 bf skills ~/.agents/skills
 ```
 
-Expect `"valid":true` from validation and `"passed":true` from your retrieval cases; otherwise fix the reported problem first, with [Troubleshooting](troubleshooting.md). `bf skills` updates the skills it installed and never overwrites a folder that reports `modified` (you edited it) or `unmanaged` (it has no `.bf-skill.json` manifest, such as a copy made before 16.0). Either status makes the command exit 1 and leaves that folder unchanged: back up any edits you want to keep, then rerun `bf skills ~/.agents/skills --force`. See [skill installation](agents.md#install-the-skills).
+Expect `"valid":true` from validation and `"passed":true` from your retrieval cases; otherwise fix the reported problem first, with [Troubleshooting](troubleshooting.md). `bf skills` updates the skills it installed. It leaves a folder unchanged and exits 1 when the folder reports `modified` (you edited it), `unmanaged` (it has no BF manifest) or `newer` (a newer `bf` installed a different copy): see [skill installation](agents.md#install-the-skills) before passing `--force`.
 
 `bf init` writes a brain's `AGENTS.md` once. Merge new guidance by hand, as [Refresh brain instructions](agents.md#refresh-brain-instructions) shows. Regenerate native schedules with `bf schedule` when the changelog asks or the `bf` executable moved.
 
@@ -55,4 +57,14 @@ echo /.venv/ >> .gitignore
 uv run --locked bf --version
 ```
 
-Commit `pyproject.toml` and `uv.lock`, then run commands as `uv run --locked bf ...` inside the brain. Elsewhere, use `uv run --project ~/brain --locked bf ... --brain ~/brain`. Upgrade the pin with `uv add "brain-framework==X.Y.Z"`, and point native schedules at the pinned runtime with `bf schedule --executable ~/brain/.venv/bin/bf`.
+Commit `pyproject.toml` and `uv.lock`. Run commands that execute programs, such as `bf update`, through the pin: `uv run --locked bf update` inside the brain, or `uv run --project ~/brain --locked bf update --brain ~/brain` elsewhere. Search, read and checks need no pin: the agent skills run them with your installed `bf` in every brain, and stop to ask when a pin names another major version. Upgrade both together, the pin with `uv add "brain-framework==X.Y.Z"`.
+
+Generate native schedules through the pin too, inside the brain:
+
+```bash
+uv run --locked bf schedule --every 15 --output ~/.config/bf-schedules
+```
+
+The jobs then start the pinned `bf`, and the `PATH` they capture finds it first, so routines that call `bf` themselves use the same release. Write Git hooks the same way, such as `exec uv run --locked bf run --hook pre-commit` or `exec uv run --locked bf run --hook pre-push -- "$@"`.
+
+Run a pin only in a brain you created or reviewed: it runs with your permissions. `uv run` installs and runs whatever its `uv.lock` names, with the interpreter its `.python-version` names and the settings of its `uv.toml`, and runs an existing `.venv/` as is. Review those files and `pyproject.toml` like `sensors/` and `routines/` before running or upgrading a downloaded or shared brain's pin. Delete a `.venv/` it ships before the first pinned run, and never run the pin of a brain whose Git tracks one (`git ls-files .venv` prints files): every checkout restores it. Search or read a downloaded or shared brain with your installed `bf` ([privacy](privacy.md#running-code)).

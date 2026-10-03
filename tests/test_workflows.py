@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -291,6 +292,28 @@ def test_read_rejects_changed_or_incomplete_pages(brain: Store, provider: Provid
         "--offset",
         str(first["next_offset"]),
     ]
+
+
+def test_output_escapes_terminal_controls_and_keeps_capture_digests(provider: Provider) -> None:
+    # bf escapes DEL and C1 controls, such as U+009B CSI, and bidi or invisible format characters in its replies; the
+    # helper never re-emits them raw.
+    note = {**NOTE, "text": "## Retention\n\nKeep \x9b31m one\x7f \x1b]52;c;eA==\x07 \u202eversion\u200b.\n"}
+    controls = re.compile("[\x00-\x1f\x7f-\x9f\u202e\u200b]")
+    provider.install("bf", [{"match": ["read"], "stdout": note}])
+    read = provider.run(
+        "evidence.py", "read", note["ref"], "--brain", "brain", folder="../src/bf/skills/bf-use/scripts"
+    )
+    capture = execute("capture", note)
+    for result in (read, capture):
+        assert result.returncode == 0, result.stderr
+        assert not controls.search(result.stdout.removesuffix("\n"))
+    assert json.loads(read.stdout) == note
+    saved = json.loads(capture.stdout)
+    assert saved["text"] == note["text"]
+    # The digest covers the content itself, so captures written before or after escaping compare alike.
+    content = json.dumps({"text": note["text"]}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    assert saved["sha256"] == hashlib.sha256(content.encode()).hexdigest()
+    assert run("compare", saved, note)["state"] == "unchanged"
 
 
 def test_read_passes_whole_replies_and_rejects_option_like_refs(provider: Provider) -> None:

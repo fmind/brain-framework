@@ -14,7 +14,8 @@ from importlib.metadata import version as distribution_version
 from pathlib import Path
 
 import pytest
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, TextContent
 from typer.core import TyperGroup
 from typer.main import get_command
@@ -22,7 +23,7 @@ from typer.testing import CliRunner
 
 from bf import links, pages, records
 from bf.cli import app, main
-from bf.config import user_config
+from bf.config import select, user_config, user_path
 from bf.mcp import INSTRUCTIONS, server
 from bf.models import Error, NotFoundError, Record
 from bf.retrieve import read
@@ -156,6 +157,8 @@ def test_console_errors_are_private_and_on_stderr(
         assert isinstance(exited.value.code, int), exited.value.code
         return subprocess.CompletedProcess(args, exited.value.code, out, err)
 
+    # An existing folder below a root is a page too, though only reading the brain shows it.
+    brain.write("projects/archive/old.md", b"# Old\n")
     # Exit 1 is a failed operation; exit 2 is invalid command-line input, including option values and ref syntax.
     cases = [
         (["read", "bf.yaml", "--brain", "fixture"], 1),
@@ -172,6 +175,11 @@ def test_console_errors_are_private_and_on_stderr(
         (["read", "tags/a\\b"], 2),
         (["read", "projects/offline.md", "--rel", "nope"], 2),
         (["read", "projects", "--rel", "links"], 2),
+        # A section, an authored folder page and a source's period are invalid input too, not failed reads.
+        (["read", "projects/offline.md#decision", "--rel", "links"], 2),
+        (["read", "concepts/", "--rel", "links"], 2),
+        (["read", "projects/archive/", "--rel", "links"], 2),
+        (["read", "memories/meetings/2026-13"], 2),
         (["eval", "--path", "/etc"], 2),
         (["collect", "mail", "--since", "soon"], 2),
         (["collect", "mail", "--until", "2026-13-01"], 2),
@@ -181,30 +189,30 @@ def test_console_errors_are_private_and_on_stderr(
     for result, code in processes + [(bf(*args), code) for args, code in cases]:
         assert result.returncode == code, (result.args, result.stderr)
         assert not result.stdout
-        # Usage errors come from Typer; failures are plain `bf:` lines, also under forced colors (tested below).
-        assert result.stderr.startswith("bf:") if code == 1 else "bf:" in result.stderr or "Usage" in result.stderr
+        # Every diagnostic is one `bf:` line; invalid input says so (forced colors are tested below).
+        assert result.stderr.startswith("bf: invalid input: " if code == 2 else "bf: ")
+        assert result.stderr.count("\n") == 1, result.stderr
         assert str(brain.root) not in result.stderr
         assert "Traceback" not in result.stderr
-    assert "limit" in plain(bf("search", "x", "--limit", "0").stderr)
-    assert "scope accepts" in plain(bf("search", "x", "--scope", "soon").stderr)
+    assert "--limit: " in bf("search", "x", "--limit", "0").stderr
+    assert "--scope: scope accepts" in bf("search", "x", "--scope", "soon").stderr
     # Query and scope errors name the argument the user wrote, not the model field behind it.
-    assert "Invalid value for QUERY: give words" in plain(bf("search", "   ").stderr)
-    assert "Invalid value for QUERY: String should have at most 4096" in plain(bf("search", "x" * 4097).stderr)
-    assert "Invalid value for --scope: since must be earlier than until" in plain(
-        bf("search", "x", "--scope", "0d").stderr
-    )
+    assert "QUERY: give words" in bf("search", "   ").stderr
+    assert "QUERY: String should have at most 4096" in bf("search", "x" * 4097).stderr
+    assert "--scope: since must be earlier than until" in bf("search", "x", "--scope", "0d").stderr
+    assert "--scope: String should have at most 4096" in bf("search", "x", "--scope", "projects/" + "a" * 5000).stderr
     for query in ("bf://me", "bf:foo", "bf://fixture/tags/a?rel=owner", "bf://Me/x"):
         # A malformed address is a usage error before any brain is read, as it is for read and --scope.
         malformed = bf("search", query)
         assert malformed.returncode == 2, (query, malformed.stderr)
-        assert "Invalid value for QUERY" in plain(malformed.stderr)
-    assert "invalid period" in plain(bf("read", "2026-13").stderr)
+        assert "QUERY: " in malformed.stderr
+    assert "REF: invalid period" in bf("read", "2026-13").stderr
     # An undeclared role names the valid ones, never the rejected value.
-    undeclared = plain(bf("read", "projects/offline.md", "--rel", "nope").stderr)
-    assert "Invalid value for --rel: undeclared relation; use links" in undeclared
+    undeclared = bf("read", "projects/offline.md", "--rel", "nope").stderr
+    assert undeclared.startswith("bf: invalid input: --rel: undeclared relation; use links, cites (see ")
     assert "nope" not in undeclared
-    assert "--path" in plain(bf("eval", "--path", "/etc").stderr)
-    assert "Missing argument" in plain(bf("search").stderr)
+    assert "--path: " in bf("eval", "--path", "/etc").stderr
+    assert "missing argument 'QUERY'" in bf("search").stderr
     version = process("--version")
     assert version.stdout.strip() == distribution_version("brain-framework")
 
@@ -227,10 +235,12 @@ def test_forced_color_keeps_replies_and_failures_plain() -> None:
     assert failure.returncode == 1
     assert failure.stderr.startswith("bf: ")
     assert "\x1b[" not in failure.stderr
+    # Before 18 invalid input printed Typer's usage text and a colored box, wrapped at 80 columns.
     usage = bf("search", "x", "--limit", "0")
     assert usage.returncode == 2
-    assert "\x1b[" in usage.stderr, "the environment no longer forces colors, so this test checks nothing"
-    assert "limit" in plain(usage.stderr)
+    assert usage.stderr.startswith("bf: invalid input: --limit: ")
+    assert "\x1b[" not in usage.stderr
+    assert "\x1b[" in bf("search", "--help").stdout, "the environment no longer forces colors: this checks nothing"
 
 
 @pytest.mark.parametrize(
@@ -475,8 +485,8 @@ def test_initialization_names_team_brains_and_keeps_action_inputs_versioned(tmp_
     assert "collect" not in created
     assert "team-knowledge" not in user_config().brains
     patterns = [line for line in (clone / ".gitignore").read_text().splitlines() if not line.startswith("#")]
-    # Unanchored patterns would also hide actions/*/inputs/ from every clone.
-    # Program logs live in private state, never in the brain.
+    # Unanchored patterns would also hide actions/*/inputs/ from every clone. Program logs stay in the brain's
+    # Git-ignored logs/.
     assert patterns == ["/.bf/", "/logs/", "/memories/", "/originals/", "/inputs/"]
     (clone / "actions/2026-09-24_pilot/inputs").mkdir(parents=True)
     (clone / "actions/2026-09-24_pilot/inputs/request.md").write_text("# Request\n")
@@ -616,19 +626,38 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
             "reference not found; use the search tool to locate it, or the read tool to browse pages; did you mean"
         )
         for name, arguments, message in [
-            ("read", {"ref": "bf.yaml"}, "not found"),
-            ("search", {"query": "   "}, "invalid input: "),
+            ("read", {"ref": "bf.yaml"}, "reference not found"),
+            ("search", {"query": "   "}, "invalid input: query: "),
             # Query-level reasons read like the CLI's, without pydantic's `Value error` label.
-            ("search", {"query": "!!!"}, "invalid input: give words or an identity to search"),
-            ("search", {"query": "x", "scope": "0d"}, "invalid input: since must be earlier than until"),
-            ("search", {"query": "x", "scope": "soon"}, "scope accepts"),
-            ("read", {"ref": "projects/offline.md", "rel": "owner"}, "undeclared relation; use links"),
+            ("search", {"query": "!!!"}, "invalid input: query: give words or an identity to search"),
+            ("search", {"query": "x", "scope": "0d"}, "invalid input: scope: since must be earlier than until"),
+            ("search", {"query": "x", "scope": "soon"}, "invalid input: scope: scope accepts"),
+            # Before 18 the reply named the model field behind the scope: prefix.
+            ("search", {"query": "x", "scope": "projects/" + "a" * 5000}, "invalid input: scope: String should"),
+            ("search", {"query": "x", "scope": "projects/offline.md#decision"}, "invalid input: scope: scope takes"),
+            ("search", {"query": "bf://Me/x"}, "invalid input: query: invalid BF link"),
+            # Before 18 these looked like failed operations, although the CLI exits 2 for each.
+            ("read", {"ref": "2026-13"}, "invalid input: ref: invalid period: 2026-13"),
+            ("read", {"ref": "projects/../bf.yaml"}, "invalid input: ref: expected a normalized"),
+            ("read", {"ref": "bf://"}, "invalid input: ref: invalid BF link"),
+            ("read", {"ref": "projects/", "rel": "links"}, "invalid input: rel: rel lists the links to a note"),
+            ("read", {"ref": "projects/offline.md", "rel": "owner"}, "invalid input: rel: undeclared relation; use"),
         ]:
             failed = await mcp.call_tool(name, arguments)
             assert isinstance(failed, CallToolResult)
             assert failed.is_error
-            assert text(failed).startswith(message) if message.startswith("invalid") else message in text(failed)
+            assert text(failed).startswith(message), (arguments, text(failed))
             assert str(brain.root) not in text(failed)
+        # Some clients send every number as a double: an integral one is the integer the schema allows.
+        found = await mcp.call_tool("search", {"query": "offline", "limit": 1.0, "offset": 0.0})
+        assert isinstance(found, CallToolResult)
+        assert json.loads(text(found))["items"][0]["ref"] == "projects/offline.md"
+        page = await mcp.call_tool("read", {"ref": "projects", "offset": 0.0})
+        assert isinstance(page, CallToolResult)
+        assert not page.is_error
+        for arguments in ({"query": "x", "limit": 1.5}, {"query": "x", "offset": True}, {"query": "x", "limit": 1e300}):
+            with pytest.raises(ToolError, match="Input should be"):
+                await mcp.call_tool("search", arguments)
 
     asyncio.run(check())
 
@@ -651,19 +680,21 @@ def test_qualified_mcp_reads_keep_backlinks_from_referenced_brains(brain: Store,
 
 
 def test_replies_escape_terminal_controls_without_changing_values(brain: Store) -> None:
-    # Collected text is data: a C1 control such as CSI (U+009B) reaches a terminal only as a JSON escape.
-    text = "before \u009b2J\u009d0;title\u009c after \u007f"
+    # Collected text is data: a C1 control such as CSI (U+009B), or a bidi override that reorders what a terminal
+    # shows, reaches a terminal only as a JSON escape.
+    text = "before \u009b2J\u009d0;title\u009c after \u007f \u202egnp.exe\u202c \u200b\u2066x\u2069\ufeff \u061c1-2"
+    hidden = re.compile("[\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
     records_file(brain, "meetings", [Record(id="c1", title="Controls", text=text, attributes={"note": "\u009b31m"})])
     result = CliRunner().invoke(app, ["read", "meetings:c1", "--brain", "fixture"])
     assert result.exit_code == 0, result.output
-    assert not re.search(rb"[\x7f]|\xc2[\x80-\x9f]", result.stdout_bytes)
+    assert not hidden.search(result.stdout_bytes.decode())
     record = json.loads(result.stdout_bytes)["record"]
     assert (record["text"], record["attributes"]) == (text, {"note": "\u009b31m"})
     # MCP text content is the same JSON, escaped the same way; structured content keeps the values.
     found = asyncio.run(server([brain]).call_tool("read", {"ref": "meetings:c1"}))
     assert isinstance(found, CallToolResult)
     assert isinstance(found.content[0], TextContent)
-    assert not re.search("[\x7f-\x9f]", found.content[0].text)
+    assert not hidden.search(found.content[0].text)
     assert json.loads(found.content[0].text) == found.structured_content == json.loads(result.stdout_bytes)
 
 
@@ -816,7 +847,7 @@ def test_edges_export_as_json_lines_across_selected_brains(
     assert (failed.exit_code, failed.stdout) == (1, "")
     assert str(failed.exception) == pages.CACHE
     unknown = CliRunner().invoke(app, ["export", "--kind", "nodes"])
-    assert (unknown.exit_code, "Invalid value for '--kind'" in plain(unknown.stderr)) == (2, True)
+    assert (unknown.exit_code, "--kind: " in unknown.stderr) == (2, True)
 
 
 def test_replies_state_dates_as_written_and_datetimes_with_the_local_offset(brain: Store) -> None:
@@ -919,4 +950,163 @@ def test_errors_name_what_exists(brain: Store) -> None:
     result = runner.invoke(app, ["read", "projects/offline.md#context", "--brain", "fixture"])
     assert "heading #context does not exist; its sections: #offline-retrieval, #decision" in str(result.exception)
     result = runner.invoke(app, ["collect", "brief", "--brain", str(brain.root)])
-    assert "sensor brief is unknown or disabled; did you mean briefs?" in str(result.exception)
+    assert "unknown sensor brief; check names in bf.yaml; did you mean briefs?" in str(result.exception)
+
+
+@pytest.mark.parametrize("kind", ["permission", "encoding", "argument", "cache"])
+def test_file_encoding_and_cache_failures_share_one_message_without_paths(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], kind: str
+) -> None:
+    # An OSError's own text holds the absolute path: the CLI and MCP name only its cause.
+    failure: Exception = {
+        "permission": PermissionError(13, "Permission denied", str(brain.root / "projects/offline.md")),
+        "encoding": UnicodeDecodeError("utf-8", b"\xff", 0, 1, f"invalid start byte in {brain.root}"),
+        # Brain files decode strictly: text that cannot be encoded comes from an argument or the terminal.
+        "argument": UnicodeEncodeError("utf-8", f"{brain.root}/caf\udce9", 0, 1, "surrogates not allowed"),
+        "cache": sqlite3.DatabaseError(f"database disk image is malformed: {brain.root}"),
+    }[kind]
+    message = {
+        "permission": "inaccessible file or directory (Permission denied); check the brain and path",
+        "encoding": "a file is not valid UTF-8; run bf validate to locate it",
+        "argument": "an argument or the terminal encoding is not UTF-8; use UTF-8 arguments and a UTF-8 locale",
+        "cache": pages.CACHE,
+    }[kind]
+
+    def failing(*_: object, **__: object) -> dict[str, object]:
+        raise failure
+
+    monkeypatch.setattr("bf.cli.read", failing)
+    monkeypatch.setattr("bf.mcp.read", failing)
+    monkeypatch.setattr(sys, "argv", ["bf", "read", "projects/offline.md", "--brain", str(brain.root)])
+    with pytest.raises(SystemExit) as exited:
+        main()
+    out, err = capsys.readouterr()
+    assert (exited.value.code, out, err) == (1, "", f"bf: {message}\n")
+    result = asyncio.run(server([brain]).call_tool("read", {"ref": "projects/offline.md"}))
+    assert isinstance(result, CallToolResult)
+    assert (result.is_error, text(result)) == (True, message)
+
+
+def test_an_unexpected_mcp_failure_reveals_nothing(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing(*_: object, **__: object) -> dict[str, object]:
+        raise ValueError(f"unexpected value from {brain.root}")
+
+    monkeypatch.setattr("bf.mcp.read", failing)
+    # A bug, as in the CLI: the SDK reports a generic failure without the exception's text.
+    with pytest.raises(UnexpectedToolError) as raised:
+        asyncio.run(server([brain]).call_tool("read", {"ref": "projects/offline.md"}))
+    assert str(brain.root) not in str(raised.value)
+
+
+def test_diagnostics_escape_terminal_controls_in_brain_file_names(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A shared brain controls its file names: OSC and CSI sequences could set the title, clear the screen or write
+    # the clipboard, a newline forge another diagnostic line, and a bidi override reorder the text around it.
+    name = "projects/x\x1b]0;P\x07\u202e\nbf: y.md"
+    shown = "projects/x\\u001b]0;P\\u0007\\u202e\\u000abf: y.md"
+    brain.write(name, b"---\nstale_after: soon\n---\n# Broken\n")
+    exported = CliRunner().invoke(app, ["export", "--brain", "fixture"])
+    assert exported.exit_code == 1
+    assert exported.stderr.startswith(f"bf: fixture: {shown}: ")
+    assert exported.stderr.count("\n") == 1
+    # A mistyped ref's hint names the brain's files.
+    monkeypatch.setattr(sys, "argv", ["bf", "read", "projects/xy.md", "--brain", "fixture"])
+    with pytest.raises(SystemExit):
+        main()
+    hint = capsys.readouterr().err
+    assert shown in hint
+    assert not re.search("[\x00-\x09\x0b-\x1f\x7f-\x9f\u202e]", hint)
+    missing = asyncio.run(server([brain]).call_tool("read", {"ref": "projects/xy.md"}))
+    assert isinstance(missing, CallToolResult)
+    assert shown in text(missing)
+    # A bf.yaml key reaches every command's failure through its validation message.
+    brain.write("bf.yaml", b'version: 7\nname: fixture\n"\\e]0;K\\a": 1\n')
+    monkeypatch.setattr(sys, "argv", ["bf", "read", "--brain", str(brain.root)])
+    with pytest.raises(SystemExit):
+        main()
+    invalid = "invalid bf.yaml: \\u001b]0;K\\u0007: Extra inputs are not permitted"
+    assert capsys.readouterr().err == f"bf: {invalid}\n"
+    unloaded = asyncio.run(server([brain]).call_tool("read", {}))
+    assert isinstance(unloaded, CallToolResult)
+    assert text(unloaded) == invalid
+
+
+@pytest.mark.usefixtures("brain")
+def test_mcp_resolves_the_selection_for_each_call(tmp_path: Path) -> None:
+    # Validated at startup: a server that could not answer fails to start, like a CLI command.
+    with pytest.raises(Error, match="brain directory does not exist"):
+        server(lambda: select(str(tmp_path / "absent")))
+    mcp = server(lambda: select())
+
+    async def found(query: str) -> list[str]:
+        result = await mcp.call_tool("search", {"query": query})
+        assert isinstance(result, CallToolResult)
+        return [item["ref"] for item in json.loads(text(result))["items"]]
+
+    assert asyncio.run(found("offline"))[0] == "projects/offline.md"
+    later = tmp_path / "later"
+    invoke("init", str(later), "--name", "later")
+    (later / "concepts/zephyr.md").write_text("# Zephyr\n\nA later brain.\n")
+    invoke("register", str(later))
+    # Before 18 a registered brain reached the server only after a restart.
+    assert asyncio.run(found("zephyr")) == ["concepts/zephyr.md"]
+
+
+def test_a_selection_that_fails_mid_session_reveals_no_path(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each call resolves the selection again, so its errors reach the agent: they name the selection as given, never
+    # the directory it resolved to, the registry file or the home directory.
+    folder = Path.home() / "private-folder"
+    folder.mkdir()
+    link = Path.home() / "brain-link"
+    link.symlink_to(brain.root)
+    named, linked, registered = (server(lambda value=value: select(value)) for value in ("fixture", str(link), ""))
+    registry = user_path()
+    entries = registry.read_text()
+
+    async def failed(mcp: MCPServer) -> str:
+        result = await mcp.call_tool("search", {"query": "offline"})
+        assert isinstance(result, CallToolResult)
+        assert result.is_error
+        assert str(tmp_path) not in text(result)
+        return text(result)
+
+    unconfigured = " has no bf.yaml; pass the brain's root directory, or create a brain with bf init"
+    registry.write_text(entries.replace(str(brain.root), str(folder)))
+    assert asyncio.run(failed(named)) == "registered brain fixture" + unconfigured
+    registry.write_text("brains: [broken\n")
+    assert asyncio.run(failed(registered)) == "<registry>: invalid YAML at line 2, column 1"
+    registry.write_text(entries + "  Bad:\n    path: x\n")
+    assert asyncio.run(failed(registered)).startswith("invalid <registry>: brains.Bad.[key]: ")
+    link.unlink()
+    link.symlink_to(folder)
+    assert asyncio.run(failed(linked)) == "~/brain-link" + unconfigured
+    # A bf.yaml another program planted in the working directory is named from there.
+    (tmp_path / "checkout").mkdir()
+    (tmp_path / "checkout/bf.yaml").symlink_to(brain.root / "bf.yaml")
+    monkeypatch.chdir(tmp_path / "checkout")
+    planted = "./bf.yaml is not a regular file owned by you; pass --brain PATH to select a brain"
+    assert asyncio.run(failed(registered)) == planted
+    # A home directory at the file system root hides nothing: replacing it would garble every path.
+    monkeypatch.setenv("HOME", "/")
+    assert asyncio.run(failed(registered)) == planted
+
+
+def test_mcp_errors_hide_a_short_home_only_where_a_path_starts(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Containers often set a short home, such as /root or /app: a note path that contains it keeps its name.
+    monkeypatch.setenv("HOME", "/offline")
+    result = asyncio.run(server([brain]).call_tool("read", {"ref": "projects/offline.md#missing"}))
+    assert text(result).startswith("projects/offline.md: heading #missing does not exist; its sections: ")
+
+
+def test_tag_pages_and_eval_folders_accept_a_trailing_slash(brain: Store) -> None:
+    # As shell completion writes them, like projects/ and --scope projects/.
+    assert invoke("read", "tags/retention/", "--brain", "fixture") == invoke(
+        "read", "tags/retention", "--brain", "fixture"
+    )
+    brain.write(
+        "evals/retrieval.yaml", b"version: 7\ncases:\n- name: d\n  query: retention\n  expect: [projects/offline.md]\n"
+    )
+    assert invoke("eval", "--path", "evals/", "--brain", "fixture")["score"] == "1/1"

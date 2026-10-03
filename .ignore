@@ -1,0 +1,10 @@
+# https://github.com/BurntSushi/ripgrep/blob/master/GUIDE.md#automatic-filtering
+# Editor search (ripgrep, fd) skips generated and duplicated text; Git tracking is unchanged.
+# Ruff, ty and lychee read this file too: never list Python sources or Markdown with local links, or a gate skips them.
+/mise.lock
+/uv.lock
+/THIRD_PARTY_NOTICES.md
+/docs/assets/watch.svg
+/docs/third-party/
+# The last major release's docs/*.schema.json, compared by tests/test_contract.py; the published copies stay searchable.
+/tests/contract/

@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -62,10 +63,24 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
     assert [item["ref"] for item in before["changed"]] == ["projects/new-website.md"]
     assert "review" not in before["projects"][0]
     flagged = after["projects"][0]
-    assert (flagged["review"], flagged["review_reasons"], flagged["new_links"]) == (True, ["newer_evidence"], 1)
-    relation = next(reply for reply in replies if reply.get("page") == "relation")
-    assert relation["items"][0]["ref"] == "jira:review"
-    assert relation["items"][0]["fields"]["status"] == "Done"
+    assert {key: flagged[key] for key in ("review", "review_reasons", "new_links", "newer")} == {
+        "review": True,
+        "review_reasons": ["newer_evidence"],
+        "new_links": 1,
+        "newer": ["jira:review"],
+    }
+    # The issue kept its event time; only its upstream change is new.
+    record = [reply for reply in replies if reply.get("ref") == "jira:review"][-1]["record"]
+    assert (datetime.fromisoformat(record["time"]), record["fields"]["status"]) == (
+        datetime(2026, 9, 24, 14, tzinfo=UTC),
+        "Done",
+    )
+    # Updating the conclusion clears the flag.
+    note = brain / "projects/new-website.md"
+    note.write_text(note.read_text().replace("still blocks launch", "is Done: nothing blocks launch"))
+    result = CliRunner().invoke(app, ["read", "--brain", str(brain)])
+    assert result.exit_code == 0, result.output
+    assert "review" not in json.loads(result.stdout)["projects"][0]
     # The walkthrough changed its own copy only.
     assert json.loads((EXAMPLE / "fixtures/jira.json").read_text())["attributes"]["status"] == "In review"
 

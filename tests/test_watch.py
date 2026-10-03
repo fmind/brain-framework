@@ -27,7 +27,7 @@ from typer.testing import CliRunner
 import bf.collect as collector
 from bf.cli import app
 from bf.history import state
-from bf.models import Error, encode, timestamp
+from bf.models import Error, encode, local, timestamp
 from bf.storage import Store, state_store
 from bf.watch import (
     Dashboard,
@@ -272,6 +272,15 @@ def test_details_show_diagnostics_and_routine_markers_at_every_width(width: int,
     output = screen(dashboard, width, height)
     assert "program exited with status 1" in output
     assert "Log: /state/b.log" in output
+
+
+def test_details_show_the_last_success_in_local_time() -> None:
+    success = "2026-09-01T11:59:00.123456Z"
+    dashboard = Dashboard("fixture", rows=[Row("sensor", "calendar", State.FRESH, True, 60, success=success)])
+    # Like every reply, with the local offset and to the second, whole within the details panel.
+    output = screen(dashboard, 120, 24)
+    assert f"Last OK: {local(success)}" in output
+    assert ".123456" not in output
 
 
 def test_short_terminals_keep_program_rows_over_details() -> None:
@@ -535,6 +544,20 @@ def test_keyboard_restores_terminal_after_failure() -> None:
         os.close(slave)
 
 
+def test_a_closed_terminal_cancels_like_ctrl_c() -> None:
+    master, slave = pty.openpty()
+    try:
+        with os.fdopen(os.dup(slave), "r") as stream, pytest.raises(KeyboardInterrupt), keyboard(stream):  # noqa: PT012 - the hangup happens inside the context
+            # Closing the terminal hangs it up; main() turns the SIGHUP that follows into an interrupt (exit 130).
+            os.close(master)
+            master = -1
+            raise KeyboardInterrupt
+    finally:
+        if master >= 0:
+            os.close(master)
+        os.close(slave)
+
+
 def test_read_keys_completes_an_escape_sequence_split_across_reads() -> None:
     reader, writer = os.pipe()
     try:
@@ -583,8 +606,19 @@ def test_idle_dashboard_redraws_once_a_second(brain: Store, monkeypatch: pytest.
     assert min(waits) == 1
 
 
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (Error("invalid bf.yaml: sensors.git.refresh: Input should be a valid integer"), None),
+        (PermissionError(13, "Permission denied"), "Cannot read bf.yaml or history; run bf status for diagnostics"),
+    ],
+)
 def test_observation_loop_never_executes_and_recovers_config_error(
-    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    brain: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: Exception,
+    message: str | None,
 ) -> None:
     calls = 0
     original = snapshot
@@ -593,7 +627,7 @@ def test_observation_loop_never_executes_and_recovers_config_error(
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise Error("bad configuration")
+            raise failure
         return original(brain)
 
     ticks = iter([0, 1, 4, 7])
@@ -604,9 +638,37 @@ def test_observation_loop_never_executes_and_recovers_config_error(
         _loop(brain, Dashboard("fixture", observe=True), Job(brain, (), ()), (), ())
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert events[0]["programs"] == []
-    assert "Cannot read bf.yaml or history" in events[0]["message"]
+    # BF's own diagnostic names the field without quoting content; other failures point to bf status.
+    assert events[0]["message"] == (message or str(failure))
     assert events[1]["message"] == "Configuration recovered"
     assert not any(event["running"] for event in events)
+
+
+def test_watcher_names_a_selected_program_bf_yaml_no_longer_declares(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `bf watch --sensor git` runs while its owner renames git in a bf.yaml that stays valid.
+    brain.write("bf.yaml", CONFIG.replace(b"  git:\n", b"  gitlab:\n"))
+    ticks = iter([0.0, 4.0, 8.0])
+    starts: list[set[str]] = []
+
+    def clock() -> float:
+        tick = next(ticks)
+        if tick == 4.0:
+            brain.write("bf.yaml", CONFIG)
+        return tick
+
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=clock, sleep=lambda _: None))
+    dashboard = Dashboard("fixture")
+    monkeypatch.setattr(Job, "start", lambda _: starts.append({row.name for row in dashboard.rows if row.included}))
+    with pytest.raises(StopIteration):
+        _loop(brain, dashboard, Job(brain, ("git",), ()), ("git",), ())
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    # bf status sees nothing wrong with bf.yaml: the message names the selection, and nothing runs until it is valid.
+    assert events[0]["message"] == "unknown sensor git; check names in bf.yaml; did you mean gitlab?"
+    assert (events[0]["programs"], events[0]["running"]) == ([], False)
+    assert starts == [{"git"}]
+    assert events[1]["running"]
 
 
 def test_job_runs_selected_program_and_retains_state(brain: Store) -> None:
@@ -934,7 +996,7 @@ def test_refresh_during_update_coalesces_and_waits_for_valid_configuration(
             return []
         if invalid and steps == 3:
             assert len(starts) == 1
-            assert "Cannot read" in dashboard.message
+            assert dashboard.message == "bf.yaml: invalid YAML at line 2, column 1"
             brain.write("bf.yaml", changed)
             return []  # The pending request survives the error without pressing f again.
         if len(starts) == 1:

@@ -34,7 +34,11 @@ def test_local_documents_extract_text_office_and_saved_pages(provider: Provider,
             '<worksheet><row><c r="A1" t="s"><v>0</v></c><c r="B1"><v>42</v></c></row></worksheet>',
         )
     (root / ".env").write_text("DO_NOT_COLLECT=secret")
-    records = provider.records("local-documents.py", "work", str(root))
+    # Office's owner file for the open meeting.docx is not a ZIP archive: it would fail the whole snapshot.
+    (root / "~$meeting.docx").write_bytes(b"\x05Owner" + bytes(150))
+    result = provider.run("local-documents.py", "work", str(root))
+    assert (result.returncode, result.stderr) == (0, "")
+    records = TypeAdapter(list[Record]).validate_json(result.stdout)
     assert len(records) == 5
     by_id = {record.id: record for record in records}
     assert "Conserver les preuves" in by_id["work/decision.md"].text

@@ -46,6 +46,7 @@ alias = "c"
 description = "Run every static check in parallel"
 depends = [
   "check:actions",
+  "check:changelog",
   "check:docs",
   "check:format",
   "check:leaks",
@@ -68,6 +69,10 @@ run = [
   "zizmor --offline --collect dependabot --strict-collection .",
 ]
 
+[tasks."check:changelog"]
+description = "Check that CHANGELOG.md has exactly one nonempty section for the project version"
+run = 'scripts/release-notes "v$(uv version --short)" > /dev/null'
+
 [tasks."check:docs"]
 description = "Build strict documentation and check rendered links and anchors"
 run = [
@@ -89,7 +94,13 @@ run = [
 [tasks."check:leaks"]
 alias = "cs"
 description = "Scan recent commits and the working tree for secrets"
-run = ["mise run check:leaks:history", "gitleaks dir . --redact=100 --verbose --no-banner"]
+run = [
+  # Every scan skips the ignored generated directories, so Git must track no ignored file, including a force-staged one.
+  # Only the repository's .gitignore files count, as in CI, not a contributor's global excludes.
+  "! git ls-files -ci --exclude-per-directory=.gitignore | grep .",
+  "mise run check:leaks:history",
+  "gitleaks dir . --redact=100 --verbose --no-banner",
+]
 
 [tasks."check:leaks:history"]
 description = "Scan the last 100 commits for secrets"
@@ -150,7 +161,7 @@ run = "uv audit --preview-features audit-command --locked"
 [tasks.clean]
 alias = "n"
 description = "Remove generated build, test, and documentation output"
-run = "rm -rf dist site .cache .coverage htmlcov .pytest_cache .ruff_cache"
+run = "rm -rf dist site .cache .coverage .coverage.* htmlcov .pytest_cache .ruff_cache"
 
 [tasks.coverage]
 alias = "v"

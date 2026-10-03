@@ -28,7 +28,7 @@ Your meeting notes, issues and project decisions live in different places. Brain
 | Check work across tools | Follow explicit connections between briefs, issues and deployments. |
 | Notice what changed     | See which conclusions newer evidence has overtaken.                 |
 
-In the [runnable four-tool demo](https://fmind.github.io/brain-framework/docs/context-hub/), GitHub says the implementation is merged and Gcloud shows a healthy preview, but Jira still blocks launch on accessibility review. You record that conclusion in the project; when Jira later moves to Done, BF flags the project for review. The records are fictional and everything runs locally. The [examples](https://github.com/fmind/brain-framework/tree/main/examples) also cover decision reviews, retrieval checks, hooks, routines, monitoring and teams.
+In the [runnable four-tool demo](https://fmind.github.io/brain-framework/docs/context-hub/), GitHub says the implementation is merged and Gcloud shows a healthy preview, but Jira still blocks launch on accessibility review. You record that conclusion in the project; when Jira later moves to Done, BF flags the project for review and names the issue to read. The records are fictional and everything runs locally. The [examples](https://github.com/fmind/brain-framework/tree/main/examples) also cover decision reviews, retrieval checks, hooks, routines, monitoring and teams.
 
 ## Try it
 
@@ -81,7 +81,7 @@ Search returns this match in `items` (other fields omitted):
 { "ref": "projects/new-website.md#decision", "title": "New website — Decision" }
 ```
 
-`read` returns the original Decision section, and validation reports `"valid":true`. Edit the note and search again: BF notices changes on its own. The [getting-started guide](https://fmind.github.io/brain-framework/docs/getting-started/) continues with a first collected source and a link from the decision to its evidence.
+`read` returns the original Decision section with its note's status and date, and validation reports `"valid":true`. Edit the note and search again: BF notices changes on its own. The [getting-started guide](https://fmind.github.io/brain-framework/docs/getting-started/) continues with a first collected source and a link from the decision to its evidence.
 
 ## Agents
 
@@ -95,9 +95,9 @@ Check that it cites `projects/new-website.md#decision` and names “Draft the pr
 bf skills ~/.agents/skills
 ```
 
-Each host reads its own folder: for Claude Code, use `~/.claude/skills` instead.
+Each host reads its own folder: for Claude Code, use `~/.claude/skills` instead. Claude Code reads `CLAUDE.md` rather than the brain's `AGENTS.md`: create a `CLAUDE.md` in the brain containing only `@AGENTS.md`.
 
-`bf-use` finds evidence and keeps notes and actions current, `bf-setup` onboards brains and sources, and `bf-maintain` runs integrations and checks. Hosts that prefer tools can call `search` and `read` through [MCP](https://fmind.github.io/brain-framework/docs/mcp/). See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/).
+`bf-use` finds evidence and keeps notes and actions current, `bf-setup` onboards brains and sources, and `bf-maintain` runs integrations, checks and upgrades. Hosts that prefer tools can call `search` and `read` through [MCP](https://fmind.github.io/brain-framework/docs/mcp/). See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/).
 
 ## How it works
 

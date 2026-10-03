@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import heapq
 import json
-import os
 import re
 import sqlite3
 import stat
@@ -15,27 +14,44 @@ from datetime import UTC, date, datetime, time, timedelta
 from itertools import islice
 from typing import TypedDict, cast
 
+from pydantic import ValidationError
+
 from bf import graph, index, links, usage
 from bf.config import brain_name, load
 from bf.health import attention, source_health
-from bf.markdown import action_note, authored, editor_lock, entry_note, note, reference, split_ref
-from bf.models import AUTHORED, LINKS, NAME, Error, NotFoundError, addressable, encode, tag_name, timestamp
-from bf.storage import UNNAMED, Store, relative, unnamed
+from bf.markdown import Markdown, action_note, authored, editor_lock, entry_note, note, reference, split_ref
+from bf.models import (
+    AUTHORED,
+    CACHE,
+    LINKS,
+    NAME,
+    Error,
+    InputError,
+    NotFoundError,
+    Query,
+    addressable,
+    encode,
+    tag_name,
+    timestamp,
+)
+from bf.storage import UNNAMED, Store, relative, temporary, unnamed
 
 # The automatic reminder interval for project files; modification time is not evidence of verification.
 REVIEW_DAYS = 14
+# The refs a reminder names beside its count of newer linked evidence, newest first.
+NEWER = 5
 SECTION = 20
 PAGE = 50
 LISTING = 200
-# The newest items previewed in each backlink group; its role page lists them all.
+# The newest items previewed in each backlink group; its relation page lists them all.
 PREVIEW = 5
 # Serialized bytes of a page's items, or of an exact read's text page. Agents read a reply whole: a larger one
 # ends early and continues at next_offset.
 BUDGET = 32 << 10
 BROWSE = ["projects", "concepts", "actions", "tasks", "memories", "tags", "today", "7d"]
-CACHE = "the search cache is unavailable; run bf build"
 _SCOPE = (
-    "scope accepts a folder or file (projects, memories/gmail), a period (today, 7d, 2026-09, 2026-09-25, "
+    "scope accepts a folder or a whole note (projects, memories/gmail, projects/atlas.md), a period (today, 7d, "
+    "2026-09, 2026-09-25, "
     "2026-09-21..2026-09-25), "
     "a source period or its undated records (memories/gmail/7d, memories/gmail/undated), an identity or a tag "
     "(bf://NAME/tags/LABEL)"
@@ -111,18 +127,30 @@ def period(value: str, now: datetime | None = None) -> Period | None:
             _midnight(day), _midnight(following), (day - timedelta(days=1)).isoformat(), following.isoformat()
         )
     except (ValueError, OverflowError) as error:
-        raise Error(f"invalid period: {value}") from error
+        raise InputError(f"invalid period: {value}") from error
 
 
 def scope(value: str, now: datetime | None = None) -> Scope:
-    """Search bounds for one scope: a period, an explicit identity, or a brain folder or file."""
-    value = value.strip()
+    """Search bounds for one scope: a period, an explicit identity, or a brain folder or file.
+
+    A scope is checked without a brain, so any failure is invalid input.
+    """
+    try:
+        return _scope(value.strip(), now)
+    except Error as error:
+        raise InputError(str(error), "scope") from None
+
+
+def _scope(value: str, now: datetime | None) -> Scope:
     if not value:
         return {}
     if found := period(value, now):
         return {"since": found.since, "until": found.until}
     if index.identity(value) or value.lower().startswith("bf:"):
+        # A tag scope takes no relation, unlike a read. Otherwise as `bf read` takes it: a page's #fragment would
+        # scope nothing, a complete-looking empty reply.
         links.tag(value)
+        _syntax(value)
         return {"target": links.identity(value)}
     path = value.rstrip("/")
     try:
@@ -131,6 +159,9 @@ def scope(value: str, now: datetime | None = None) -> Scope:
         raise Error(_SCOPE) from None
     if parts[0] not in (*AUTHORED, "memories"):
         raise Error(_SCOPE)
+    if authored(note := split_ref(path)[0]) and note != path:
+        # Items carry a note's path, never a section's: a section ref, as search returns it, would scope nothing.
+        raise Error("scope takes a whole note without its #section; search the note, then read the section")
     if parts[0] == "memories" and len(parts) >= 3:
         # The source pages below memories/SOURCE, and nothing else: another segment would scope nothing.
         if len(parts) == 3 and not parts[2].endswith(".json") and (found := period(parts[2], now)):
@@ -140,6 +171,32 @@ def scope(value: str, now: datetime | None = None) -> Scope:
         if len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{64}\.json", parts[2]):
             raise Error(_SCOPE)
     return {"prefix": path}
+
+
+def query(text: str, bounds: str = "", *, limit: int = 10, offset: int = 0) -> Query:
+    """A search checked without a brain, as the CLI, MCP and eval take it; invalid input names `query` or `scope`.
+
+    An identity-shaped query must be a well-formed identity, like a read ref. Each interface bounds `limit` and
+    `offset` itself, before calling.
+    """
+    window = scope(bounds)
+    if index.identity(text):
+        try:
+            links.tag(links.identity(text.strip()))
+        except Error as error:
+            raise InputError(str(error), "query") from None
+    # The words alone first: a query without words names the query, and any other reason the scope's bounds.
+    _request("query", text=text)
+    return _request("scope", text=text, limit=limit, offset=offset, **window)
+
+
+def _request(argument: str, **values: object) -> Query:
+    try:
+        return Query.model_validate(values)
+    except ValidationError as error:
+        # pydantic's reasons without its field names, which are not the arguments a caller wrote.
+        reasons = sorted({item["msg"].removeprefix("Value error, ") for item in error.errors(include_input=False)})
+        raise InputError("; ".join(reasons), argument) from None
 
 
 def low(store: Store) -> list[str]:
@@ -191,6 +248,35 @@ def local(reply: dict[str, object]) -> dict[str, object]:
         key: [plain(entry) for entry in value] if key != "problems" and isinstance(value, list) else value
         for key, value in reply.items()
     }
+
+
+def addressed(reply: dict[str, object]) -> dict[str, object]:
+    """With several selected brains a plain ref can be ambiguous: `newer`, `also` and `sections` name items by
+    address, like each entry's `uri`.
+
+    Listed entries and an exact read each name their brain. Pages fit their items in this shape: with one selected
+    brain, local() keeps refs plain and drops each entry's brain and address, so that reply is only smaller.
+    """
+    lists = {
+        key: [_named(entry) for entry in value] if isinstance(value, list) else value for key, value in reply.items()
+    }
+    return cast("dict[str, object]", _named(lists))
+
+
+def _named(entry: object) -> object:
+    """One entry as addressed() returns it; an entry that names no brain stays as it is."""
+    if not isinstance(entry, dict) or "brain" not in entry:
+        return entry
+    found = cast("dict[str, object]", entry)
+    brain = str(found["brain"])
+    changed: dict[str, object] = {}
+    for key in ("newer", "also"):
+        if isinstance(refs := found.get(key), list):
+            changed[key] = [links.address(brain, str(ref)) for ref in refs]
+    if isinstance(refs := found.get("sections"), list):
+        # A section ref names its note's path and fragment; a record id or note path may hold a literal `#`.
+        changed["sections"] = [links.address(brain, *split_ref(str(ref))) for ref in refs]
+    return {**found, **changed} if changed else found
 
 
 def brains(
@@ -252,10 +338,13 @@ def unique(problems: list[dict[str, object]]) -> list[dict[str, object]]:
 
 
 def fitting(items: list[dict[str, object]], budget: int = BUDGET) -> list[dict[str, object]]:
-    """The leading items within the reply budget; at least one, so a continuation always advances."""
+    """The leading items within the reply budget; at least one, so a continuation always advances.
+
+    Each item counts as addressed() shapes it for several selected brains; with one brain, the reply is smaller.
+    """
     size = 0
     for count, item in enumerate(items):
-        size += len(encode(item))
+        size += len(encode(_named(item)))
         if count and size > budget:
             return items[:count]
     return items
@@ -270,7 +359,7 @@ def _gather(parts: Parts, key: str) -> list[dict[str, object]]:
 
 
 def _newest(
-    items: list[dict[str, object]], limit: int, *, oldest: bool = False, modified: bool = False
+    items: list[dict[str, object]], limit: int | None, *, oldest: bool = False, modified: bool = False
 ) -> list[dict[str, object]]:
     """Newest event first, or newest modification first; a note's date is both. SQL previews use the same key."""
 
@@ -363,16 +452,21 @@ def _time_key(item: dict[str, object]) -> tuple[str, str]:
 
 
 def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now: datetime) -> None:
-    """Derive reminders from local edits and explicit deadlines, without asserting a semantic review."""
+    """Derive reminders from local edits, explicit deadlines and newer linked evidence, without asserting a review.
+
+    The same note may appear in several of `items`, such as a home section's: each copy gets the same signals.
+    """
     rows = {
         row["ref"]: row
         for row in connection.execute(
-            "SELECT i.ref,i.stale_after,f.mtime FROM items i JOIN files f ON f.path=i.path "
+            "SELECT i.id,i.ref,i.stale_after,f.mtime FROM items i JOIN files f ON f.path=i.path "
             "WHERE i.ref IN (SELECT value FROM json_each(?))",
-            (json.dumps([item["ref"] for item in items]),),
+            (json.dumps(sorted({str(item["ref"]) for item in items})),),
         )
     }
     stamp = timestamp(now.isoformat())
+    reviewed: list[tuple[dict[str, object], int, list[str]]] = []
+    edits: dict[int, str] = {}
     for item in items:
         row = rows.get(item["ref"])
         if (
@@ -408,10 +502,14 @@ def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now:
             item["review_due"] = review.date().isoformat()
             if due <= stamp:
                 reasons.append("due")
-        # Incoming evidence keeps its event-date semantics; copying another note is not new evidence.
-        newer = index.newer_links(connection, str(item["ref"]), modified) if modified else 0
-        if newer:
-            item["new_links"] = newer
+        if modified:
+            edits[row["id"]] = modified
+        reviewed.append((item, row["id"], reasons))
+    # Linked evidence that happened or changed upstream since the edit; copying another note is not new evidence.
+    newer = index.newer_links(connection, edits, stamp, NEWER)
+    for item, item_id, reasons in reviewed:
+        if item_id in newer:
+            item["new_links"], item["newer"] = newer[item_id]
             reasons.append("newer_evidence")
         if reasons:
             item["review"] = True
@@ -423,37 +521,39 @@ def _brief(item: dict[str, object]) -> dict[str, object]:
 
 
 def home(stores: list[Store], now: datetime | None = None, *, counted: bool = True) -> dict[str, object]:
-    """What needs attention now: current project notes, recent actions and notes, activity and the coming week."""
+    """What needs attention now: projects needing review first, recent actions and notes, activity and the coming week.
+
+    Every current project is reviewed; those that fit the page budget are listed, and `projects_total` counts all.
+    A deprecated note no longer applies, so it leaves every section.
+    """
     now = now or datetime.now(UTC)
     stamp = timestamp(now.isoformat())
     day, week = (timestamp((now - timedelta(days=days)).isoformat()) for days in (1, 7))
     ahead = timestamp((now + timedelta(days=7)).isoformat())
+    current = "i.status!='deprecated'"
 
     def build(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
         # Each preview's SQL order matches the Python merge below, so ties at a cap select the same items.
         projects = _rows(
-            connection,
-            f"{index.ENTRY} AND i.type='project' AND i.status!='deprecated'",
-            {},
-            "time DESC,i.ref DESC",
-            LISTING,
+            connection, f"{index.ENTRY} AND i.type='project' AND {current}", {}, "time DESC,i.ref DESC", -1
         )
-        _review(connection, projects, now)
-        actions = _rows(connection, index.ACTION, {}, "i.path DESC", 10)
+        actions = _rows(connection, f"{index.ACTION} AND {current}", {}, "i.path DESC", 10)
         changed = _rows(
             connection,
-            f"i.kind='note' AND i.time!='' AND ({index.TIME})>=:since AND ({index.TIME})<:until",
+            f"i.kind='note' AND {current} AND i.time!='' AND ({index.TIME})>=:since AND ({index.TIME})<:until",
             {"since": week, "until": stamp},
             "time DESC,i.ref DESC",
             SECTION,
         )
         upcoming = _rows(
             connection,
-            f"{index.WITHIN} AND {_LOUD}",
+            f"{index.WITHIN} AND {_LOUD} AND {current}",
             {"since": stamp, "until": ahead, "low": json.dumps(low(store))},
             "time,i.ref",
             SECTION,
         )
+        # A note listed in several sections carries the same signals in each.
+        _review(connection, [*projects, *actions, *changed, *upcoming], now)
         activity = _counts(store, index.activity(connection, day, stamp), "24h")
         issues: list[dict[str, object]] = []
         try:
@@ -472,12 +572,11 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
         }
 
     parts, extra = brains(stores, build, counted=counted)
-    projects = sorted(
-        _newest(_gather(parts, "projects"), LISTING * len(parts)), key=lambda item: not item.get("review")
-    )
-    return {
+    projects = _newest(_gather(parts, "projects"), None)
+    reply: dict[str, object] = {
         "page": "",
-        "projects": projects,
+        "projects": [],
+        "projects_total": len(projects),
         "actions": sorted(_gather(parts, "actions"), key=lambda i: str(i["ref"]), reverse=True)[:10],
         # Orientation previews: titles and times; read an item for its text.
         "changed": [_brief(item) for item in _newest(_gather(parts, "changed"), SECTION)],
@@ -487,6 +586,11 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
         "pages": BROWSE,
         **extra,
     }
+    # Projects needing review first, each group newest first, in what the bounded previews leave of the budget.
+    reply["projects"] = fitting(
+        sorted(projects, key=lambda item: not item.get("review")), BUDGET - len(encode(addressed(reply)))
+    )
+    return reply
 
 
 def timeline(
@@ -524,9 +628,7 @@ def timeline(
 
 def _directory(store: Store, path: str) -> bool:
     try:
-        relative(path)
-        with store.parent(path) as (parent, leaf):
-            return stat.S_ISDIR(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode)
+        return stat.S_ISDIR(store.mode(path))
     except Error, OSError:
         return False
 
@@ -755,49 +857,91 @@ def page(
     if parts[0] == "tags":
         if len(parts) == 1:
             return tags(stores, offset=offset, counted=counted)
-        return tagged(stores, path.removeprefix("tags/"), offset=offset, counted=counted)
+        # The label of the normalized path: tags/LABEL/ reads like tags/LABEL, as projects/ reads like projects.
+        return tagged(stores, "/".join(parts[1:]), offset=offset, counted=counted)
     if parts[0] == "memories":
         relative("/".join(parts))
         return memories(stores, parts, now, offset=offset, counted=counted)
-    # Notes and their sections (`path#heading`) are items, not folders.
-    if authored(split_ref(path)[0]):
-        return None
-    if parts[0] in AUTHORED and not (parts[0] == "actions" and len(parts) == 2):
-        name = "/".join(parts)
-        relative(name)
-        # Entity names such as projects/archive are logical: only an existing folder is a page.
-        if name in AUTHORED or any(_directory(store, name) for store in stores):
-            return folder(stores, name, now, offset=offset, counted=counted)
+    if name := folder_page(stores, path):
+        return folder(stores, name, now, offset=offset, counted=counted)
     return None
 
 
-def readable(ref: str) -> str:
-    """Check a read ref's syntax without a brain, as `page` and `retrieve.read` apply it.
+def folder_page(stores: list[Store], path: str) -> str | None:
+    """The folder page an authored path names: a root, or an existing folder below one other than an action's,
+    which reads as its ACTION.md. Notes and their sections (`path#heading`) are items, not folders."""
+    parts = tuple(path.rstrip("/").split("/"))
+    if authored(split_ref(path)[0]) or parts[0] not in AUTHORED or (parts[0] == "actions" and len(parts) == 2):
+        return None
+    name = "/".join(parts)
+    relative(name)
+    # Entity names such as projects/archive are logical: only an existing folder is a page.
+    return name if name in AUTHORED or any(_directory(store, name) for store in stores) else None
 
-    A malformed ref fails here; a well-formed one can still name nothing in the selected brains.
+
+# A page has no relation page: by its syntax here, or once retrieve finds an existing folder below a root.
+RELATIONLESS = "rel lists the links to a note, record or identity, not a page"
+
+
+def readable(ref: str, rel: str = "") -> str:
+    """Check a read's syntax without a brain, as `page` and `retrieve.read` apply it; a failure is invalid input.
+
+    A malformed ref, or a relation page of a page or a #section, fails here; a well-formed ref can still name
+    nothing in the selected brains.
     """
+    try:
+        path, section = _syntax(ref)
+    except Error as error:
+        raise InputError(str(error), "ref") from None
+    if rel and links.reserved(path.rstrip("/")):
+        raise InputError(RELATIONLESS, "rel")
+    if rel and section:
+        raise InputError("rel lists the links to a whole note; read the note without its #section", "rel")
+    return ref
+
+
+_SECTIONLESS = "pages have no sections; read the page without its #fragment"
+
+
+def _syntax(ref: str) -> tuple[str, bool]:
+    """A read ref's path, once its syntax is checked, and whether it names a note's section."""
     if len(ref) > 8192:
         raise Error("expected a reference of at most 8192 characters")
+    try:
+        ref.encode()
+    except UnicodeEncodeError:
+        # Undecodable argument bytes arrive as lone surrogates, which no note path, record id or identity holds.
+        raise Error("expected UTF-8 text") from None
     value = ref.strip()
     if parsed := links.parse(value):
         links.tag(parsed.identity)
         if parsed.fragment:
-            return ref
+            if links.reserved(parsed.path.rstrip("/")):
+                raise Error(_SECTIONLESS)
+            return parsed.path, True
     path = parsed.path if parsed else value
     parts = path.rstrip("/").split("/")
+    note, fragment = split_ref(path)
+    # A page, such as tasks or 7d, has no sections; a folder below a root may hold `#` in its name.
+    if fragment and links.reserved(note.rstrip("/")):
+        raise Error(_SECTIONLESS)
     period(path)
     if parts[0] == "tags" and len(parts) > 1:
-        _label(path.removeprefix("tags/"))
-    elif authored(note := split_ref(path)[0]):
+        _label("/".join(parts[1:]))
+    elif authored(note):
         # A note's section fragment is free text; only its path must be normalized.
         relative(note)
+        return path, bool(fragment)
     elif parts[0] in (*AUTHORED, "memories"):
         # Pages and folders check the whole path, including any `#`.
         relative("/".join(parts))
-    return ref
+        if parts[0] == "memories" and len(parts) == 3:
+            # A source's period page, such as memories/mail/7d.
+            period(parts[2])
+    return path, False
 
 
-# A backlink preview names an item; its role page and exact read hold the rest.
+# A backlink preview names an item; its relation page and exact read hold the rest.
 _PREVIEWED = ("brain", "ref", "uri", "title", "time", "date", "kind", "source", "status", "type", "fields", "excerpt")
 # A backlink preview's excerpt: enough to see what each linking item says without reading it.
 GLIMPSE = 160
@@ -837,7 +981,7 @@ def _merge(parts: Parts) -> list[dict[str, object]]:
     ]
 
 
-def role(
+def relation_page(
     stores: list[Store],
     targets: set[str],
     relation: str,
@@ -857,7 +1001,7 @@ def role(
     def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
         exclude = ref if owner is not None and store.root == owner.root else ""
         relations = [relation, *load(store).narrower(relation)]
-        rows, total = index.linking(connection, graph.local_refs(connection, targets), relations, exclude=exclude)
+        rows, total = index.linking(connection, graph.local_refs(connection, targets, name), relations, exclude=exclude)
         items = (label(name, row) for row in rows)
         return {
             "rows": ({k: v for k, v in item.items() if (k, v) != ("relation", relation)} for item in items),
@@ -868,20 +1012,54 @@ def role(
     return {"page": "relation", "relation": relation, **reply}
 
 
-def _graph(targets: set[str], owner: Store | None = None, ref: str = "") -> Build:
-    """Each brain's backlinks and typed claims about the expanded targets; the owning item is not its own backlink."""
+def _graph(targets: set[str], owner: Store | None = None, ref: str = "", now: datetime | None = None) -> Build:
+    """Each brain's backlinks and typed claims about the expanded targets; the owning item is not its own backlink.
+
+    With `now`, the owning brain also gives the whole note's reminders.
+    """
 
     def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
-        local = graph.local_refs(connection, targets)
+        local = graph.local_refs(connection, targets, name)
         claims, truncated = graph.outgoing(connection, local)
-        exclude = ref if owner is not None and store.root == owner.root else ""
+        owned = owner is not None and store.root == owner.root
         return {
-            "backlinks": _backlinks(connection, name, local, exclude),
+            "backlinks": _backlinks(connection, name, local, ref if owned else ""),
             "claims": [{"brain": name, **claim} for claim in claims],
             "claims_truncated": truncated,
+            **({"reminders": _reminders(connection, ref, now)} if owned and now else {}),
         }
 
     return build
+
+
+# What a whole read adds from the note's listing entry when the note gets reminders.
+_REMINDERS = ("tasks", "next", "review", "review_due", "review_source", "review_reasons", "new_links", "newer")
+
+
+def _reminders(connection: sqlite3.Connection, ref: str, now: datetime) -> dict[str, object]:
+    """A note's tasks and review signals as listings show them; nothing for a note without reminders."""
+    items = _rows(connection, "i.ref=:ref", {"ref": ref}, "i.ref", 1)
+    _review(connection, items, now)
+    if not items or "review_source" not in items[0]:
+        return {}
+    return {key: items[0][key] for key in _REMINDERS if key in items[0]}
+
+
+def _summary(reply: Mapping[str, object]) -> dict[str, object]:
+    """A section's note title, type, status and date, from the file it was read from: its text omits them."""
+    try:
+        path, data, markdown = cast("tuple[str, bytes, Markdown | None]", reply["_source"])
+        found = note(path, markdown or data)
+    except Error:
+        # The section still reads; only a note that search can index states its metadata.
+        return {}
+    values = {
+        "title": found.title,
+        "type": found.knowledge.type,
+        "status": found.knowledge.status,
+        "date": found.knowledge.updated,
+    }
+    return {key: value for key, value in values.items() if value}
 
 
 def _related(parts: Parts) -> dict[str, object]:
@@ -896,13 +1074,14 @@ def _related(parts: Parts) -> dict[str, object]:
 def context(stores: list[Store], owner: Store, brain: str, reply: dict[str, object]) -> dict[str, object]:
     """Backlinks of a whole note or record and typed claims about it across the selected brains.
 
-    An action's ACTION.md also lists the action's files and the projects it links to.
+    A whole note that gets reminders adds its tasks and review signals, and an action's ACTION.md the action's files
+    and the projects it links to. A section names its note's title, type, status and date instead.
     """
     ref = str(reply["ref"])
     record = "record" in reply
     path, fragment = ("", "") if record else split_ref(ref)
     if fragment:
-        return {}
+        return _summary(reply)
     if not record and not addressable(path):
         # Record ids are bounded to fit a BF address; a note path is not, but the note itself still reads.
         return {"problems": [{"brain": brain, "error": "backlinks are unavailable for a path this long; shorten it"}]}
@@ -913,8 +1092,11 @@ def context(stores: list[Store], owner: Store, brain: str, reply: dict[str, obje
         return {
             "problems": [{"brain": brain, "file": path, "error": "backlinks are unavailable for this path; rename it"}]
         }
-    parts, extra = brains(stores, _graph(targets, owner, ref), strict=False, counted=False)
+    reminded = None if record else datetime.now(UTC)
+    parts, extra = brains(stores, _graph(targets, owner, ref, reminded), strict=False, counted=False)
     result = _related(parts)
+    for _, part in parts:
+        result.update(cast("dict[str, object]", part.get("reminders", {})))
     issues: list[dict[str, object]] = [*problems, *cast("list[dict[str, object]]", extra.get("problems", []))]
     if not record and action_note(path):
         skipped: dict[str, tuple[int, int, int, int]] = {}
@@ -943,7 +1125,11 @@ def _action(
 ) -> dict[str, object]:
     """The files kept with an action, and the projects its ACTION.md links to."""
     folder = path.rsplit("/", 1)[0]
-    files = [name for name in store.files(folder, skipped=skipped) if name != path and not editor_lock(name)][:LISTING]
+    files = [
+        name
+        for name in store.files(folder, skipped=skipped)
+        if name != path and not editor_lock(name) and not temporary(name)
+    ][:LISTING]
     projects = set()
     for target in note(path, text.encode()).targets:
         resolved = reference(path, target)

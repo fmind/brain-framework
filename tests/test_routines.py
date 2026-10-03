@@ -29,6 +29,7 @@ from bf.models import Config, Error, Program
 from bf.retrieve import read
 from bf.storage import Store
 from bf.update import update
+from bf.validate import validate
 from conftest import plain
 
 NOW = datetime(2026, 9, 25, 8, tzinfo=UTC)
@@ -50,6 +51,7 @@ routines:
 """
 ACTION = b"---\ntype: action\nstatus: draft\n---\n# Digest\n\nSee [offline](../../projects/offline.md).\n"
 FOLDER = f"actions/{NOW.astimezone().date().isoformat()}_digest-00000001"
+SKIPPED = "an action for this routine already exists today"
 
 
 @pytest.fixture
@@ -89,7 +91,8 @@ def test_a_routine_writes_one_action_per_day_after_success(configured: Store) ->
     preview = routine(
         configured, "digest", start=START, end=END, runner=printing(ACTION, calls), dry_run=True, clock=lambda: NOW
     )
-    assert preview == {"routine": "digest", "action": f"{FOLDER}/ACTION.md", "text": ACTION.decode()}
+    # A preview names no action path: the real run draws its own random suffix.
+    assert preview == {"routine": "digest", "text": ACTION.decode()}
     assert calls == [["routines/digest.py", str(configured.root), START, END]]
     assert not configured.files("actions")
     assert state(configured, ROUTINES) == {}
@@ -108,27 +111,76 @@ def test_a_routine_writes_one_action_per_day_after_success(configured: Store) ->
     # People may already be working on today's action: a second run never replaces it.
     configured.write(f"{FOLDER}/ACTION.md", b"# Digest\n\nReviewed by a person.\n")
     again = routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
-    assert again == {"routine": "digest", "skipped": "an action for this routine already exists today"}
+    assert again == {"routine": "digest", "skipped": SKIPPED}
     assert configured.read(f"{FOLDER}/ACTION.md") == b"# Digest\n\nReviewed by a person.\n"
     assert refs(read([configured], "actions")) == [f"{FOLDER}/ACTION.md"]
+    # Before, a preview then still reported a new action that the real run would never write.
+    preview = routine(
+        configured, "digest", start=START, end=END, runner=printing(ACTION), dry_run=True, clock=lambda: NOW
+    )
+    assert preview == {"routine": "digest", "skipped": SKIPPED, "text": ACTION.decode()}
 
 
-def test_an_editor_lock_in_todays_action_skips_the_rerun_instead_of_failing(configured: Store, tmp_path: Path) -> None:
+def test_only_an_action_md_makes_todays_folder_an_action(
+    configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
-    # Emacs keeps a dangling `.#NAME` link beside a file while its buffer has unsaved edits.
+    # Emacs keeps a dangling `.#NAME` link beside a file while its buffer has unsaved edits: the rerun skips.
     (configured.root / FOLDER / ".#ACTION.md").symlink_to("owner@host.12345:1790000000")
-    skipped = {"routine": "digest", "skipped": "an action for this routine already exists today"}
+    skipped = {"routine": "digest", "skipped": SKIPPED}
     assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW) == skipped
-    # Someone is still editing there: nothing is written beside the lock, even once ACTION.md is gone.
+    # Without its ACTION.md, the folder holds no action: a rerun writes one in a new folder, nothing beside the lock.
     configured.delete(f"{FOLDER}/ACTION.md")
-    assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW) == skipped
-    assert not (configured.root / FOLDER / "ACTION.md").exists()
-    # A linked actions/ folder still fails the run by name.
+    monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=2))
+    written = routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
+    assert written == {"routine": "digest", "action": f"{FOLDER[:-1]}2/ACTION.md"}
+    assert [path.name for path in (configured.root / FOLDER).iterdir()] == [".#ACTION.md"]
+    # A linked folder of the day cannot be inspected, so it counts as today's action.
     shutil.rmtree(configured.root / "actions")
     (tmp_path / "elsewhere").mkdir()
+    (configured.root / "actions").mkdir()
+    (configured.root / FOLDER).symlink_to(tmp_path / "elsewhere")
+    assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW) == skipped
+    # A linked actions/ folder still fails the run by name.
+    shutil.rmtree(configured.root / "actions")
     (configured.root / "actions").symlink_to(tmp_path / "elsewhere")
     with pytest.raises(Error, match="actions: expected a directory"):
         routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
+
+
+def test_a_killed_write_never_stops_todays_action(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A run killed while writing its action can leave the folder holding only the write's temporary file.
+    configured.write(f"{FOLDER}/.write-{'0' * 32}", b"---\ntype: act")
+    monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=2))
+    preview = routine(
+        configured, "digest", start=START, end=END, runner=printing(ACTION), dry_run=True, clock=lambda: NOW
+    )
+    assert "skipped" not in preview
+    # Before, the leftover counted as today's action: the routine skipped for the rest of the day.
+    result = routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
+    assert result == {"routine": "digest", "action": f"{FOLDER[:-1]}2/ACTION.md"}
+    assert configured.read(f"{FOLDER[:-1]}2/ACTION.md") == ACTION
+    # Validation names the leftover in a warning, not as a broken action, so a pre-commit validation still passes.
+    checked = validate(configured)
+    leftover = f"{FOLDER}/.write-{'0' * 32}"
+    assert not [p for p in cast("list[dict[str, str]]", checked["problems"]) if p["file"].startswith(FOLDER)]
+    assert {"warning": "an interrupted write left this temporary file; delete it", "file": leftover} in cast(
+        "list[dict[str, str]]", checked["warnings"]
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+def test_an_unreadable_actions_folder_fails_the_run_without_blaming_a_link(configured: Store) -> None:
+    # The scan skips an unreadable actions/ like a linked one, so the retrieval of other folders still answers.
+    actions = configured.root / "actions"
+    actions.mkdir(exist_ok=True)
+    actions.chmod(0)
+    try:
+        with pytest.raises(Error, match=r"actions: unreadable folder; grant read and search permission; no action"):
+            routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
+    finally:
+        actions.chmod(0o700)
+    assert not any(actions.iterdir())
 
 
 def test_a_retry_finds_todays_action_when_its_run_history_was_not_saved(
@@ -153,7 +205,7 @@ def test_a_retry_finds_todays_action_when_its_run_history_was_not_saved(
         routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)
     assert configured.read(f"{FOLDER}/ACTION.md") == ACTION
     assert "action" not in state(configured, ROUTINES)["digest"]
-    skipped = {"routine": "digest", "skipped": "an action for this routine already exists today"}
+    skipped = {"routine": "digest", "skipped": SKIPPED}
     assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW) == skipped
     assert not (configured.root / f"{FOLDER[:-1]}2").exists()
 
@@ -203,8 +255,9 @@ def test_invalid_output_writes_nothing_and_records_the_error(
 
 def test_routines_require_enabled_programs_and_valid_windows(configured: Store, tmp_path: Path) -> None:
     for name, start, end, message in [
-        ("absent", START, END, "unknown or disabled"),
-        ("paused", START, END, "unknown or disabled"),
+        # An unknown name suggests only routines that can run; a disabled one says how to enable it.
+        ("pause", START, END, "^unknown routine pause; check names in bf.yaml$"),
+        ("paused", START, END, "^routine paused is disabled in bf.yaml; set enabled: true to run it$"),
         ("digest", END, START, "earlier"),
         ("digest", "2026-09-24", END, "timezone"),
     ]:
@@ -461,7 +514,7 @@ def test_a_direct_run_never_waits_for_input_an_agent_shell_holds_open(hooked: St
         ([], 2, "name a routine, or pass --hook EVENT"),
         (["--hook", "Pre Push"], 2, "hook names are lowercase words"),
         (["missing"], 1, "unknown routine missing"),
-        (["paused"], 1, "routine paused is unknown or disabled"),
+        (["paused"], 1, "routine paused is disabled in bf.yaml; set enabled: true to run it"),
     ],
 )
 def test_run_rejects_missing_unknown_or_disabled_routines(
@@ -470,6 +523,25 @@ def test_run_rejects_missing_unknown_or_disabled_routines(
     result = CliRunner().invoke(app, ["run", *arguments, "--brain", str(hooked.root)])
     assert result.exit_code == code
     assert message in plain(result.output) + str(result.exception)
+    # Like an unknown name, a disabled one fails before running anything, without a reply.
+    assert not result.stdout
+    assert not hooked.root.joinpath("logs").exists()
+
+
+def test_a_log_routine_keeps_the_tail_of_output_beyond_max_bytes(hooked: Store) -> None:
+    # A verbose backup prints a line per file: its log keeps the newest 256 KiB instead of the run failing.
+    hooked.write("routines/backup.sh", b"#!/bin/sh\nhead -c 600000 /dev/zero | tr '\\0' x\necho done\n")
+    (hooked.root / "routines/backup.sh").chmod(0o700)
+    settings = "  backup:\n    command: [routines/backup.sh]\n    max_bytes: 1024\n"
+    hooked.write("bf.yaml", HOOKED.replace(b"routines:\n", b"routines:\n" + settings.encode()))
+    assert routine(hooked, "backup", start=START, end=END) == {"routine": "backup"}
+    # The run's entry holds exactly the last 256 KiB, followed by the routine's outcome.
+    body = hooked.read(log_path("backup")).split(b"==\n", 1)[1]
+    assert body.startswith(b"x" * ((256 << 10) - len("done\n")) + b"done\n== ")
+    # An action routine's output becomes a note: it still fails beyond max_bytes.
+    hooked.write("bf.yaml", hooked.read("bf.yaml").replace(b"max_bytes: 1024", b"max_bytes: 1024\n    output: action"))
+    with pytest.raises(Error, match="program output exceeded max_bytes; no action was written"):
+        routine(hooked, "backup", start=START, end=END)
 
 
 def test_update_selection_suggests_close_names(hooked: Store) -> None:

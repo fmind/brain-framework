@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from bf.cli import app
 from bf.collect import collect
 from bf.config import load, user_path, yaml_object
 from bf.evaluate import Case, Suite, evaluate
-from bf.models import Config, Error, Registration
+from bf.models import Config, Error, Registration, UserConfig
 from bf.schemas import Kind, document
 from bf.storage import Store
 from conftest import plain
@@ -60,7 +61,6 @@ ROOT = Path(__file__).resolve().parents[1]
         *(
             {"version": 7, "name": "brain", "watch": watch}
             for watch in (
-                None,
                 [],
                 {"interval": 0},
                 {"interval": "60"},
@@ -78,12 +78,68 @@ ROOT = Path(__file__).resolve().parents[1]
             for executable in ("/usr/bin/env", "../escape.sh", "sensors/../x", "sensors//x", "bin/x", ".", "a{b")
         ),
         {"version": 7, "name": "brain", "routines": {"digest": {"command": ["routines/./digest.py"]}}},
+        {"version": 7, "name": "brain", "sensors": []},
+        {"version": 7, "name": "brain", "brains": {f"brain-{i}": {"path": f"../{i}"} for i in range(33)}},
     ],
 )
 def test_editor_and_runtime_reject_invalid_structure(value: dict) -> None:
     with pytest.raises(ValidationError):
         Config.model_validate(value)
     assert not Draft202012Validator(Config.model_json_schema()).is_valid(value)
+
+
+@pytest.mark.parametrize(
+    ("kind", "data", "expected"),
+    [
+        *(
+            ("brain", f"version: 7\nname: brain\n{key}:\n  # demo: {{}}\n".encode(), {"version": 7, "name": "brain"})
+            for key in ("brains", "fields", "sensors", "watch", "routines")
+        ),
+        (
+            "brain",
+            b"version: 7\nname: brain\nsensors:\n  demo:\n    command: [echo]\n    fields:\n      # kind: {path: /a}\n",
+            {"version": 7, "name": "brain", "sensors": {"demo": {"command": ["echo"]}}},
+        ),
+        ("registry", b"brains:\n  # brain:\n  #   path: ~/brain\n", {}),
+    ],
+)
+def test_a_mapping_whose_entries_are_all_commented_out_is_empty(kind: Kind, data: bytes, expected: dict) -> None:
+    # YAML reads a key whose entries are all commented out as null, which the strict models once rejected.
+    value = yaml_object(data)
+    model = {"brain": Config, "registry": UserConfig}[kind].model_validate(value)
+    assert model.model_dump(exclude_defaults=True) == expected
+    Draft202012Validator(document(kind)).validate(value)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (
+            {
+                "fields": {"kind": {"description": "Item kind", "type": "string"}},
+                "sensors": {
+                    "mail": {"command": ["echo"]},
+                    "chat": {"command": ["echo"], "fields": {"kind": {"value": 3}}},
+                },
+            },
+            "sensors.chat.fields.kind.value: expected string",
+        ),
+        (
+            {"fields": {"kind": {"description": "Item kind", "type": "string", "examples": ["ok", 3]}}},
+            "fields.kind: examples.1: expected string",
+        ),
+        (
+            {"sensors": {"digest": {"command": ["echo"]}}, "routines": {"digest": {"command": ["echo"]}}},
+            "sensors.digest and routines.digest: sensor and routine names must be distinct",
+        ),
+    ],
+    ids=["literal-value", "example", "program-name"],
+)
+def test_invalid_literal_values_and_shared_names_are_located(brain: Store, value: dict, message: str) -> None:
+    # JSON is YAML: the configuration names the key to fix among several sensors or examples.
+    brain.write("bf.yaml", json.dumps({"version": 7, "name": "fixture", **value}).encode())
+    with pytest.raises(Error, match=rf"^invalid bf\.yaml: {re.escape(message)}"):
+        load(brain)
 
 
 @pytest.mark.parametrize(
@@ -286,26 +342,30 @@ def test_all_evaluation_cases_are_checked_before_retrieval(brain: Store, monkeyp
 
 
 @pytest.mark.parametrize(
-    "data",
+    ("data", "problem"),
     [
-        b"name: &name brain\n",
-        b"name: brain\nname: other\n",
-        b"name: brain\n---\nname: other\n",
-        b"name: brain\nextra: !!python/object/apply:os.system [PRIVATE]\n",
-        b"name: brain\nsensors: !!bool PRIVATE\n",
-        b"name: brain\nsensors: " + b"[" * 33 + b"]" * 33,
-        b"name: brain\nextra: [" + b"0," * 10001 + b"]",
-        b"name: brain\n#" + b"x" * (1 << 20),
+        (b"version: 7\nname: &name brain\n", "anchors and aliases are not supported"),
+        (b"version: 7\nname: brain\nname: other\n", "keys must be unique strings at line 3"),
+        (b"version: 7\nname: brain\n---\nname: other\n", "invalid YAML at line 3"),
+        (b"version: 7\nname: brain\nextra: !!python/object/apply:os.system [PRIVATE]\n", "invalid YAML at line 3"),
+        (b"version: 7\nname: brain\nsensors: !!bool PRIVATE\n", "invalid YAML"),
+        (b"version: 7\nname: brain\nsensors: " + b"[" * 33 + b"]" * 33, "structure exceeds its limit"),
+        (b"version: 7\nname: brain\nextra: [" + b"0," * 20_000 + b"]", "structure exceeds its limit"),
+        (b"version: 7\nname: brain\n#" + b"x" * (1 << 20), "exceeds 1048576 bytes"),
     ],
+    ids=["anchor", "duplicate-key", "two-documents", "python-tag", "bool-tag", "nesting", "events", "size"],
 )
-def test_malformed_configuration_never_runs_a_sensor_or_changes_evidence(brain: Store, data: bytes) -> None:
+def test_malformed_configuration_never_runs_a_sensor_or_changes_evidence(
+    brain: Store, data: bytes, problem: str
+) -> None:
     before = {path: path.read_bytes() for path in (brain.root / "memories").rglob("*.json")}
     brain.write("bf.yaml", data)
 
     def unexpected(*_args):
         pytest.fail("sensor executed with malformed configuration")
 
-    with pytest.raises(Error) as failure:
+    # A version keeps each case from failing on its format alone: each limit or rule must reject it.
+    with pytest.raises(Error, match=problem) as failure:
         collect(brain, "demo", start="2026-09-01T00:00:00Z", end="2026-09-02T00:00:00Z", runner=unexpected)
     assert "PRIVATE" not in str(failure.value)
     assert before == {path: path.read_bytes() for path in (brain.root / "memories").rglob("*.json")}

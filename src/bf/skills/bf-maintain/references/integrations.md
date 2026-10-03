@@ -17,9 +17,9 @@ sensors:
       kind: { value: document }
 ```
 
-`command` is direct argv without a shell; arguments accept `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. `bf validate` checks that an enabled program is an executable regular file; check a disabled one with `test -x sensors/NAME`. `mode: window` (the default) collects a time window each run; `mode: snapshot` returns the whole catalog each run, so records it no longer returns are removed. `refresh` sets how often the sensor is due (0 keeps it manual); `priority: low` quiets a high-volume feed on period and home pages.
+`command` is direct argv without a shell; arguments accept `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. `bf validate` checks that an enabled program is an executable regular file, or, behind a command on PATH such as `[python3, sensors/NAME.py]`, that its first `sensors/` or `routines/` argument exists; check a disabled one with `test -x sensors/NAME`. Running a disabled program fails and says to set `enabled: true`. `mode: window` (the default) collects a time window each run; `mode: snapshot` returns the whole catalog each run, so records it no longer returns are removed. `refresh` sets how often the sensor is due (0 keeps it manual); `priority: low` quiets a high-volume feed on period and home pages.
 
-Shared meanings live once under the top-level `fields:` of `bf.yaml` (description, type, cardinality, `relation: true` for identities, optional `broader` and `targets`); the example assumes `kind` is declared there. A sensor's `fields:` maps each one from a JSON pointer into its output (`path`, such as `/attributes/repository_refs`) or a constant (`value`). Emit explicit namespaced identities only (`person:email/address`, `repo:github.com/owner/name`, lowercase as the reviewed examples write them), never display names or names matched by similarity. Keep the upstream modification time in `attributes.updated` and mark incomplete text with `attributes.partial`; BF sets `attributes.observed`. A mapped identity outside its relation's `targets` fails the run without changing evidence. See [good records](https://fmind.github.io/brain-framework/docs/sensors/#good-records) and the [limits](https://fmind.github.io/brain-framework/docs/limits/).
+Shared meanings live once under the top-level `fields:` of `bf.yaml` (description, type, cardinality, `relation: true` for identities, optional `broader` and `targets`); the example assumes `kind` is declared there. A sensor's `fields:` maps each one from a JSON pointer into its output (`path`, such as `/attributes/repository_refs`) or a constant (`value`). Emit explicit namespaced identities only (`person:email/address`, `repo:github.com/owner/name`, lowercase as the reviewed examples write them, without invisible format characters), never display names or names matched by similarity; `links` and `url` take identities or URLs, and `bf validate` warns once per source about other text. A sensor prints `attributes`, never `fields`, which only its mappings set. Keep the upstream modification time in `attributes.updated`, which flags the notes linking the record for review, and mark incomplete text with `attributes.partial`; BF sets `attributes.observed`. A mapped identity outside its relation's `targets` fails the run without changing evidence. See [good records](https://fmind.github.io/brain-framework/docs/sensors/#good-records) and the [limits](https://fmind.github.io/brain-framework/docs/limits/).
 
 Test with a fake provider: a complete response and a realistic failure, such as an incomplete page, which must leave saved evidence untouched and keep provider text out of diagnostics. Then, within live authority, set `enabled: true`, preview and collect once:
 
@@ -49,27 +49,27 @@ routines:
     hooks: [pre-push]
 ```
 
-- `output: log` (the default) keeps the routine's stdout in `logs/NAME.log`. `output: action` turns non-empty OKF Markdown (`type: action`, `status: draft`) into `actions/YYYY-MM-DD_NAME-XXXXXXXX/ACTION.md`, with an 8-hex suffix and the local date; empty output means nothing to review, and an existing action of that routine for the same day skips the run instead of writing beside it.
+- `output: log` (the default) keeps the routine's stdout in `logs/NAME.log`, up to its last 256 KiB. `output: action` turns non-empty OKF Markdown (`type: action`, `status: draft`) into `actions/YYYY-MM-DD_NAME-XXXXXXXX/ACTION.md`, with an 8-hex suffix and the local date; its stdout must stay within `max_bytes`. Empty output means nothing to review, and an `ACTION.md` that routine already wrote that day skips the run instead of writing beside it.
 - `refresh` makes the routine due in `bf update`, `bf watch` and schedules; without it the routine runs only on demand.
 - `hooks` lists events that `bf run --hook EVENT` runs, every enabled routine listing the event in name order.
-- A failing routine writes no action, retries after the failure backoff and appears in `bf status` and the home page's `attention`.
+- A failing routine writes no action and reports `failed` in `bf status`; one with a `refresh` retries after the failure backoff and appears in the home page's `attention`.
 
-Run it on demand, passing extra arguments through; put `--` before arguments that start with a dash, and add `--stdin` only to pass piped input:
+Run it on demand, passing extra arguments through; put `--` before arguments that start with a dash. A direct run reads piped input only with `--stdin`; `--hook` reads what Git pipes, and only when a routine lists that hook. When you run such a hook by hand, close stdin with `< /dev/null` or pipe sample ref lines.
 
 ```bash
 bf run weekly-review --dry-run
 bf run weekly-review
-bf run --hook pre-push -- origin https://example.test/repo.git
+bf run --hook pre-push -- origin https://example.test/repo.git < /dev/null
 ```
 
-`--dry-run` runs the routine but writes no action and records no run; its log still grows. To run hook routines from Git, make `.git/hooks/pre-push` executable with:
+`--dry-run` runs the routine but writes no action and records no run; its log still grows. An action routine's dry run returns the Markdown as `text`, with `"status":"skipped"` when today's action exists. To run hook routines from Git, make `.git/hooks/pre-push` executable with:
 
 ```sh
 #!/bin/sh
 exec bf run --hook pre-push --brain "$HOME/brain" -- "$@"
 ```
 
-Git passes the remote name and URL as arguments and the pushed refs on stdin; a non-zero exit from any routine blocks the push. Piped input must end within 10 seconds and stay under 1 MiB.
+Git passes the remote name and URL as arguments and the pushed refs on stdin; a non-zero exit from any routine blocks the push. Piped input must end within 10 seconds and stay under 1 MiB. In a pinned brain the user created or reviewed, start the line with `exec uv run --project "$HOME/brain" --locked bf` instead, so the routines' own `bf` calls use the pinned release too.
 
 ## Verify and hand off
 

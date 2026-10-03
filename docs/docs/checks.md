@@ -19,16 +19,25 @@ A valid New website note can still omit the reason for its decision: validation 
 `bf validate` returns `"valid":true`, or a `problems` list naming the brain-relative `file` to repair and its `error`, such as `{"file":"projects/new-website.md","error":"broken link: absent.md"}`. It checks:
 
 - OKF metadata of projects, concepts and `ACTION.md` notes, and action folder names (`YYYY-MM-DD_topic`).
-- Every local link, image and `sources` entry, including sections, `bf://` targets in this brain and records named by a provider alias.
+- Every local link, image and `sources` entry, including sections, `bf://` targets in this brain and records named by a provider alias. Record refs are case-sensitive, and a page address cannot select a section.
 - Declared relations: a link naming an undeclared one, a `?rel=` on a link that is not `bf://`, a relation written at the top of frontmatter instead of under `fields:`, and identities outside a relation's `targets`.
+- [Identities](links.md#give-a-subject-a-stable-identity): a BF `entity`, alias or `resource` names a whole subject in this brain, and no identity holds invisible format characters, such as U+200B.
 - Record files: their names, the fixed record format and stored `fields` against the current `fields:`.
-- Each enabled program in `sensors/` or `routines/`: it must be an executable regular file.
+- Each enabled program: a script run directly must be an executable regular file, and behind a command on PATH, such as `[uv, run, ..., sensors/brief.py]`, the first `sensors/` or `routines/` path among the arguments must exist.
 
-It lists at most 200 problems, then `"problems_truncated":true`: fix these and validate again. Targets in other brains appear under [`unresolved`](link-reference.md#across-brains) without making the brain invalid.
+Each distinct problem appears once per file; a link relation problem names the frontmatter key, such as `links:`, or the `line N` where it first occurs. A note whose frontmatter or links cannot be parsed reports that first, and its other problems once it is fixed. Validation lists at most 200 problems, then `"problems_truncated":true`: fix these and validate again. Targets in other brains appear under [`unresolved`](link-reference.md#across-brains) without making the brain invalid.
 
 ## Warnings
 
-`warnings` never make a brain invalid or change the exit code. Validation warns about identities that differ only by letter case, since identities are case-sensitive:
+`warnings` never make a brain invalid or change the exit code. Validation lists up to 200 of them in this order, then `"warnings_truncated":true`:
+
+| Warning                                                    | What to do                                                                                                                  |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `record links are not namespaced identities or URLs`       | Once per source, with its `records` count and one `file` to inspect: fix the sensor's `links` or `url`, then collect again. |
+| `an interrupted write left this temporary file; delete it` | A killed write left this `.write-` file beside its target: delete it.                                                       |
+| `identities differ only by letter case`                    | Choose one spelling, as below.                                                                                              |
+
+Identities are case-sensitive, so a case variant names another subject:
 
 ```json
 {
@@ -40,7 +49,7 @@ It lists at most 200 problems, then `"problems_truncated":true`: fix these and v
 }
 ```
 
-Each spelling counts the notes and records naming it, most used first. Choose one spelling: fix the sensor emitting the other and recollect, or edit the notes. Validation lists the 200 most used groups, then `"warnings_truncated":true`, and up to 20 spellings per group.
+Each spelling counts the notes and records naming it, most used first, up to 20 per group; the most used groups come first. Choose one spelling: fix the sensor emitting the other and recollect, or edit the notes.
 
 ## Retrieval cases
 
@@ -123,7 +132,7 @@ A suite declares `version: 7`, the brain format, and a list of `cases`. `bf sche
 | `name`              | A unique, nonblank case name.                                                                     |
 | `query`             | Search words; optional `scope` narrows the evidence and `limit` bounds results.                   |
 | `read`              | An exact ref or page; an empty string reads home.                                                 |
-| `expect` / `forbid` | Refs or `bf://` addresses that must / must not appear.                                            |
+| `expect` / `forbid` | Refs or `bf://` addresses that must / must not appear, checked like a `bf read` ref.              |
 | `text`              | Answer fragments, case-insensitive, present in returned titles and excerpts or in the read reply. |
 | `empty: true`       | No returned refs; use instead of `expect` or `text`.                                              |
 

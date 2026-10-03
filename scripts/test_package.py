@@ -56,10 +56,10 @@ asyncio.run(check())
 """
 
 
-def run(*args: str, cwd: Path, env: dict[str, str], capture: bool = False) -> str:
+def run(*args: str, cwd: Path, env: dict[str, str], capture: bool = False, timeout: int = 180) -> str:
     # Callers supply fixed CLI operations and local artifact paths; no shell is used.
     result = subprocess.run(  # noqa: S603
-        args, cwd=cwd, env=env, check=True, timeout=180, text=True, stdout=subprocess.PIPE if capture else None
+        args, cwd=cwd, env=env, check=True, timeout=timeout, text=True, stdout=subprocess.PIPE if capture else None
     )
     return result.stdout or ""
 
@@ -101,7 +101,9 @@ def main() -> None:
             run(UV, "venv", "--python", args.python, str(venv), cwd=home, env=env)
             python = str(venv / "bin/python")
             if args.unlocked:
-                run(UV, "pip", "install", "--python", python, str(artifact), cwd=home, env=env)
+                # A new Python can lack dependency wheels, such as pydantic-core's on 3.15, as users would find: allow a
+                # source build, which the second artifact reuses from the cache, within the job's 15 minutes.
+                run(UV, "pip", "install", "--python", python, str(artifact), cwd=home, env=env, timeout=600)
             else:
                 run(
                     UV,

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Create a dated action folder with an ACTION.md skeleton; never replace or join an existing action.
 
-The folder is actions/YYYY-MM-DD_TOPIC. When that folder exists, or with --unique, it gains an 8-hex suffix,
-as routine actions do, so sessions written by several clones of a shared brain never share a folder.
+The folder is actions/YYYY-MM-DD_TOPIC. When that folder exists, or with --unique, it gains a 12-hex suffix, so
+sessions written by several clones of a shared brain never share a folder.
 """
 
 from __future__ import annotations
@@ -22,12 +22,16 @@ from uuid import uuid4
 SECTIONS = ("## Context {#context}", "## TODO", "## Decision {#decision}", "## Resume {#resume}", "## Outcome")
 # A suffixed name that also exists is astronomically unlikely; a few attempts end a pathological loop.
 ATTEMPTS = 5
+# Longer than the 8 hex digits of routine actions: bf counts a folder of that shape, named after a routine, as the
+# routine's action for the day and skips the routine.
+SUFFIX = 12
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 def create(actions: int, topic: str, today: str, *, unique: bool) -> str:
     """The folder created exclusively below `actions`: exclusive creation is the collision guard."""
-    names = ([] if unique else [f"{today}_{topic}"]) + [f"{today}_{topic}-{uuid4().hex[-8:]}" for _ in range(ATTEMPTS)]
+    names = [] if unique else [f"{today}_{topic}"]
+    names += [f"{today}_{topic}-{uuid4().hex[-SUFFIX:]}" for _ in range(ATTEMPTS)]
     for name in names:
         try:
             os.mkdir(name, mode=0o700, dir_fd=actions)
@@ -103,13 +107,17 @@ def main() -> int:
     parser.add_argument("topic", help="lowercase words joined by hyphens, such as website-review")
     parser.add_argument("--brain", required=True, type=Path, help="the brain directory, not a registered name")
     parser.add_argument(
-        "--unique", action="store_true", help="always add the 8-hex suffix, for a brain that several clones share"
+        "--unique", action="store_true", help="always add the 12-hex suffix, for a brain that several clones share"
     )
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", args.topic) or len(args.topic) > 64:
         parser.error("topic must be lowercase words joined by single hyphens, at most 64 characters")
     try:
-        folder = start(args.brain.expanduser(), args.topic, unique=args.unique)
+        brain = args.brain.expanduser()
+    except RuntimeError:
+        parser.error("the brain path's ~ or ~user home directory cannot be resolved")
+    try:
+        folder = start(brain, args.topic, unique=args.unique)
     except OSError:
         parser.exit(1, "Could not create an action safely; inspect permissions and existing paths, then retry.\n")
     sys.stdout.write(json.dumps({"action": f"actions/{folder}/ACTION.md"}) + "\n")

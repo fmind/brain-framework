@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
-from bf import pages, usage
+from bf import index, pages, retrieve, usage
 from bf.config import register
 from bf.markdown import Task, note
-from bf.models import Config, Error, NotFoundError, Query, Record, encode
-from bf.retrieve import RelationError, read, search
+from bf.models import Config, Error, InputError, NotFoundError, Query, Record, encode
+from bf.retrieve import read, search
 from bf.storage import Store, writer
 from conftest import records_file
 
@@ -56,23 +56,35 @@ def populate(brain: Store) -> None:
 
 def test_home_lists_what_needs_attention(brain: Store) -> None:
     populate(brain)
+    brain.write("actions/2026-09-22_dropped/ACTION.md", b"---\ntype: action\nstatus: deprecated\n---\n# Dropped\n")
     for name, day in (("offline", 1), ("fresh", 24)):
         instant = datetime(2026, 9, day, tzinfo=UTC).timestamp()
         os.utime(brain.root / f"projects/{name}.md", (instant, instant))
     home = pages.home([brain], NOW)
     projects = {str(p["ref"]): p for p in cast("list[dict[str, object]]", home["projects"])}
     assert list(projects) == ["projects/offline.md", "projects/fresh.md"]  # due for review first
-    # Old, and a record dated after its update links to the project's alias.
+    assert home["projects_total"] == 2
+    # Old, and a record dated after its update links to the project's alias: it names that record.
     assert projects["projects/offline.md"]["review"] is True
-    assert projects["projects/offline.md"]["new_links"] == 1
+    assert (projects["projects/offline.md"]["new_links"], projects["projects/offline.md"]["newer"]) == (
+        1,
+        ["mail:followup"],
+    )
     fresh = projects["projects/fresh.md"]
     assert "review" not in fresh
     assert fresh["tasks"] == {"open": 1, "done": 1}
     # The next step keeps its link, resolved to the ref `bf read` opens.
     assert fresh["next"] == "Ship the [plan](actions/2026-09-24_second/ACTION.md)."
     assert fresh["uri"] == "bf://fixture/projects/fresh.md"
+    # A deprecated note no longer applies: it leaves every section.
     assert refs(home, "actions") == ["actions/2026-09-24_second/ACTION.md", "actions/2026-09-20_first/ACTION.md"]
-    assert refs(home, "changed") == ["projects/fresh.md", "projects/closed.md"]
+    assert refs(home, "changed") == ["projects/fresh.md"]
+    # A note carries the same signals in each section listing it.
+    changed = cast("list[dict[str, object]]", home["changed"])[0]
+    assert {key: changed[key] for key in ("review_due", "review_source")} == {
+        "review_due": fresh["review_due"],
+        "review_source": "modified",
+    }
     assert home["activity"] == [{"brain": "fixture", "source": "mail", "records": 1, "page": "memories/mail/24h"}]
     assert refs(home, "upcoming") == ["mail:tomorrow"]
     assert home["attention"] == [{"brain": "fixture", "sensor": "mail", "freshness": "never"}]
@@ -84,9 +96,115 @@ def test_home_lists_what_needs_attention(brain: Store) -> None:
 def test_home_keeps_future_notes_out_of_recent_changes(brain: Store) -> None:
     populate(brain)
     brain.write("concepts/planned.md", b"---\nupdated: 2026-09-26\n---\n# Planned review\n")
+    brain.write("concepts/cancelled.md", b"---\nstatus: deprecated\nupdated: 2026-09-27\n---\n# Cancelled review\n")
     home = pages.home([brain], NOW)
-    assert refs(home, "changed") == ["projects/fresh.md", "projects/closed.md"]
+    assert refs(home, "changed") == ["projects/fresh.md"]
     assert refs(home, "upcoming") == ["concepts/planned.md", "mail:tomorrow"]
+
+
+def test_home_flags_any_listed_note_past_its_deadline(brain: Store) -> None:
+    due = "stale_after: 2026-09-24T00:00:00Z"
+    brain.write("actions/2026-09-20_audit/ACTION.md", f"---\ntype: action\n{due}\n---\n# Audit\n".encode())
+    brain.write("concepts/policy.md", f"---\ntype: concept\nupdated: 2026-09-23\n{due}\n---\n# Policy\n".encode())
+    edited = datetime(2026, 9, 23, tzinfo=UTC).timestamp()
+    for path in ("actions/2026-09-20_audit/ACTION.md", "concepts/policy.md"):
+        os.utime(brain.root / path, (edited, edited))
+    home = pages.home([brain], NOW)
+    for key, ref in (("actions", "actions/2026-09-20_audit/ACTION.md"), ("changed", "concepts/policy.md")):
+        item = next(item for item in cast("list[dict[str, object]]", home[key]) if item["ref"] == ref)
+        assert (item["review"], item["review_reasons"], item["review_source"]) == (True, ["due"], "stale_after")
+
+
+def test_home_reviews_every_project_within_the_page_budget(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The project due for review is the oldest: a preview of only the newest projects would leave it out.
+    monkeypatch.setattr(pages, "LISTING", 3)
+    for n in range(12):
+        path = f"projects/p{n:02}.md"
+        brain.write(
+            path, f"---\ntype: project\nupdated: 2026-09-{n + 10}\nsummary: {'Plan. ' * 50}\n---\n# P\n".encode()
+        )
+        os.utime(brain.root / path, (NOW.timestamp(), NOW.timestamp()))
+    instant = datetime(2026, 8, 1, tzinfo=UTC).timestamp()
+    os.utime(brain.root / "projects/offline.md", (instant, instant))
+    monkeypatch.setattr(pages, "BUDGET", 3_000)
+    home = pages.home([brain], NOW)
+    listed = cast("list[dict[str, object]]", home["projects"])
+    assert (listed[0]["ref"], listed[0]["review_reasons"]) == ("projects/offline.md", ["due", "newer_evidence"])
+    # Like any page, the list ends near the budget; the total shows what `bf read projects` holds.
+    assert 1 < len(listed) < 13 == home["projects_total"]
+    assert len(encode(home)) <= pages.BUDGET + max(len(encode(item)) for item in listed)
+    assert [item["ref"] for item in listed[1:]] == [f"projects/p{n:02}.md" for n in range(11, 12 - len(listed), -1)]
+
+
+def test_exact_reads_summarize_their_note(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime.now(UTC)
+    brain.write(
+        "projects/launch.md",
+        b"---\ntype: project\nstatus: draft\nupdated: 2026-09-20\n---\n# Launch\n\nEvidence: [brief](mail:brief).\n\n"
+        b"## Next actions\n\n- [x] Draft.\n- [ ] Ship.\n",
+    )
+    edited = (now - timedelta(days=30)).timestamp()
+    os.utime(brain.root / "projects/launch.md", (edited, edited))
+    # The cited brief happened before the edit and changed upstream since.
+    changed = (now - timedelta(days=1)).isoformat()
+    created = (now - timedelta(days=40)).isoformat()
+    records_file(brain, "mail", [Record(id="brief", title="Brief", time=created, attributes={"updated": changed})])
+    whole = read([brain], "projects/launch.md")
+    assert {key: whole[key] for key in ("tasks", "next", "review", "review_reasons", "new_links", "newer")} == {
+        "tasks": {"open": 1, "done": 1},
+        "next": "Ship.",
+        "review": True,
+        "review_reasons": ["due", "newer_evidence"],
+        "new_links": 1,
+        "newer": ["mail:brief"],
+    }
+    assert whole["review_source"] == "modified"
+    # A note without reminders adds none; neither does a section, which names its note from the file instead.
+    assert not {"review_source", "tasks", "title"} & set(read([brain], "concepts/evidence.md"))
+    section = read([brain], "projects/launch.md#next-actions")
+    assert {key: section.get(key) for key in ("title", "type", "status", "date")} == {
+        "title": "Launch",
+        "type": "project",
+        "status": "draft",
+        "date": "2026-09-20",
+    }
+    assert not {"review", "tasks", "backlinks"} & set(section)
+
+    def unavailable(*_: object) -> None:
+        raise AssertionError("a section read never opens the cache")
+
+    monkeypatch.setattr(index, "database", unavailable)
+    assert read([brain], "projects/launch.md#next-actions") == section
+    # A note search skips still reads by section, without the metadata it cannot state.
+    brain.write("projects/bad.md", b"---\nstale_after: soon\n---\n# Bad\n\n## Part\n\nText.\n")
+    assert set(read([brain], "projects/bad.md#part")) == {"brain", "ref", "text", "sha256", "modified", "notice"}
+
+
+def test_large_reads_outline_only_the_sections_inside_them(brain: Store) -> None:
+    body = "evidence\n" * 4_000
+    # Only an H1 title spans this note: no section to read instead, so the first page fills the budget.
+    brain.write("concepts/plain.md", f"---\ntype: concept\n---\n# Plain title\n\n{body}".encode())
+    plain = read([brain], "concepts/plain.md")
+    assert (plain["outline"], plain["next_offset"]) == ([], len(str(plain["text"])))
+    assert len(encode(plain["text"])) > retrieve.OPENING
+    brain.write("concepts/parts.md", f"# Parts\n\n## One\n\n{body}## Two\n\nend\n".encode())
+    whole = read([brain], "concepts/parts.md")
+    assert [entry["ref"] for entry in cast("list[dict]", whole["outline"])] == [
+        "concepts/parts.md#one",
+        "concepts/parts.md#two",
+    ]
+    assert len(encode(whole["text"])) <= retrieve.OPENING
+    # A large section without subsections lists none, never itself.
+    one = read([brain], "concepts/parts.md#one")
+    assert one["outline"] == []
+    assert len(encode(one["text"])) > retrieve.OPENING
+    # Several H1s split a note: each is a section.
+    brain.write("concepts/halves.md", f"# First half\n\n{body}# Second half\n\nend\n".encode())
+    halves = read([brain], "concepts/halves.md")
+    assert [entry["ref"] for entry in cast("list[dict]", halves["outline"])] == [
+        "concepts/halves.md#first-half",
+        "concepts/halves.md#second-half",
+    ]
 
 
 def test_folder_pages_list_notes_in_useful_order(brain: Store) -> None:
@@ -115,6 +233,8 @@ def test_folder_pages_list_notes_in_useful_order(brain: Store) -> None:
 
 def test_an_action_reads_as_a_resumable_page(brain: Store) -> None:
     populate(brain)
+    # A killed write's temporary file is no output: bf validate asks to delete it.
+    brain.write("actions/2026-09-24_second/outputs/.write-" + "0123456789abcdef" * 2, b"partial")
     action = read([brain], "actions/2026-09-24_second")
     assert action["ref"] == "actions/2026-09-24_second/ACTION.md"
     assert "## Resume" in str(action["text"])
@@ -279,9 +399,9 @@ def test_memories_pages_browse_sources_record_files_and_periods(brain: Store) ->
             read([brain], missing)
 
 
-def test_note_reads_carry_backlinks_grouped_by_relationship(brain: Store) -> None:
+def test_note_reads_carry_backlinks_grouped_by_relation(brain: Store) -> None:
     reply = read([brain], "projects/offline.md")
-    # A preview names each linking item; its role page and exact read hold the excerpt, URL and claims.
+    # A preview names each linking item; its relation page and exact read hold the excerpt, URL and claims.
     assert reply["backlinks"] == [
         {
             "relation": "links",
@@ -313,6 +433,9 @@ def test_pages_combine_selected_brains_and_count_reads(brain: Store, tmp_path: P
     team.write("projects/shared.md", b"---\ntype: project\nstatus: stable\nupdated: 2026-09-20\n---\n# Shared\n")
     team.write("projects/cite.md", b"# Cite\n\nSee [offline](bf://fixture/projects/offline.md).\n")
     register(team)
+    # The meeting linking to the project happened after its last edit.
+    edited = datetime(2026, 8, 31, 9, tzinfo=UTC).timestamp()
+    os.utime(brain.root / "projects/offline.md", (edited, edited))
     home = pages.home([brain, team], NOW)
     assert {(p["brain"], p["ref"]) for p in cast("list[dict[str, object]]", home["projects"])} == {
         ("fixture", "projects/offline.md"),
@@ -334,6 +457,10 @@ def test_pages_combine_selected_brains_and_count_reads(brain: Store, tmp_path: P
         for i in cast("list[dict[str, object]]", g["items"])
     }
     assert linked == {("fixture", "meetings:decision-1"), ("team", "projects/cite.md")}
+    # With several brains a plain ref can be ambiguous: `newer` names its items by address, like `also`.
+    listed = next(i for i in cast("list[dict[str, object]]", projects["items"]) if i["ref"] == "projects/offline.md")
+    assert listed["newer"] == offline["newer"] == ["bf://fixture/meetings:decision-1"]
+    assert read([brain], "projects/offline.md")["newer"] == ["meetings:decision-1"]
     before = usage.summary(brain)["7d"]["read"]
     read([brain], "today")
     read([brain], "today", counted=False)
@@ -456,8 +583,8 @@ def test_previews_break_ties_like_their_continuation(brain: Store) -> None:
     continuation = refs(search([brain], Query(text="bf://fixture/projects/p.md", limit=21)))
     assert continuation[0] == "projects/p.md"
     assert (group["relation"], group["total"], refs(group)) == ("links", 25, continuation[1 : 1 + pages.PREVIEW])
-    role = read([brain], "projects/p.md", rel="links")
-    assert (role["total"], refs(role)[:20]) == (25, continuation[1:])
+    related = read([brain], "projects/p.md", rel="links")
+    assert (related["total"], refs(related)[:20]) == (25, continuation[1:])
     changed = refs(pages.home([brain], datetime(2026, 9, 21, tzinfo=UTC)), "changed")
     assert changed == [f"concepts/c{n:02}.md" for n in range(24, 4, -1)]
 
@@ -479,6 +606,36 @@ def test_large_items_end_a_page_early_and_continue(brain: Store, monkeypatch: py
     assert max(sizes) < pages.PAGE
     first = search([brain], Query(text="page", limit=50))
     assert len(cast("list", first["items"])) == cast("int", first["next_offset"]) < 30
+
+
+def test_pages_over_several_brains_fit_newer_refs_as_addresses(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime.now(UTC)
+    root = tmp_path / "home-lab"
+    root.mkdir()
+    lab = Store(root)
+    lab.write("bf.yaml", b"version: 7\nname: home-lab\n")
+    brain.write("bf.yaml", f"version: 7\nname: fixture\nbrains:\n  home-lab:\n    path: {root}\n".encode())
+    brain.delete("projects/offline.md")
+    edited, time = (now - timedelta(days=10)).timestamp(), (now - timedelta(days=1)).isoformat()
+    for name, store in (("fixture", brain), ("home-lab", lab)):
+        for n in range(12):
+            path = f"projects/p{n:02}.md"
+            store.write(path, f"---\ntype: project\n---\n# P{n:02}\n".encode())
+            os.utime(store.root / path, (edited, edited))
+        linked = [(n, k, f"bf://{name}/projects/p{n:02}.md") for n in range(12) for k in range(6)]
+        records_file(store, "mail", [Record(id=f"r{n}-{k}", title="M", time=time, links=[to]) for n, k, to in linked])
+    monkeypatch.setattr(pages, "BUDGET", 3_000)
+    # Several selected brains name newer items by address; a page fits its items in that shape, as returned.
+    for ref, key in (("", "projects"), ("projects", "items"), ("bf://fixture/projects", "items")):
+        reply = read([brain], ref)
+        items = cast("list[dict[str, object]]", reply[key])
+        assert 1 < len(items) < 24
+        assert all(cast("list[str]", item["newer"])[0].startswith(f"bf://{item['brain']}/mail:") for item in items)
+        assert sum(len(encode(item)) for item in items) <= pages.BUDGET
+    # A whole read names its own newer items by address too.
+    assert read([brain], "bf://home-lab/projects/p00.md")["newer"] == [f"bf://home-lab/mail:r0-{k}" for k in range(5)]
 
 
 def test_page_summaries_share_the_reply_budget(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -566,7 +723,7 @@ def test_relation_pages_list_every_link_of_one_relation(brain: Store, monkeypatc
     rest = read([brain], "projects/offline.md", rel="depends-on", offset=2)
     assert (refs(first), refs(rest)) == (["concepts/d2.md", "concepts/d1.md"], ["concepts/d0.md"])
     assert "next_offset" not in rest
-    # The same page through an alias and a qualified address; a link's own role does not change it.
+    # The same page through an alias and a qualified address; a link's own relation does not change it.
     for ref in (
         "repo:example/project",
         "bf://fixture/projects/offline.md",
@@ -577,7 +734,7 @@ def test_relation_pages_list_every_link_of_one_relation(brain: Store, monkeypatc
     assert read([brain], "projects/offline.md", rel="owner")["total"] == 0
     assert refs(read([brain], "meetings:decision-1", rel="links")) == ["projects/offline.md"]
     assert refs(read([brain], "repo:example/unowned", rel="links")) == ["mail:u"]
-    with pytest.raises(RelationError, match=r"^undeclared relation; use links, cites, depends-on, owner$"):
+    with pytest.raises(InputError, match=r"^undeclared relation; use links, cites, depends-on, owner$"):
         read([brain], "projects/offline.md", rel="author")
     for ref, message in (
         ("projects", "not a page"),
@@ -588,6 +745,11 @@ def test_relation_pages_list_every_link_of_one_relation(brain: Store, monkeypatc
     ):
         with pytest.raises(Error, match=message):
             read([brain], ref, rel="links")
+    # A page has no sections: the ref is invalid input, not a missing reference.
+    for ref in ("tasks#open", "#top", "7d#x", "projects#x", "bf://fixture/tasks#open", "bf://fixture/#top"):
+        with pytest.raises(InputError, match="pages have no sections"):
+            pages.readable(ref)
+    assert pages.readable("projects/sub#x") == "projects/sub#x"
     for ref in ("repo:example/nothing", "projects/absent.md"):
         with pytest.raises(NotFoundError):
             read([brain], ref, rel="links")
@@ -595,10 +757,11 @@ def test_relation_pages_list_every_link_of_one_relation(brain: Store, monkeypatc
         read([brain], "repo:example/unowned", offset=1)
 
 
-def test_a_read_names_an_undeclared_link_relationship_without_failing(brain: Store) -> None:
+def test_a_read_names_an_undeclared_link_relation_without_failing(brain: Store) -> None:
     reply = read([brain], "bf://fixture/projects/offline.md?rel=nope")
     assert reply["text"] == read([brain], "projects/offline.md")["text"]
-    assert reply["problems"] == [{"error": "undeclared relation nope; declare it in bf.yaml fields"}]
+    undeclared = "link relation nope is undeclared; declare it in bf.yaml fields with type: identity and relation: true"
+    assert reply["problems"] == [{"error": undeclared}]
     assert "problems" not in read([brain], "bf://fixture/projects/offline.md")
 
 
@@ -634,20 +797,20 @@ def test_backlink_previews_keep_the_newest_items_and_name_brains_only_when_sever
     with pytest.raises(Error, match="several brains"):
         read([brain], "projects/offline.md", rel="links")
     team.delete("projects/offline.md")
-    role = read([brain], "projects/offline.md", rel="links")
-    assert role["total"] == 9
-    assert [(i["brain"], i["ref"]) for i in cast("list[dict[str, object]]", role["items"])][:2] == [
+    related = read([brain], "projects/offline.md", rel="links")
+    assert related["total"] == 9
+    assert [(i["brain"], i["ref"]) for i in cast("list[dict[str, object]]", related["items"])][:2] == [
         ("team", "projects/cite.md"),
         ("fixture", "concepts/c6.md"),
     ]
 
 
-def test_a_broader_role_page_also_lists_its_narrower_roles(brain: Store) -> None:
-    role = "{description: Took part., type: identity, cardinality: many, relation: true"
+def test_a_broader_relation_page_also_lists_its_narrower_relations(brain: Store) -> None:
+    field = "{description: Took part., type: identity, cardinality: many, relation: true"
     brain.write(
         "bf.yaml",
-        f"version: 7\nname: fixture\nfields:\n  participant: {role}}}\n"
-        f"  organizer: {role}, broader: participant}}\n  attendee: {role}, broader: participant}}\n".encode(),
+        f"version: 7\nname: fixture\nfields:\n  participant: {field}}}\n"
+        f"  organizer: {field}, broader: participant}}\n  attendee: {field}, broader: participant}}\n".encode(),
     )
     alice = "person:alice"
     records_file(
@@ -660,7 +823,7 @@ def test_a_broader_role_page_also_lists_its_narrower_roles(brain: Store) -> None
         ],
     )
     page = read([brain], alice, rel="participant")
-    # Items name their actual role only when it narrows the requested one.
+    # Items name their actual relation only when it narrows the requested one.
     assert [(item["ref"], item.get("relation")) for item in cast("list[dict[str, object]]", page["items"])] == [
         ("calendar:sync", None),
         ("calendar:review", "attendee"),
@@ -668,7 +831,7 @@ def test_a_broader_role_page_also_lists_its_narrower_roles(brain: Store) -> None
     ]
     assert (page["relation"], page["total"]) == ("participant", 3)
     assert refs(read([brain], alice, rel="organizer")) == ["calendar:kickoff"]
-    # Backlink groups and stored edges keep each claim's own role.
+    # Backlink groups and stored edges keep each claim's own relation.
     groups = cast("list[dict[str, object]]", read([brain], alice)["backlinks"])
     assert [(group["relation"], group["total"]) for group in groups] == [
         ("attendee", 1),

@@ -95,7 +95,8 @@ def replace(directory: int, name: str, expected: str, edit: Callable[[bytes], by
     result = edit(data)
     if not result or len(result) > MAX_BYTES:
         raise EditError(f"the new content must hold 1 byte to {MAX_BYTES} bytes")
-    temporary = f".guarded-write-{os.urandom(8).hex()}"
+    # Named like bf's own temporaries, `.write-HEX`, so `bf validate` names the file a killed edit leaves behind.
+    temporary = f".write-{os.urandom(16).hex()}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open(temporary, flags, 0o600, dir_fd=directory)
     try:
@@ -163,8 +164,15 @@ def main() -> int:
     expected = args.expect_sha256.lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         parser.error("--expect-sha256 takes the 64 hexadecimal characters of a SHA-256 digest")
-    before = text(parser, args.old, args.old_file, "old")
-    after = text(parser, args.new, args.new_file, "new")
+    try:
+        # A quoted ~ reaches the helper unexpanded; bf and the other helpers expand it too.
+        path = args.path.expanduser()
+        old_file = args.old_file and args.old_file.expanduser()
+        new_file = args.new_file and args.new_file.expanduser()
+    except RuntimeError:
+        parser.error("a path's ~ or ~user home directory cannot be resolved")
+    before = text(parser, args.old, old_file, "old")
+    after = text(parser, args.new, new_file, "new")
     if (before is None) != (after is None):
         parser.error("pass both the old passage and its replacement, or neither to replace the file with stdin")
     if before is not None and after is not None:
@@ -177,7 +185,7 @@ def main() -> int:
             parser.exit(1, f"Refusing to write: stdin must hold the new content, 1 byte to {MAX_BYTES} bytes.\n")
         edit = whole(data)
     try:
-        written = write(args.path, expected, edit)
+        written = write(path, expected, edit)
     except ChangedError as change:
         parser.exit(
             1,
@@ -194,7 +202,7 @@ def main() -> int:
             "Not written: expected an existing regular file that you can replace, on a path without symbolic "
             "links; nothing changed.\n",
         )
-    sys.stdout.write(json.dumps({"written": str(args.path), "sha256": written}, separators=(",", ":")) + "\n")
+    sys.stdout.write(json.dumps({"written": str(path), "sha256": written}, separators=(",", ":")) + "\n")
     return 0
 
 

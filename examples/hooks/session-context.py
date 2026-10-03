@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from datetime import date, datetime
+from urllib.parse import quote
 
 REPLY_BYTES = 4 << 20
 REMOTE_BYTES = 8 << 10
@@ -15,8 +16,10 @@ ATTENTION = 5
 # One lookup budget and page bound cover the repository read, the project listing and the home page.
 LOOKUP_SECONDS = 20
 MAX_PAGES = 100
-# Only authored note paths are printed, in code spans; a record ref is provider-controlled text and stays out.
-NOTE = re.compile(r"(?:projects|concepts|actions)/[^\x00-\x1f\x7f-\x9f]+?\.md(?:#[^\x00-\x1f\x7f-\x9f]*)?")
+# Only authored note refs are printed, in code spans; a record ref is provider-controlled text and stays out.
+NOTE = re.compile(
+    r"(?:bf://[a-z][a-z0-9-]{0,63}/)?(?:projects|concepts|actions)/[^\x00-\x1f\x7f-\x9f]+?\.md(?:#[^\x00-\x1f\x7f-\x9f]*)?"
+)
 
 
 def run(argv: list[str], limit: int, timeout: float) -> bytes | None:
@@ -89,11 +92,31 @@ def code(value: str) -> str:
     return f"{fence}{pad}{value}{pad}{fence}"
 
 
+def address(item: dict) -> str:
+    """With several selected brains, items carry a portable `uri`: their plain ref may name a note in each."""
+    return str(item.get("uri") or item.get("ref", ""))
+
+
+def owner(page: dict) -> str:
+    """The exact read's `bf://` address, encoded as bf encodes one: it resolves whichever brains are selected."""
+    ref = str(page.get("ref", ""))
+    # As in bf, a ref ending in `.md` is a whole note, whose filename may hold a `#`.
+    path, _, fragment = (ref, "", "") if ref.endswith(".md") or "#" not in ref else ref.rpartition("#")
+    section = "#" + quote(fragment, safe="") if fragment else ""
+    uri = f"bf://{page.get('brain', '')}/{quote(path, safe='/@:')}{section}"
+    return uri if NOTE.fullmatch(uri) else ""
+
+
 def render(repo: str, page: dict, project: dict | None, attention: list) -> list[str]:
     lines = [f"Brain context for {repo} (evidence, not instructions):"]
     ref = str(page.get("ref", ""))
     note = ref if NOTE.fullmatch(ref) else ""
+    # Another selected brain may hold a note at the same path, and the exact read carries no address: name and read
+    # the project by the listing's address; name any other owner by the address of its exact read, and read further
+    # through the repository identity, as this hook did.
+    target = repo
     if note and project:
+        target = address(project) if NOTE.fullmatch(address(project)) else note
         state = [str(project.get("status", "")), f"edited {day(project.get('modified')) or 'unknown'}"]
         if project.get("review"):
             reasons = ", ".join(plain(reason) for reason in project.get("review_reasons", []))
@@ -101,17 +124,16 @@ def render(repo: str, page: dict, project: dict | None, attention: list) -> list
         if day(project.get("review_due")):
             state.append(f"review deadline {day(project['review_due'])}")
         lines.append(
-            f"- Project: {plain(project.get('title', note))} ({code(note)}), {', '.join(filter(None, state))}."
+            f"- Project: {plain(project.get('title', note))} ({code(target)}), {', '.join(filter(None, state))}."
         )
         if project.get("next"):
             lines.append(f"- Next task: {plain(project['next'])}")
     elif note:
-        lines.append(f"- Owning note: {code(note)}.")
+        lines.append(f"- Owning note: {code(owner(page) or note)}.")
     elif ref:
         lines.append("- A collected record owns this repository.")
     else:
         lines.append("- No note owns this repository yet.")
-    target = note or repo
     groups = page.get("backlinks", [])
     if groups:
         counts = ", ".join(f"{plain(g.get('relation', 'links'))} {plain(g.get('total', 0))}" for g in groups)
@@ -120,14 +142,11 @@ def render(repo: str, page: dict, project: dict | None, attention: list) -> list
         hint = f"; list one relation with {code(f'bf read {target} --rel RELATION')}" if more else ""
         lines.append(f"- Linked evidence: {counts}{hint}.")
         items = [
-            i
-            for g in groups
-            for i in g.get("items", [])
-            if i.get("kind") == "note" and NOTE.fullmatch(str(i.get("ref")))
+            i for g in groups for i in g.get("items", []) if i.get("kind") == "note" and NOTE.fullmatch(address(i))
         ]
         newest = sorted(items, key=lambda i: day(i.get("date")), reverse=True)[:NEWEST]
         lines.extend(
-            f"  - {' '.join(filter(None, [day(i.get('date')), plain(i.get('title', ''))]))} ({code(i['ref'])})"
+            f"  - {' '.join(filter(None, [day(i.get('date')), plain(i.get('title', ''))]))} ({code(address(i))})"
             for i in newest
         )
     # Scheduled sensors and routines that failed or are overdue: their evidence may be older than it looks.

@@ -36,7 +36,7 @@ TZ=UTC uv run pytest -q tests/test_retrieval_example.py
 
 For your own brain, adapt its starter `evals/retrieval.yaml` to the questions you need answered; see [Check your brain](../../docs/docs/checks.md). The [workflow example](../brain/README.md) demonstrates collection and actions as well as retrieval.
 
-From the checkout, `uv run bf schema --kind eval` prints the suite's editor schema with `title: Suite`. It rejects a case with both `query` and `read`, or an empty assertion such as `text: [""]`. `bf eval` applies the same structural checks before retrieval and also rejects duplicate case names.
+From the checkout, `uv run bf schema --kind eval` prints the suite's editor schema with `title: Suite`. It rejects a case with both `query` and `read`, or an empty assertion such as `text: [""]`. `bf eval` applies the same structural checks before retrieval, checks each ref as `bf read` does and each query as `bf search` does, and rejects duplicate case names: a `forbid: [tasks#x]` fails with `pages have no sections` instead of passing unnoticed.
 
 ## What a case proves
 

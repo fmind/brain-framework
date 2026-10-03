@@ -34,7 +34,7 @@ These are alternatives, not additional brains:
 | `bf init ~/team-brain`                  | `~/team-brain`     | `team-brain` |
 | `bf init ~/brains/default --name brain` | `~/brains/default` | `brain`      |
 
-The name defaults to the folder name, lowercased, with other characters replaced by hyphens. It must start with a letter and fit 64 characters; otherwise pass `--name`. The name is stored in `bf.yaml` and identifies the brain in links, so keep it stable. The rest of this guide runs inside `~/brain`.
+The name defaults to the folder name, lowercased with accents removed and each run of other characters turned into one hyphen, except at either end: `Équipe produit` becomes `equipe-produit`. When that gives no name starting with a letter within 64 characters, or would drop a letter such as `ø`, pass `--name`. The name is stored in `bf.yaml` and identifies the brain in links, so keep it stable. The rest of this guide runs inside `~/brain`.
 
 </details>
 
@@ -127,9 +127,9 @@ Edit the project as work changes. Search notices edits automatically; update `up
 ## Collect your first source
 
 <details markdown="1">
-<summary>Optional exercise: collect a local brief and link it to your decision</summary>
+<summary>Optional exercise: collect a local brief, link it to your decision and notice when it changes</summary>
 
-A sensor is a small program that prints JSON records; BF saves each record as evidence. This one reads a fictional local brief. uv supplies Python 3.14, and the exercise needs no network access once Python is installed.
+A sensor is a small program that prints JSON records; BF saves each record as evidence. This one reads a fictional local brief and dates it by the file's modification time. uv supplies Python 3.14, and the exercise needs no network access once Python is installed.
 
 ```bash
 mkdir -p inputs sensors
@@ -145,10 +145,18 @@ Save `sensors/brief.py`:
 
 ```python
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
-text = Path("inputs/brief.txt").read_text(encoding="utf-8")
-print(json.dumps([{"id": "website-brief", "title": "Product brief", "text": text}]))
+brief = Path("inputs/brief.txt")
+record = {
+    "id": "website-brief",
+    "title": "Product brief",
+    "text": brief.read_text(encoding="utf-8"),
+    # When the brief last changed: a later change flags the project linking to it.
+    "attributes": {"updated": datetime.fromtimestamp(brief.stat().st_mtime, UTC).isoformat()},
+}
+print(json.dumps([record]))
 ```
 
 A new brain has no `sensors:` key. Add this one at the top level of `bf.yaml`, keeping the other settings:
@@ -212,7 +220,31 @@ bf validate
 bf eval
 ```
 
-Validation now reports `"records":1` and `"valid":true`; the starter questions still pass. Edit the brief and collect again: the same record updates and its ref stays the same. [Add a sensor](sensors.md#your-first-sensor) replaces this tutorial sensor with a reviewed one.
+Validation now reports `"records":1` and `"valid":true`; the starter questions still pass.
+
+Now change the evidence. Save `inputs/brief.txt` again with a revised brief:
+
+```text
+Visitors need a clear product explanation and pricing before signing up.
+```
+
+```bash
+bf collect brief
+bf read projects
+```
+
+Collection reports `"updated":1`: the record keeps its ref and holds the new text. The brief changed after the project's last edit, so the projects page flags the project linking to it, and `newer` names the record to read:
+
+```json
+{
+  "ref": "projects/new-website.md",
+  "review": true,
+  "review_reasons": ["newer_evidence"],
+  "newer": ["brief:website-brief"]
+}
+```
+
+Read it with `bf read brief:website-brief`, then revise the decision or keep it: your next edit of the project clears the flag. [Add a sensor](sensors.md#your-first-sensor) replaces this tutorial sensor with a reviewed one.
 
 </details>
 

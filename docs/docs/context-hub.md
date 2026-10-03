@@ -120,20 +120,20 @@ EOF
 bf read
 ```
 
-The home page lists the project under `changed`, with its new `next` task. Its review is not due: no evidence is newer than the edit.
+The home page lists the project under `changed`, with its new `next` task. It is not flagged for review: no linked evidence is newer than the edit.
 
 ## Follow a change
 
-In the fictional tracker, the keyboard navigation check passes and the review moves to Done. Swap in the tracker's next fixture and collect Jira again. That fixture's `time` is `now`, so the demo sensor dates the change at collection, as a tracker would report a transition that just happened:
+In the fictional tracker, the keyboard navigation check passes and the review moves to Done. Swap in the tracker's next fixture and collect Jira again. Like a [good record](sensors.md#good-records), the fixture keeps the issue's event `time` and records the change in `attributes.updated`; its value `now` makes the demo sensor date the change at collection, as a tracker reports a transition that just happened:
 
 ```bash
 cp fixtures/jira-done.json fixtures/jira.json
 bf collect jira
 bf read
-bf read project:new-website --rel project
+bf read jira:review
 ```
 
-Collection reports `"updated":1`. The home page now flags the project, since evidence dated after its last edit links to it:
+Collection reports `"updated":1`. The home page now flags the project: the Jira review linked to it changed upstream after its last edit, and `newer` names the record to read:
 
 ```json
 {
@@ -141,11 +141,12 @@ Collection reports `"updated":1`. The home page now flags the project, since evi
   "review": true,
   "review_reasons": ["newer_evidence"],
   "new_links": 1,
+  "newer": ["jira:review"],
   "next": "Run the keyboard navigation check."
 }
 ```
 
-The relation page lists the Jira review first, now with `"status":"Done"`. The saved conclusion is out of date: read `jira:review`, update the Launch review and Next actions, and the flag clears with the edit. This is the loop BF supports: gather, connect, act, learn, and notice when evidence moves on.
+The Jira record's `fields` now hold `"status":"Done"`. The saved conclusion is out of date: update the Launch review and Next actions, and the flag clears with the edit. This is the loop BF supports: gather, connect, act, learn, and notice when evidence moves on.
 
 ## Give a terminal agent the same context
 

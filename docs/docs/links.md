@@ -29,7 +29,7 @@ Each group previews its five newest items. A relation page lists all of them, ne
 bf read projects/new-website.md --rel cites
 ```
 
-It returns `"relation":"cites"`, `"total":1` and the concept among its `items`; `--rel links` lists untyped links the same way.
+It returns `"relation":"cites"` and the concept among its `items`; `total` counts every item citing the project or its sections, such as the [review action](brain.md#actions) if you created it. `--rel links` lists untyped links the same way.
 
 Relative links start from the containing file: `../projects/` goes up from `concepts/`, then into `projects/`. `#decision` selects the Decision section; write `## Decision {#decision}` to keep that address when the heading is renamed. Link upstream evidence by its URL, or a collected record by its ref, such as `[Product brief](brief:website-brief)`.
 
@@ -125,7 +125,7 @@ bf read repo:github.com/example/new-website
 | `aliases`  | Other exact identities of the subject, such as a repository or an email address.                |
 | `resource` | OKF: the URI of the asset the note describes. Links to that URI count as backlinks of the note. |
 
-Identities are case-sensitive: write them as your sensors emit them, such as lowercase GitHub owners. `bf validate` warns about identities that differ only by letter case; see [Check your brain](checks.md#warnings). Declare only identities you have verified.
+Identities are case-sensitive: write them as your sensors emit them, such as lowercase GitHub owners. Each names a whole subject, so a BF `entity`, alias or `resource` stays in this brain's namespace and never names a `#section`, a note's file, a page or a record. No identity may hold an invisible format character, such as U+200B. `bf validate` reports those mistakes and [warns](checks.md#warnings) about identities that differ only by letter case. Declare only identities you have verified.
 
 ## Connect records and other brains
 

@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import cast
 
 import pytest
 from mcp.types import CallToolResult
 
-from bf import index, links, pages
+from bf import index, links, ontology, pages
 from bf.collect import collect
 from bf.config import load
 from bf.evaluate import evaluate
 from bf.markdown import note, section
 from bf.mcp import server
-from bf.models import Error, NotFoundError, Query, Record, encode
+from bf.models import Error, InputError, NotFoundError, Query, Record, encode
 from bf.records import path as record_path
 from bf.retrieve import read, search
 from bf.storage import Store, writer
@@ -72,7 +73,7 @@ A reviewed profile.
 def test_bf_links_percent_encode_spaces_and_percent_signs() -> None:
     # Destinations are read as written, so angle brackets do not make a space part of a BF address.
     for destination in ("<bf://fixture/projects/launch plan.md>", "bf://fixture/projects/100%.md"):
-        with pytest.raises(Error, match=r"^invalid BF link; .* percent-encoded as %20 and %25"):
+        with pytest.raises(Error, match=r"^projects/web.md: line 3: invalid BF link; .*-encoded as %20 and %25"):
             note("projects/web.md", f"# Web\n\n[plan]({destination})\n".encode())
     encoded = note("projects/web.md", b"# Web\n\n[plan](bf://fixture/projects/launch%20plan.md)\n")
     assert encoded.targets == ["bf://fixture/projects/launch%20plan.md"]
@@ -169,23 +170,24 @@ def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
     assert read([brain], "bf://fixture/people/bob?rel=friend#about")["ref"] == "projects/bob.md#about"
 
 
-def test_independent_support_and_no_claims_from_frontmatter_fields(brain: Store) -> None:
+def test_independent_support_of_field_and_link_claims(brain: Store) -> None:
     people(brain)
     brain.write(
         "projects/evidence.md",
         b"""---
+type: note
 fields:
-  friend: [person:bob]
+  friend: person:bob
 ---
 # Evidence
 ## Meeting
 [Bob](bf://fixture/people/bob?rel=friend)
 """,
     )
-    # Each file supports its own claim; frontmatter `fields` are ordinary data, not relationships.
+    assert validate(brain)["valid"]
+    # The field claims from the whole note and the link from its section: each keeps its own origin.
     friends = group(read([brain], "person:bob"), "friend")
-    assert friends["total"] == 2
-    assert "projects/evidence.md" in {i["ref"] for i in friends["items"]}
+    assert {i["ref"] for i in friends["items"]} == {"projects/alice.md", "projects/evidence.md"}
     evidence = explained([brain], "person:bob", "projects/evidence.md")
     assert evidence["relations"] == [
         {
@@ -193,12 +195,19 @@ fields:
             "relation": "friend",
             "target": "bf://fixture/people/bob",
             "origin": "bf://fixture/projects/evidence.md#meeting",
-        }
+        },
+        {
+            "subject": "bf://fixture/projects/evidence.md",
+            "relation": "friend",
+            "target": "person:bob",
+            "origin": "bf://fixture/projects/evidence.md",
+        },
     ]
     subjects = cast(list[dict], read([brain], "person:alice")["claims"])
     assert [(c["relation"], c["origin"]) for c in subjects] == [("friend", "bf://fixture/projects/alice.md#friends")]
+    # Removing a file removes only the claims it supports.
     brain.delete("projects/evidence.md")
-    assert group(read([brain], "person:bob"), "friend")["total"] == 1
+    assert [i["ref"] for i in group(read([brain], "person:bob"), "friend")["items"]] == ["projects/alice.md"]
     with writer(brain):
         brain.delete(index.CACHE)
     assert group(read([brain], "person:bob"), "friend")["total"] == 1
@@ -282,8 +291,8 @@ def test_validation_and_skip_invalid_links(brain: Store) -> None:
     assert [item["ref"] for item in cast(list, found["items"])] == ["projects/bad.md"]
     assert "problems" not in found
     assert (
-        "projects/bad.md: link relation unmapped is undeclared; declare it in bf.yaml fields with relation: true"
-        in [f"{p['file']}: {p['error']}" for p in cast(list, validate(brain)["problems"])]
+        "projects/bad.md: line 2: link relation unmapped is undeclared; declare it in bf.yaml fields with type: "
+        "identity and relation: true" in [f"{p['file']}: {p['error']}" for p in cast(list, validate(brain)["problems"])]
     )
     backlinks = cast(list, read([brain], "bf://fixture/people/bob")["backlinks"])
     assert ("links", 1) in [(group["relation"], group["total"]) for group in backlinks]
@@ -475,12 +484,12 @@ def test_body_links_keep_their_written_form(brain: Store) -> None:
     for value in ids:
         assert [i["ref"] for i in group(read([brain], f"local:{value}"))["items"]] == ["projects/docs.md"]
     # BF addresses are parsed as written, in the body as in frontmatter: a bare % is malformed encoding.
-    for data in (
-        b"# Bad\n\n[c](bf://fixture/projects/100%.md)\n",
-        b'---\nlinks: ["bf://fixture/projects/100%.md"]\n---\n# Bad\n',
+    for data, where in (
+        (b"# Bad\n\n[c](bf://fixture/projects/100%.md)\n", "line 3"),
+        (b'---\nlinks: ["bf://fixture/projects/100%.md"]\n---\n# Bad\n', "links"),
     ):
         brain.write("projects/bad.md", data)
-        assert any(p.startswith("projects/bad.md: invalid BF link") for p in problems(brain))
+        assert any(p.startswith(f"projects/bad.md: {where}: invalid BF link") for p in problems(brain))
 
 
 def test_ordinary_markdown_declares_no_identity_or_membership(brain: Store) -> None:
@@ -577,16 +586,33 @@ def test_page_addresses_are_link_targets(brain: Store) -> None:
     brain.write(
         "projects/hub.md",
         b"---\ntype: project\n---\n# Hub\n\n[a](bf://fixture/projects/absent) [b](bf://fixture/memories/absent)\n"
-        b"[c](bf://fixture/projects#part) [d](bf://fixture/meetings:decision-1#part)\n",
+        b"[c](bf://fixture/projects#part) [d](bf://fixture/meetings:decision-1#part)\n"
+        b"[e](bf://fixture/#part) [f](bf://fixture/tasks#part)\n",
     )
+    # A page's fragment is the link's problem, as a missing section is: the note itself stays valid and searchable.
     assert problems(brain) == [
+        "projects/hub.md: page cannot select a section: bf://fixture/#part",
         "projects/hub.md: record cannot select a Markdown section: bf://fixture/meetings:decision-1#part",
         "projects/hub.md: unresolved BF target: bf://fixture/memories/absent",
-        "projects/hub.md: unresolved BF target: bf://fixture/projects#part",
+        "projects/hub.md: page cannot select a section: bf://fixture/projects#part",
         "projects/hub.md: unresolved BF target: bf://fixture/projects/absent",
+        "projects/hub.md: page cannot select a section: bf://fixture/tasks#part",
     ]
-    with pytest.raises(Error, match="invalid BF link"):
-        links.parse("bf://fixture/#part")
+    assert links.parse("bf://fixture/#part") == links.Address("fixture", "", "part")
+    # As input, a page's fragment is invalid alike in a read, a search scope and an eval case: before, a scope or an
+    # expected ref naming one gave a complete-looking empty answer, and a forbidden one always passed.
+    for ref in ("bf://fixture/#part", "bf://fixture/tasks#part", "bf://fixture/projects#part"):
+        for check in (pages.readable, lambda value: pages.query("hub", value)):
+            with pytest.raises(InputError, match="pages have no sections"):
+                check(ref)
+    brain.write(
+        "evals/pages.yaml",
+        b"version: 7\ncases:\n  - {name: expected, query: hub, expect: ['bf://fixture/tasks#part']}\n"
+        b"  - {name: forbidden, query: hub, expect: [projects/hub.md], forbid: ['tasks#part']}\n",
+    )
+    with pytest.raises(Error, match=r"cases\.0\.expect: pages have no sections.*cases\.1\.forbid: pages have no"):
+        evaluate(brain, "evals/pages.yaml")
+    assert [i["ref"] for i in cast(list[dict], search([brain], Query(text="hub"))["items"])] == ["projects/hub.md"]
 
 
 def test_page_links_follow_the_routing_of_bf_read(brain: Store) -> None:
@@ -611,7 +637,7 @@ def test_page_links_follow_the_routing_of_bf_read(brain: Store) -> None:
     assert read([brain], f"bf://fixture/{absent}")["items"] == []
     # Page routing and the reserved namespace agree on ASCII digits: this unowned entity path is no timeline.
     assert pages.period(window) is None
-    assert not links.computed(f"bf://fixture/{window}")
+    assert not links.reserved(window)
     assert "since" not in read([brain], f"bf://fixture/{window}")
 
 
@@ -627,12 +653,12 @@ def test_page_addresses_cannot_be_claimed(brain: Store, entity: str) -> None:
     assert problems(brain) == [
         (
             "concepts/claim.md: home, folder roots, tasks, periods, tags and memories are computed page addresses "
-            "and cannot be entities or aliases; link to the page instead"
+            "and name no note or record; link to the page instead"
         )
     ]
     brain.delete("concepts/claim.md")
     records_file(brain, "mail", [Record(id="x", title="X", aliases=[entity])])
-    assert any("computed page addresses and cannot be aliases" in p for p in problems(brain))
+    assert any("computed page addresses and name no note or record" in p for p in problems(brain))
 
 
 def test_record_addresses_cannot_be_claimed(brain: Store) -> None:
@@ -641,13 +667,12 @@ def test_record_addresses_cannot_be_claimed(brain: Store) -> None:
     brain.write("concepts/web.md", b"---\ntype: concept\naliases: [bf://fixture/team:web/app]\n---\n# Web\n")
     record = "a BF path whose first segment contains ':' names a source:id record"
     assert problems(brain) == [
-        f"concepts/{name}.md: {record} and cannot be an entity or alias; link to the record instead"
-        for name in ("team", "web")
+        f"concepts/{name}.md: {record} and no other subject; link to the record instead" for name in ("team", "web")
     ]
     brain.delete("concepts/team.md")
     brain.delete("concepts/web.md")
     records_file(brain, "mail", [Record(id="x", title="X", aliases=["bf://fixture/team:core"])])
-    assert any(f"{record} and cannot be an alias" in p for p in problems(brain))
+    assert any(f"{record} and no other subject" in p for p in problems(brain))
     # A colon in a later segment names an ordinary entity path.
     brain.write("concepts/alice.md", b"---\ntype: person\nentity: bf://fixture/people/alice:ops\n---\n# Alice\n")
     assert not any("concepts/alice.md" in p for p in problems(brain))
@@ -673,7 +698,7 @@ def test_folders_and_tag_membership_are_not_claimed(brain: Store) -> None:
     brain.write("bf.yaml", b"version: 7\nname: fixture\nfields:\n" + field.encode())
     with pytest.raises(Error, match=r"fields\.tagged-with is reserved for tag membership"):
         load(brain)
-    # `links` names the backlink group and role page of untyped links.
+    # `links` names the backlink group and relation page of untyped links.
     brain.write("bf.yaml", b"version: 7\nname: fixture\nfields:\n" + field.replace("tagged-with", "links").encode())
     with pytest.raises(Error, match=r"fields\.links is reserved for untyped backlinks"):
         load(brain)
@@ -699,7 +724,7 @@ def test_okf_sources_cite_their_resources(brain: Store) -> None:
         ("cites", "bf://fixture/projects/offline.md#decision", "bf://fixture/concepts/lesson.md"),
         ("cites", "meetings:decision-1", "bf://fixture/concepts/lesson.md"),
     ]
-    # A link can name the built-in role too; a read following it reports nothing undeclared.
+    # A link can name the built-in relation too; a read following it reports nothing undeclared.
     brain.write("projects/plan.md", b"---\ntype: plan\n---\n# Plan\n\n[Bob](bf://fixture/people/bob?rel=cites)\n")
     assert group(read([brain], "person:bob"), "cites")["items"][0]["ref"] == "projects/plan.md"
     assert "problems" not in read([brain], "bf://fixture/people/bob?rel=cites")
@@ -719,3 +744,164 @@ def test_an_okf_resource_names_its_note(brain: Store) -> None:
     assert reply["ref"] == "concepts/pull.md"
     groups = {group["relation"]: group for group in cast("list[dict]", reply["backlinks"])}
     assert [item["ref"] for item in groups["links"]["items"]] == ["github:pr-42"]
+
+
+IDENTITIES = "BF entities, aliases and resources"
+
+
+@pytest.mark.parametrize("key", ["entity", "aliases", "resource"])
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("bf://other/people/robert", f"{IDENTITIES} must belong to their own brain namespace"),
+        ("bf://fixture/people/robert#profile", f"{IDENTITIES} name a whole subject; remove the #section"),
+        (
+            "bf://fixture/projects/old-name.md",
+            (
+                "a BF path to a .md file in projects, actions or concepts names that note and no other subject; "
+                "link to the note instead"
+            ),
+        ),
+        ("bf://fixture/tags/robert", "computed page addresses and name no note or record"),
+        ("bf://fixture/people/robert?rel=friend", "identity must not contain a link relation"),
+    ],
+)
+def test_note_identities_must_reach_their_note(brain: Store, key: str, value: str, message: str) -> None:
+    # Reads resolve a BF identity only in its own brain, never as a section, a note file or a page: one that could
+    # never reach its note fails validation, and retrieval drops the note, whether entity, alias or resource.
+    people(brain)
+    declared = f"[{value}]" if key == "aliases" else value
+    brain.write("concepts/robert.md", f"---\ntype: person\n{key}: {declared}\n---\n# Robert\n\nrobertneedle\n".encode())
+    reported = problems(brain)
+    assert len(reported) == 1
+    assert reported[0].startswith("concepts/robert.md: ")
+    assert message in reported[0]
+    found = search([brain], Query(text="robertneedle"))
+    assert found["items"] == []
+    assert message in str(found["problems"])
+
+
+def test_record_aliases_must_reach_their_record(brain: Store) -> None:
+    records_file(
+        brain,
+        "mail",
+        [
+            Record(id="x", title="X", aliases=["bf://fixture/people/x#part"]),
+            Record(id="y", title="Y", aliases=["bf://fixture/projects/y.md"]),
+        ],
+    )
+    note = "a BF path to a .md file in projects, actions or concepts names that note and no other subject"
+    assert set(problems(brain)) == {
+        f"{record_path('mail', 'x')}: BF aliases name a whole subject; remove the #section",
+        f"{record_path('mail', 'y')}: {note}; link to the note instead",
+    }
+
+
+def hijacking(brain: Store, tmp_path: Path, resource: str) -> Store:
+    """Bob's brain with a talk linking him, and a team brain whose note names one of Bob's addresses as resource."""
+    people(brain)
+    brain.write("projects/talk.md", b"---\ntype: project\n---\n# Talk\n\n[Bob](bf://fixture/people/bob)\n")
+    root = tmp_path / "team"
+    root.mkdir(exist_ok=True)
+    team = Store(root)
+    team.write("bf.yaml", CONFIG.replace(b"name: fixture", b"name: team"))
+    team.write("projects/other.md", b"---\ntype: project\n---\n# Other\n\nworked with [him](../concepts/hijack.md)\n")
+    team.write("concepts/hijack.md", f"---\ntype: person\nresource: {resource}\n---\n# Hijack\n".encode())
+    return team
+
+
+def bob_is_intact(brain: Store, team: Store) -> None:
+    """Bob's backlinks are his own brain's, whole, and a search scoped to him finds nothing in team."""
+    reply = read([brain, team], "bf://fixture/projects/bob.md")
+    assert {(i["brain"], i["ref"]) for g in cast(list[dict], reply["backlinks"]) for i in g["items"]} == {
+        ("fixture", "projects/alice.md"),
+        ("fixture", "projects/talk.md"),
+    }
+    assert "claimed elsewhere" not in str(reply.get("problems"))
+    assert search([brain, team], Query(text="worked", target="bf://fixture/people/bob"))["items"] == []
+
+
+def test_a_bf_resource_follows_the_alias_rules_across_brains(brain: Store, tmp_path: Path) -> None:
+    # Another brain's note can neither take over Bob's note nor hide its backlinks by naming it as its resource.
+    for resource in ("bf://fixture/projects/bob.md", "bf://fixture/people/bob"):
+        team = hijacking(brain, tmp_path, resource)
+        assert "concepts/hijack.md: BF entities, aliases and resources must belong" in "\n".join(problems(team))
+        bob_is_intact(brain, team)
+    # A malformed resource names its file and key instead of aborting validation, which still reports the other
+    # problems.
+    brain.write("concepts/typo.md", b"---\ntype: concept\nresource: bf://fixture/docs/100%-done\n---\n# Typo\n")
+    brain.write("projects/broken.md", b"---\ntype: project\n---\n# Broken\n\n[gone](absent.md)\n")
+    reported = problems(brain)
+    assert "projects/broken.md: broken link: absent.md" in reported
+    assert any(p.startswith("concepts/typo.md: resource: invalid BF link") for p in reported)
+
+
+@pytest.mark.parametrize("resource", ["bf://fixture/projects/bob.md", "bf://fixture/people/bob"])
+def test_a_cache_holding_another_brains_address_changes_nothing(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resource: str
+) -> None:
+    team = hijacking(brain, tmp_path, resource)
+    # A cache built without the namespace rule, as by an older release, names team's note by Bob's address.
+    with monkeypatch.context() as patched:
+        patched.setattr(ontology, "_reachable", lambda *_: None)
+        index.refresh(team)
+    bob_is_intact(brain, team)
+    # Nor does team's note list Bob's backlinks as its own: his address still names him only.
+    reply = read([brain, team], "bf://team/concepts/hijack.md")
+    assert {(i["brain"], i["ref"]) for g in cast(list[dict], reply["backlinks"]) for i in g["items"]} == {
+        ("team", "projects/other.md")
+    }
+
+
+def test_other_brains_link_a_record_by_its_bare_ref(brain: Store, tmp_path: Path) -> None:
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("projects/followup.md", b"---\ntype: project\n---\n# Follow-up\n\n[the meeting](meetings:decision-1)\n")
+    expected = {("fixture", "projects/offline.md"), ("team", "projects/followup.md")}
+    # The record's ref, qualified address and alias all list the links from every selected brain, in reads, relation
+    # pages and identity searches alike.
+    for ref in ("meetings:decision-1", "bf://fixture/meetings:decision-1", "meeting:decision-1"):
+        reply = read([brain, team], ref)
+        assert {(i["brain"], i["ref"]) for i in group(reply)["items"]} == expected
+        assert "problems" not in reply
+        listed = read([brain, team], ref, rel="links")
+        assert {(i["brain"], i["ref"]) for i in cast(list[dict], listed["items"])} == expected
+        found = search([brain, team], Query(text=ref))
+        assert expected <= {(i["brain"], i["ref"]) for i in cast(list[dict], found["items"])}
+    # Once team collects the same record, its link names its own copy: no problem, and no merged backlinks.
+    records_file(team, "meetings", [Record(id="decision-1", title="Team copy")])
+    reply = read([brain, team], "bf://fixture/meetings:decision-1")
+    assert {(i["brain"], i["ref"]) for i in group(reply)["items"]} == {("fixture", "projects/offline.md")}
+    assert "problems" not in reply
+
+
+def test_link_diagnostics_name_the_correction(brain: Store) -> None:
+    people(brain)
+    brain.write(
+        "projects/typed.md",
+        b"---\ntype: project\n---\n# Typed\n\n"
+        b"[Bob](bf://fixture/people/bob?rel=links) [Bob](bf://fixture/people/bob?rel=weight)\n"
+        b"[Bob](bf://fixture/people/bob?rel=nope)\n",
+    )
+    links_fix = "untyped links need no ?rel=; remove ?rel=links"
+    weight_fix = "field weight is not a relation; relations need type: identity and relation: true"
+    nope_fix = "link relation nope is undeclared; declare it in bf.yaml fields with type: identity and relation: true"
+    assert problems(brain) == [
+        f"projects/typed.md: line 6: {links_fix}",
+        f"projects/typed.md: line 6: {weight_fix}",
+        f"projects/typed.md: line 7: {nope_fix}",
+    ]
+    # Following such a link reads its target and gives the same correction, in the same words.
+    for relation, correction in (("links", links_fix), ("weight", weight_fix), ("nope", nope_fix)):
+        reply = read([brain], f"bf://fixture/people/bob?rel={relation}")
+        assert (reply["ref"], reply["problems"]) == ("projects/bob.md", [{"error": correction}])
+    for value, correction in (
+        ("bf://fixture/projects/", "remove the trailing / or empty path segment"),
+        ("bf://fixture/projects//bob.md", "remove the trailing / or empty path segment"),
+        ("bf://fixture", "end a brain's address with /, as in bf://brain/ for its home"),
+        ("bf://fixture/a?owner=me", "use bf://brain/path?rel=relation#section"),
+    ):
+        with pytest.raises(Error, match=f"^invalid BF link; {re.escape(correction)}"):
+            links.parse(value)

@@ -11,7 +11,7 @@ from typing import cast
 import pytest
 
 from bf import index, pages
-from bf.models import MAX_OFFSET, Error, Record
+from bf.models import MAX_OFFSET, InputError, Record
 from bf.retrieve import read
 from bf.storage import Store
 from bf.validate import validate
@@ -101,8 +101,10 @@ def test_task_page_identity_cannot_be_claimed_by_notes_or_records(brain: Store) 
 
 
 def test_task_page_has_no_sections(brain: Store) -> None:
-    with pytest.raises(Error, match="invalid BF link"):
-        read([brain], "bf://fixture/tasks#section")
+    # Invalid input before any brain is read, as a section of any other page.
+    for ref in ("bf://fixture/tasks#section", "tasks#section"):
+        with pytest.raises(InputError, match="pages have no sections"):
+            read([brain], ref)
 
 
 def test_task_parser_excludes_literal_code_and_escaped_checkbox_examples(brain: Store) -> None:

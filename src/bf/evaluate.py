@@ -12,8 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationIn
 from bf import links
 from bf.config import load, yaml_object
 from bf.markdown import authored, split_ref
-from bf.models import MAX_FILE, Error, Model, NotFoundError, Query, check_version, clean, decode, explain
-from bf.pages import address, readable, scope
+from bf.models import MAX_FILE, Error, Model, NotFoundError, check_version, clean, decode, explain
+from bf.pages import address, query, readable
 from bf.retrieve import read, search
 from bf.storage import Store
 
@@ -22,17 +22,9 @@ Nonblank = Annotated[str, Field(pattern=r"\S")]
 DEPTH = 50
 
 
-def _query(text: str, value: str = "", limit: int = 10) -> Query:
-    """A case's search, by the search's own rules: words to match, a nonempty window and a bounded prefix."""
-    try:
-        return Query.model_validate({"text": text, "limit": limit, **scope(value)})
-    except ValidationError as error:
-        raise Error("; ".join(item["msg"].removeprefix("Value error, ") for item in error.errors())) from None
-
-
 def _bounds(value: str) -> None:
     """A scope checked on its own, so its failure names the scope field."""
-    _query("scope", value)
+    query("scope", value)
 
 
 class Case(Model):
@@ -106,7 +98,8 @@ class Case(Model):
     @field_validator("scope", "read", "expect", "forbid")
     @classmethod
     def syntax(cls, value: str | list[str] | None, info: ValidationInfo) -> str | list[str] | None:
-        check = {"scope": _bounds, "read": readable}.get(info.field_name or "", links.parse)
+        # An expected or forbidden ref is one a reply lists, so `bf read` takes it: a page's #fragment never matches.
+        check = {"scope": _bounds}.get(info.field_name or "", readable)
         try:
             for item in value if isinstance(value, list) else [] if value is None else [value]:
                 check(item)
@@ -123,8 +116,9 @@ class Case(Model):
         if self.read is not None and (self.scope or "limit" in self.model_fields_set):
             raise ValueError(f"case {self.name}: scope and limit apply to query cases")
         if self.read is None:
+            # bf search's own checks: a query it rejects as invalid input fails while loading.
             try:
-                _query(self.query, self.scope, self.limit)
+                query(self.query, self.scope, limit=self.limit)
             except Error as error:
                 raise ValueError(f"case {self.name}: {error}") from None
         return self
@@ -219,7 +213,7 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
             [],
         )
     # The case's results are the leading items of a deeper search: continuing a search never reorders it.
-    reply = search([store], _query(case.query, case.scope, max(case.limit, DEPTH)), counted=False)
+    reply = search([store], query(case.query, case.scope, limit=max(case.limit, DEPTH)), counted=False)
     found = cast("list[dict[str, object]]", reply["items"])
     # With one selected brain, items omit their address: every item is the evaluated brain's.
     ranking = [
@@ -250,7 +244,8 @@ def _ranks(expect: list[str], ranking: list[tuple[str, str]]) -> dict[str, int |
 class _Outcome(BaseModel):
     """One case of a previous `bf eval` reply; its other fields are diagnostics."""
 
-    model_config = ConfigDict(strict=True)
+    # Only `bf eval --baseline` validates these models: build them then, like every Model, not at import.
+    model_config = ConfigDict(strict=True, defer_build=True)
 
     suite: str
     name: str
@@ -259,7 +254,7 @@ class _Outcome(BaseModel):
 
 
 class _Baseline(BaseModel):
-    model_config = ConfigDict(strict=True)
+    model_config = ConfigDict(strict=True, defer_build=True)
 
     cases: Annotated[list[_Outcome], Field(max_length=100 * 200)]
 

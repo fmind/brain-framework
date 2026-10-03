@@ -96,11 +96,13 @@ def code(value: object) -> str:
 def mention(item: dict) -> str:
     """Name an item without linking it: a link from this dated action would count as newer evidence.
 
-    Collected text (an invite's title, a mail subject) never enters the action: only its ref does.
+    Collected text (an invite's title, a mail subject) never enters the action: only its ref does. With several
+    brains, the portable uri names the item's brain, as two brains can hold the same ref.
     """
+    ref = item.get("uri") or item["ref"]
     if item.get("kind") == "record":
-        return f"{code(item['ref'])} (record)"
-    return f"{plain(item.get('title', item['ref']))} ({code(item['ref'])})"
+        return f"{code(ref)} (record)"
+    return f"{plain(item.get('title', item['ref']))} ({code(ref)})"
 
 
 def render(day: str, home: dict, week: dict) -> Iterator[str]:

@@ -11,13 +11,15 @@ import sys
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
-from bf import index, records, retrieve
-from bf.config import register
-from bf.models import MAX_FIELDS, MAX_RECORD, Error, Query, Record
+from bf import index, ontology, records, retrieve
+from bf.collect import collect, reproject
+from bf.config import load, register
+from bf.models import MAX_FIELDS, MAX_RECORD, Error, Query, Record, encode
 from bf.storage import Store, writer
 from bf.update import update
+from conftest import records_file
 
 DECISION = records.path("meetings", "decision-1")
 NEW = records.path("meetings", "new")
@@ -31,6 +33,11 @@ def test_fields_beside_text_stay_within_a_readable_size() -> None:
         Record(id="bulky", title="Bulky", attributes={"a": half, "b": half})
     with pytest.raises(ValidationError, match="fields other than text exceed 2 MiB"):
         Record(id="linked", title="Linked", links=[f"repo:example/{n}-" + "y" * 4000 for n in range(600)])
+    # A record file of up to 16 MiB could hold millions of invalid field names: one error names the whole map.
+    with pytest.raises(ValidationError) as raised:
+        Record.model_validate({"id": "many", "title": "Many", "fields": {f"F{n}": 1 for n in range(100_000)}})
+    assert raised.value.error_count() == 1
+    assert "fields hold at most 1,000 names" in str(raised.value)
 
 
 def test_window_upsert_adds_updates_moves_and_keeps_unchanged(brain: Store) -> None:
@@ -548,3 +555,40 @@ def test_collection_replaces_its_own_records_that_break_current_rules(brain: Sto
     assert records.load(brain, kept).aliases == ["person:alice"]
     assert records.upsert(brain, "legacy", corrected, snapshot=True)["removed"] == 1
     assert records.files(brain, "legacy") == [kept]
+
+
+ATTENDED = (
+    b"version: 7\nname: fixture\nfields:\n  attendee:\n    description: A person who attended.\n    type: identity\n"
+    b"    cardinality: many\n    relation: true\nsensors:\n  meetings:\n    command: [sensors/meetings.py]\n"
+    b"    fields:\n      attendee:\n        path: /attributes/people\n"
+)
+
+
+def test_projected_fields_keep_the_bounds_of_every_stored_record(brain: Store) -> None:
+    brain.write("bf.yaml", ATTENDED)
+    config = load(brain)
+    # 1.4 MB of participants fit a printed record; copied into its fields, they exceed what an exact read shows.
+    people: list[JsonValue] = [f"person:email/{n}-{'x' * 1400}@example.test" for n in range(1000)]
+    printed = Record(id="all-hands", title="All hands", attributes={"people": people})
+    with pytest.raises(Error, match=r"^fields other than text exceed 2 MiB"):
+        ontology.project(printed, config.sensors["meetings"], config)
+
+    def runner(*_args: object) -> bytes:
+        return encode([printed.model_dump(exclude_defaults=True)])
+
+    # Collection once reported success and saved a record that every later read and search rejected.
+    with pytest.raises(Error, match=r"record 0: fields other than text exceed 2 MiB"):
+        collect(brain, "meetings", start="2026-09-01T00:00:00Z", end="2026-09-02T00:00:00Z", runner=runner)
+    name = records.path("meetings", "all-hands")
+    assert not (brain.root / name).exists()
+    # Reprojection counts such a stored record as failed and keeps it as it was.
+    observed = {**printed.attributes, "observed": "2026-09-01T00:00:00.000000Z"}
+    records_file(brain, "meetings", [printed.model_copy(update={"attributes": observed})])
+    before = brain.read(name)
+    report = reproject(brain, "meetings")
+    assert (report["records"], report["changed"], report["failed"]) == (3, 0, 1)
+    assert report["problems"] == [
+        {"file": name, "error": "fields other than text exceed 2 MiB; keep bulky content in text"}
+    ]
+    assert brain.read(name) == before
+    records.load(brain, name)

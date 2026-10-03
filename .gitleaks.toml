@@ -4,7 +4,8 @@ title = "brain-framework"
 [extend]
 useDefault = true
 
-# Like trivy.yaml's skip-dirs: local scans skip ignored generated output, so they see what a CI checkout sees.
+# Ignored generated output, also in trivy.yaml's skip-dirs. Every scan skips it, staged and history scans included, so
+# check:leaks fails while Git tracks an ignored file.
 [[allowlists]]
 description = "Ignored generated output: environments, builds, caches, reports and the rendered site."
 paths = ['''^(\./)?(\.agents/tmp|\.cache|\.pytest_cache|\.ruff_cache|\.venv|dist|htmlcov|site)/''']

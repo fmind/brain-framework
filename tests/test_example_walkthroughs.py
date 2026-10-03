@@ -13,10 +13,20 @@ import pytest
 ROOT = Path(__file__).parents[1]
 
 
+def export() -> str:
+    """The export lines the example brain documents: its walkthrough prints them after the action's answer."""
+    readme = (ROOT / "examples/brain/README.md").read_text()
+    return readme.split("The first three lines are:\n\n```text\n", 1)[1].split("\n```", 1)[0]
+
+
 @pytest.mark.parametrize(
     ("example", "block", "expected"),
     [
-        ("brain", None, ['"score":"16/16"', '"state":"unchanged"', '"state":"changed"', '"brain":"example-team"']),
+        (
+            "brain",
+            None,
+            ['"score":"16/16"', export(), '"state":"unchanged"', '"state":"changed"', '"brain":"example-team"'],
+        ),
         ("retrieval", 0, ['"score":"23/23"', '"mrr":1.0', '"valid":true']),
         (
             "hooks",

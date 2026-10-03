@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from importlib.resources import files
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -13,8 +14,8 @@ from bf.storage import Store, expand
 # The installed files and their digests: a later install replaces only files that still match them.
 MANIFEST = ".bf-skill.json"
 SKILLS = ("bf-use", "bf-setup", "bf-maintain")
-# States that leave a folder as it is: a person's edits or files this command did not install.
-BLOCKED = frozenset({"modified", "unmanaged"})
+# States that leave a folder as it is: a person's edits, files this command did not install or a newer version's.
+BLOCKED = frozenset({"modified", "unmanaged", "newer"})
 
 
 def _packaged(skill: str) -> dict[str, bytes]:
@@ -34,10 +35,18 @@ def _packaged(skill: str) -> dict[str, bytes]:
     return result
 
 
+def _release(version: object) -> tuple[int, ...]:
+    """An X.Y.Z version's numbers; anything else is empty, older than every release."""
+    if isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        return tuple(int(part) for part in version.split("."))
+    return ()
+
+
 def _state(store: Store, skill: str, wanted: dict[str, str]) -> tuple[str, list[str], dict[str, str]]:
     """A folder's status, its edited files and the digests its manifest recorded."""
     folder = store.root / skill
-    if not folder.exists() and not folder.is_symlink():
+    # An empty folder holds nothing to keep, such as one a first install left when a full disk failed its first write.
+    if not folder.is_symlink() and (not folder.exists() or (folder.is_dir() and not any(folder.iterdir()))):
         return "missing", [], {}
     try:
         manifest = decode(store.read(f"{skill}/{MANIFEST}", 1 << 20))
@@ -47,25 +56,25 @@ def _state(store: Store, skill: str, wanted: dict[str, str]) -> tuple[str, list[
     if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
         return "unmanaged", [], {}
     recorded = {str(name): str(value) for name, value in manifest["files"].items()}
+    # Two bf versions can share a skills directory, such as a global install and a brain's pinned runtime: never
+    # replace a newer version's different copy. A newer version that recorded these same files changes nothing.
+    if recorded != wanted and _release(manifest.get("version")) > _release(__version__):
+        return "newer", [], recorded
     edited = []
-    for name, value in sorted(recorded.items()):
+    for name in sorted(recorded.keys() | wanted.keys()):
         try:
-            if digest(store.read(f"{skill}/{name}")) != value:
-                edited.append(name)
+            found = digest(store.read(f"{skill}/{name}"))
         except FileNotFoundError:
             # A deleted file the packaged skill still needs leaves it incomplete; `--force` restores it.
-            if name in wanted:
+            if name in recorded and name in wanted:
                 edited.append(name)
-        except Error:
-            edited.append(name)
-    for name in sorted(set(wanted) - set(recorded)):
-        # A file someone added where a newer version ships one is theirs until `--force` replaces it.
-        try:
-            if digest(store.read(f"{skill}/{name}")) != wanted[name]:
-                edited.append(name)
-        except FileNotFoundError:
             continue
         except Error:
+            edited.append(name)
+            continue
+        # Bytes BF installed or ships, such as those an interrupted run already wrote, are not a person's edit;
+        # a file someone added where a newer version ships one is theirs until `--force` replaces it.
+        if found not in {recorded.get(name), wanted.get(name)}:
             edited.append(name)
     if edited:
         return "modified", edited, recorded
@@ -75,9 +84,9 @@ def _state(store: Store, skill: str, wanted: dict[str, str]) -> tuple[str, list[
 def skills(destination: Path, *, check: bool = False, force: bool = False) -> dict[str, object]:
     """Install or update each packaged skill in `destination`, such as ~/.agents/skills.
 
-    A folder this command installed is updated while its files still match its manifest; edited or foreign
-    folders stay as they are unless `force` replaces them. `check` reports the same states without writing.
-    Files a newer version no longer ships are removed only when unedited.
+    A folder this command installed is updated while its files still match its manifest; edited or foreign folders,
+    and a different copy a newer bf installed, stay as they are unless `force` replaces them. `check` reports the
+    same states without writing. Files a newer version no longer ships are removed only when unedited.
     """
     root = expand(destination)
     if not check:
@@ -93,6 +102,9 @@ def skills(destination: Path, *, check: bool = False, force: bool = False) -> di
         status, edited, recorded = _state(store, skill, wanted) if store else ("missing", [], {})
         entry: dict[str, object] = {"name": skill, "status": status, **({"edited": edited} if edited else {})}
         if store and not check and (status in {"missing", "outdated"} or (force and status in BLOCKED)):
+            if status == "missing":
+                # A manifest first: an interrupted first install then reads as outdated, and the next run finishes it.
+                store.write(f"{skill}/{MANIFEST}", encode({"version": __version__, "files": {}}))
             for name, data in packaged.items():
                 store.write(f"{skill}/{name}", data)
                 # Helpers run directly: `scripts/NAME.py` is executable, like the packaged copy.

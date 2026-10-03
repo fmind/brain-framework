@@ -10,7 +10,7 @@ from typing import cast
 from bf import index, usage
 from bf.config import ABSENT, Selection, brain_name, load, related
 from bf.history import ROUTINES, log_path, state
-from bf.models import Config, Error, Program
+from bf.models import CACHE, Config, Error, Program
 from bf.storage import Store
 
 # Counters of the last successful collection, reported apart from indexed totals.
@@ -136,7 +136,7 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
             if len(stores) == 1:
                 if isinstance(error, sqlite3.DatabaseError):
-                    raise Error("the search cache is unavailable; run bf build") from error
+                    raise Error(CACHE) from error
                 raise
             # Status diagnoses brains: one that cannot load is reported, and the others still are.
             message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; check its path"

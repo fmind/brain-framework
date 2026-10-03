@@ -63,7 +63,7 @@ env -u BF_BRAIN XDG_CONFIG_HOME="$watch_demo/config" XDG_STATE_HOME="$watch_demo
   --output "$watch_demo/schedules"
 ```
 
-The JSON reply contains the native files and literal argv lists for installation, status and removal. Inspect the files; this example does not require installing them. Their PATH, XDG paths and executable point to the environment used to generate them, so regenerate a real schedule from the installation you intend to keep. One-minute checks can collect the 30-second calendar less frequently than its refresh; the scheduler checks eligibility, it does not override it.
+The JSON reply contains the native files and literal argv lists for installation, status and removal. Inspect the files; this example does not require installing them. Their PATH, XDG paths and executable point to the environment used to generate them, so regenerate a real schedule from the installation you intend to keep. The reply's `warnings` include `calendar refreshes every 30s, but the timer checks every 1 minutes`: one-minute checks collect the 30-second calendar late, and `bf status` can report it `overdue`. The scheduler checks eligibility; it does not override it.
 
 Observe the same local history without executing programs; its footer offers `u reread` instead of `f refresh` and no pause:
 

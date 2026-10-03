@@ -32,22 +32,22 @@ bf watch
 
 Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. It can contact providers. A failed program retries after 1 minute, then waits twice as long per consecutive failure, up to its `refresh`. Closing watch stops its collection.
 
-The dashboard shows each program's state, last success, next due time, returned items and record changes. `never` means no success on this machine; `failed` means the last attempt failed. Items counts the records the last successful run returned, not the stored total. Manual and disabled programs stay visible without running. Use `bf status --check` for full health.
+The dashboard shows each program's state, last success, next due time, returned items and record changes. `never` means no success on this machine, such as a sensor that only backfilled older windows; `failed` means the last attempt failed. Items counts the records the last completed collection returned, even a backfill, not the stored total. Manual and disabled programs stay visible without running. Use `bf status --check` for full health.
 
 [![Watch dashboard for the fictional offline demo: five sensors sorted by state, with a failed sensor's details beside their last success, next due time, item count and record changes.](../assets/watch.svg)](../assets/watch.svg)
 
 This is the fictional [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch), sorted by state: `unavailable` failed, `calendar` updated its record, `git` added one, and the manual and disabled sensors stay idle.
 
-| Key               | Effect                                                                      |
-| ----------------- | --------------------------------------------------------------------------- |
-| `j` / `k`, arrows | Select a program and show its details, including its log and latest action. |
-| Tab               | Show only programs needing attention: failed, never collected or due.       |
-| `f` (or `u`)      | Reload `bf.yaml` and check due work now; queues one check during an update. |
-| Space             | Pause or resume future checks; an active update finishes.                   |
-| `?`               | Toggle the guide: every key, sort field and count explained.                |
-| `q`               | Cancel any active update and quit. Ctrl-C exits 130.                        |
+| Key               | Effect                                                                       |
+| ----------------- | ---------------------------------------------------------------------------- |
+| `j` / `k`, arrows | Select a program and show its details, including its log and latest action.  |
+| Tab               | Show only programs needing attention: failed, never collected or due.        |
+| `f` (or `u`)      | Reload `bf.yaml` and check due work now; queues one check during an update.  |
+| Space             | Pause or resume future checks; an active update finishes.                    |
+| `?`               | Toggle the guide: every key, sort field and count explained.                 |
+| `q`               | Cancel any active update and quit. Ctrl-C or closing the terminal exits 130. |
 
-Press `f` after adding a reviewed program to `bf.yaml`: its row appears and it runs if due. Refresh respects selectors, pause, `refresh` and failure backoff. Changes to the `watch` preferences need a restart.
+Press `f` after adding a reviewed program to `bf.yaml`: its row appears and it runs if due. Refresh respects selectors, pause, `refresh` and failure backoff. When `bf.yaml` becomes invalid, or stops declaring a program you selected, the message line shows BF's diagnostic, such as `unknown sensor git; check names in bf.yaml`, and nothing runs until you fix it. Changes to the `watch` preferences need a restart.
 
 ### Sort the dashboard
 
@@ -68,7 +68,7 @@ Observation shows local history alongside a native scheduler. It offers `u` to r
 
 ## Watch preferences
 
-**The `watch` section is optional.** By default, watch checks due work every 60 seconds, rereads local history every 2 seconds and alerts on failures and recovery. For a quieter session:
+**The `watch` section is optional**, and an empty one keeps the defaults. By default, watch checks due work every 60 seconds, rereads local history every 2 seconds and alerts on failures and recovery. For a quieter session:
 
 ```bash
 bf watch --interval 300 --notify off
@@ -90,7 +90,7 @@ watch:
 | `notifications`         | `failure` | `off`, `failure`, `success` or `all`.                     |
 | `notification_cooldown` | 300       | Seconds between alerts, 0–86400.                          |
 
-Command-line options override `bf.yaml`, then defaults apply. Every command loading `bf.yaml` validates the section, even when an option overrides it. `failure` alerts on new failures and recovery; `success` on completed cycles with work; `all` on both. Alerts never name sources or quote provider text. Desktop alerts need `osascript` on macOS, or `notify-send` or `gdbus` on Linux; a delivery failure warns once and collection continues.
+Command-line options override `bf.yaml`, then defaults apply. Every command loading `bf.yaml` validates the section, even when an option overrides it. `failure` alerts on new failures and recoveries; `success` on recoveries and on cycles that completed work, even while another program keeps failing; `all` on all three. Alerts never name sources or quote provider text. Desktop alerts need `osascript` on macOS, or `notify-send` or `gdbus` on Linux; a delivery failure warns once and collection continues.
 
 ## Select programs
 
@@ -110,9 +110,9 @@ With no selector, every configured program is eligible, including programs added
 bf schedule --every 15 --output ~/.config/bf-schedules
 ```
 
-The reply lists the generated `files`, the `written` paths and literal argument lists to `install`, check the `status` of and `remove` the job. BF runs none of them. Without `--output`, the reply previews the files and warns that nothing was written. A relative `--output` resolves against the brain folder. Differing existing files are kept and generation fails, so your edits survive.
+The reply lists the generated `files`, the `written` paths and literal argument lists to `install`, check the `status` of and `remove` the job. BF runs none of them. Without `--output`, the reply previews the files and warns that nothing was written; its install commands copy from `~/.config/bf-schedules`, where the suggested rerun writes them. A relative `--output` resolves against the brain folder. Differing existing files are kept and generation fails, so your edits survive.
 
-The files hold this machine's `PATH`, home and brain paths: keep them out of a shared brain's Git history. Credentials and other environment variables are not copied.
+The files hold home and brain paths and the `PATH` that `bf schedule` runs with: keep them out of a shared brain's Git history. Credentials and other environment variables are not copied. Sensors and routines find commands such as `uv` through that `PATH`: when it lists version-specific tool folders, such as those of mise, asdf, pyenv or nvm, put stable shims in their place or regenerate the schedule after upgrading those tools. In a brain that [pins its runtime](upgrades.md#pin-a-brains-runtime), generate them with `uv run --locked bf schedule ...`, so jobs and nested `bf` calls use the pinned release.
 
 | Option or default   | Meaning                                                                                               |
 | ------------------- | ----------------------------------------------------------------------------------------------------- |
@@ -140,6 +140,6 @@ Updates of one brain run one at a time. A second update waits up to 10 minutes, 
 
 ## Timing and health
 
-A scheduled program is `fresh` when it succeeded on this machine within twice its `refresh`, `overdue` when it has succeeded but not within that time, and `never` when it has no local success. A program with `refresh: 0` is `manual`; a disabled program or historical source is `unknown`. `bf status --check` exits 1 for an enabled scheduled program that is `overdue`, `never` succeeded or last failed. Run it on the collecting machine: run history is local, even when records are shared.
+A scheduled program is `fresh` when it succeeded on this machine within twice its `refresh`, `overdue` when it has succeeded but not within that time, and `never` when it has no local success. A sensor succeeds only with a collection reaching the moment it runs: one that only [backfilled](sensors.md#backfills-and-coverage) older windows stays `never`. A program with `refresh: 0` is `manual`; a disabled program or historical source is `unknown`. `bf status --check` exits 1 for an enabled scheduled program that is `overdue`, `never` succeeded or last failed. Run it on the collecting machine: run history is local, even when records are shared.
 
-Choose a timer interval shorter than the smallest nonzero `refresh`. With an hourly sensor and a 15-minute timer, a check 59 minutes after the last success skips the sensor, and the next check, at 74 minutes, runs it. A success timestamp in the future, after a clock correction, makes the program due at once. Long pauses catch up at most 30 days.
+Choose a timer interval shorter than the smallest nonzero `refresh`: `bf schedule` warns, naming that program, when `--every` reaches it. With an hourly sensor and a 15-minute timer, a check 59 minutes after the last success skips the sensor, and the next check, at 74 minutes, runs it. A success timestamp in the future, after a clock correction, makes the program due at once. Long pauses catch up at most 30 days.

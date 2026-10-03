@@ -348,3 +348,51 @@ def test_new_directories_are_durable_before_their_files(brain: Store, monkeypatc
         expected.append((info.st_dev, info.st_ino))
     assert all(identity in synced for identity in expected)
     assert synced.index(expected[0]) < synced.index(expected[1]) < synced.index(expected[2])
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+@pytest.mark.parametrize(
+    ("folder", "mode", "problem"),
+    [
+        ("concepts", 0, "concepts"),
+        ("projects", 0o300, "projects"),
+        ("memories", 0, "memories"),
+        ("memories", 0o600, "memories/meetings"),
+    ],
+)
+def test_an_unreadable_top_level_folder_leaves_the_rest_of_the_brain_answering(
+    brain: Store, folder: str, mode: int, problem: str
+) -> None:
+    # A first collection run as root can leave memories/ unreadable; a nested folder was already skipped alone.
+    (brain.root / folder).chmod(mode)
+    try:
+        reply = search([brain], Query(text="offline"), counted=False)
+        assert reply["items"]
+        assert [item["file"] for item in cast("list[dict[str, str]]", reply["problems"])] == [problem]
+        reasons = {item["file"]: item["error"] for item in cast("list[dict[str, str]]", validate(brain)["problems"])}
+        # Without search permission on memories/, its source is unreachable rather than a link or special file.
+        assert reasons[problem] == "unreadable folder; grant read and search permission or move it out of the brain"
+        if folder == "memories":
+            with pytest.raises(Error, match="source meetings is unreadable"):
+                read([brain], "meetings:decision-1", counted=False)
+        else:
+            assert read([brain], "meetings:decision-1", counted=False)["record"]
+    finally:
+        (brain.root / folder).chmod(0o700)
+
+
+def test_notes_with_thousands_of_invalid_values_keep_replies_small(brain: Store) -> None:
+    # Five 40 KB notes once produced 4 MB of problems: every search and read of the brain, and of brains referencing
+    # it, failed. A list over its bound is one error; within it, the first reasons stand for the rest.
+    for number in range(5):
+        aliases = b",".join([b"1"] * 19_000)
+        brain.write(f"concepts/bulk-{number}.md", b"---\ntype: concept\naliases: [" + aliases + b"]\n---\n# Bulk\n")
+    brain.write("concepts/many.md", b"---\ntype: concept\nlinks: [" + b",".join([b"1"] * 999) + b"]\n---\n# Many\n")
+    reply = search([brain], Query(text="offline"), counted=False)
+    assert reply["items"]
+    errors = {item["file"]: item["error"] for item in cast("list[dict[str, str]]", reply["problems"])}
+    assert errors["concepts/bulk-0.md"] == (
+        "invalid frontmatter: aliases: List should have at most 1000 items after validation, not 19000"
+    )
+    assert errors["concepts/many.md"].endswith("links.4: Input should be a valid string; and 994 more")
+    assert read([brain], "projects/offline.md", counted=False)["text"]

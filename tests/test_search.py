@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from mcp.types import CallToolResult
@@ -29,7 +29,7 @@ from bf.cli import main
 from bf.config import register, user_path
 from bf.markdown import LEAD, entry_note
 from bf.mcp import server
-from bf.models import Error, NotFoundError, Query, Record, digest, encode, timestamp
+from bf.models import Config, Error, NotFoundError, Query, Record, digest, encode, timestamp
 from bf.pages import scope
 from bf.retrieve import read, search
 from bf.storage import UNNAMED, BusyError, Store, state_store, writer
@@ -66,6 +66,24 @@ def test_function_words_written_as_acronyms_stay_terms(brain: Store) -> None:
     # Lowercase function words and the habitual AND and OR operators still drop; one letter is no acronym.
     assert index.terms("ai and the IT budget AND I") == ["IT", "budget"]
     assert index.terms("launch OR budget") == ["launch", "budget"]
+
+
+def test_quoted_words_and_english_subjects_stay_terms(brain: Store) -> None:
+    brain.write(
+        "concepts/comments.md",
+        b"# Comment guidelines\n\nEvery comment on a pull request names the line. A review comment is short.\n",
+    )
+    brain.write("concepts/review.md", b"# Review checklist\n\nCheck tests and docs before approving a review.\n")
+    # Before, comment dropped as a French function word: the first query found nothing and the second ranked the
+    # checklist first.
+    assert refs(brain, "comment etiquette") == ["concepts/comments.md"]
+    assert refs(brain, "review comment") == ["concepts/comments.md", "concepts/review.md"]
+    # Quoting keeps a function word as a term, as a phrase keeps its own: French "son" is also an English word.
+    brain.write("concepts/family.md", b"# Family\n\nTheir son packs for the trip.\n")
+    assert "concepts/family.md" not in refs(brain, "son checklist")
+    assert "concepts/family.md" in refs(brain, '"son" checklist')
+    # Before, a quoted acronym dropped too, although the same word unquoted stays a term.
+    assert index.terms('"the" review "EU" act') == ["the", "review", "EU", "act"]
 
 
 def test_results_are_compact_and_cite_readable_refs(brain: Store) -> None:
@@ -327,13 +345,30 @@ def test_full_build_creates_every_index_after_loading_and_serves_in_wal_mode(bra
     assert created == set(index._INDEXES)  # noqa: SLF001 - deferred secondary indexes
 
 
+def test_replies_find_skipped_files_through_their_own_index(brain: Store) -> None:
+    brain.write("projects/broken.md", b"---\nstale_after: soon\n---\n# Broken\n")
+    index.refresh(brain, full=True)
+    statements: list[str] = []
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.set_trace_callback(statements.append)
+        assert [problem["file"] for problem in index.problems(connection)] == ["projects/broken.md"]
+        assert retrieve._complete(connection, "ready", "meetings")  # noqa: SLF001 - an exact record read's check
+        connection.set_trace_callback(None)
+        # Every reply checks for skipped files: only their rows are read, not the row of every file.
+        assert len(statements) == 2
+        for statement in statements:
+            plan = " ".join(row[3] for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}"))
+            assert "files_problems" in plan, plan
+
+
 def test_one_reply_compares_files_with_the_cache_once_per_brain(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     checked: list[Path] = []
     original = index.fresh
 
-    def counted(store: Store) -> str:
+    def counted(store: Store, counts: dict[str, int] | None = None) -> str:
         checked.append(store.root)
-        return original(store)
+        return original(store, counts)
 
     monkeypatch.setattr(index, "fresh", counted)
     # A note with backlinks opens the cache for identities, backlinks and claims.
@@ -485,15 +520,15 @@ def test_concurrent_first_search_waits_for_a_complete_cache(
     original_index, original_refresh = index._index, index.refresh  # noqa: SLF001 - coordinated ingestion failure boundary
     waits: list[float] = []
 
-    def paused(connection: sqlite3.Connection, store: Store, path: str) -> None:
+    def paused(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
         ingest_started.set()
         assert release_ingest.wait(10)
-        return original_index(connection, store, path)
+        return original_index(connection, store, path, config)
 
-    def observe_refresh(store: Store, *, full: bool = False, wait: float = 30) -> dict[str, object]:
+    def observe_refresh(store: Store, *, wait: float = 30, **options: Any) -> dict[str, object]:
         waits.append(wait)
         reader_refreshing.set()
-        return original_refresh(store, full=full, wait=wait)
+        return original_refresh(store, wait=wait, **options)
 
     monkeypatch.setattr(index, "_index", paused)
     monkeypatch.setattr(index, "refresh", observe_refresh)
@@ -521,11 +556,11 @@ def test_failed_or_abandoned_full_rebuilds_keep_the_live_cache(brain: Store, mon
     original_index = index._index  # noqa: SLF001 - inject failure after a file was indexed
     indexed: list[str] = []
 
-    def fail_second(connection: sqlite3.Connection, store: Store, path: str) -> None:
+    def fail_second(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
         if indexed:
             raise sqlite3.OperationalError("simulated disk full")
         indexed.append(path)
-        return original_index(connection, store, path)
+        return original_index(connection, store, path, config)
 
     with monkeypatch.context() as patch:
         patch.setattr(index, "_index", fail_second)
@@ -538,10 +573,10 @@ def test_failed_or_abandoned_full_rebuilds_keep_the_live_cache(brain: Store, mon
         assert connection.execute("PRAGMA user_version").fetchone()[0] == index.SCHEMA
         assert connection.execute("SELECT count(*) FROM items").fetchone()[0] == 4
     assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
-    # A killed build leaves its partial file and journal beside the cache; the next build replaces them.
+    # A killed build leaves its partial file and journal beside the cache; the next build replaces them. A read
+    # would remove them first (tests/test_cache.py), so the build runs next.
     for suffix in ("", "-journal"):
         (brain.root / (index.BUILD + suffix)).write_bytes(b"abandoned build")
-    assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
     assert index.refresh(brain, full=True)["files"] == 4
     assert sorted(path.name for path in (brain.root / ".bf").iterdir()) == ["index.sqlite"]
     assert cache_file(brain) != live
@@ -555,11 +590,11 @@ def test_a_full_build_keeps_serving_and_refreshing_the_live_cache_until_it_publi
     ingesting, finish = Event(), Event()
     original_index = index._index  # noqa: SLF001 - pause the build after its scan
 
-    def paused(connection: sqlite3.Connection, store: Store, path: str) -> None:
+    def paused(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
         if not ingesting.is_set():
             ingesting.set()
             assert finish.wait(10)
-        return original_index(connection, store, path)
+        return original_index(connection, store, path, config)
 
     monkeypatch.setattr(index, "_index", paused)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -697,7 +732,7 @@ def test_exact_reads(brain: Store) -> None:
 
 def test_oversized_notes_read_as_pages_of_their_text(brain: Store) -> None:
     # Escaped quotes double the serialized size: a page holds fewer characters, never more bytes.
-    data = b"# Quoted\n\n" + b'"' * 3_000_000
+    data = b"# Quoted\n\n## Part\n\n" + b'"' * 3_000_000
     brain.write("concepts/quoted.md", data)
     reply = read([brain], "concepts/quoted.md")
     assert "chunk" not in reply
@@ -734,9 +769,10 @@ def test_usage_counts_searches_empty_results_and_reads_without_queries(brain: St
     assert usage.summary(brain, now=later)["7d"] == {"search": 0, "empty": 0, "read": 0}
     log.write_text(log.read_text() + "not json\n" + '{"at": "x"}\n')
     assert usage.summary(brain)["30d"]["search"] == 2
+    # Rotation drops events older than the largest window: only the new event remains.
     log.write_bytes(b'{"at":"2026-01-01T00:00:00+00:00","op":"search","results":1}\n' * 40_000)
     usage.note(brain, "search", 3)
-    assert log.stat().st_size <= usage.LIMIT // 2 + 200
+    assert len(log.read_text().splitlines()) == 1
     log.unlink()
     log.mkdir()
     usage.note(brain, "search", 1)  # an unwritable log never breaks retrieval
@@ -757,8 +793,19 @@ def test_identity_relations_keep_newest_first(brain: Store) -> None:
 
 def test_malformed_link_does_not_block_other_notes(brain: Store) -> None:
     brain.write("projects/bad-url.md", b'---\nlinks: ["https://["]\n---\n# Invalid link\n')
+    brain.write("projects/hub.md", b"# Hub\n\nOpen\n[the console](http://[fe80::1%eth0/admin).\n")
+    # A document copied from another tool stays searchable without a URL Python cannot parse, such as a placeholder.
+    brain.write("actions/2026-09-27_import/ACTION.md", b"---\ntype: action\n---\n# Import\n")
+    brain.write(
+        "actions/2026-09-27_import/inputs/vendor.md", b"# Vendor\n\nOpen [the okapi console](http://[host]:8080/).\n"
+    )
     assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
-    assert "invalid link" in str(index.status(brain)["problems"])
+    assert refs(brain, "okapi") == ["actions/2026-09-27_import/inputs/vendor.md"]
+    # Before, both problems read only "invalid link": each now names the line or frontmatter key to repair.
+    assert index.status(brain)["problems"] == [
+        {"file": "projects/bad-url.md", "error": "links: invalid link"},
+        {"file": "projects/hub.md", "error": "line 4: invalid link"},
+    ]
 
 
 def test_removing_a_misnamed_record_clears_its_problem(brain: Store) -> None:
@@ -782,7 +829,7 @@ def test_current_schema_cache_with_missing_table_rebuilds(brain: Store) -> None:
 
 
 def test_direct_record_read_survives_unavailable_cache(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    def unavailable(_store: Store) -> str:
+    def unavailable(_store: Store, _counts: dict[str, int] | None = None) -> str:
         raise Error("cache unavailable")
 
     monkeypatch.setattr(index, "fresh", unavailable)
@@ -921,7 +968,7 @@ def test_cache_sidecars_cannot_redirect_reads(brain: Store, suffix: str) -> None
 
 
 def test_cache_write_failure_is_a_safe_actionable_error(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail(_store: Store) -> sqlite3.Connection:
+    def fail(_store: Store, _config: Config) -> sqlite3.Connection:
         raise sqlite3.OperationalError("database or disk is full")
 
     monkeypatch.setattr(index, "_create", fail)
@@ -1018,8 +1065,8 @@ def test_a_search_opens_a_generation_published_after_its_freshness_check(
     checked, reopen = Event(), Event()
     original_fresh = index.fresh
 
-    def paused_fresh(store: Store) -> str:
-        state = original_fresh(store)
+    def paused_fresh(store: Store, counts: dict[str, int] | None = None) -> str:
+        state = original_fresh(store, counts)
         checked.set()
         assert reopen.wait(10)
         return state
@@ -1053,6 +1100,17 @@ def test_evaluation_names_missing_retrieval_cases(brain: Store) -> None:
     for case in (b"    query: x\n    read: today\n", b"    read: today\n    scope: 7d\n", b"    since: 7d\n"):
         brain.write("evals/retrieval.yaml", b"version: 7\ncases:\n  - name: bad\n" + case + b"    empty: true\n")
         with pytest.raises(Error, match=r"case bad|since"):
+            evaluate(brain)
+    # A query that bf search rejects as invalid input fails while loading too, before any retrieval.
+    for text, reason in (
+        ("bf:foo", "invalid BF link"),
+        ("bf://fixture/projects/offline.md?rel=owner", "identity must"),
+    ):
+        brain.write(
+            "evals/retrieval.yaml",
+            f"version: 7\ncases:\n  - name: typed\n    query: {text}\n    empty: true\n".encode(),
+        )
+        with pytest.raises(Error, match=rf"invalid evals/retrieval\.yaml: cases\.0: case typed: {reason}"):
             evaluate(brain)
 
 
@@ -1211,6 +1269,19 @@ def test_whole_note_results_without_matching_text_preview_the_note_lead(brain: S
     assert (item["ref"], item["excerpt"]) == ("projects/atlas.md", "Atlas uses SQLite.")
 
 
+def test_note_leads_keep_identifiers_in_listings_and_title_matches(brain: Store) -> None:
+    brain.write(
+        "projects/deploy.md",
+        b"---\ntype: project\n---\n# Zebra deploy\n\n## Steps\n\nExport `GITHUB_TOKEN`, run deploy_all.sh on 2*3 hosts.\n",
+    )
+    lead = "Export GITHUB_TOKEN, run deploy_all.sh on 2*3 hosts."
+    # Before, leads dropped every _ and *, so an agent copied GITHUBTOKEN and deployall.sh, which match nothing.
+    listed = cast("list[dict[str, str]]", read([brain], "projects")["items"])
+    assert next(item for item in listed if item["ref"] == "projects/deploy.md")["excerpt"] == lead
+    item = cast("list[dict[str, str]]", search([brain], Query(text="zebra"))["items"])[0]
+    assert (item["ref"], item["excerpt"]) == ("projects/deploy.md", lead)
+
+
 def test_results_name_other_matching_sections_of_their_note(brain: Store, tmp_path: Path) -> None:
     item = cast("list[dict[str, object]]", search([brain], Query(text="retention guide"))["items"])[0]
     # Before 16 only the best section of a note returned; the decision was hidden.
@@ -1241,6 +1312,16 @@ def test_function_words_of_questions_drop_while_subjects_stay(brain: Store) -> N
     brain.write("projects/noise.md", b"# Has been\n\nThere has been any number of notes about it.\n")
     # Before 16 these auxiliary words ranked the noise first.
     assert refs(brain, "Has there been any budget?")[0] == "projects/budget.md"
+
+
+def test_words_that_stem_to_function_words_drop(brain: Store) -> None:
+    # English stemming turns one into on, doing into do and ours into our: as terms they match nearly every text.
+    assert index.terms("why did we choose one page") == ["choose", "page"]
+    assert index.terms("ones doing having ours yours theirs hers budget") == ["budget"]
+    brain.write("projects/website.md", b"# Website\n\n## Decision\n\nStart with a single product page.\n")
+    brain.write("projects/hosting.md", b"# Hosting\n\nThe page runs on a vendor platform, on call on weekends.\n")
+    # Before, the hosting note ranked first: each of its "on" matched "one".
+    assert refs(brain, "why did we choose one page")[0] == "projects/website.md#decision"
 
 
 def test_equal_scores_list_the_newest_first(brain: Store, tmp_path: Path) -> None:

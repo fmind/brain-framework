@@ -4,6 +4,69 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v18.0.0](https://github.com/fmind/brain-framework/releases/tag/v18.0.0) - 2026-10-03
+
+A review release. Review signals now follow upstream changes and the evidence a note cites, the home page and exact reads summarize what needs attention, and every interface reports invalid input the same way. The brain format (`version: 7`) and `bf.yaml` are unchanged apart from accepting empty sections; stricter identity rules and bounds are listed below. Reply schemas only gain optional fields, and the search cache rebuilds once.
+
+### Breaking changes
+
+- **Invalid input.** A usage error prints one stderr line, `bf: invalid input: ARGUMENT: reason (see bf COMMAND -h)`, with exit 2, instead of Typer's usage text and boxed panel; help is unchanged. MCP clients receive the same rejections as `invalid input: ARGUMENT: reason` naming the tool argument (`query`, `scope`, `ref` or `rel`), including malformed refs, periods, addresses, scopes and relations that used to return bare messages.
+- **Exit codes.** These are invalid input (exit 2) instead of failures (exit 1): `--rel` on a page written with a trailing slash (`projects/`) or on an existing folder page, `--rel` with a `#section`, a section of a page (`bf read tasks#x`, `bf read bf://NAME/7d#x`), an invalid period below `memories/SOURCE/`, a ref that is not UTF-8 and `bf watch --poll-interval nan`.
+- **Empty values.** An explicit empty `--brain` is invalid input instead of falling back to `BF_BRAIN`, the enclosing brain or every registered brain, and so are an empty `PATH` for `init` and `register`, `DIR` for `skills` and `schedule --output`.
+- **Scopes and retrieval cases.** A note or page section as `--scope`, such as `projects/atlas.md#next-actions`, is invalid input instead of silently matching nothing. `bf eval` checks `expect` and `forbid` refs as `bf read` checks a ref, so a malformed or unnormalized ref fails the suite instead of a `forbid` that always passed, and a malformed identity query fails when the suite loads.
+- **Identities.** An identity holding a Unicode format character (category Cf, such as U+200B, U+200C, U+200D, U+202E, U+FEFF or a soft hyphen) is rejected: two identities that look alike would silently differ. A BF entity, alias or resource must reach its note or record: another brain's namespace, a `#section`, a note file path, a page address or a `SOURCE:ID` address fails `bf validate`, and the note or record leaves the search cache like one with a foreign alias. A malformed BF `resource` makes its note invalid, like a malformed alias.
+- **Bounds.** Note frontmatter `aliases` and `links` hold at most 1,000 items, like tags and records, and a record's `fields` at most 1,000 names.
+- **Routine replies.** `bf run` rejects a disabled routine before running anything, with a stderr diagnostic and no JSON reply, as it rejects an unknown one. A `--dry-run` reply no longer names an `action` path, which the real run picks anew, and reports `skipped` when the real run would skip.
+- **Skills.** `bf skills` reports `newer`, exits 1 and leaves the folder when a newer `bf` installed a different copy of a skill, such as a brain's pinned runtime sharing the skills directory; `--force` installs this version's copy. The packaged skills search, read and check every brain with the installed `bf`, never through a brain's pinned runtime, which installs and runs code the brain supplies.
+- **Heading slugs.** A heading whose title spans several lines, or whose `{#id}` sits inside emphasis, a code span, link text or an escape, gets a new slug, such as `#title-line-one-line-two`; `bf validate` reports links to the old one.
+
+Upgrade: run `uv tool upgrade brain-framework` (or update a brain's pin), then `bf skills DIR`; the skills now require Brain Framework 18. Drop empty `--brain ""` arguments from scripts and host configurations, and match the new `bf: invalid input:` line where a script parsed usage errors. Run `bf validate`: retype the identities it names for invisible characters or unreachable declarations, point links at renamed heading slugs, and fix a sensor whose records it reports, then collect again, since collection replaces its own records. Re-copy the example `git-history.py`, `github-history.py`, `local-documents.py`, `prompt-context.py`, `session-context.py` or `weekly-review.py` if your brain uses one; remove `timeout: 3600` from a `github-history.py` sensor, and note that `git-history.py --skip` with any worktree's path now skips its whole repository.
+
+### Added
+
+- Review signals follow evidence that changed: a project linked from a record whose upstream `updated` is after the note's last edit, such as an issue closed or a pull request merged, needs review, and so does a note citing a record that happened or changed since. The optional `newer` field names up to five of those items, newest first. A future event counts once it happens, and an edit always clears the flag.
+- Exact reads summarize their note: a section read states the note's `title`, `type`, `status` and `date`, and a whole read of a project, or of a note with `stale_after`, carries `tasks`, `next` and its review signals.
+- The home page reviews every current project, lists those needing review first, ends near the 32 KiB page budget and reports `projects_total`. Its actions, changed and upcoming items carry the same review signals, so an action or concept past `stale_after` shows there, and deprecated notes leave every home section.
+- `bf validate` warns, without failing, about record `links` that are neither identities nor URLs and about a temporary file an interrupted write left behind, and checks programs launched through a command, such as `[uv, run, ..., sensors/brief.py]`.
+- `bf schedule` warns when its interval is at or above the shortest selected `refresh`; `bf status` usage windows gain `since` when heavy use cut them.
+- `bf register` at a moved brain's new place replaces the entry whose folder no longer exists, or which reaches the same brain through another path, and reports `replaced`.
+- A Python whose SQLite is older than 3.35 or lacks FTS5 or JSON functions fails with a message naming the requirement and the fix, instead of a misleading cache error.
+
+### Fixed
+
+- Search keeps the English word `comment`, and a quoted word is always a search term. `one`, `ones`, `doing`, `having`, `ours`, `yours`, `theirs` and `hers` drop like other function words: stemming made them match nearly every passage.
+- Note leads and task text keep identifiers such as `MAX_FILE_SIZE`, `deploy_all.sh`, `2*3` and link refs such as `_drafts/`.
+- Reading a record, and its relation page, lists links to its `SOURCE:ID` from other selected brains, as search did; review signals skip names that several items claim, as backlinks do.
+- A large read's `outline` lists only the headings inside it, so an H1-only note or a section without subsections fills its first page instead of pointing back to itself. With several brains, pages fit their items within the 32 KiB budget once refs are named by address.
+- A refresh loads `bf.yaml` once: a `bf.yaml` briefly invalid during an editor save no longer leaves the files indexed meanwhile skipped until `bf build`. A killed build's `.bf/index.sqlite.new` is removed, and each skipped file's error is cut to 1 KiB so a few hostile files cannot push replies past their limit.
+- Parsing a note with many repeated headings, or a long run of `[^`, takes linear time instead of stalling search, validation and section reads.
+- A heading anchor is read from the heading's source, and generated `-N` slugs skip explicit anchors. An indented OKF footnote definition keeps its link, which supports the section that first cites it.
+- A link Python cannot parse, such as `http://[your-host]/`, or a relative link holding a backslash no longer makes a copied document unsearchable; link errors name the line or frontmatter key.
+- `bf validate` reports each problem of a note once, names where a link problem first occurs, no longer turns links to a note's entity into false "unresolved BF target" problems, and reports a record link whose scheme case differs from its source, such as `Mail:m1`.
+- A huge hex or octal YAML integer is invalid YAML instead of a crash of every search over the brain and its references. Validation messages name at most five problems, then how many more, and sensor output is checked record by record, so malformed output or frontmatter cannot build megabytes of error text.
+- An unreadable top-level folder is skipped and reported while the rest of the brain answers, Unix sockets are reported as special files, and empty `brains:`, `fields:`, `sensors:`, `routines:` or `watch:` sections read as empty.
+- A `--brain` path without `bf.yaml` fails naming the selection before anything runs, a registered brain whose folder is absent fails with the registry's message, and `bf register` keeps a name whose folder exists but cannot be reached.
+- A window collection that ends before it runs, such as a backfill chunk, extends coverage without counting as a fresh collection. A `log` routine is no longer killed past `max_bytes`; its log keeps the last 256 KiB.
+- A program ended by a signal fails with `program was killed by SIGKILL` instead of `exited with status -9`. An action folder left with only a killed write's temporary file no longer makes the routine skip for the day.
+- Collection checks projected records against the record bounds and validates each record once.
+- `bf schedule` previews copy from `~/.config/bf-schedules`, where its warning suggests writing, and `--output DIR` no longer fails when DIR holds the state directory.
+- A disabled program fails with `sensor NAME is disabled in bf.yaml; set enabled: true to run it` instead of suggesting its own name. `bf run --hook EVENT` reads standard input only when a routine lists the hook, so an unlisted hook succeeds at once in agent shells.
+- Diagnostics and MCP error text escape control and format characters from file names and keys, and replies escape every Unicode format character, so a shared brain can neither send terminal escape sequences nor hide text. MCP error text hides brain roots, the registry and the home directory.
+- A closed or full standard output fails with one line and exit 1 instead of a traceback or exit 120; closing the terminal under `bf watch` exits 130.
+- `bf watch` shows bf's own diagnostic when `bf.yaml` becomes invalid or drops a selected program, `notifications: success` and `all` alert while another program keeps failing, and the details panel shows local time.
+- `bf skills` finishes an interrupted install or update instead of reporting its own partial copy as `unmanaged` or as your edits.
+- MCP integer arguments accept integral floats such as `5.0`; `tags/LABEL/` and `bf eval --path evals/` accept a trailing slash; default brain names fold accents (`Équipe produit` becomes `equipe-produit`).
+- The example `git-history.py` collects repositories whose scanned checkouts are only worktrees, once each; `github-history.py` pages by modification time and reads merge state from the issue listing, one request per 100 items instead of one more per pull request; `local-documents.py` skips Office owner files; the example hooks and weekly review name items by `bf://` address across brains.
+- The skills run helpers with an installed Python 3.14 when `python3` is older (`uv python find --system --no-config --no-project 3.14`), never through `uv run`, which adopts a `.venv` above the working directory, and they review a brain's `.venv/`, `uv.toml` and `.python-version` before running its pin. The guarded-write helper names its temporary file like bf's own writes.
+
+### Changed
+
+- `bf mcp` validates its brain selection at startup, then resolves it again for each call, so registry changes need no restart.
+- Faster: a full build creates its schema in one transaction, a search after an edit scans the brain once, problem checks use an index, record commits count files without a stat each, home computes review signals in one query, and validation parses each note once.
+- Identity search no longer repeats an untyped link beside a typed one from the same origin; usage history keeps 30 days; help and errors name arguments `QUERY`, `REF`, `SENSOR`, `PATH` and `DIR`.
+- The contract gate checks configuration schemas for narrowing and reply schemas from the reader's side; `mise run check` validates the changelog, and a hung test ends the run after 300 seconds.
+- The documentation, skills and examples describe this release: identity rules, review signals, invalid-input lines, the pinned-runtime review and the new limits. Reference pages own each contract and guides link to them.
+
 ## [v17.0.0](https://github.com/fmind/brain-framework/releases/tag/v17.0.0) - 2026-10-02
 
 A review release. The brain format (`version: 7`), `bf.yaml` and the search and read reply schemas are unchanged. The command line is stricter, so input that was silently misread now fails, and failures that took down a whole brain are now contained.

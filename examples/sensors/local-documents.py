@@ -279,7 +279,8 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
             for entry in sorted(selected, key=lambda item: item.name):
                 relative = prefix + entry.name
                 if (
-                    entry.name.startswith(".")
+                    # Office writes a binary `~$name.docx` owner file beside a document while it is open.
+                    entry.name.startswith((".", "~$"))
                     or entry.name in SKIP
                     or any(fnmatch.fnmatchcase(relative, pattern) for pattern in excluded)
                 ):

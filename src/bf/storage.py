@@ -30,6 +30,11 @@ _TEMPORARY = re.compile(r"\.write-[0-9a-f]{32}")
 UNNAMED = "file name is not valid UTF-8 or contains a backslash; rename it"
 
 
+def temporary(path: str) -> bool:
+    """A file an interrupted write left behind: BF names its temporaries `.write-HEX`, never a note or an input."""
+    return _TEMPORARY.fullmatch(path.rsplit("/", 1)[-1]) is not None
+
+
 def unnamed(path: str) -> bool:
     """Whether a scanned path names an entry that `scan` could only show escaped, never open or index."""
     return "\\" in path
@@ -111,6 +116,11 @@ class Store:
             except OSError as error:
                 if error.errno == errno.ELOOP:
                     raise Error(f"{name}: symlinks are not followed; replace it with a regular file") from error
+                # A Unix socket fails to open before the type check below: ENXIO on Linux, EOPNOTSUPP on macOS.
+                if error.errno in {errno.ENXIO, errno.EOPNOTSUPP} and not stat.S_ISREG(
+                    os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode
+                ):
+                    raise Error(f"{name}: expected a regular file") from error
                 raise
             with os.fdopen(fd, "rb") as stream:
                 info = os.fstat(stream.fileno())
@@ -186,14 +196,20 @@ class Store:
             if durable:
                 os.fsync(parent)
 
-    def sync(self, directory: str) -> None:
-        """Persist the entries that writes and deletes with `durable=False` changed in one directory."""
-        with self.parent(directory) as (parent, leaf):
+    @contextmanager
+    def _directory(self, name: str) -> Iterator[int]:
+        """A descriptor of one directory, reached and opened without following links."""
+        with self.parent(name) as (parent, leaf):
             descriptor = os.open(leaf, _DIR, dir_fd=parent)
         try:
-            os.fsync(descriptor)
+            yield descriptor
         finally:
             os.close(descriptor)
+
+    def sync(self, directory: str) -> None:
+        """Persist the entries that writes and deletes with `durable=False` changed in one directory."""
+        with self._directory(directory) as descriptor:
+            os.fsync(descriptor)
 
     def sweep(self, directory: str) -> None:
         """Remove the temporary files that killed `write` calls left directly in a directory.
@@ -202,21 +218,15 @@ class Store:
         a live write. Removal need not be durable: a file a crash brings back is removed again.
         """
         try:
-            with self.parent(directory) as (parent, leaf):
-                descriptor = os.open(leaf, _DIR, dir_fd=parent)
-        except OSError as error:
-            if error.errno in {errno.ENOENT, errno.ELOOP, errno.ENOTDIR}:
-                # Nothing to sweep; the caller's own access names a linked or special directory.
-                return
-            raise
-        try:
-            with os.scandir(descriptor) as entries:
+            with self._directory(directory) as descriptor, os.scandir(descriptor) as entries:
                 for entry in entries:
                     if _TEMPORARY.fullmatch(entry.name) and entry.is_file(follow_symlinks=False):
                         with suppress(FileNotFoundError):
                             os.unlink(entry.name, dir_fd=descriptor)
-        finally:
-            os.close(descriptor)
+        except OSError as error:
+            # Nothing to sweep; the caller's own access names a linked or special directory.
+            if error.errno not in {errno.ENOENT, errno.ELOOP, errno.ENOTDIR}:
+                raise
 
     def rmdir(self, name: str) -> None:
         """Remove an empty directory without following links."""
@@ -238,15 +248,18 @@ class Store:
         skipped: dict[str, tuple[int, int, int, int]] | None = None,
         split: bool = False,
         counts: dict[str, int] | None = None,
+        fingerprints: bool = True,
     ) -> dict[str, tuple[int, int, int, int]]:
         """Regular files below a directory, fingerprinted by the traversal's own no-follow stats.
 
         Symlinks, special files and names BF cannot address are never followed. They fail the scan, or, when
         the caller passes `skipped`, land there with their own fingerprint so the caller can report them and
-        carry on; an unaddressable name lands under its escaped form, for which `unnamed` holds.
+        carry on; an unaddressable name lands under its escaped form, for which `unnamed` holds. So does a folder
+        BF cannot read, the scanned one included.
         Each traversed tree holds at most MAX_FILES entries, counting directories and ignored extensions: the whole
         directory, or with `split`, its own listing and each subdirectory's tree, such as one source of memories/.
-        `counts` receives the entries of each tree.
+        `counts` receives the entries of each tree. Without `fingerprints`, the directory listing alone types regular
+        files and folders, without a stat each, and their fingerprints are zero.
         """
         relative(directory)
         result: dict[str, tuple[int, int, int, int]] = {}
@@ -262,11 +275,16 @@ class Store:
                         raise Error(f"{tree} exceeds the {MAX_FILES:,}-entry scan limit; {_crowded(tree)}")
                     path = f"{prefix}/{entry.name}"
                     shown = _shown(entry.name)
-                    info = None
+                    stamp = _UNSTATED
                     try:
-                        info = entry.stat(follow_symlinks=False)
+                        # The listing types regular files and folders; fingerprints, links and special files need
+                        # the entry's own no-follow stat.
+                        mode = 0 if fingerprints else _listed(entry)
+                        if not mode:
+                            info = entry.stat(follow_symlinks=False)
+                            mode, stamp = info.st_mode, _fingerprint(info)
                         # An unaddressable folder is reported whole, like a linked one: its entries have no ref.
-                        opened = stat.S_ISDIR(info.st_mode) and shown is None
+                        opened = stat.S_ISDIR(mode) and shown is None
                         child = os.open(entry.name, _DIR, dir_fd=fd) if opened else None
                     except FileNotFoundError:
                         # Removed after listing, as by an editor's atomic save; later refreshes compare again.
@@ -275,61 +293,84 @@ class Store:
                         # An unreadable folder is reported whole too, while the rest of the brain still answers.
                         if skipped is None:
                             raise
-                        skipped[f"{prefix}/{shown}" if shown is not None else path] = (
-                            _fingerprint(info) if info else (0, 0, 0, 0)
-                        )
+                        skipped[f"{prefix}/{shown}" if shown is not None else path] = stamp
                         continue
                     if shown is not None:
                         if skipped is None:
                             raise Error(f"{prefix}/{shown}: {UNNAMED}")
-                        skipped[f"{prefix}/{shown}"] = _fingerprint(info)
+                        skipped[f"{prefix}/{shown}"] = stamp
                         continue
                     if child is not None:
                         try:
                             visit(child, path, path if split and prefix == directory else tree)
                         finally:
                             os.close(child)
-                    elif stat.S_ISREG(info.st_mode):
-                        result[path] = _fingerprint(info)
+                    elif stat.S_ISREG(mode):
+                        result[path] = stamp
                     elif skipped is not None:
-                        skipped[path] = _fingerprint(info)
+                        skipped[path] = stamp
                     else:
                         raise Error(f"{path}: symlinks and special files are forbidden")
 
         fd = os.open(self.root, _DIR)
         try:
-            try:
-                prefix = []
-                for part in relative(directory):
-                    prefix.append(part)
+            prefix = []
+            for part in relative(directory):
+                prefix.append(part)
+                stamp = _UNSTATED
+                try:
                     info = os.stat(part, dir_fd=fd, follow_symlinks=False)
-                    if not stat.S_ISDIR(info.st_mode):
-                        path = "/".join(prefix)
-                        if skipped is None:
-                            raise Error(f"{path}: expected a directory; symlinks and special files are forbidden")
-                        skipped[path] = _fingerprint(info)
-                        return {}
-                    child = os.open(part, _DIR, dir_fd=fd)
-                    os.close(fd)
-                    fd = child
-            except FileNotFoundError:
-                return {}
+                    stamp = _fingerprint(info)
+                    child = os.open(part, _DIR, dir_fd=fd) if stat.S_ISDIR(info.st_mode) else None
+                except FileNotFoundError:
+                    return {}
+                except PermissionError:
+                    # Like a nested folder: an unreadable projects/ or memories/ leaves the rest of the brain answering.
+                    if skipped is None:
+                        raise
+                    skipped["/".join(prefix)] = stamp
+                    return {}
+                if child is None:
+                    path = "/".join(prefix)
+                    if skipped is None:
+                        raise Error(f"{path}: expected a directory; symlinks and special files are forbidden")
+                    skipped[path] = stamp
+                    return {}
+                os.close(fd)
+                fd = child
             visit(fd, directory, directory)
         finally:
             os.close(fd)
         return result
 
+    def _status(self, name: str) -> os.stat_result:
+        with self.parent(name) as (parent, leaf):
+            return os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+
+    def mode(self, name: str) -> int:
+        """An entry's own type and permission bits, never a link target's; FileNotFoundError when it is absent."""
+        return self._status(name).st_mode
+
     def lstat(self, name: str) -> os.stat_result:
         """A regular file's own status, never a link target's."""
-        with self.parent(name) as (parent, leaf):
-            info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode):
+        if not stat.S_ISREG((info := self._status(name)).st_mode):
             raise Error(f"{name}: expected a regular file")
         return info
 
     def fingerprint(self, name: str) -> tuple[int, int, int, int]:
         """Size, mtime, ctime and inode: ctime catches an edit whose mtime was preserved."""
         return _fingerprint(self.lstat(name))
+
+
+def _listed(entry: os.DirEntry[str]) -> int:
+    """The type of a regular file or folder as its directory entry states it, usually without a stat; else 0."""
+    if entry.is_file(follow_symlinks=False):
+        return stat.S_IFREG
+    return stat.S_IFDIR if entry.is_dir(follow_symlinks=False) else 0
+
+
+# The fingerprint of an entry the scan did not stat: a name-only listing, or a folder it could not reach.
+_UNSTATED = (0, 0, 0, 0)
 
 
 def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:

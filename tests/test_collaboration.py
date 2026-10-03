@@ -118,10 +118,40 @@ def test_action_helper_creates_two_sessions_without_replacing_work(brain: Store)
     today = date.today().isoformat()
     assert created[0] == f"actions/{today}_review/ACTION.md"
     for path in created[1:]:
-        assert re.fullmatch(rf"actions/{today}_review-[0-9a-f]{{8}}/ACTION\.md", path)
+        assert re.fullmatch(rf"actions/{today}_review-[0-9a-f]{{12}}/ACTION\.md", path)
     assert len(set(created)) == 3
     assert validate(brain)["valid"]
     assert all(brain.read(path).startswith(b"---\ntype: action") for path in created)
+
+
+def test_a_session_named_after_a_routine_never_counts_as_its_action(brain: Store) -> None:
+    # A routine skips a day that already holds its own action; a person's suffixed session must not be taken for one.
+    brain.write(
+        "bf.yaml", b"version: 7\nname: fixture\nroutines:\n  review:\n    command: [fake]\n    output: action\n"
+    )
+    script = Path(__file__).parents[1] / "src/bf/skills/bf-use/scripts/new-action.py"
+    reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
+        [sys.executable, str(script), "review", "--brain", str(brain.root), "--unique"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    session = json.loads(reply.stdout)["action"]
+    before = brain.read(session)
+    day = date.fromisoformat(session.removeprefix("actions/")[:10])
+    result = routine(
+        brain,
+        "review",
+        start="2026-09-26T00:00:00Z",
+        end="2026-09-27T00:00:00Z",
+        runner=lambda *_: b"---\ntype: action\nstatus: draft\n---\n# Review\n",
+        clock=lambda: datetime(day.year, day.month, day.day, 12, tzinfo=UTC),
+    )
+    assert "skipped" not in result
+    assert re.fullmatch(rf"actions/{day}_review-[0-9a-f]{{8}}/ACTION\.md", str(result["action"]))
+    assert brain.read(str(result["action"])).startswith(b"---\ntype: action")
+    assert brain.read(session) == before
 
 
 def test_action_helper_refuses_redirected_actions(brain: Store, tmp_path: Path) -> None:

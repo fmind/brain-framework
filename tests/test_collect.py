@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -23,8 +24,8 @@ from bf import records
 from bf.cli import app
 from bf.collect import Runner, collect, due, run
 from bf.health import source_health
-from bf.history import LOG_LIMIT, environment, log_path, state
-from bf.models import Error, Program, Sensor, timestamp
+from bf.history import LOG_LIMIT, SENSORS, environment, log_path, remember, state
+from bf.models import MAX_FIELDS, Error, Program, Record, Sensor, encode, timestamp
 from bf.storage import BusyError, Store, state_store, writer
 from bf.update import update
 from bf.watch import snapshot
@@ -134,14 +135,14 @@ def test_invalid_output_writes_nothing_and_is_remembered(
 
 
 def test_provider_keys_never_reach_errors_or_history(configured: Store) -> None:
-    for output in [
-        b'[{"id":"x","title":"A","From: ceo@corp.example Subject: layoffs":1}]',
-        b'[{"id":"x","title":"A","fields":{"From: ceo@corp.example":1}}]',
+    for output, match in [
+        (b'[{"id":"x","title":"A","From: ceo@corp.example Subject: layoffs":1}]', "one JSON array.*<key>"),
+        # Collection maps fields itself: printed ones fail before validation, whatever their keys.
+        (b'[{"id":"x","title":"A","fields":{"From: ceo@corp.example":1}}]', "record 0: .* not precomputed fields"),
     ]:
-        with pytest.raises(Error, match="one JSON array") as failure:
+        with pytest.raises(Error, match=match) as failure:
             collect(configured, "sample", start=START, end=END, runner=lambda *_, data=output: data)
         assert "ceo@corp" not in str(failure.value)
-        assert "<key>" in str(failure.value)
         assert "ceo@corp" not in str(state(configured)["sample"]["error"])
 
 
@@ -157,9 +158,46 @@ def test_provider_relation_names_never_reach_errors_history_or_status(configured
     assert "link relation is undeclared" in status.stdout
 
 
+def test_large_invalid_output_reports_only_its_first_invalid_record(configured: Store) -> None:
+    # Before, each invalid item added a diagnostic: megabytes of error text, log heading and run history.
+    invalid: list[dict[str, object]] = [{"id": f"item-{n}"} for n in range(50_000)]
+    output = emit({"id": "valid", "title": "Valid"}, *invalid)
+    message = "collector must print one JSON array of records: 1.title: Field required; nothing was written"
+    with pytest.raises(Error, match=re.escape(message)):
+        collect(configured, "sample", start=START, end=END, runner=lambda *_: output)
+    assert state(configured)["sample"]["error"] == message
+    assert records.files(configured, "sample") == []
+
+
+def test_printed_fields_fail_by_their_rule_whatever_their_keys(configured: Store) -> None:
+    # Validation would name the 1,000-name bound or each invalid key instead of the rule the sensor broke.
+    printed: dict[str, object] = {"id": "x", "title": "t", "fields": {f"Key {n}": n for n in range(100_000)}}
+    message = "record 1: sensors must supply mapped output, not precomputed fields; nothing was written"
+    with pytest.raises(Error, match=re.escape(message)):
+        collect(
+            configured, "sample", start=START, end=END, runner=lambda *_: emit({"id": "ok", "title": "OK"}, printed)
+        )
+    assert records.files(configured, "sample") == []
+
+
+def test_the_observed_stamp_cannot_push_a_record_over_the_size_bound(configured: Store) -> None:
+    # Fields other than text exactly at the bound: valid as printed, but not once collection stamps `observed`.
+    padding = MAX_FIELDS - len("xt") - len(encode({"blob": ""})) - len(encode({}))
+    printed: dict[str, object] = {"id": "x", "title": "t", "attributes": {"blob": "a" * padding}}
+    assert Record.model_validate(printed)
+    with pytest.raises(Error, match=r"sample: record 0: fields other than text exceed 2 MiB.*; nothing was written"):
+        collect(configured, "sample", start=START, end=END, runner=lambda *_: emit(printed), clock=lambda: NOW)
+    assert records.files(configured, "sample") == []
+
+
 def test_collection_requires_a_known_enabled_source_and_a_window(configured: Store, tmp_path: Path) -> None:
-    for name in ["absent", "disabled"]:
-        with pytest.raises(Error, match="unknown or disabled"):
+    # An unknown name suggests only sensors that can run; a disabled one says how to enable it.
+    for name, message in [
+        ("sampel", "unknown sensor sampel; check names in bf.yaml; did you mean sample?"),
+        ("absent", "unknown sensor absent; check names in bf.yaml"),
+        ("disabled", "sensor disabled is disabled in bf.yaml; set enabled: true to run it"),
+    ]:
+        with pytest.raises(Error, match=f"^{re.escape(message)}$"):
             collect(configured, name, start=START, end=END, runner=lambda *_: b"[]")
     for start, end in [(END, START), ("2026-09-01", END)]:
         with pytest.raises(Error, match="start"):
@@ -235,23 +273,61 @@ def test_failed_programs_back_off_exponentially_up_to_their_refresh(configured: 
     assert pending(at + timedelta(minutes=1))
 
 
-def test_real_process_boundary(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+def background(pidfile: Path, output: str = ">/dev/null 2>&1") -> str:
+    """A shell prefix that starts a descendant outliving its leader and records the descendant's pid."""
+    return f"sleep 30 {output} & echo $! > {shlex.quote(str(pidfile))}; "
+
+
+def ended(pidfile: Path) -> bool:
+    """Whether a recorded descendant is gone, a zombie included, within two seconds; one that survived is killed."""
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 2
+    while status := subprocess.run(  # noqa: S603 - inspect only a synthetic program's descendant
+        ["ps", "-o", "stat=", "-p", str(pid)],  # noqa: S607 - POSIX process-boundary check
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    ).stdout.strip():
+        if status.startswith("Z"):
+            break
+        if time.monotonic() > deadline:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def test_real_process_boundary(configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setenv("LD_PRELOAD", "/bad.so")
     log = configured.root / log_path("sample")
+    finished = tmp_path / "finished"
     source = Sensor(command=["sh"], timeout=1, max_bytes=128)
-    assert run(["sh", "-c", 'printf "[]"; printf "$LD_PRELOAD note" >&2'], source, configured, "sample") == b"[]"
+    script = background(finished) + 'printf "[]"; printf "$LD_PRELOAD note" >&2'
+    assert run(["sh", "-c", script], source, configured, "sample") == b"[]"
+    # A finished program's whole process group ends with it, as after any failure below.
+    assert ended(finished)
     # One entry per run: a heading with the local time, outcome and duration, then the program's stderr.
     assert re.fullmatch(r"== \S+ exited with status 0 after [0-9.]+s ==\n note\n", log.read_text())
     assert log.stat().st_mode & 0o077 == 0
     assert log.parent.stat().st_mode & 0o077 == 0
-    for script, match in [
-        ("printf private-secret >&2; exit 7", "status 7"),
-        ("sleep 5", "timed out"),
-        ("while :; do printf abc; done", "max_bytes"),
-    ]:
+    for number, (script, match) in enumerate(
+        [
+            ("printf private-secret >&2; exit 7", "status 7"),
+            ("sleep 5", "timed out"),
+            # Output beyond max_bytes from a program that already exited: a group that survives fails, never hangs.
+            ("head -c 4096 /dev/zero; exit 0", "max_bytes"),
+            ("while :; do printf abc; done", "max_bytes"),
+        ]
+    ):
+        pidfile = tmp_path / f"descendant-{number}"
+        started = time.monotonic()
         with pytest.raises(Error, match=match) as failure:
-            run(["sh", "-c", script], source, configured, "sample")
+            run(["sh", "-c", background(pidfile) + script], source, configured, "sample")
+        assert ended(pidfile), script
+        assert time.monotonic() - started < 3, script
         # Provider output reaches the private log, never the error.
         assert "private-secret" not in str(failure.value)
     entries = log.read_text().split("== ")[1:]
@@ -259,6 +335,7 @@ def test_real_process_boundary(configured: Store, monkeypatch: pytest.MonkeyPatc
         "exited with status 0",
         "program exited with status 7",
         "program timed out after 1s",
+        "program output exceeded max_bytes",
         "program output exceeded max_bytes",
     ]
     assert "private-secret" in entries[1]
@@ -287,20 +364,42 @@ def test_programs_select_the_executing_brain(
 
 
 def test_background_descendants_cannot_hold_a_finished_program(
-    configured: Store, monkeypatch: pytest.MonkeyPatch
+    configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     log = configured.root / log_path("sample")
+    pidfile = tmp_path / "descendant"
     source = Sensor(command=["sh"], timeout=30)
     started = time.monotonic()
     # A helper that inherits only stderr, such as an SSH master, holds diagnostics, not the result.
-    script = 'sleep 30 >/dev/null & printf "[]"; printf note >&2'
+    script = background(pidfile, ">/dev/null") + 'printf "[]"; printf note >&2'
     assert run(["sh", "-c", script], source, configured, "sample") == b"[]"
     assert log.read_text().endswith("==\nnote\n")
+    assert ended(pidfile)
     # Output still open after the program exited may be incomplete: fail quickly with the cause.
+    holder = tmp_path / "holder"
     with pytest.raises(Error, match="kept its stdout open"):
-        run(["sh", "-c", 'sleep 30 & printf "[]"'], source, configured, "sample")
+        run(["sh", "-c", background(holder, "") + 'printf "[]"'], source, configured, "sample")
+    assert ended(holder)
     assert time.monotonic() - started < 10
+
+
+@pytest.mark.parametrize(
+    ("signum", "name"),
+    [
+        (signal.SIGKILL, "SIGKILL"),
+        # Real-time signals between SIGRTMIN and SIGRTMAX have no name in Python.
+        pytest.param(40, "signal 40", marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux signal")),
+    ],
+)
+def test_a_program_killed_by_a_signal_names_it(
+    configured: Store, monkeypatch: pytest.MonkeyPatch, signum: int, name: str
+) -> None:
+    # Before, the out-of-memory killer's SIGKILL read as `exited with status -9`.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    with pytest.raises(Error, match=f"^program was killed by {name}$"):
+        run(["sh", "-c", f"kill -{int(signum)} $$"], Sensor(command=["sh"]), configured, "sample")
+    assert f"program was killed by {name} after" in (configured.root / log_path("sample")).read_text()
 
 
 def test_brain_collectors_run_from_the_brain_root(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -753,6 +852,64 @@ def test_manual_window_sensor_coverage_follows_its_latest_run(configured: Store,
     since, until = timestamp((later - timedelta(days=1)).isoformat()), timestamp(later.isoformat())
     report = source_health(configured, now=later)["manual"]
     assert (report["last_collected"], report["window"]) == (until, {"since": since, "until": until})
+    # A contiguous window that stops before its run extends the coverage but is no collection, manual or not.
+    chunk, ran = timestamp((later + timedelta(minutes=30)).isoformat()), later + timedelta(hours=1)
+    collect(configured, "manual", start=since, end=chunk, runner=lambda *_: b"[]", clock=lambda: ran)
+    report = source_health(configured, now=ran)["manual"]
+    assert (report["last_collected"], report["window"]) == (until, {"since": since, "until": chunk})
+
+
+def test_a_window_ending_before_its_run_extends_coverage_without_claiming_freshness(configured: Store) -> None:
+    collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]", clock=lambda: NOW)
+    # Ten days later, as after a pause, a backfill chunk adjacent to the coverage stops seven days short of now.
+    later, chunk = NOW + timedelta(days=10), timestamp((NOW + timedelta(days=3)).isoformat())
+    collect(configured, "sample", start=END, end=chunk, runner=lambda *_: b"[]", clock=lambda: later)
+    entry = state(configured)["sample"]
+    assert (entry["start"], entry["end"], entry["success"]) == (START, chunk, END)
+    # Before, the chunk counted as a fresh collection, which also hid the source from search replies' coverage.
+    health = source_health(configured, now=later)["sample"]
+    assert (health["freshness"], health["last_collected"]) == ("overdue", END)
+    assert health["window"] == {"since": START, "until": chunk}
+    # The next update resumes from the chunk's end, with overlap, and brings the coverage up to date.
+    report = cast("Any", update(configured, now=later, sensors=("sample",), runner=lambda *_: b"[]"))
+    assert report["sensors"][0]["start"] == timestamp((NOW + timedelta(days=3, minutes=-5)).isoformat())
+    entry, current = state(configured)["sample"], timestamp(later.isoformat())
+    assert (entry["start"], entry["end"], entry["success"]) == (START, current, current)
+
+
+def test_a_first_window_ending_in_the_past_is_coverage_not_a_collection(configured: Store) -> None:
+    # Like the first monthly chunk of a history backfill.
+    january = ("2020-01-01T00:00:00.000000Z", "2020-02-01T00:00:00.000000Z")
+    collect(configured, "sample", start=january[0], end=january[1], runner=lambda *_: b"[]", clock=lambda: NOW)
+    health = source_health(configured, now=NOW)["sample"]
+    assert (health["freshness"], health["window"]) == ("never", {"since": january[0], "until": january[1]})
+    assert "last_collected" not in health
+    # Never collected up to now, the source is due at once and catches up the last 30 days.
+    assert [window[1] for window in due(configured, NOW) if window[0] == "sample"] == [
+        timestamp((NOW - timedelta(days=30)).isoformat())
+    ]
+
+
+def test_a_default_collect_covers_through_its_own_run(configured: Store) -> None:
+    # The command and the collection share one clock: a run without --until reaches the instant it ran.
+    configured.write(
+        "bf.yaml", CONFIG.replace(b"  manual:\n    command: [echo]", b'  manual:\n    command: [echo, "[]"]')
+    )
+    result = CliRunner().invoke(app, ["collect", "manual", "--brain", str(configured.root)])
+    assert result.exit_code == 0, result.output
+    entry = state(configured)["manual"]
+    assert entry["success"] == entry["end"] == entry["run"]
+
+
+def test_invalid_run_history_fails_its_write_instead_of_erasing_the_entry(configured: Store) -> None:
+    collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]", clock=lambda: NOW)
+    saved = state(configured)
+    # The next read would drop the whole entry: the program would show `never` and restart its window.
+    with writer(configured):
+        for values in ({"failures": -1}, {"unexpected": 1}, {"success": "yesterday"}):
+            with pytest.raises(Error, match=r"^sample: invalid run history: "):
+                remember(configured, "sample", SENSORS, **values)
+    assert state(configured) == saved
 
 
 def test_failed_run_history_reports_that_records_were_committed(

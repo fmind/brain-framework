@@ -81,7 +81,7 @@ EOF
 
 Git shows the hook's reply. The first commit passes with `{"dry_run":false,"hook":"pre-commit","ok":true,"routines":[{"routine":"validate","status":"ran"}]}`. The second note links to a missing `plan.md`, so the hook reports `"status":"failed"`, exits 1 and Git refuses the commit. `bf run validate` fails the same way; the log's last entries hold the validation reply, with the problem `{"error":"broken link: plan.md","file":"projects/launch.md"}`, then the failure line.
 
-`bf validate` checks the working tree, including unstaged edits, not only the staged snapshot. A routine with `output: log`, the default, keeps its output in `logs/NAME.log`; `bf init` ignores `logs/` in Git. For a `pre-push` hook, use `exec bf run --hook pre-push "$@"`: Git's arguments and the ref lines it pipes reach each routine.
+`bf validate` checks the working tree, including unstaged edits, not only the staged snapshot. A routine with `output: log`, the default, keeps its output in `logs/NAME.log`; `bf init` ignores `logs/` in Git. For `pre-push` hooks and pinned brains, see [Run routines from hooks](../../docs/docs/routines.md#run-routines-from-hooks).
 
 ## Use the weekly review in your brain
 
@@ -100,7 +100,9 @@ Preview the review before creating an action. Run from the brain folder with Pyt
 routines/weekly-review.py "$PWD" 2026-09-27T12:00:00Z
 ```
 
-Output starting with OKF metadata (`type: action`, `status: draft`) is the review; empty output means there is nothing to review. Its Coming week lists each item by its `date`, or by the local time `bf read` returns, with its offset, such as `2026-09-26 11:00+02:00`. The timestamp sets the note's date; page reads use the current brain. `bf run weekly-review` creates the action now, and `bf update` creates it when due. A second run on the same day keeps the existing action.
+Output starting with OKF metadata (`type: action`, `status: draft`) is the review; empty output means there is nothing to review. Its Coming week lists each item by its `date`, or by the local time `bf read` returns, with its offset, such as `2026-09-26 11:00+02:00`. The timestamp sets the note's date; page reads use the current brain. `bf run weekly-review` creates the action now, and `bf update` creates it when due. A second run on the same day reports `"status":"skipped"` and keeps the existing action; `bf run weekly-review --dry-run` returns the review as `text` without writing it, but still runs the routine.
+
+The routine reads the brain BF passes as `{{brain}}` with the first `bf` on PATH; a scheduled run uses the PATH that `bf schedule` captured. In a brain that [pins its runtime](../../docs/docs/upgrades.md#pin-a-brains-runtime), run `bf update`, `bf watch` and `bf schedule` through the pin so that this `bf` is the pinned release.
 
 ## Contract
 
@@ -109,8 +111,8 @@ Output starting with OKF metadata (`type: action`, `status: draft`) is the revie
 - Python 3.11+ standard library only, `#!/usr/bin/env python3`, executable bit set, no shell.
 - Deterministic: the same pages produce the same Markdown. No model, network or provider call; read the brain through `bf read` and `bf search` with literal arguments.
 - An `output: action` routine prints one OKF action or nothing. BF validates its metadata and declared links before writing. Use `status: draft|stable|deprecated` for note maturity and checkboxes for work progress.
-- Link only notes needing review, using returned `uri` values or, when items omit them, paths relative to the action: links from a dated action count as newer evidence for their targets. Name other notes and records by ref; do not copy record titles into authored notes.
+- Link only notes needing review, using returned `uri` values or, when items omit them, paths relative to the action: links from a dated action count as newer evidence for their targets. Name other notes and records by their returned `uri`, or by ref when items omit it: two selected brains can hold the same ref. Do not copy record titles into authored notes.
 - A failed or incomplete page (`problems`, `stale`) exits nonzero with nothing on stdout and one generic sentence on stderr; BF then writes nothing and retries after the [failure backoff](../../docs/docs/sensors.md#collect-and-update).
-- Project review follows every `next_offset`, up to 100 pages (20,000 projects), and fails before writing when a continuation stalls.
+- Project review follows every `next_offset`, up to 100 pages, and fails before writing when a continuation stalls or more pages remain.
 - Task counts cover the selected notes; up to ten open tasks are previewed with source refs and lines, as plain bullets that duplicate no checkbox. Follow `bf read tasks` for the complete list.
 - A routine never edits notes: people and agents read its action and update the owning notes.

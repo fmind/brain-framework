@@ -18,6 +18,8 @@ from bf.storage import Store, expand, writer, xdg_setting
 from bf.update import selection
 
 Backend = Literal["auto", "systemd", "launchd", "cron"]
+# The files hold this machine's paths: a preview suggests, and its commands copy from, a folder outside the brain.
+DEFAULT_OUTPUT = Path("~/.config/bf-schedules")
 
 
 def _literal(value: str) -> str:
@@ -62,10 +64,11 @@ def generate(
         )
     config = load(store)
     selected_sensors, selected_routines = selection(config, sensors, routines)
-    selected = [config.sensors[item] for item in selected_sensors] + [
-        config.routines[item] for item in selected_routines
+    selected = [(item, config.sensors[item]) for item in selected_sensors] + [
+        (item, config.routines[item]) for item in selected_routines
     ]
-    if not any(program.enabled and program.refresh for program in selected):
+    scheduled = sorted((program.refresh, item) for item, program in selected if program.enabled and program.refresh)
+    if not scheduled:
         raise Error("selection contains no enabled scheduled programs; configure a nonzero refresh first")
     executable = executable or Path(sys.executable).parent / "bf"
     executable = expand(executable).absolute()
@@ -97,12 +100,19 @@ def generate(
         "Use one owner for each selected program; avoid overlapping watch and native schedules.",
         "PATH and XDG locations are captured; credentials and other environment variables are not copied.",
     ]
+    refresh, fastest = scheduled[0]
+    if every * 60 >= refresh:
+        # A slower check can be deliberate: warn, since a program is due only once its refresh has passed.
+        warnings.append(
+            f"{fastest} refreshes every {refresh}s, but the timer checks every {every} minutes: it will run late and "
+            "status can report it overdue. Choose an --every shorter than the shortest refresh."
+        )
     files: dict[str, str]
     install: list[list[str]]
     status: list[list[str]]
     remove: list[list[str]]
     # Like other brain-relative options, a relative output directory resolves against the brain root.
-    source = Path(os.path.normpath(store.root / (expand(output) if output else "settings/schedules")))
+    source = Path(os.path.normpath(store.root / expand(output or DEFAULT_OUTPUT)))
     if backend == "systemd":
         service = label + ".service"
         timer = label + ".timer"
@@ -193,7 +203,7 @@ def generate(
     written: list[str] = []
     if output is None:
         warnings.append(
-            "Preview only: no file was written; rerun with --output ~/.config/bf-schedules before the install commands."
+            f"Preview only: no file was written; rerun with --output {DEFAULT_OUTPUT} before the install commands."
         )
     else:
         if source.is_symlink():
@@ -206,7 +216,9 @@ def generate(
         else:
             source.mkdir(mode=0o700, parents=True, exist_ok=True)
             destination, prefix = Store(source), ""
-        with writer(destination):
+        # File names embed the brain: its own lock serializes generation, wherever the files go. An outside folder
+        # is no brain, and may even hold the state directory where locks live.
+        with writer(store, wait=30):
             for filename, content in files.items():
                 try:
                     existing = destination.read(prefix + filename)

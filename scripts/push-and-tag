@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Push main, wait for CI on that exact commit, then tag it: a failed push, a missing CI run or any unsuccessful
-# conclusion exits before the tag exists. Run it as its own command from the clean release worktree; as a separate
-# process, its checks hold whatever shell calls it (`set -e` inside `( ... )` does not after `&&`).
+# conclusion exits before the tag exists, and a failed tag push deletes the local tag so that a rerun retries. Run it as
+# its own command from the clean release worktree; as a separate process, its checks hold whatever shell calls it
+# (`set -e` inside `( ... )` does not after `&&`).
 set -euo pipefail
 
 version=${1:?usage: scripts/push-and-tag X.Y.Z}
@@ -63,5 +64,10 @@ if [[ ${conclusion} != success ]]; then
   exit 1
 fi
 git tag -a "${tag}" -m "${tag}" "${commit}"
-git push origin "${tag}"
+if ! git push origin "refs/tags/${tag}"; then
+  # A rerun repeats every check and stops if origin received the tag after all.
+  git tag -d "${tag}" >/dev/null
+  echo "push-and-tag: pushing ${tag} failed; the local tag was deleted, so rerun to retry" >&2
+  exit 1
+fi
 echo "push-and-tag: pushed ${tag} at ${commit} after CI run ${run} succeeded"

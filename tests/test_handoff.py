@@ -105,7 +105,6 @@ def test_handoff_context_byte_boundary(provider: Provider, size: int) -> None:
         {**reply("context", CONTEXT), "next_offset": 0},
         {**reply("context", CONTEXT), "page": "actions"},
         {**reply("context", CONTEXT), "offset": 1024},
-        reply("context", "## Context {#context}\n\n"),
         {**reply("context", CONTEXT), "text": 17},
         {**reply("context", CONTEXT), "ref": f"{ACTION}#other"},
         {**reply("context", CONTEXT), "brain": "../../private"},
@@ -123,6 +122,18 @@ def test_handoff_unavailable_input_never_passes_or_leaks(provider: Provider, con
     assert not report["passed"]
     assert "context is unavailable" in report["error"]
     assert "PRIVATE CONTENT" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("text", ["## Context {#context}\n\n", "## Context {#context}", "## Context\n \n\t\n"])
+def test_handoff_names_an_empty_section_instead_of_blaming_the_read(provider: Provider, text: str) -> None:
+    # new-action.py writes headings without bodies: the read succeeds, so `bf read` would show nothing wrong.
+    install(provider, reply("context", text))
+    result = execute(provider)
+    report = json.loads(result.stdout)
+    assert result.returncode == 1
+    assert not report["checked"]
+    assert not report["passed"]
+    assert report["error"] == "context is empty; write it before a handoff"
 
 
 def test_handoff_rejects_oversized_bf_reply(provider: Provider) -> None:
@@ -143,6 +154,15 @@ def test_handoff_rejects_cross_brain_sections_and_missing_resume(provider: Provi
     assert result.returncode == 1
     assert "resume is unavailable" in json.loads(result.stdout)["error"]
     assert json.loads(result.stdout)["sections"]["context"]["passed"]
+
+
+def test_handoff_rejects_an_empty_brain_before_reading(provider: Provider) -> None:
+    install(provider)
+    # bf would refuse it as invalid input anyway: the helper says so without calling bf.
+    result = execute(provider, ACTION, "--brain", " ")
+    assert (result.returncode, result.stdout) == (2, "")
+    assert "--brain needs a brain name or path" in result.stderr
+    assert not provider.calls("bf")
 
 
 def test_handoff_qualified_ref_must_match_the_returned_brain(provider: Provider) -> None:
@@ -246,6 +266,15 @@ def test_real_handoff_fails_a_paged_context(brain: Store) -> None:
     assert report["sections"]["context"]["characters"] == len(context) > pages.BUDGET
     assert not report["sections"]["context"]["passed"]
     assert report["sections"]["resume"]["passed"]
+
+
+def test_real_handoff_of_a_new_action_names_its_empty_context(brain: Store) -> None:
+    brain.write(
+        ACTION, b"---\ntype: action\nstatus: draft\n---\n\n# Website\n\n## Context {#context}\n\n" + RESUME.encode()
+    )
+    result = real(brain)
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error"] == "context is empty; write it before a handoff"
 
 
 def test_real_handoff_keeps_existing_brain_files_unchanged(brain: Store) -> None:

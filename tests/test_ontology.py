@@ -1,4 +1,4 @@
-"""Schema contracts preserve roles and make the derived graph recoverable from records."""
+"""Schema contracts preserve relations and make the derived graph recoverable from records."""
 
 from __future__ import annotations
 
@@ -59,8 +59,8 @@ sensors:
 """
 
 
-def role(brain: Store, identity: str, relation: str) -> list[str]:
-    """Refs linking to an identity through one explicit role, from its read."""
+def linking(brain: Store, identity: str, relation: str) -> list[str]:
+    """Refs linking to an identity through one explicit relation, from its read."""
     groups = cast(list[dict], read([brain], identity)["backlinks"])
     return [i["ref"] for g in groups if g.get("relation") == relation for i in g["items"]]
 
@@ -71,15 +71,15 @@ def ingest(brain: Store, values: list[dict]) -> dict:
     )
 
 
-def test_roles_replacement_aliases_and_cache_rebuild(brain: Store) -> None:
+def test_relations_replacement_aliases_and_cache_rebuild(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     brain.write("projects/alice.md", b"---\ntype: person\naliases: [person:alice, account:alice]\n---\n# Alice\n")
     first = {"id": "one", "title": "Planning", "attributes": {"from": "person:alice", "to": ["person:bob"]}}
     second = {"id": "two", "title": "Reply", "attributes": {"from": "person:bob", "to": ["person:alice"]}}
     assert ingest(brain, [first, second])["added"] == 2
-    assert role(brain, "person:alice", "sender") == ["mail:one"]
-    assert role(brain, "account:alice", "sender") == ["mail:one"]
-    assert role(brain, "person:alice", "recipient") == ["mail:two"]
+    assert linking(brain, "person:alice", "sender") == ["mail:one"]
+    assert linking(brain, "account:alice", "sender") == ["mail:one"]
+    assert linking(brain, "person:alice", "recipient") == ["mail:two"]
     assert search([brain], Query(text="message"))["items"]
     assert cast(dict, read([brain], "mail:one")["record"])["fields"] == {
         "sender": "person:alice",
@@ -89,11 +89,11 @@ def test_roles_replacement_aliases_and_cache_rebuild(brain: Store) -> None:
     assert validate(brain)["valid"]
     with writer(brain):
         brain.delete(index.CACHE)
-    assert role(brain, "person:alice", "sender") == ["mail:one"]
+    assert linking(brain, "person:alice", "sender") == ["mail:one"]
     first["attributes"]["from"] = "person:carol"
     ingest(brain, [first])
-    assert role(brain, "person:alice", "sender") == []
-    assert role(brain, "person:alice", "recipient") == ["mail:two"]
+    assert linking(brain, "person:alice", "sender") == []
+    assert linking(brain, "person:alice", "recipient") == ["mail:two"]
     with writer(brain):
         records.upsert(brain, "mail", [], snapshot=True)
     assert read([brain], "person:alice")["backlinks"] == []
@@ -126,6 +126,8 @@ def test_invalid_batch_writes_nothing_and_does_not_leak(brain: Store) -> None:
         ("timestamp", "2026-01-01", False),
         ("identity", "person:alice", True),
         ("identity", "Alice", False),
+        ("identity", "person:ali\u200bce", False),
+        ("identity", "person:alice\ufeff", False),
         ("string", "", False),
         ("string", "a" * 8193, False),
         ("string", {}, False),
@@ -136,7 +138,7 @@ def test_scalar_contracts(kind: str, value: JsonValue, valid: bool) -> None:
     if valid:
         assert field.normalize(value) is not None
     else:
-        with pytest.raises(ValueError, match=r"expected|requires|exceeds|nonempty"):
+        with pytest.raises(ValueError, match=r"expected|requires|exceeds|nonempty|invisible"):
             field.normalize(value)
 
 
@@ -175,7 +177,7 @@ def test_config_contracts_and_pointer_escaping() -> None:
 def test_schema_change_invalidates_cache_and_bad_record_is_reported(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     ingest(brain, [{"id": "one", "title": "Mail", "attributes": {"from": "person:alice"}}])
-    assert role(brain, "person:alice", "sender") == ["mail:one"]
+    assert linking(brain, "person:alice", "sender") == ["mail:one"]
     brain.write("bf.yaml", CONFIG.replace(b"relation: true", b"relation: false"))
     with pytest.raises(Error, match="not found"):
         read([brain], "person:alice")
@@ -195,12 +197,12 @@ def test_schema_edits_keep_every_stored_identity_edge(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     values = {"from": "person:alice", "to": ["person:bob"], "category": "urgent"}
     ingest(brain, [{"id": "one", "title": "Planning", "attributes": values}])
-    assert role(brain, "person:bob", "recipient") == ["mail:one"]
+    assert linking(brain, "person:bob", "recipient") == ["mail:one"]
     # A declared relation keeps its stored identities whatever cardinality it now has.
     many = b"    cardinality: many\n    relation: true\n    examples: [[person:bob, person:carol]]\n"
     retyped = CONFIG.replace(many, b"    cardinality: optional\n    relation: true\n")
     brain.write("bf.yaml", retyped)
-    assert role(brain, "person:bob", "recipient") == ["mail:one"]
+    assert linking(brain, "person:bob", "recipient") == ["mail:one"]
     assert "field recipient" in str(validate(brain)["problems"])
     # A value stored before its field became an identity names none, so it claims nothing.
     retyped = retyped.replace(b"    type: string\n  kind:", b"    type: identity\n    relation: true\n  kind:")
@@ -225,7 +227,7 @@ def test_cli_mcp_and_evaluation_share_relationship_pages(brain: Store) -> None:
     assert asyncio.run(call())["backlinks"] == cli["backlinks"]
     assert invoke("search", "mail", "--scope", "person:alice")["items"][0]["ref"] == "mail:one"
     brain.write(
-        "evals/roles.yaml",
+        "evals/relations.yaml",
         b"version: 7\ncases:\n- name: sender\n  read: person:alice\n  expect: [mail:one]\n  text: [sender]\n",
     )
     brain.write(
@@ -233,7 +235,7 @@ def test_cli_mcp_and_evaluation_share_relationship_pages(brain: Store) -> None:
         b"version: 7\ncases:\n- name: absent\n  read: person:unknown\n  empty: true\n",
     )
     assert evaluate(brain)["score"] == "2/2"
-    assert evaluate(brain, "evals/roles.yaml")["score"] == "1/1"
+    assert evaluate(brain, "evals/relations.yaml")["score"] == "1/1"
     for params in [{"text": "x", "relation": "sender"}, {"text": "x", "target": "Alice"}]:
         with pytest.raises(ValidationError):
             Query.model_validate(params)
@@ -269,7 +271,7 @@ def test_loaded_configurations_are_shared_frozen_and_follow_edits(brain: Store) 
 
 
 def field(**values: object) -> dict[str, object]:
-    return {"description": "A role.", "type": "identity", "cardinality": "many", "relation": True, **values}
+    return {"description": "A relation.", "type": "identity", "cardinality": "many", "relation": True, **values}
 
 
 @pytest.mark.parametrize(
@@ -340,8 +342,8 @@ def test_validate_reports_targets_that_stored_records_and_note_links_miss(brain:
         {"file": "projects/plan.md", "error": "recipient link outside the declared targets: bf://fixture/teams/core"},
     ]
     # Evidence stays readable: the claims remain until their files change.
-    assert role(brain, "team:core", "sender") == ["mail:one"]
-    assert role(brain, "bf://fixture/teams/core", "recipient") == ["projects/plan.md"]
+    assert linking(brain, "team:core", "sender") == ["mail:one"]
+    assert linking(brain, "bf://fixture/teams/core", "recipient") == ["projects/plan.md"]
 
 
 def test_reprojection_applies_current_mappings_to_stored_records(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -350,7 +352,7 @@ def test_reprojection_applies_current_mappings_to_stored_records(brain: Store, m
     second = {"id": "two", "title": "Reply", "attributes": {"from": "person:bob"}}
     ingest(brain, [first, second, {**second, "id": "three"}])
     before = {name: brain.read(name) for name in records.files(brain, "mail")}
-    # Rename a role: stored records keep the old field, which no longer builds an edge, until reprojected.
+    # Rename a relation: stored records keep the old field, which no longer builds an edge, until reprojected.
     renamed = CONFIG.replace(b"  sender:\n", b"  author:\n").replace(b"      sender: {", b"      author: {")
     brain.write("bf.yaml", renamed)
     assert "field sender is not declared in bf.yaml fields" in str(validate(brain)["problems"])
@@ -366,7 +368,7 @@ def test_reprojection_applies_current_mappings_to_stored_records(brain: Store, m
     assert (done["changed"], done["unchanged"], done["failed"]) == (3, 0, 0)
     assert cast(dict, done["index"])["skipped"] == 0
     assert validate(brain)["valid"]
-    assert role(brain, "person:alice", "author") == ["mail:one"]
+    assert linking(brain, "person:alice", "author") == ["mail:one"]
     stored = records.load(brain, records.path("mail", "one"))
     assert stored.fields == {"author": "person:alice", "recipient": ["person:bob"], "kind": "message"}
     # Collection's own time and every other stored value stay as they were.
@@ -415,3 +417,26 @@ def test_broader_and_targets_keep_the_cache_like_other_read_time_settings(brain:
         "bf.yaml", CONFIG.replace(b"    type: string\n  kind:", b"    type: string\n    cardinality: many\n  kind:")
     )
     assert index.refresh(brain)["changed"] == 4
+
+
+def test_identity_search_lists_a_typed_link_once(brain: Store) -> None:
+    brain.write("bf.yaml", CONFIG)
+    # Like git-history, the sensor emits the sender both as a link and as a mapped relation.
+    ingest(
+        brain, [{"id": "one", "title": "Planning", "links": ["person:alice"], "attributes": {"from": "person:alice"}}]
+    )
+    items = cast(list[dict], search([brain], Query(text="person:alice"))["items"])
+    assert [(item["ref"], item["relations"]) for item in items] == [
+        (
+            "mail:one",
+            [
+                {
+                    "subject": "bf://fixture/mail:one",
+                    "relation": "sender",
+                    "target": "person:alice",
+                    "origin": "bf://fixture/mail:one",
+                }
+            ],
+        )
+    ]
+    assert linking(brain, "person:alice", "sender") == ["mail:one"]

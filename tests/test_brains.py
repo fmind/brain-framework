@@ -20,6 +20,7 @@ from bf.models import Error, Query
 from bf.retrieve import read, search
 from bf.storage import Store
 from bf.update import update
+from bf.validate import validate
 
 
 def make(root: Path, name: str, references: dict[str, str] | None = None) -> Store:
@@ -282,7 +283,7 @@ def test_enclosing_discovery_requires_your_ownership(tmp_path: Path, monkeypatch
     # Another account's bf.yaml above the working directory is never trusted implicitly, as in Git.
     monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
     for selection in (select, execution):
-        with pytest.raises(Error, match=r"planted: bf\.yaml is not a regular file owned by you; pass --brain PATH"):
+        with pytest.raises(Error, match=r"^\.\./bf\.yaml is not a regular file owned by you; pass --brain PATH"):
             selection()
     result = CliRunner().invoke(app, ["update", "--dry-run"])
     assert result.exit_code == 1
@@ -401,3 +402,47 @@ def test_a_newer_referenced_format_is_named(tmp_path: Path) -> None:
             "error": "brains.team: bf.yaml declares version 8; this release reads version: 7",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["search", "durable"], ["read", "projects"], ["export"], ["status"], ["validate"], ["eval"], ["build"]],
+    ids=lambda command: command[0],
+)
+def test_a_folder_without_bf_yaml_is_named_before_anything_is_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: list[str]
+) -> None:
+    brain = make(tmp_path / "brain", "brain")
+    # Passing a subfolder or the parent of the brain is a common mistake; eval once blamed missing suites instead.
+    for folder in (brain.root / "projects", tmp_path):
+        result = CliRunner().invoke(app, [*command, "--brain", str(folder)])
+        assert result.exit_code == 1, result.output
+        assert f"{folder} has no bf.yaml; pass the brain's root directory" in str(result.exception)
+        assert not (folder / ".bf").exists()
+    # A registered brain whose bf.yaml went missing, by name or as the only registered brain.
+    register(brain)
+    brain.delete("bf.yaml")
+    for arguments in ([*command, "--brain", "brain"], command):
+        result = CliRunner().invoke(app, arguments)
+        # Named as selected: the resolved directory never appears, as MCP errors require.
+        assert str(result.exception).startswith("registered brain brain has no bf.yaml"), arguments
+    assert not (brain.root / ".bf").exists()
+    monkeypatch.setenv("BF_BRAIN", str(brain.root / "projects"))
+    with pytest.raises(Error, match=r"has no bf\.yaml"):
+        execution()
+
+
+def test_a_huge_integer_in_a_referenced_note_leaves_every_brain_answering(tmp_path: Path) -> None:
+    first = make(tmp_path / "first", "first", {"team": "../team"})
+    team = make(tmp_path / "team", "team")
+    team.write("bf.yaml", b"version: 7\nname: team\nfields:\n  count:\n    description: A count.\n    type: integer\n")
+    # A hex literal escapes Python's digit limit for decimal text; printing it in a reply or the cache once crashed.
+    team.write("concepts/count.md", b"---\ntype: concept\nfields: {count: 0x" + b"f" * 3600 + b"}\n---\n# Count\n")
+    found = cast(dict, search([first], Query(text="durable")))
+    assert {item["brain"] for item in found["items"]} == {"first", "team"}
+    assert found["problems"] == [
+        {"brain": "team", "file": "concepts/count.md", "error": "invalid YAML at line 3, column 17"}
+    ]
+    assert "team durable answer" in str(read([first], "bf://team/projects/example.md")["text"])
+    # Validation once passed the brain, since the value is an integer.
+    assert not validate(team)["valid"]

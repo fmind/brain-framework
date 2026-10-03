@@ -20,6 +20,13 @@ JSON: TypeAlias = "bool | int | float | str | list[JSON] | dict[str, JSON] | Non
 MAX_REPLY = 4 << 20  # UTF-8 bytes of one bf reply, and characters of one assembled text.
 PAGING = ("offset", "next_offset", "total_characters", "outline", "outline_truncated")
 MAX_INPUT = 9 << 20  # Two bounded bf replies, plus the small capture envelope.
+# The set bf replies escape: DEL and C1 controls, which JSON leaves raw and some terminals obey, such as U+009B CSI,
+# and every Unicode format character (category Cf), such as bidi controls and zero-width and tag characters.
+CONTROLS = re.compile(
+    "[\x7f-\x9f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064"
+    "\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
+    "\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]"
+)
 
 
 def object_value(value: JSON) -> dict[str, JSON]:
@@ -29,7 +36,19 @@ def object_value(value: JSON) -> dict[str, JSON]:
 
 
 def encode(value: JSON) -> bytes:
+    """The canonical form that capture digests cover."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def escape(match: re.Match[str]) -> str:
+    """A character's JSON escape: one `\\uXXXX` per UTF-16 code unit, so a surrogate pair beyond U+FFFF."""
+    units = match[0].encode("utf-16-be").hex()
+    return "".join(f"\\u{units[start : start + 4]}" for start in range(0, len(units), 4))
+
+
+def terminal(value: JSON) -> bytes:
+    """`encode` for output, escaping controls as bf does: the decoded value and its digest stay the same."""
+    return CONTROLS.sub(escape, encode(value).decode()).encode()
 
 
 def unique(pairs: list[tuple[str, JSON]]) -> dict[str, JSON]:
@@ -210,7 +229,7 @@ def main() -> int:
             sys.stderr.write("evidence: expected an exact ref and a brain name or path\n")
             return 2
         try:
-            output = encode(exact(ref, brain))
+            output = terminal(exact(ref, brain))
         except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, RecursionError):
             sys.stderr.write("evidence: bf read failed or changed while reading; inspect the exact read and retry\n")
             return 1
@@ -234,7 +253,7 @@ def main() -> int:
         if remaining:
             raise ValueError("unexpected trailing input")
         result = capture(values[0]) if count == 1 else compare(values[0], values[1])
-        output = encode(result)
+        output = terminal(result)
     except (ValueError, TypeError, RecursionError):
         # Parser errors may quote private data. Do not copy them into logs or stdout.
         sys.stderr.write("evidence: invalid or incomplete input; supply exact bf reads and an intact capture\n")

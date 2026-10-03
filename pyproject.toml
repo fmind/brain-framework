@@ -1,7 +1,7 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "17.0.0"
+version = "18.0.0"
 description = "🧠 Brain Framework: from information to informed actions."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -129,8 +129,10 @@ ignore = [
 
 [tool.pytest]
 addopts = ["-ra"]
-# Dump every thread's traceback when a test hangs instead of stalling until the CI timeout (a string option).
-faulthandler_timeout = "120"
+# A test still running after 300 seconds dumps every thread's traceback and ends the run, long before CI's 30-minute job
+# timeout. Subprocess waits in tests stay within 120 seconds. The timeout is a string option.
+faulthandler_timeout = "300"
+faulthandler_exit_on_timeout = true
 filterwarnings = ["error"]
 strict = true
 testpaths = ["tests"]
@@ -140,6 +142,9 @@ branch = true
 source = ["bf"]
 # Skill helpers run as separate processes with the agent's python3; their tests exercise them there.
 omit = ["*/bf/skills/*"]
+# Also measure Python subprocesses, such as `python -m bf`, which pytest-cov 7 no longer does; one started with a fresh
+# environment stays unmeasured. Each writes a .coverage.* file that the run combines.
+patch = ["subprocess"]
 
 [tool.coverage.report]
 fail_under = 95

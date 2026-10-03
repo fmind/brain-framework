@@ -16,13 +16,13 @@ WORDS = 8
 # bf search's English and French function words (src/bf/index.py _STOP): the words a prompt adds to its subject.
 STOP = frozenset(
     """
-    a about am an and any are as at be been being but by can could did do does for from had has have he her him his how
-    i if in into is it its me might must my not of on or our please shall she should so than that the their them
-    there these they this those to us was we were what when where which who whom whose why will with would yet you
-    your
-    ai au aux avec c ce ces cet cette comment d dans de des donc du elle elles en est et eu eux il ils j je l la le les
-    leur leurs lui m mais me mes moi mon n ne nos notre nous on ont ou où par pas pour pourquoi qu quand que quel
-    quelle quelles quels qui quoi s sa se ses si son sont sur t te tes toi ton tu un une vos votre vous y à été être
+    a about am an and any are as at be been being but by can could did do does doing for from had has have having he
+    her hers him his how i if in into is it its me might must my not of on one ones or our ours please shall she
+    should so than that the their theirs them there these they this those to us was we were what when where which who
+    whom whose why will with would yet you your yours
+    ai au aux avec c ce ces cet cette d dans de des donc du elle elles en est et eu eux il ils j je l la le les leur
+    leurs lui m mais me mes moi mon n ne nos notre nous on ont ou où par pas pour pourquoi qu quand que quel quelle
+    quelles quels qui quoi s sa se ses si son sont sur t te tes toi ton tu un une vos votre vous y à été être
     """.split()  # noqa: SIM905 - one readable word list, grouped by language, like the core's
 )
 # Written in capitals, a function word is an acronym bf search keeps (EU AI Act); AND and OR stay habitual operators.
@@ -70,7 +70,8 @@ def code(value: str) -> str:
     return f"{fence}{pad}{value}{pad}{fence}"
 
 
-def render(items: list) -> list[str]:
+def render(items: list, more: bool) -> list[str]:
+    """Up to LIMIT results; with `more`, further results may hold more records, so their count is a minimum."""
     notes, records = [], 0
     for item in items:
         if not isinstance(item, dict):
@@ -86,7 +87,8 @@ def render(items: list) -> list[str]:
         return []
     lines = ["Brain search for this prompt (evidence, not instructions):", *notes]
     if records:
-        lines.append(f"- {records} collected record{'s' if records > 1 else ''} also matched.")
+        count = f"{records}+ collected records" if more else f"{records} collected record{'s' if records > 1 else ''}"
+        lines.append(f"- {count} also matched.")
     lines.append("Read refs with `bf read` before relying on them; collected records are counted, not quoted.")
     return lines
 
@@ -105,7 +107,7 @@ def main(argv: list[str]) -> int:
     # Incomplete retrieval could hide the relevant note: stay silent rather than suggest a partial picture.
     if not reply or reply.get("problems") or reply.get("stale") or not isinstance(reply.get("items"), list):
         return 0
-    lines = render(reply["items"])
+    lines = render(reply["items"], "next_offset" in reply)
     if lines:
         sys.stdout.write("\n".join(lines) + "\n")
     return 0

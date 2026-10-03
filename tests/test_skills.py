@@ -22,6 +22,7 @@ from markdown_it import MarkdownIt
 from typer.core import TyperGroup
 
 from bf import __version__, cli, retrieve
+from bf.install import BLOCKED
 from bf.install import SKILLS as INSTALLED
 from bf.storage import Store
 from bf.validate import validate
@@ -106,6 +107,35 @@ def test_skill_commands_and_options_exist() -> None:
     assert found > 80
 
 
+def test_skills_never_retrieve_through_a_brain_pinned_runtime() -> None:
+    # `uv run --project BRAIN` installs and runs what the brain's uv.lock names: offline commands and helpers use the
+    # installed bf, so a shared brain gains no code execution from a search. Only reviewed execution goes through it.
+    # A helper never runs through `uv run`, even with --no-project: it adopts a .venv in the working directory or a
+    # parent, and uv before 0.12 reads the uv.toml there. `uv python find --system --no-config --no-project` reads
+    # neither, nor the brain's pyproject.toml.
+    pinned = re.compile(
+        r"uv\s+run\s+(?:-\S+\s+(?:(?!bf\s)\S+\s+)?)*"
+        r"(?:bf\s+(?:search|read|status|validate|eval|export|mcp|COMMAND|--version)\b|python3?\s|\S*scripts/)"
+        r"|uv\s+python\s+find\s+(?!--system\s+--no-config\s+--no-project\s)"
+    )
+    for name, text in TEXTS.items():
+        assert not pinned.search(text), name
+        # Retrieval and note updates never go through a pin, whatever `bf ...` command a sentence names.
+        if name.startswith("src/bf/skills/bf-use/") or name == "src/bf/cli.py:AGENTS":
+            assert not re.search(r"\buv\s+run\b", text), name
+    assert pinned.search("uv run --project PATH --locked bf COMMAND ... --brain PATH")
+    assert pinned.search("uv run --project PATH --locked bf read REF")
+    assert pinned.search('uv run --project PATH --locked python3 "$SKILL_DIR/scripts/evidence.py"')
+    assert pinned.search('uv run --locked "$SKILL_DIR/scripts/check-handoff.py"')
+    assert pinned.search('uv run --no-project python3 "$SKILL_DIR/scripts/evidence.py"')
+    assert not pinned.search("uv run --project PATH --locked bf collect SENSOR")
+    assert pinned.search('uv run --no-project --no-config --python 3.14 "$SKILL_DIR/scripts/NAME.py"')
+    assert pinned.search('uv run -p 3.14 "$SKILL_DIR/scripts/NAME.py"')
+    assert pinned.search("uv python find --no-config 3.14")
+    assert pinned.search("uv python find --system --no-config 3.14")
+    assert not pinned.search('"$(uv python find --system --no-config --no-project 3.14)" "$SKILL_DIR/scripts/NAME.py"')
+
+
 def test_skill_links_resolve_to_this_checkout() -> None:
     found = 0
     for name, text in TEXTS.items():
@@ -148,6 +178,16 @@ def test_each_skill_file_is_reachable_from_its_router(entry: Path) -> None:
 @pytest.mark.parametrize("entry", ENTRIES, ids=lambda path: path.parent.name)
 def test_skill_routers_stay_short(entry: Path) -> None:
     assert len(entry.read_text(encoding="utf-8").split()) <= WORDS
+
+
+def test_blocking_skill_statuses_are_explained_where_bf_skills_is_run() -> None:
+    # An unexplained status invites --force, which replaces a person's edits or downgrades a newer bf's copy.
+    for name in (
+        "src/bf/skills/README.md",
+        "src/bf/skills/bf-setup/SKILL.md",
+        "src/bf/skills/bf-maintain/references/operations.md",
+    ):
+        assert {status for status in BLOCKED if f"`{status}`" not in TEXTS[name]} == set(), name
 
 
 def test_packaged_skills_are_the_installed_ones() -> None:
@@ -210,6 +250,16 @@ def test_action_helper_writes_the_template_sections(brain: Store) -> None:
     template = (SKILLS / "bf-use/templates/action.md").read_text(encoding="utf-8")
     assert re.findall(r"^## .*", created, re.MULTILINE) == re.findall(r"^## .*", template, re.MULTILINE)
     assert validate(brain)["valid"]
+    # A quoted `~user` that names no account is invalid input, not a traceback.
+    unknown = subprocess.run(  # noqa: S603 - the bundled helper, refused before any write
+        [sys.executable, str(helper), "review", "--brain", "~bf-no-such-user-9c4f/brain"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert (unknown.returncode, "Traceback" in unknown.stderr) == (2, False)
+    assert "home directory cannot be resolved" in unknown.stderr
 
 
 def test_action_helper_removes_only_what_a_failed_write_created(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:

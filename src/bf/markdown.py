@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import posixpath
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import date
 from functools import cache
@@ -20,12 +21,19 @@ from bf.models import AUTHORED, IDENTITY, MAX_ENCODED, Error, Knowledge, address
 
 if TYPE_CHECKING:
     from markdown_it import MarkdownIt
+    from markdown_it.token import Token
 
 LEAD = 320
 # Record titles share this bound: a note title is copied into every listing and search row.
 MAX_TITLE = 4096
-_FOOTNOTE = re.compile(r"^\[\^([^\]\s]+)\]:", re.MULTILINE)
+# An OKF claim footnote's definition, `[^id]:`, at the start of a line, after a list item's indentation or a quote.
+# An id holds no `[`: each citation scan then stops at the next one, so a long run of `[^` parses in linear time.
+_FOOTNOTE = re.compile(r"([ \t>]*)\[\^([^\[\]\s]+)\]:")
+_CITATION = re.compile(r"\[\^([^\[\]\s]+)\]")
 _TASK = re.compile(r"\[([ xX])\]\s+(\S.*)")
+# Emphasis markers open or close a word; inside one, `_` and `*` belong to identifiers and arithmetic (MAX_SIZE, 2*3).
+_EMPHASIS = re.compile(r"(?<![\w\]])[*_`]{1,3}|[*_`]{1,3}(?![\w(])")
+_CODE = re.compile(r"`+([^`]*)`+")
 
 
 @dataclass(frozen=True)
@@ -49,11 +57,10 @@ class Task:
 @dataclass
 class Markdown:
     text: str
-    body: str
     attributes: dict[str, object]
     headings: list[Heading]
-    links: list[str]
-    contexts: list[tuple[str, str]]
+    # Each link as written, with the section it supports and its source line.
+    contexts: list[tuple[str, str, int]]
     # Task list items in document order, with their containing section and source line.
     tasks: list[Task] = field(default_factory=list)
     # The first body line after any frontmatter.
@@ -79,9 +86,11 @@ class Note:
     passages: list[Passage]
     slugs: set[str] = field(default_factory=set)
     targets: list[str] = field(default_factory=list)
-    contexts: list[tuple[str, str]] = field(default_factory=list)
+    # Each body link as written, with the section it supports and its source line; frontmatter `links` and OKF
+    # `sources` support the whole note.
+    contexts: list[tuple[str, str, int]] = field(default_factory=list)
     tasks: list[Task] = field(default_factory=list)
-    # OKF `sources` resources: whole-note `cites` claims unless a BF link names another role.
+    # OKF `sources` resources: whole-note `cites` claims unless a BF link names another relation.
     sources: list[str] = field(default_factory=list)
 
     @property
@@ -142,16 +151,24 @@ def parse(path: str, data: bytes) -> Markdown:
             except Error:
                 if okf(path):
                     raise
-    body = "".join(source_lines[offset:])
     # OKF claim footnotes (`[^id]: [Source](ref)`) are not link reference definitions in CommonMark;
     # parse them as ordinary lines so their links are checked, on a copy with the same line numbers.
-    tokens = _parser().parse(_FOOTNOTE.sub(r"\1:", body))
-    headings: list[Heading] = []
-    links: list[str] = []
-    contexts: list[tuple[str, str]] = []
+    copy: list[str] = []
+    # The footnote each definition line starts: its links support the section that first cites it, not the
+    # section where the definition happens to sit, usually the last one.
+    definitions: dict[int, str] = {}
+    for number, line in enumerate(source_lines[offset:], offset + 1):
+        definition = _FOOTNOTE.match(line)
+        if definition:
+            definitions[number] = definition[2]
+        copy.append(definition.expand(r"\1\2:") + line[definition.end() :] if definition else line)
+    tokens = _parser().parse("".join(copy))
+    headings = _headings(path, tokens, offset)
+    sections = iter(headings)
+    # Each link with its section, line and footnote, then the section first citing each footnote.
+    found: list[tuple[str, str, int, str]] = []
+    cited: dict[str, str] = {}
     tasks: list[Task] = []
-    used: set[str] = set()
-    explicit: set[str] = set()
     fragment = ""
     quoted = 0
     for i, token in enumerate(tokens):
@@ -159,62 +176,106 @@ def parse(path: str, data: bytes) -> Markdown:
             quoted += 1
         elif token.type == "blockquote_close":
             quoted -= 1
-        if token.type == "heading_open" and token.map is not None:
-            inline = tokens[i + 1]
-            title = "".join(
-                child.content for child in inline.children or [] if child.type in {"text", "code_inline", "image"}
-            )
-            # An anchor id holds no `{` or `#`, so only the last `{#` can start one: no regex backtracking.
-            start = title.rfind("{#")
-            anchor = (
-                re.fullmatch(r"\{#([A-Za-z0-9][A-Za-z0-9_.-]*)\}", title[start:])
-                if start > 0 and title[start - 1].isspace()
-                else None
-            )
-            if anchor:
-                title = title[:start].rstrip()
-                if anchor[1].endswith(".md"):
-                    # `note.md#part.md` would read as a file name, not a section.
-                    raise Error(f"{path}: explicit heading anchors cannot end in .md")
-            # A heading without word characters still needs an addressable, non-empty slug.
-            stem = slug = anchor[1] if anchor else slugify(title) or "section"
-            if slug in used and (anchor or slug in explicit):
-                raise Error(f"{path}: duplicate explicit heading anchor")
-            if anchor:
-                explicit.add(slug)
-            suffix = 0
-            while slug in used:
-                suffix += 1
-                slug = f"{stem}-{suffix}"
-            used.add(slug)
-            headings.append(Heading(slug, title, int(token.tag[1:]), token.map[0] + offset, token.map[1] + offset))
-            fragment = slug
+        elif token.type == "heading_open" and token.map is not None:
+            fragment = next(sections).slug
+        if token.type != "inline" or token.map is None:
+            continue
         # A task is an unquoted list paragraph starting with [ ] or [x]; code blocks never produce one.
         if (
-            token.type == "inline"
-            and not quoted
-            and token.map is not None
+            not quoted
             and i >= 2
             and (tokens[i - 1].type, tokens[i - 2].type) == ("paragraph_open", "list_item_open")
             and (task := _TASK.match(token.content.split("\n", 1)[0]))
         ):
             tasks.append(Task(task[1] != " ", _task(path, task[2])[:LEAD], fragment, token.map[0] + offset + 1))
+        # Each line break moves to the next source line, so a link names its own line; a code span, image
+        # description or HTML tag spanning lines can only make it an earlier line of the same paragraph. A footnote
+        # holds the lines from its definition on.
+        at = token.map[0] + offset + 1
+        footnote = definitions.get(at, "")
         for child in token.children or []:
+            if child.type in {"softbreak", "hardbreak"}:
+                at += 1
+                footnote = definitions.get(at, footnote)
+            elif child.type == "text":
+                # Only text cites: `[^1]` in a code span is an example.
+                for citation in _CITATION.findall(child.content):
+                    cited.setdefault(citation, fragment)
             # An embedded image is a link too, so validation catches a missing asset; inline data names no target.
-            if child.type not in {"link_open", "image"}:
-                continue
-            target = str(child.attrGet("href" if child.type == "link_open" else "src"))
-            if child.type == "image" and target.lower().startswith("data:"):
-                continue
-            # Split local URL fragments before decoding: %23 is part of a filename.
-            # BF parses each component before decoding; external queries keep their original meaning.
-            links.append(target)
-            contexts.append((target, fragment))
-    return Markdown(text, body, attributes, headings, links, contexts, tasks, offset)
+            elif child.type in {"link_open", "image"}:
+                target = str(child.attrGet("href" if child.type == "link_open" else "src"))
+                # Split local URL fragments before decoding: %23 is part of a filename.
+                # BF parses each component before decoding; external queries keep their original meaning.
+                if not (child.type == "image" and target.lower().startswith("data:")):
+                    found.append((target, fragment, at, footnote))
+    contexts = [(target, cited.get(footnote, origin), at) for target, origin, at, footnote in found]
+    return Markdown(text, attributes, headings, contexts, tasks, offset)
 
 
-def section(path: str, data: bytes, fragment: str) -> str:
-    markdown = parse(path, data)
+def _title(path: str, inline: Token) -> tuple[str, str]:
+    """A heading's words and its explicit anchor, written last in its source as ` {#id}`.
+
+    The anchor is read from the source, so braces in a code span or escaped with a backslash stay words.
+    """
+    title = "".join(
+        " " if child.type in {"softbreak", "hardbreak"} else child.content
+        for child in inline.children or []
+        if child.type in {"text", "code_inline", "image", "softbreak", "hardbreak"}
+    )
+    # An anchor id holds no `{` or `#`, so only the last `{#` can start one: no regex backtracking.
+    start = inline.content.rfind("{#")
+    anchor = (
+        re.fullmatch(r"\{#([A-Za-z0-9][A-Za-z0-9_.-]*)\}", inline.content[start:])
+        if start > 0 and inline.content[start - 1].isspace()
+        else None
+    )
+    if not anchor:
+        return title, ""
+    if anchor[1].endswith(".md"):
+        # `note.md#part.md` would read as a file name, not a section.
+        raise Error(f"{path}: explicit heading anchors cannot end in .md")
+    return title.removesuffix(anchor[0]).rstrip(), anchor[1]
+
+
+def _headings(path: str, tokens: Sequence[Token], offset: int) -> list[Heading]:
+    """Headings with unique slugs: an explicit anchor, otherwise the title's slug or its next free `-N` suffix.
+
+    Generated suffixes skip every explicit anchor, wherever it appears; a title whose own slug another heading
+    anchors explicitly is ambiguous and fails, like two equal anchors.
+    """
+    titled = [
+        (int(token.tag[1:]), token.map[0] + offset, token.map[1] + offset, *_title(path, tokens[i + 1]))
+        for i, token in enumerate(tokens)
+        if token.type == "heading_open" and token.map is not None
+    ]
+    explicit = [anchor for *_, anchor in titled if anchor]
+    reserved = set(explicit)
+    if len(reserved) < len(explicit):
+        raise Error(f"{path}: duplicate explicit heading anchor")
+    used: set[str] = set()
+    # The last suffix each slug took, so repeated headings, as in a transcript, probe each suffix once.
+    last: dict[str, int] = {}
+    headings = []
+    for level, start, end, title, anchor in titled:
+        slug = anchor
+        if not anchor:
+            # A heading without word characters still needs an addressable, non-empty slug.
+            stem = slug = slugify(title) or "section"
+            if stem in reserved:
+                raise Error(f"{path}: duplicate explicit heading anchor")
+            suffix = last.get(stem, 0)
+            while slug in used or slug in reserved:
+                suffix += 1
+                slug = f"{stem}-{suffix}"
+            last[stem] = suffix
+        used.add(slug)
+        headings.append(Heading(slug, title, level, start, end))
+    return headings
+
+
+def section(path: str, data: bytes | Markdown, fragment: str) -> str:
+    """A note section's Markdown, from its bytes or from a parse the caller already holds."""
+    markdown = data if isinstance(data, Markdown) else parse(path, data)
     heading = next((h for h in markdown.headings if h.slug == fragment), None)
     if heading is None:
         slugs = [f"#{h.slug}" for h in markdown.headings]
@@ -268,6 +329,15 @@ def scheme(path: str, target: str) -> str:
         raise Error(f"{path}: invalid link") from error
 
 
+@contextmanager
+def _at(path: str, where: str) -> Iterator[None]:
+    """Name where the note writes a failing value, such as `line 12` or a frontmatter key, rather than quoting it."""
+    try:
+        yield
+    except Error as error:
+        raise Error(f"{path}: {where}: {str(error).removeprefix(f'{path}: ')}") from error
+
+
 def _sources(path: str, attributes: dict[str, object]) -> list[str]:
     sources = attributes.get("sources", [])
     if not isinstance(sources, list) or any(
@@ -287,16 +357,20 @@ def _sources(path: str, attributes: dict[str, object]) -> list[str]:
 
 def _task(path: str, markdown: str) -> str:
     """A task's words with its links kept as `[label](ref)`: a relative target becomes the brain-relative ref that
-    `bf read` opens, so the next step names what to read without another lookup."""
+    `bf read` opens, so the next step names what to read without another lookup.
 
-    def kept(match: re.Match[str]) -> str:
-        try:
-            return f"[{match[1]}]({reference(path, match[2])})"
-        except Error:
-            return match[1]
-
-    text = re.sub(r"\[([^\]]*)\]\(([^)\s]+)\)", kept, markdown[: 8 * LEAD])
-    return re.sub(r"\s+", " ", re.sub(r"(?<![\w\]])[*_`]{1,3}|[*_`]{1,3}(?![\w(])", "", text)).strip()
+    Only words and labels lose emphasis markers: a ref keeps every character, such as the `_` ending a document ID.
+    """
+    text = markdown[: 8 * LEAD]
+    words: list[str] = []
+    end = 0
+    for link in re.finditer(r"\[([^\]]*)\]\(([^)\s]+)\)", text):
+        label = _unmarked(link[1])
+        with suppress(Error):
+            label = f"[{label}]({reference(path, link[2])})"
+        words += [_unmarked(text[end : link.start()]), label]
+        end = link.end()
+    return re.sub(r"\s+", " ", "".join([*words, _unmarked(text[end:])])).strip()
 
 
 def _plain(markdown: str) -> str:
@@ -306,8 +380,12 @@ def _plain(markdown: str) -> str:
     """
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", markdown[: 8 * LEAD])
     text = re.sub(r"^#+\s*|^ {0,3}(?:-[ \t]*){3,}$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"[*_`]{1,3}", "", text)
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+", " ", _unmarked(text)).strip()
+
+
+def _unmarked(text: str) -> str:
+    """Text without emphasis markers; a code span keeps its words verbatim, such as `__init__.py`, without backticks."""
+    return "".join(part if i % 2 else _EMPHASIS.sub("", part) for i, part in enumerate(_CODE.split(text)))
 
 
 # Display and lifecycle metadata, the only frontmatter ordinary Markdown contributes.
@@ -335,11 +413,11 @@ def _knowledge(path: str, attributes: dict[str, object]) -> Knowledge:
         raise Error(f"{path}: invalid frontmatter: " + explain(error)) from error
 
 
-def note(path: str, data: bytes) -> Note:
+def note(path: str, data: bytes | Markdown) -> Note:
     if not addressable(path):
         # Every note has a BF address: links, backlinks and identities name it by that address.
         raise Error(f"{path}: path exceeds {MAX_ENCODED} characters once percent-encoded in a BF address; shorten it")
-    markdown = parse(path, data)
+    markdown = data if isinstance(data, Markdown) else parse(path, data)
     knowledge = _knowledge(path, markdown.attributes)
     if not knowledge.type:
         knowledge.type = {"projects": "project", "actions": "action", "concepts": "concept"}[path.split("/")[0]]
@@ -380,14 +458,35 @@ def note(path: str, data: bytes) -> Note:
     # OKF provenance cites its resources in each authored note format.
     # Working inputs and outputs remain ordinary Markdown, even when their filename is ACTION.md.
     sources = _sources(path, markdown.attributes) if okf(path) else []
-    targets = sorted({target for target in [*markdown.links, *knowledge.links, *sources] if target})
-    for target in targets:
-        reference(path, target)
+    # A link that cannot resolve makes the note invalid; the problem names its frontmatter key or line.
+    for key, values in (("links", knowledge.links), ("sources", sources)):
+        for target in values:
+            with _at(path, key):
+                reference(path, target)
+    unsplit: set[str] = set()
+    for target, _, line in markdown.contexts:
+        try:
+            with _at(path, f"line {line}"):
+                reference(path, target)
+        except Error:
+            # Ordinary Markdown, such as a document copied from another tool, stays searchable without a URL Python
+            # cannot split, such as http://[host]/. Only BF writers write BF links: a malformed one fails any note.
+            if okf(path) or target.lower().startswith("bf:"):
+                raise
+            unsplit.add(target)
+    contexts = [context for context in markdown.contexts if context[0] not in unsplit]
+    targets = sorted({target for target in [*(t for t, *_ in contexts), *knowledge.links, *sources] if target})
     if knowledge.entity:
-        bf_links.identity(knowledge.entity)
-    for alias in knowledge.aliases:
-        if bf_links.parse(alias):
-            bf_links.identity(alias)
+        with _at(path, "entity"):
+            bf_links.identity(knowledge.entity)
+    with _at(path, "aliases"):
+        for alias in knowledge.aliases:
+            if bf_links.parse(alias):
+                bf_links.identity(alias)
+    with _at(path, "resource"):
+        # Like an alias, a BF resource names the note; one with spaces describes a population, as OKF allows.
+        if re.fullmatch(IDENTITY, knowledge.resource) and bf_links.parse(knowledge.resource):
+            bf_links.identity(knowledge.resource)
     return Note(
         path=path,
         title=title,
@@ -396,7 +495,7 @@ def note(path: str, data: bytes) -> Note:
         passages=passages,
         slugs={h.slug for h in markdown.headings},
         targets=targets,
-        contexts=[*markdown.contexts, *((target, "") for target in knowledge.links)],
+        contexts=contexts,
         tasks=markdown.tasks,
         sources=sources,
     )
@@ -420,9 +519,11 @@ def broken(note: Note, exists: Callable[[str], bool], slugs: dict[str, set[str]]
     return problems
 
 
-def validate_okf(path: str, data: bytes) -> None:
-    """Check project, concept and action OKF v0.2 structure; retrieval remains tolerant."""
-    attributes = parse(path, data).attributes
+def validate_okf(path: str, data: bytes | Markdown) -> None:
+    """Check project, concept and action OKF v0.2 structure; retrieval remains tolerant. A caller holding the note's
+    parse passes it instead of its bytes."""
+    markdown = data if isinstance(data, Markdown) else parse(path, data)
+    attributes = markdown.attributes
     filename = PurePosixPath(path).name
     if filename == "index.md":
         allowed = {"okf_version"} if path in {"projects/index.md", "concepts/index.md"} else set()
@@ -432,7 +533,7 @@ def validate_okf(path: str, data: bytes) -> None:
     if filename == "log.md":
         if attributes:
             raise Error(f"{path}: keep OKF update logs as dated Markdown, without concept metadata")
-        for heading in parse(path, data).headings:
+        for heading in markdown.headings:
             if heading.level == 2:
                 try:
                     if date.fromisoformat(heading.title).isoformat() != heading.title:

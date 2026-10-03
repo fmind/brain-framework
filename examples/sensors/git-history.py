@@ -3,15 +3,17 @@
 
 Usage: git-history.py ROOT START END [--skip RELATIVE_REPO]...
 Requires Git 2.37 or later on PATH.
-Scans repositories one or two levels below ROOT. Automated history stays out: hidden repositories (such as
-~/.codex/memories), repositories named with --skip (such as an autonomous agent loop), commits by bots or
-reserved test domains, and internal refs such as stashes and notes.
+Scans checkouts one or two levels below ROOT and collects each repository once, however many of its worktrees
+are there. Automated history stays out: hidden repositories (such as ~/.codex/memories), repositories named
+with --skip (such as an autonomous agent loop), commits by bots or reserved test domains, and internal refs
+such as stashes and notes.
 """
 
 import json
 import os
 import re
 import selectors
+import stat
 import subprocess
 import sys
 import time
@@ -101,61 +103,93 @@ def line(value: str, fallback: str) -> str:
 AUTOMATED = re.compile(r"(\[bot\]@users\.noreply\.github\.com|@([a-z0-9-]+\.)*(invalid|test|example|localhost))$")
 
 
-def linked(marker: Path) -> bool:
-    """Whether a `.git` file names a linked worktree, whose history its main checkout already holds.
+def shared(marker: Path) -> tuple[str, bool] | None:
+    """The Git directory a checkout shares with its repository's other worktrees, and whether it is its own.
 
-    `git worktree add` writes `gitdir: COMMON/worktrees/NAME`, a folder holding a `commondir` file; a submodule's
-    `.git` file names its own repository, without one.
+    A `.git` folder is its own repository. `git worktree add` writes a `.git` file naming `COMMON/worktrees/NAME`,
+    whose `commondir` file leads back to the repository, bare or not; a submodule or `--separate-git-dir` checkout
+    names a repository of its own, without one. A malformed or pruned marker stands for itself, so Git fails there
+    by name. None means no repository: no marker, or a symlinked one. Any other OSError is an unreadable folder.
     """
-    if not marker.is_file():
-        return False
     try:
-        with marker.open("rb") as stream:
-            line = stream.read(4096).decode(errors="replace").strip()
-    except OSError:
-        return False
+        info = marker.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return os.path.realpath(marker), True
+    with marker.open("rb") as stream:
+        line = os.fsdecode(stream.read(4096)).strip()
     if not line.startswith("gitdir: "):
-        return False
-    folder = Path(line.removeprefix("gitdir: "))
-    return (folder if folder.is_absolute() else marker.parent / folder).joinpath("commondir").is_file()
+        return os.path.realpath(marker), True
+    folder = marker.parent / line.removeprefix("gitdir: ")
+    try:
+        with (folder / "commondir").open("rb") as stream:
+            common = os.fsdecode(stream.read(4096)).strip()
+    except (FileNotFoundError, NotADirectoryError):
+        return os.path.realpath(folder), True
+    return os.path.realpath(folder / common), False
 
 
-def repositories(root: Path, skip: frozenset[str]) -> tuple[list[Path], int]:
-    """Repositories one or two levels below root, and the count of folders that could not be used.
+def repositories(root: Path, skip: frozenset[str]) -> tuple[list[tuple[str, Path]], int]:
+    """Repositories checked out one or two levels below root, and the count of folders that could not be used.
 
-    An unreadable folder cannot hold a readable repository, and window mode never removes saved records, so
-    skipping one (for example a protected ~/Documents under launchd) cannot lose evidence already collected.
+    Each repository comes once, as its name and the checkout Git reads. An unreadable folder cannot hold a
+    readable repository, and window mode never removes saved records, so skipping one (for example a protected
+    ~/Documents under launchd) cannot lose evidence already collected.
     """
     skipped: set[Path] = set()
 
+    # os.scandir and lstat raise on an unreadable folder; from Python 3.14, pathlib's checks return False instead.
     def directories(parent: Path) -> list[Path]:
-        return [p for p in parent.iterdir() if not p.name.startswith(".") and not p.is_symlink() and p.is_dir()]
+        with os.scandir(root / parent) as entries:
+            return [
+                parent / entry.name
+                for entry in entries
+                if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False)
+            ]
 
-    parents = directories(root)
+    try:
+        parents = directories(Path())
+    except (FileNotFoundError, NotADirectoryError):
+        raise InvalidError("ROOT is not a directory") from None
     candidates = list(parents)
     for parent in parents:
         try:
             candidates.extend(directories(parent))
-        except PermissionError:
+        except OSError:
             skipped.add(parent)
-    found = []
+    # Worktrees share their repository's history: group checkouts by the Git directory they share.
+    groups: dict[str, list[tuple[str, bool]]] = {}
     for path in candidates:
-        relative = path.relative_to(root).as_posix()
         try:
-            marker = path / ".git"
-            # A linked worktree would collect its repository's whole history again under another name.
-            if not marker.exists() or marker.is_symlink() or relative in skip or linked(marker):
-                continue
-        except PermissionError:
+            found = shared(root / path / ".git")
+        except OSError:
             skipped.add(path)
             continue
-        if not nameable(relative):
+        if found is None:
+            continue
+        if not nameable(path.as_posix()):
             skipped.add(path)
             continue
-        found.append(path)
-    if len(found) > MAX_REPOSITORIES:
+        groups.setdefault(found[0], []).append((path.as_posix(), found[1]))
+    real = Path(os.path.realpath(root))
+    selected = []
+    for common, members in groups.items():
+        owners = [relative for relative, own in members if own]
+        name = checkout = min(owners or [relative for relative, _ in members])
+        if not owners:
+            # Only worktrees are scanned. Name the repository after its own folder below ROOT, such as a bare
+            # `project.git`, so adding or removing a worktree keeps its record ids; else after its first worktree.
+            home = Path(common).parent if Path(common).name == ".git" else Path(common)
+            inside = home.relative_to(real).as_posix() if home.is_relative_to(real) else "."
+            name = inside if inside != "." and nameable(inside) else checkout
+        if name not in skip and not any(relative in skip for relative, _ in members):
+            selected.append((name, root / checkout))
+    if len(selected) > MAX_REPOSITORIES:
         raise InvalidError(f"more than {MAX_REPOSITORIES} repositories; select a narrower ROOT or add --skip")
-    return sorted(found), len(skipped)
+    return sorted(selected), len(skipped)
 
 
 def supported() -> None:
@@ -216,14 +250,11 @@ def collect(
         raise InvalidError("START and END must be ISO 8601 timestamps") from None
     if begin.tzinfo is None or finish.tzinfo is None or begin >= finish:
         raise InvalidError("START and END need timezones, with START before END")
-    if not root.is_dir():
-        raise InvalidError("ROOT is not a directory")
     selected, skipped = repositories(root, skip)
     if selected:
         supported()
     records: list[dict[str, object]] = []
-    for repository in selected:
-        relative = repository.relative_to(root).as_posix()
+    for relative, repository in selected:
         try:
             remote = github(repository)
             fields = history(repository, start, end)

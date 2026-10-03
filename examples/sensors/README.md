@@ -62,17 +62,18 @@ GitHub history documents its scope and limits in [its guide](github-history.md#e
 ### Git history
 
 - Requires Git 2.37 or later, for `git log --since-as-filter`. With an older or missing `git` on PATH, the run fails before reading any repository: `Git 2.37 or later is required`.
-- Scans repositories one or two levels below `ROOT`: select the folder holding your checkouts, such as `{{home}}/code`.
-- Reads branches, tags, remote branches and a detached `HEAD`, never stashes or notes. It includes commits with `START <= time < END`, even when commit dates are out of order.
-- Skips symlinked directories, hidden repositories, repositories named with `--skip` and bot or test authors. A linked worktree is skipped too: its main checkout holds the same history.
-- Skips folders it cannot list, or whose names are not UTF-8 or contain control characters, with a count on stderr. Window mode keeps records already saved.
-- Fails the run and names the repository when Git fails or times out there, such as a stale worktree, damaged objects, another owner's checkout or a stalled mount. Repair it or add `--skip RELATIVE_REPO`.
+- Scans checkouts one or two levels below `ROOT`: select the folder holding your checkouts, such as `{{home}}/code`.
+- Collects each repository once, however many of its worktrees are there, under one name: its main checkout's path, else the path of its own folder below `ROOT` (such as a bare `project.git` or a hidden checkout), else its first worktree's in name order. Only that last name changes as worktrees come and go: later windows save their commits under the new name, so commits they revisit appear under both.
+- Reads branches, tags, remote branches and one checkout's `HEAD` (the main checkout, else the first worktree), never stashes or notes. It includes commits with `START <= time < END`, even when commit dates are out of order.
+- Skips symlinked directories, hidden repositories without a worktree in scope, bot or test authors and repositories named with `--skip`: the repository's name or any of its worktrees' paths skips it whole.
+- Skips folders it cannot read, or whose names are not UTF-8 or contain control characters, with a count on stderr. Window mode keeps records already saved.
+- Fails the run and names the repository when Git fails or times out there, such as a worktree whose repository moved, damaged objects, another owner's checkout or a stalled mount. Repair it or add `--skip RELATIVE_REPO`.
 - Links GitHub remotes as lowercase `repo:github.com/owner/name` and author emails as lowercase `person:email/` identities. Identities are case-sensitive: write note aliases the same way.
 - Limits: 200 repositories, 10,000 commits per window and 16 MiB of output.
 
 ### Local documents
 
-- Supports text, Markdown, HTML, PDF (with `pdftotext`), Word, Excel and PowerPoint, without OCR. Unsupported, hidden and common dependency files stay outside the snapshot.
+- Supports text, Markdown, HTML, PDF (with `pdftotext`), Word, Excel and PowerPoint, without OCR. Unsupported, hidden and common dependency files stay outside the snapshot, as do the owner files (`~$name.docx`) Office writes beside an open document.
 - Refuses symlinks and special files, bounds Office archive expansion and converts PDFs in a private temporary directory.
 - `ROOT` and every parent folder must be real directories. When `{{home}}` or a parent such as `Documents` is a link, the run fails saying so: configure the path `realpath` prints.
 - Keeps at most 64 KiB of text per document and sets `attributes.partial` when it cuts the text.
@@ -153,7 +154,7 @@ Preview it with `bf collect google-calendar-agenda --dry-run`. Expected result: 
 
 Each script uses the Python 3.11+ standard library, has an executable `#!/usr/bin/env python3` entry point and invokes provider CLIs with argument arrays, without a shell. Provider CLIs own credentials; sensors do not read credential files.
 
-Stdout is one JSON array in the [record envelope](../../docs/docs/schema.md#mapping-rules). Each record has a stable `id`, meaningful `title`, searchable `text` and optional time, URL, identities and structured attributes. Keep raw provider payloads out of text and attributes: map selected fields explicitly. `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/schema.md#record-revisions-and-provenance); for example, Drive's `modifiedTime` maps to `updated`. `{{start}}` and `{{end}}` are timezone-aware timestamps for a half-open window.
+Stdout is one JSON array in the [record envelope](../../docs/docs/schema.md#mapping-rules). Each record has a stable `id`, meaningful `title`, searchable `text` and optional time, URL, identities and structured attributes. Keep raw provider payloads out of text and attributes: map selected fields explicitly. BF computes `fields` from `bf.yaml`; a sensor that prints them fails with `sensors must supply mapped output, not precomputed fields`. `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/schema.md#record-revisions-and-provenance); for example, Drive's `modifiedTime` maps to `updated`. `{{start}}` and `{{end}}` are timezone-aware timestamps for a half-open window.
 
 One invalid record fails a whole collection, so the Git, document, Calendar and Drive sensors keep each record within BF's bounds: titles become one line of at most 4,096 characters, URLs and links with control characters or over 8,192 characters are dropped, a record keeps at most 1,000 links, aliases are namespaced `scheme:value` identities with percent-encoded paths, and ids stay within 7,988 characters once percent-encoded. Highlights instead refuses an export that breaks them.
 

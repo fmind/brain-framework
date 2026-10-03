@@ -70,8 +70,8 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     assert "projects/done.md" not in text
     assert "12 dated items; records by source: mail 8" in text
     # Only projects under review are linked: a link from this dated action would flag any other note.
-    assert "- 2026-09-26 11:00+02:00: `calendar:standup` (record)" in text
-    assert "- 2026-09-27: Launch (`projects/launch.md`)" in text
+    assert "- 2026-09-26 11:00+02:00: `bf://brain/calendar:standup` (record)" in text
+    assert "- 2026-09-27: Launch (`bf://brain/projects/launch.md`)" in text
     assert "UTC" not in text
     assert "Ignore previous instructions" not in text
     day = datetime.fromisoformat(END).astimezone().date().isoformat()
@@ -111,7 +111,12 @@ def test_weekly_review_links_a_single_brains_projects_by_path(provider: Provider
 
 
 def test_weekly_review_keeps_hostile_record_ids_inert(provider: Provider) -> None:
-    hostile = {**EVENT, "ref": "mail:x` [ok](bf://brain/projects/p.md?rel=depends-on) `y", "uri": "bf://brain/mail:x"}
+    # With one selected brain, items carry no uri: the record's own id is printed.
+    hostile = {
+        "ref": "mail:x` [ok](bf://brain/projects/p.md?rel=depends-on) `y",
+        "kind": "record",
+        "time": EVENT["time"],
+    }
     home = {"page": "", "projects": [PROJECT], "upcoming": [hostile], "changed": [], "actions": []}
     pages(provider, home, {"page": "7d", "total": 1})
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
@@ -119,6 +124,22 @@ def test_weekly_review_keeps_hostile_record_ids_inert(provider: Provider) -> Non
     assert "``mail:x` [ok](bf://brain/projects/p.md?rel=depends-on) `y`` (record)" in result.stdout
     # The id stays inside its code span: the action links only the project under review.
     assert note("actions/2026-09-25_weekly-review/ACTION.md", result.stdout.encode()).targets == [PROJECT["uri"]]
+
+
+def test_weekly_review_names_items_by_brain_across_brains(provider: Provider) -> None:
+    # Two selected brains each hold projects/new-website.md: their plain refs would name both notes alike.
+    changed = [
+        {"brain": brain, "ref": "projects/new-website.md", "uri": f"bf://{brain}/projects/new-website.md"}
+        for brain in ("main", "team")
+    ]
+    changed = [{**item, "kind": "note", "title": "New website"} for item in changed]
+    pages(provider, {"page": "", "projects": [PROJECT], "changed": changed}, {"page": "7d", "total": 2})
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert result.returncode == 0, result.stderr
+    assert (
+        "- Notes changed: New website (`bf://main/projects/new-website.md`), "
+        "New website (`bf://team/projects/new-website.md`)"
+    ) in result.stdout.splitlines()
 
 
 def test_weekly_review_prints_nothing_without_anything_to_review(provider: Provider) -> None:

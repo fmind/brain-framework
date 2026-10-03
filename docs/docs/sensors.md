@@ -62,7 +62,7 @@ The dry run executes the script and previews up to three records without saving 
   "record": {
     "id": "website-demo/brief.txt",
     "title": "brief.txt",
-    "text": "Visitors need a clear product explanation before signing up.\n",
+    "text": "Visitors need a clear product explanation and pricing before signing up.\n",
     "fields": { "kind": "document" }
   }
 }
@@ -74,14 +74,14 @@ In `projects/new-website.md`, point the Evidence line beneath the decision at th
 Evidence: [Product brief](local-documents:website-demo/brief.txt).
 ```
 
-The tutorial records stay searchable, and `bf status` lists their source as `historical`, until you delete them. Remove them and the tutorial script, then validate:
+This edit also clears the review flag that the revised brief raised. The tutorial records stay searchable, and `bf status` lists their source as `historical`, until you delete them. Remove them and the tutorial script, then validate:
 
 ```bash
 rm -r memories/brief sensors/brief.py
 bf validate
 ```
 
-Validation reports `"records":1` and `"valid":true`. Edit the input file and collect again: the same id updates the saved record, and the project link keeps working.
+Validation reports `"records":1` and `"valid":true`. Edit the input file and collect again: the same id updates the saved record, the project link keeps working, and the project is flagged for review, as in [Getting started](getting-started.md#collect-your-first-source).
 
 ## Selected highlights
 
@@ -130,21 +130,21 @@ The read returns the selection as `record.text`, the document as `record.url` an
 
 ## Sensor settings
 
-The command is a program on PATH or in `sensors/`, followed by its arguments, run without a shell. The placeholders `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}` are replaced once. A script run directly needs an executable bit and a suitable interpreter; `bf validate` checks the bit.
+The command is a program on PATH or in `sensors/`, followed by its arguments, run without a shell. The placeholders `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}` are replaced once. A script run directly needs an executable bit and a suitable interpreter; `bf validate` checks the bit. Behind a command on PATH, such as `uv` or `python3`, it checks that the first `sensors/` path among the arguments exists.
 
-| Setting     | Default  | Meaning                                                                                          |
-| ----------- | -------- | ------------------------------------------------------------------------------------------------ |
-| `command`   | required | The program and up to 127 arguments of at most 16,384 characters each.                           |
-| `fields`    | `{}`     | [Field mappings](schema.md#shared-fields-and-sensor-mappings).                                   |
-| `enabled`   | `true`   | A disabled sensor never runs; its records stay searchable.                                       |
-| `mode`      | `window` | `window` updates returned records; `snapshot` replaces the complete list.                        |
-| `refresh`   | `0`      | Seconds between automatic runs, up to 365 days; zero keeps the sensor manual.                    |
-| `lookback`  | `86400`  | Seconds covered by the first run, or each snapshot run; up to 365 days.                          |
-| `overlap`   | `300`    | Seconds re-read before the previous window's end.                                                |
-| `reconcile` | none     | An occasional wider window; see [reconciliation](#frequent-updates-and-periodic-reconciliation). |
-| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                                                     |
-| `max_bytes` | 64 MiB   | Maximum output; configurable up to 256 MiB.                                                      |
-| `priority`  | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                |
+| Setting     | Default  | Meaning                                                                                                 |
+| ----------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `command`   | required | The program and up to 127 arguments of at most 16,384 characters each.                                  |
+| `fields`    | `{}`     | [Field mappings](schema.md#shared-fields-and-sensor-mappings).                                          |
+| `enabled`   | `true`   | A disabled sensor never runs; its records stay searchable.                                              |
+| `mode`      | `window` | `window` updates returned records; `snapshot` replaces the complete list.                               |
+| `refresh`   | `0`      | Seconds between automatic runs, up to 365 days; zero keeps the sensor manual.                           |
+| `lookback`  | `86400`  | Seconds covered by the first run, each snapshot run and `bf collect` without `--since`; up to 365 days. |
+| `overlap`   | `300`    | Seconds re-read before the previous window's end.                                                       |
+| `reconcile` | none     | An occasional wider window; see [reconciliation](#frequent-updates-and-periodic-reconciliation).        |
+| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                                                            |
+| `max_bytes` | 64 MiB   | Maximum output; configurable up to 256 MiB.                                                             |
+| `priority`  | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                       |
 
 ## Quiet a high-volume source
 
@@ -201,7 +201,7 @@ Expect `issues.md` to hold drafts grounded in the collected notes, each citing i
 
 ## Collect and update
 
-`bf collect SENSOR` runs one sensor now. `bf update`, `bf watch` and schedules run the sensors that are due: enabled, with a nonzero `refresh`, and not run successfully within it. They act on one [selected brain](configuration.md#select-a-brain) and never on referenced brains.
+`bf collect SENSOR` runs one sensor now. `bf update`, `bf watch` and schedules run the sensors that are due: enabled, with a nonzero `refresh`, and without a [fresh collection](#backfills-and-coverage) within it. They act on one [selected brain](configuration.md#select-a-brain) and never on referenced brains.
 
 A failure lets other programs continue and makes `bf update` exit 1. The failed sensor retries 1 minute later, then after 2, 4, 8… minutes per consecutive failure, never waiting longer than its `refresh`; a success resets the delay. `bf collect` always runs at once. Each run appends its stderr and a summary to `logs/SENSOR.log` in the brain; status and errors name that log.
 
@@ -230,9 +230,9 @@ Backfill an older period explicitly:
 bf collect git-commits --since 2026-09-01 --until 2026-10-01
 ```
 
-`bf status` separates each source's indexed `records` and `bytes` from `last_run` counts: added, updated, unchanged and removed.
+The backfill saves that month's records but is not a fresh collection: only a window reaching the moment it runs is. A scheduled sensor that only backfilled stays `never` in `bf status`; collect through now with `bf collect git-commits --since 2026-10-01`, or let the next update run. `bf status` still counts the backfill under `last_run`: added, updated, unchanged and removed, beside the source's indexed `records` and `bytes`.
 
-A backfill that ends before the recorded coverage neither claims a fresh collection nor moves the resume point. A later window separated by a gap does not move it either, so the next update still fills the gap, up to 30 days back. A manual sensor has no update to fill gaps: backfill them yourself. The [GitHub history walkthrough](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) backfills a year in adjacent windows.
+A window that joins the recorded coverage extends it, and updates resume from the coverage's end. A backfill that ends before the coverage leaves that resume point unchanged, and so does a later window separated by a gap, so the next update still fills the gap, up to 30 days back. A manual sensor has no update to fill gaps: backfill them yourself. The [GitHub history walkthrough](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) backfills a year in adjacent windows.
 
 Only one run of a sensor can collect at a time: a second run of the same sensor fails at once with `SENSOR is already running for this brain; retry later`. Different sensors may run at the same time. See [process safeguards](limits.md#processes-and-logs) for timeouts and cancellation.
 
@@ -259,7 +259,8 @@ The second command succeeds and reports its `removed` count; scheduled updates k
 - Keep ids stable across edits and source URLs available for verification.
 - Put searchable facts in `title` and `text`, and exact-read details in `attributes`.
 - Use the event time for `time`, the upstream modification time for `attributes.updated` and `attributes.partial: true` for deliberately incomplete text. BF sets `attributes.observed`. Map provider fields to these reserved keys explicitly, such as Drive's `modifiedTime` to `updated`.
-- Emit only exact namespaced identities in `links` and `aliases`, such as lowercase `person:email/` addresses.
+- Expect review flags from those times: a `time` or `updated` after the last edit of a project, or of a note with `stale_after`, flags that note when it links to the record or the record links to it. `observed` never flags: collecting an older item for the first time is not new evidence.
+- Emit only exact namespaced identities in `links` and `aliases`, such as lowercase `person:email/` addresses. `bf validate` warns, once per source, when `links` or `url` hold other text.
 - Respect the [record limits](schema.md#mapping-rules), and skip noise such as trash, bots and test runs.
 
 To run sensors regularly, see [Watch and schedule updates](schedule.md). To prepare reviews from collected evidence, see [Routines](routines.md).
