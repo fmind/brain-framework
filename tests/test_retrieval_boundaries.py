@@ -497,6 +497,11 @@ def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
         (lambda: pages.query("x", "projects/" + "a" * 5000), "scope", "String should have at most 4096"),
         # Items carry note paths: a section ref, as search returns it, would scope nothing.
         (lambda: pages.query("x", "projects/offline.md#decision"), "scope", "whole note without its #section"),
+        # A page's address is never a link target: it would scope nothing, a complete-looking empty reply.
+        *(
+            (lambda page=page: pages.query("x", page), "scope", "scope accepts a folder")
+            for page in ("bf://fixture/", "bf://fixture/projects", "bf://fixture/7d", "bf://fixture/memories/gmail")
+        ),
     ):
         with pytest.raises(InputError, match=message) as raised:
             call()
@@ -504,3 +509,4 @@ def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
     # A folder whose name holds a `#` is no section.
     assert pages.scope("projects/x#y") == {"prefix": "projects/x#y"}
     assert pages.scope("projects/offline.md") == {"prefix": "projects/offline.md"}
+    assert pages.scope("bf://fixture/tags/x") == {"target": "bf://fixture/tags/x"}

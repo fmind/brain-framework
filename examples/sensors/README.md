@@ -4,7 +4,7 @@ Standalone sensors for common providers. Copy the ones you need into a brain's `
 
 | Sensor                                         | Arguments                                                     | Saves                                                                                 |
 | ---------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `git-history.py`                               | `ROOT START END [--skip REPO]...`                             | Commits on branches, tags and remote branches, with author and repository identities. |
+| `git-history.py`                               | `ROOT START END [--skip RELATIVE_REPO]...`                    | Commits on branches, tags and remote branches, with author and repository identities. |
 | [`github-history.py`](github-history.md)       | `OWNER/REPO commits\|issues\|pulls START END [--branch NAME]` | GitHub branch commits and all-age issues/PRs, with incremental refresh.               |
 | `local-documents.py`                           | `LABEL ROOT [--exclude GLOB]...`                              | A snapshot of supported documents in the chosen folder.                               |
 | `highlights.py`                                | `LABEL EXPORT.json`                                           | Selected passages, annotations and precise source locations.                          |
@@ -12,7 +12,15 @@ Standalone sensors for common providers. Copy the ones you need into a brain's `
 | `google-drive-folders.py`                      | `[START END]`                                                 | My Drive and shared-with-me folders with parent links; shared drives are excluded.    |
 | [Context demo](../context-hub/sensors/demo.py) | `workspace`, `jira`, `github` or `gcloud`                     | Fictional adapter records for the four-tool walkthrough; no provider access.          |
 
-Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). For other sources, copy the selected script and merge its configuration below into `bf.yaml`. Review paths and account scope first; do not copy all sources unless you intend to run them.
+Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). For other sources, copy the selected script from the release tag matching `bf --version` and make it executable, since the configuration below runs each script as a command and a download does not keep the executable bit:
+
+```bash
+mkdir -p sensors
+curl -fsSLo sensors/git-history.py "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors/git-history.py"
+chmod +x sensors/git-history.py
+```
+
+Then merge its configuration below into `bf.yaml`. Review paths and account scope first; do not copy all sources unless you intend to run them.
 
 The [four-tool example](../context-hub/README.md) shows how differently named fields become one shared project relation during collection. Its fixtures are not live integrations. Use `gh`, `gws`, `acli` or `gcloud` to implement selected provider access in a brain-owned script, following the contract below; the [integration table](../../docs/docs/context-hub.md#use-it-on-your-work) distinguishes reviewed examples from adapters you write.
 

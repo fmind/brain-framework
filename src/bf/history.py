@@ -34,8 +34,11 @@ _STARTUP = (
     "PERL5OPT",
     "PERL5LIB",
     "PERLLIB",
+    "PHP_INI_SCAN_DIR",
+    "PHPRC",
     "PS4",
     "SHELLOPTS",
+    "ZDOTDIR",
 )
 _PREFIXES = ("LD_", "DYLD_", "BASH_FUNC_", "PYTHON", "LUA_INIT")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import cast
 
@@ -12,11 +13,12 @@ import yaml
 from mcp.types import CallToolResult
 from typer.testing import CliRunner
 
+from bf import records
 from bf.cli import app
 from bf.config import ABSENT, execution, load, one, register, related, select, user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
-from bf.models import Error, Query
+from bf.models import Error, Query, Record
 from bf.retrieve import read, search
 from bf.storage import Store
 from bf.update import update
@@ -446,3 +448,39 @@ def test_a_huge_integer_in_a_referenced_note_leaves_every_brain_answering(tmp_pa
     assert "team durable answer" in str(read([first], "bf://team/projects/example.md")["text"])
     # Validation once passed the brain, since the value is an integer.
     assert not validate(team)["valid"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_an_unreachable_registered_brain_is_not_called_absent(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    store = make(locked / "brain", "kept")
+    register(store)
+    locked.chmod(0)
+    try:
+        # As bf register refuses to free the name, selection names the access problem instead of suggesting a move.
+        with pytest.raises(Error, match=r"^cannot reach the brain registered as kept; restore access"):
+            select("kept")
+    finally:
+        locked.chmod(0o700)
+    store.root.rename(tmp_path / "gone")
+    with pytest.raises(Error, match=f"^kept: {re.escape(ABSENT)}"):
+        select("kept")
+
+
+def test_an_exact_read_answers_while_another_brain_fails(tmp_path: Path) -> None:
+    first = make(tmp_path / "first", "first", {"second": "../second"})
+    second = make(tmp_path / "second", "second")
+    records.upsert(first, "github", [Record(id="org/repo#12", title="Merged fix")], snapshot=False)
+    records.upsert(second, "github", [Record(id="org/repo#7", title="Other")], snapshot=False)
+    # A malformed record keeps the second brain from proving it holds no org/repo#12.
+    second.write("memories/github/broken.json", b"{not json")
+    with pytest.raises(Error):
+        read([second], "github:org/repo#12")
+    reply = cast(dict, read([first], "github:org/repo#12"))
+    assert reply["record"]["title"] == "Merged fix"
+    assert {problem["brain"] for problem in reply["problems"]} == {"second"}
+    assert str(second.root) not in json.dumps(reply)
+    # When no brain holds the ref, the failure stands instead of an absence the read cannot prove.
+    with pytest.raises(Error):
+        read([first], "github:org/repo#99")

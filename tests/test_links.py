@@ -236,6 +236,17 @@ def test_okf_source_claims_keep_their_file_origin(brain: Store, path: str) -> No
     assert validate(brain)["valid"]
 
 
+def test_an_okf_source_naming_an_undeclared_relation_still_cites(brain: Store) -> None:
+    people(brain)
+    brain.write(
+        "concepts/typo.md",
+        b"---\ntype: concept\nsources:\n  - resource: bf://fixture/people/bob?rel=typo\n---\n# Typo\n",
+    )
+    # Retrieval keeps the claim the source makes; validation still reports the relation it misspells.
+    assert "concepts/typo.md" in {item["ref"] for item in group(read([brain], "person:bob"), "cites")["items"]}
+    assert any("typo" in str(problem) for problem in cast(list, validate(brain)["problems"]))
+
+
 def test_links_with_removed_attributes_are_reported(brain: Store) -> None:
     people(brain)
     brain.write("projects/bad.md", b"# Old\n[Bob](bf://fixture/people/bob?rel=friend&subject=person:alice)\n")

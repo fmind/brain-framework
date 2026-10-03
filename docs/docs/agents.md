@@ -116,7 +116,7 @@ Keep each capture within its evidence's audience and Git policy: a capture of a 
 
 ## Bring context into every session
 
-The [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add context without the agent asking. Copy them into a folder of the brain, such as `hooks/`, and review them. The session hook prints the current repository's project: its status, review deadline, next task and linked notes, plus programs that are overdue, never collected or failed.
+The [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add context without the agent asking. Copy them into a folder of the brain, such as `hooks/`, review them and make them executable with `chmod +x hooks/*.py`: hosts run them as commands. The session hook prints the current repository's project: its status, review deadline, next task and linked notes, plus programs that are overdue, never collected or failed.
 
 The optional prompt hook searches at most eight content words of each prompt, waits up to 5 seconds and prints the refs of up to three matching notes. Both print nothing when retrieval is slow, incomplete or empty.
 

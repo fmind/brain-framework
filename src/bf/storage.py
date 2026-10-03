@@ -405,7 +405,12 @@ def xdg_setting(name: str) -> Path | None:
 
 def xdg(name: str, default: str) -> Path:
     """An XDG base directory, or `default` below home."""
-    return xdg_setting(name) or Path.home() / default
+    if found := xdg_setting(name):
+        return found
+    try:
+        return Path.home() / default
+    except RuntimeError as error:
+        raise Error(f"cannot find the home directory; set HOME or {name}") from error
 
 
 def _private(*parts: str, root: Path) -> Store:

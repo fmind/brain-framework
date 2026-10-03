@@ -28,7 +28,7 @@ Expect `{"written":"projects/new-website.md","sha256":"..."}`; that digest guard
 - `the file changed since it was read`: read it again, reapply your edit to the new text and retry with the new digest.
 - `the old text does not occur` or `occurs N times`: copy the passage exactly from your read, or include surrounding text until it is unique.
 
-The helper replaces only an existing regular file, atomically, and never empties it. It follows no symbolic link, at the file or in its folders: when the brain folder itself is a link, run the helper inside the brain with a relative path. An interrupted edit can leave a `.write-HEX` temporary file beside the note, as bf's own writes can; delete it when `bf validate` warns about it.
+The helper replaces only an existing regular file, atomically, and never empties it. Like bf, it follows a linked brain folder and links above it, such as `/home` on Fedora Atomic, but no symbolic link inside the brain, at the file or in its folders. An interrupted edit can leave a `.write-HEX` temporary file beside the note, as bf's own writes can; delete it when `bf validate` warns about it.
 
 ## Author notes
 

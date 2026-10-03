@@ -66,6 +66,14 @@ def interrupted(store: Store) -> bool:
         return True
 
 
+def _completed(store: Store) -> bool:
+    """Whether the pending manifest on disk marks its commit complete."""
+    try:
+        return _Journal.model_validate(decode(store.read(_MANIFEST, _MANIFEST_LIMIT))).complete
+    except FileNotFoundError, Error, ValidationError:
+        return False
+
+
 def _clear(store: Store) -> None:
     names = store.files(_PENDING)
     if any(
@@ -216,11 +224,15 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
         journal.complete = True
         store.write(_MANIFEST, encode(journal.model_dump()))
     except BaseException as error:
+        # The completion marker may land before its directory sync fails: the commit then succeeded.
+        landed = journal.complete and _completed(store)
         try:
             recover(store)
         except (Error, OSError) as recovery_error:
             raise Error("record transaction needs recovery; preserve memories/.pending and retry") from recovery_error
-        raise error
+        if not (landed and isinstance(error, Error | OSError)):
+            raise
+        return
     # A cleanup failure cannot turn a durable successful commit into a failed collection; recovery clears it later.
     with suppress(Error, OSError):
         _clear(store)

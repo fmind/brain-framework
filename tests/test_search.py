@@ -1048,9 +1048,12 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
     empty = search([brain], Query(text="hidden answer"), counted=False)
     assert not empty["items"]
     assert empty["problems"]
-    # Exact reads cannot silently assume a broken brain contains no competing identity.
-    with pytest.raises(Error):
-        read([brain, other], "meetings:lunch")
+    # An exact read names the broken brain, which could hold a competing record, beside the one that answers.
+    found = read([brain, other], "meetings:lunch")
+    assert found["brain"] == "fixture"
+    assert "interrupted transaction" in str(cast("list[dict[str, object]]", found["problems"]))
+    with pytest.raises(Error, match="interrupted transaction"):
+        read([other], "meetings:lunch")
     other.write("bf.yaml", b"version: 7\nname: [invalid]\n")
     assert search([brain, other], Query(text="offline"), counted=False)["items"]
     with pytest.raises(Error, match=r"invalid bf\.yaml"):

@@ -224,9 +224,12 @@ def note_claims(
 
     # Frontmatter first, as the note reads.
     for key, values, relation in (("links", note.knowledge.links, ""), ("sources", note.sources, CITES)):
-        result.extend(
-            claim(value, file, key) or links.Claim(subject, relation, target(value), file) for value in values
-        )
+        for value in values:
+            found = claim(value, file, key)
+            # A source cites unless it names another relation: an undeclared one names none, so it still cites.
+            if found is None or not found.relation:
+                found = links.Claim(subject, relation, found.target if found else target(value), file)
+            result.append(found)
     for value, fragment, line in note.contexts:
         origin = qualify(config, note.path, fragment)
         result.append(claim(value, origin, f"line {line}") or links.Claim(subject, "", target(value), origin))

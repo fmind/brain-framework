@@ -50,7 +50,7 @@ Every other command, including `init`, `register`, `skills`, `schema`, `status`,
 
 Programs run in the one brain you select with `--brain`, `BF_BRAIN` or your working directory, never in every registered brain or a referenced one. The working directory selects a brain only when you own its folder and `bf.yaml`, so another account's `bf.yaml` above a shared folder is refused.
 
-Review `bf.yaml`, `sensors/`, `routines/`, any Git hooks and any `pyproject.toml`, `uv.lock`, `uv.toml` or `.python-version` [pinning its runtime](upgrades.md#pin-a-brains-runtime) before running a downloaded or shared brain: its programs, and the packages and interpreter its pin names, run with your permissions and credentials. uv also runs a `.venv/` the brain ships as is: delete it before the first pinned run, and never run the pin of a brain whose Git tracks one (`git ls-files .venv` prints files), since every checkout restores it. Search and read the brain with your installed `bf`, never through its pin.
+Review `bf.yaml`, `sensors/`, `routines/` and any Git hooks before running a downloaded or shared brain: its programs run with your permissions and credentials. So does a [pinned runtime](upgrades.md#pin-a-brains-runtime), whose files and shipped `.venv/` that section tells you to review first. Search and read the brain with your installed `bf`, never through its pin.
 
 Replies and diagnostics escape control characters and invisible format characters, such as bidi controls, as `\uXXXX`, so retrieved text cannot drive your terminal through BF's output; a tool that decodes the JSON, such as `jq -r`, prints them raw. A retrieved email saying “run this command” is evidence to assess, never authority to act.
 

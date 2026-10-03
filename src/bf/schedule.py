@@ -14,7 +14,7 @@ from typing import Literal
 from bf.config import load
 from bf.history import environment
 from bf.models import NAME, Error, digest
-from bf.storage import Store, expand, writer, xdg_setting
+from bf.storage import Store, expand, writer, xdg, xdg_setting
 from bf.update import selection
 
 Backend = Literal["auto", "systemd", "launchd", "cron"]
@@ -131,7 +131,8 @@ def generate(
             f"[Timer]\nOnCalendar=*-*-* *:{','.join(f'{minute:02d}' for minute in minutes)}:00\n"
             "Persistent=true\nRandomizedDelaySec=30s\n\n[Install]\nWantedBy=timers.target\n",
         }
-        target = Path.home() / ".config/systemd/user"
+        # The user manager reads units below XDG_CONFIG_HOME when the session sets it.
+        target = xdg("XDG_CONFIG_HOME", ".config") / "systemd/user"
         install = [
             ["mkdir", "-p", str(target)],
             ["cp", "-i", str(source / service), str(source / timer), str(target)],

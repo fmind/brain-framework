@@ -32,6 +32,20 @@ def test_repeated_headings_take_the_next_free_suffix_around_explicit_anchors() -
         parse("concepts/x.md", b"## Part {#part.md}\n")
 
 
+def test_copied_documents_keep_conflicting_anchors_searchable() -> None:
+    # A copied document, such as an MkDocs page among an action's inputs, is ordinary Markdown: a conflict that
+    # fails an OKF note gives the later heading a generated slug instead of making the document unsearchable.
+    path = "actions/2026-09-27_x/inputs/guide.md"
+    data = b"# Guide\n## Configuration {#config}\n### Config\n## Again {#config}\n## Part {#part.md}\n"
+    assert [heading.slug for heading in parse(path, data).headings] == [
+        "guide",
+        "config",
+        "config-1",
+        "again",
+        "part-partmd",
+    ]
+
+
 @pytest.mark.parametrize(
     ("source", "slug", "title"),
     [
@@ -67,6 +81,28 @@ def test_claim_footnotes_support_the_section_that_cites_them() -> None:
         ("mail:m3", "decision", 18),
         # A footnote nothing cites supports the section holding its definition.
         ("mail:m4", "risks", 19),
+    ]
+
+
+@pytest.mark.parametrize("label", ["```", "~~~", "<pre>", "<!--"])
+def test_a_footnote_label_never_changes_the_note_structure(label: str) -> None:
+    # The label could open a fence, an HTML block or an autolink that swallowed the sections after it.
+    data = f"# Web\n\nClaim.[^{label}]\n\n[^{label}]: [Review](mail:m1)\n\n## Later\n\n[Plan](mail:m2)\n".encode()
+    parsed = note("projects/web.md", data)
+    assert parsed.slugs == {"web", "later"}
+    assert parsed.contexts == [("mail:m1", "web", 5), ("mail:m2", "later", 9)]
+
+
+def test_footnote_continuations_and_labels_follow_github() -> None:
+    # An indented paragraph continues its footnote, and labels match regardless of case, as GitHub renders them.
+    data = (
+        b"# Web\n\n## Decision\n\nStatic site.[^Cost]\n\n## Risks\n\n"
+        b"[^cost]: Estimate.\n\n    [Quote](mail:m1)\n\n\t[Invoice](mail:m2)\n\nAfter [Plan](mail:m3).\n\n    [Code](mail:m4)\n"
+    )
+    assert note("projects/web.md", data).contexts == [
+        ("mail:m1", "decision", 11),
+        ("mail:m2", "decision", 13),
+        ("mail:m3", "risks", 15),
     ]
 
 

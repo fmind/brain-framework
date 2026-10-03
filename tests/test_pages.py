@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -680,11 +681,17 @@ def test_a_file_in_one_brain_does_not_hide_a_folder_note_in_another(brain: Store
     ]
     reply = read([brain, team], "projects/archive/old.md")
     assert (reply["brain"], reply["text"]) == ("team", "# Old\n\nKiwi evidence.\n")
-    # A linked folder can hide evidence, so it still fails the read.
+    # A linked folder can hide evidence: the brain that holds the note answers, naming the other's problem.
     brain.delete("projects/archive")
     (brain.root / "projects/archive").symlink_to(root / "projects/archive")
+    reply = read([brain, team], "projects/archive/old.md")
+    assert reply["brain"] == "team"
+    assert any(
+        problem["brain"] == "fixture" and str(problem["error"]).startswith("projects/archive: expected a directory")
+        for problem in cast("list[dict[str, object]]", reply["problems"])
+    )
     with pytest.raises(Error, match=r"^projects/archive: expected a directory; symlinks"):
-        read([brain, team], "projects/archive/old.md")
+        read([brain], "projects/archive/old.md")
 
 
 def test_relation_pages_list_every_link_of_one_relation(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -877,3 +884,17 @@ def test_backlinks_show_each_source_s_facts_side_by_side(brain: Store) -> None:
         "jira:WEB-7": {"status": "In Progress"},
         "linear:LIN-3": {"status": "Done"},
     }
+
+
+def test_listed_fields_stop_before_their_byte_budget(brain: Store) -> None:
+    declared = "".join(f"  f{n:03d}: {{description: Fact., type: string}}\n" for n in range(100))
+    brain.write("bf.yaml", f"version: 7\nname: fixture\nfields:\n{declared}".encode())
+    facts = {f"f{n:03d}": "v" * 190 for n in range(100)}
+    records_file(brain, "jira", [Record(id="WEB-9", title="Crowded facts", text="Open.", fields=facts)])
+    item = cast("list[dict[str, object]]", search([brain], Query(text="crowded"))["items"])[0]
+    listed = cast("dict[str, str]", item["fields"])
+    # Listings keep the first fields in name order within the budget; the exact read holds them all.
+    assert len(json.dumps(listed, ensure_ascii=False).encode()) <= index.FACTS
+    assert list(listed) == sorted(facts)[: len(listed)]
+    assert len(listed) < len(facts)
+    assert cast("dict[str, object]", read([brain], "jira:WEB-9")["record"])["fields"] == facts

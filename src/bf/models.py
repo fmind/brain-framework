@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator, model_validator
 from pydantic.json_schema import JsonDict
+from pydantic_core import ErrorDetails
 
 MAX_FILE = 16 << 20
 MAX_RECORD = 16 << 20
@@ -285,19 +286,17 @@ def explain(error: ValidationError, known: Collection[str] | None = None) -> str
     def part(key: str | int) -> str:
         return str(key) if known is None or isinstance(key, int) or key in known else "<key>"
 
-    shown: list[str] = []
-    errors = error.errors(include_url=False, include_context=False, include_input=False)
-    for number, item in enumerate(errors):
+    def clause(item: ErrorDetails) -> str:
         # A custom validator's reason is already a sentence: drop pydantic's "Value error, " label. A reason about
         # the whole document, such as a sensor mapping an undeclared field, names its own location.
         location, reason = ".".join(map(part, item["loc"])), item["msg"].removeprefix("Value error, ")
-        clause = f"{location}: {reason}" if location else reason
-        if clause in shown:
-            continue
-        if len(shown) == _EXPLAINED:
-            return "; ".join([*shown, f"and {len(errors) - number} more"])
-        shown.append(clause)
-    return "; ".join(shown)
+        return f"{location}: {reason}" if location else reason
+
+    errors = error.errors(include_url=False, include_context=False, include_input=False)
+    # Each distinct clause once, so the count of the rest never includes one already shown.
+    clauses = list(dict.fromkeys(map(clause, errors)))
+    rest = [f"and {len(clauses) - _EXPLAINED} more"] if len(clauses) > _EXPLAINED else []
+    return "; ".join([*clauses[:_EXPLAINED], *rest])
 
 
 def digest(data: bytes) -> str:
@@ -640,12 +639,8 @@ class SchemaField(Model):
         if self.cardinality == "many":
             if not isinstance(value, list) or len(value) > 1000:
                 raise ValueError("expected a list of at most 1000 scalar values")
-            result: list[JsonValue] = []
-            for item in value:
-                normalized = self.scalar(item)
-                if normalized not in result:
-                    result.append(normalized)
-            return result
+            # Each distinct value once, in input order.
+            return list(dict.fromkeys(self.scalar(item) for item in value))
         return self.scalar(value)
 
     @model_validator(mode="after")

@@ -87,19 +87,33 @@ def test_write_rejects_invalid_arguments_and_input(brain: Store, tmp_path: Path)
     assert not leftovers(brain)
 
 
-def test_write_follows_no_symlink_in_the_path(brain: Store, tmp_path: Path) -> None:
+def test_write_follows_no_symlink_in_the_brain(brain: Store, tmp_path: Path) -> None:
     # A linked folder could redirect the write outside the brain between the read and the rename.
     original = (brain.root / NOTE).read_bytes()
     digest = str(retrieve.read([brain], NOTE)["sha256"])
     (brain.root / "linked").symlink_to(brain.root / "projects", target_is_directory=True)
     linked = tmp_path / "linked-brain"
     linked.symlink_to(brain.root, target_is_directory=True)
-    for path in ("linked/offline.md", str(linked / NOTE)):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "note.md").write_text("# Outside\n")
+    (tmp_path / "linked-outside").symlink_to(outside, target_is_directory=True)
+    for path in ("linked/offline.md", str(linked / "linked/offline.md"), str(tmp_path / "linked-outside/note.md")):
         result = write(brain, digest, "# New\n", path)
         assert result.returncode == 1
-        assert "on a path without symbolic links" in result.stderr
+        assert "on a path without symbolic links inside the brain" in result.stderr
     assert (brain.root / NOTE).read_bytes() == original
+    assert (outside / "note.md").read_text() == "# Outside\n"
     assert not leftovers(brain)
+    # Like bf, a linked brain folder or a link above it, such as /home on Fedora Atomic, is followed.
+    above = tmp_path / "linked-parent"
+    above.symlink_to(brain.root.parent, target_is_directory=True)
+    for path in (linked / NOTE, above / brain.root.name / NOTE):
+        current = str(retrieve.read([brain], NOTE)["sha256"])
+        result = write(brain, current, f"# Through {path.parts[-4]}\n", str(path))
+        assert result.returncode == 0, result.stderr
+        assert (brain.root / NOTE).read_text() == f"# Through {path.parts[-4]}\n"
+    (brain.root / NOTE).write_bytes(original)
     # Inside a linked brain folder, the working directory is already resolved: a relative path works.
     result = subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
         [sys.executable, str(HELPER), NOTE, "--expect-sha256", digest],

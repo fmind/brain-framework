@@ -32,6 +32,7 @@ from bf.models import (
     addressable,
     digest,
     encode,
+    failure,
     suggest,
     timestamp,
 )
@@ -359,8 +360,6 @@ def _lookup(
     # A qualified address resolves in its brain; backlinks and identities still span the whole selection.
     selected = stores
     if parsed:
-        # Reads follow a link's target; its relation does not change the tag page.
-        links.tag(parsed.identity)
         selected = _brain(selected, parsed.brain, problems)
     path = parsed.path if parsed else ref
     if not (parsed and parsed.fragment):
@@ -373,7 +372,7 @@ def _lookup(
         if view is not None:
             return {**view, "notice": NOTICE, **_problems(problems, view)}
         ref = _action(ref, parsed, path)
-    found = [(store, value) for store in selected if (value := _read(store, ref)) is not None]
+    found = _holders(selected, ref, problems)
     if not found:
         # An identity with no owner reads as its links; a typed link reads as its target identity.
         view = pages.identity(stores, parsed.identity if parsed else ref, counted=counted)
@@ -392,6 +391,36 @@ def _lookup(
     if counted:
         usage.note(store, "read", 1)
     return reply
+
+
+def _holders(
+    selected: list[Store], ref: str, problems: list[dict[str, object]]
+) -> list[tuple[Store, dict[str, object]]]:
+    """Each selected brain's value for an exact ref.
+
+    With several brains, one that fails, such as on a malformed record of a shared source or a busy writer, is a
+    problem when another answers; when none does, its error stands, as it would for that brain alone.
+    """
+    found: list[tuple[Store, dict[str, object]]] = []
+    failed: list[tuple[Store, Error | OSError | sqlite3.DatabaseError]] = []
+    for store in selected:
+        try:
+            value = _read(store, ref)
+        except InputError, NotFoundError:
+            # Malformed input and a missing section are the ref's problems, not a brain's.
+            raise
+        except (Error, OSError, sqlite3.DatabaseError) as error:
+            if len(selected) == 1:
+                raise
+            failed.append((store, error))
+            continue
+        if value is not None:
+            found.append((store, value))
+    if failed and not found:
+        raise failed[0][1]
+    for store, error in failed:
+        problems.append({"brain": load(store).name, "error": failure(error).replace(str(store.root), "<brain>")})
+    return found
 
 
 def _action(ref: str, parsed: links.Address | None, path: str) -> str:
@@ -434,7 +463,7 @@ def _related(
     path = parsed.path if parsed else ref
     if pages.folder_page(selected, path):
         raise InputError(pages.RELATIONLESS, "rel")
-    found = [(store, value) for store in selected if (value := _read(store, _action(ref, parsed, path))) is not None]
+    found = _holders(selected, _action(ref, parsed, path), problems)
     if len(found) > 1:
         raise Error("reference exists in several brains; use a brain-qualified bf:// address")
     if found:

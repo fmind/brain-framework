@@ -163,7 +163,7 @@ After [Connect two notes](links.md#connect-two-notes), the first returns `"page"
 | `REF`      | A whole note, a `SOURCE:ID` record, an identity or a `bf://` address; an action folder reads its `ACTION.md`. A page or `#section` is invalid input (exit 2).  |
 | `RELATION` | `links` for untyped links, `cites`, or a relation a selected brain declares. Another value exits 2 and names the valid ones.                                   |
 | Narrower   | The page adds the links of relations declaring this one [`broader`](schema.md#narrower-relations-and-allowed-targets); their items carry their own `relation`. |
-| Items      | Like search results, with an `excerpt`, from every selected brain. `total` counts the same claims as the backlink group.                                       |
+| Items      | Like search results, with an `excerpt`, from every selected brain. `total` counts the backlink group's claims plus those of its narrower relations.            |
 | Pages      | 50 items, fewer above 32 KiB; follow `next_offset`. MCP `read` takes the relation as `rel`.                                                                    |
 
 ## Continuations

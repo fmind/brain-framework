@@ -85,6 +85,14 @@ Git shows the hook's reply. The first commit passes with `{"dry_run":false,"hook
 
 ## Use the weekly review in your brain
 
+From the brain folder, copy the routine from the release tag matching `bf --version` and make it executable: the configuration below runs it as a command, and a download does not keep the executable bit.
+
+```bash
+mkdir -p routines
+curl -fsSLo routines/weekly-review.py "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/routines/weekly-review.py"
+chmod +x routines/weekly-review.py
+```
+
 ```yaml
 # https://fmind.github.io/brain-framework/docs/routines/
 routines:

@@ -159,6 +159,12 @@ def test_explanations_name_the_first_reasons_and_count_the_rest() -> None:
     with pytest.raises(ValidationError) as redacted:
         Record.model_validate({"id": "x", "title": "T", "private-a": 1, "private-b": 2})
     assert explain(redacted.value, RECORD_KEYS) == "<key>: Extra inputs are not permitted"
+    # The rest counts distinct reasons: redacted keys that repeat a shown reason are not more problems.
+    extra = {f"private-{n}": n for n in range(3)}
+    with pytest.raises(ValidationError) as repeated:
+        TypeAdapter(list[Record]).validate_python([{"id": "x", "title": "T", **extra}] * 6)
+    reasons = [f"{n}.<key>: Extra inputs are not permitted" for n in range(5)]
+    assert explain(repeated.value, RECORD_KEYS) == "; ".join([*reasons, "and 1 more"])
 
 
 def test_missing_brain_is_named(tmp_path: Path) -> None:

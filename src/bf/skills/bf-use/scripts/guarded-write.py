@@ -34,15 +34,48 @@ class SyncError(Exception):
     """The file was replaced, but its folder could not be synced."""
 
 
-def folder(path: Path) -> int:
-    """A descriptor of the file's folder, opened one component at a time without following a symlink."""
-    parts = path.parent.parts
-    fd = os.open(parts[0] if path.is_absolute() else ".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+def holds_brain(directory: int) -> bool:
+    """Whether a folder holds a regular bf.yaml: it is a brain's root."""
     try:
-        for part in parts[1:] if path.is_absolute() else parts:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        return stat.S_ISREG(os.stat("bf.yaml", dir_fd=directory, follow_symlinks=False).st_mode)
+    except OSError:
+        return False
+
+
+def within_brain(directory: Path) -> bool:
+    """Whether a resolved folder lies in a brain: it or a parent holds a regular bf.yaml."""
+    for candidate in (directory, *directory.parents):
+        with suppress(OSError):
+            if stat.S_ISREG((candidate / "bf.yaml").lstat().st_mode):
+                return True
+    return False
+
+
+def folder(path: Path) -> int:
+    """A descriptor of the file's folder, opened one component at a time.
+
+    Like bf, links above a brain, such as /home on Fedora Atomic or /tmp on macOS, and a linked brain folder are
+    followed; nothing inside the brain is. A path that reaches no brain follows no link at all.
+    """
+    parts = path.parent.parts
+    absolute = path.is_absolute()
+    fd = os.open(parts[0] if absolute else ".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        # The working directory is already resolved: only its own brain, if any, matters for a relative path.
+        inside = holds_brain(fd) if absolute else within_brain(Path.cwd())
+        followed = False
+        for part in parts[1:] if absolute else parts:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+            if inside:
+                flags |= os.O_NOFOLLOW
+            else:
+                followed = followed or stat.S_ISLNK(os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode)
+            child = os.open(part, flags, dir_fd=fd)
             os.close(fd)
             fd = child
+            inside = inside or holds_brain(fd)
+        if followed and not inside:
+            raise OSError("a linked folder outside a brain")
     except BaseException:
         os.close(fd)
         raise
@@ -200,7 +233,7 @@ def main() -> int:
         parser.exit(
             1,
             "Not written: expected an existing regular file that you can replace, on a path without symbolic "
-            "links; nothing changed.\n",
+            "links inside the brain; nothing changed.\n",
         )
     sys.stdout.write(json.dumps({"written": str(path), "sha256": written}, separators=(",", ":")) + "\n")
     return 0

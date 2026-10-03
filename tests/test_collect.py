@@ -581,11 +581,14 @@ def test_environment_removes_documented_startup_variables(monkeypatch: pytest.Mo
         "PERL5LIB",
         "PERL5OPT",
         "PERLLIB",
+        "PHP_INI_SCAN_DIR",
+        "PHPRC",
         "PS4",
         "PYTHONSTARTUP",
         "RUBYLIB",
         "RUBYOPT",
         "SHELLOPTS",
+        "ZDOTDIR",
     )
     for key in startup:
         monkeypatch.setenv(key, "startup-injection")

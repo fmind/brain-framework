@@ -343,7 +343,12 @@ def _located(value: str, *, execute: bool = False) -> Store:
     if entry is not None:
         try:
             store = Store(Path(entry.path).expanduser())
-        except Error:
+        except Error as error:
+            # As bf register decides: only a missing directory is absent; an unreachable one may return.
+            if isinstance(error.__cause__, OSError) and not isinstance(
+                error.__cause__, FileNotFoundError | NotADirectoryError
+            ):
+                raise Error(f"cannot reach the brain registered as {value}; restore access to its directory") from None
             raise Error(f"{value}: {ABSENT}") from None
         if local is not None and local.identity != store.identity:
             raise Error(

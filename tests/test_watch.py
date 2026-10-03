@@ -688,7 +688,10 @@ def test_job_runs_selected_program_and_retains_state(brain: Store) -> None:
         job.close()
 
 
-def test_stopping_a_job_leaves_time_to_roll_back_a_commit(brain: Store) -> None:
+@pytest.mark.parametrize("slow", [False, True])
+def test_stopping_a_job_leaves_time_to_roll_back_a_commit(
+    brain: Store, capsys: pytest.CaptureFixture[str], *, slow: bool
+) -> None:
     signals: list[str] = []
 
     class Update:
@@ -700,13 +703,18 @@ def test_stopping_a_job_leaves_time_to_roll_back_a_commit(brain: Store) -> None:
 
         def wait(self, timeout: float | None = None) -> int:
             signals.append(f"wait {timeout}")
+            if slow and timeout == 1:
+                raise subprocess.TimeoutExpired("bf", 1)
             return 130
 
     job = Job(brain, (), ())
     job.process = cast("subprocess.Popen[bytes]", Update())
     job.close()
     # A cancelled update rolls back its interrupted record commit before exiting; SIGKILL would leave the journal.
-    assert signals == ["terminate", "wait 60"]
+    # Only a stop that takes longer than a second says why the terminal waits.
+    assert signals == (["terminate", "wait 1", "wait 59"] if slow else ["terminate", "wait 1"])
+    stopping = "bf: stopping the active update; this can take up to 60 seconds\n"
+    assert capsys.readouterr().err == (stopping if slow else "")
 
 
 def test_job_tells_skipped_cache_files_apart_from_failed_programs(brain: Store) -> None:
@@ -883,14 +891,14 @@ def test_json_watch_reports_completion_rows_and_delivery_warning(
     calendar = next(row for row in events[0]["programs"] if row["name"] == "calendar")
     assert (calendar["records"], calendar["added"], calendar["updated"]) == (10, 1, None)
     assert calendar["success"] == "2026-09-01T12:00:00+00:00"
-    warnings = [json.loads(line) for line in captured.err.splitlines()]
+    warnings = captured.err.splitlines()
     if delivered:
         assert events[-1]["message"].startswith("Update failed")
         assert warnings == []
     else:
-        # An unavailable desktop warns once on stderr, as JSON, and collection continues.
+        # An unavailable desktop warns once with a bf: line on stderr, and collection continues.
         assert events[-1]["message"].startswith("Desktop alerts unavailable")
-        assert warnings == [{"warning": events[-1]["message"]}]
+        assert warnings == [f"bf: {events[-1]['message']}"]
 
 
 def test_json_watch_writes_utf8_whatever_the_locale(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:

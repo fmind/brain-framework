@@ -28,6 +28,7 @@ Look up exact limits for a skipped file, a partial reply or a stopped program. F
 | Record links, aliases, field names            | 1,000 each                                                                                                           |
 | Record URL, link, field value                 | 8,192 characters                                                                                                     |
 | Listed field value                            | 200 characters; longer values stay in the exact read                                                                 |
+| Listed fields of one item                     | 2 KiB of JSON, in field-name order; later fields stay in the exact read                                              |
 | Entries per record source or authored folder  | 100,000                                                                                                              |
 | Folder depth                                  | 64 levels below a scanned folder                                                                                     |
 | Note path                                     | 7,988 characters once percent-encoded                                                                                |
@@ -45,7 +46,7 @@ Look up exact limits for a skipped file, a partial reply or a stopped program. F
 | Sensor output                                 | 64 MiB by default, up to 256 MiB                                                                                     |
 | Action routine output                         | 1 MiB by default, up to 4 MiB; a log routine's output only feeds its log                                             |
 | Routine input from `bf run`                   | 1 MiB, ending within 10 seconds when piped                                                                           |
-| Program command                               | 128 arguments of at most 16,384 characters each                                                                      |
+| Program command                               | The program and up to 127 arguments of at most 16,384 characters each                                                |
 | Program `timeout`                             | 1–3,600 seconds                                                                                                      |
 | `refresh`, `lookback`, `overlap`, `reconcile` | up to 365 days                                                                                                       |
 | Program log                                   | 1 MiB per `logs/NAME.log`; per run, the last 256 KiB of stderr and of a log routine's stdout                         |
@@ -60,12 +61,12 @@ Sensors and routines run from the brain folder with direct arguments, without a 
 
 BF removes environment variables that could load code **before your program starts**, such as `BASH_ENV` or `PYTHONPATH`:
 
-| Removed                                                           | Reason                                                 |
-| ----------------------------------------------------------------- | ------------------------------------------------------ |
-| `LD_*`, `DYLD_*`, `GCONV_PATH`                                    | Can inject loader libraries or conversion modules.     |
-| `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `PS4`  | Can supply shell startup code, options or functions.   |
-| `PYTHON*`, Java, Node, Ruby and Perl startup options, `LUA_INIT*` | Can alter interpreter startup or module loading.       |
-| Relative or empty `PATH` entries                                  | Could run an unexpected program from the brain folder. |
+| Removed                                                                     | Reason                                                 |
+| --------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `LD_*`, `DYLD_*`, `GCONV_PATH`                                              | Can inject loader libraries or conversion modules.     |
+| `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `ZDOTDIR` | Can supply shell startup code, options or functions.   |
+| `PYTHON*`, Java, Node, Ruby, Perl and PHP startup options, `LUA_INIT*`      | Can alter interpreter startup or module loading.       |
+| Relative or empty `PATH` entries                                            | Could run an unexpected program from the brain folder. |
 
 Other variables, including provider credentials and absolute `PATH` entries, remain. The list is best effort, not a sandbox. When a program needs dependencies, use an explicit runtime such as `uv run --no-project sensors/example.py`.
 

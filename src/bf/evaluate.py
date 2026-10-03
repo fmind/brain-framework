@@ -15,7 +15,7 @@ from bf.markdown import authored, split_ref
 from bf.models import MAX_FILE, Error, Model, NotFoundError, check_version, clean, decode, explain
 from bf.pages import address, query, readable
 from bf.retrieve import read, search
-from bf.storage import Store
+from bf.storage import Store, expand
 
 Nonblank = Annotated[str, Field(pattern=r"\S")]
 # A search case ranks its expected refs this deep, past its limit, so MRR still sees a drop below the limit.
@@ -261,7 +261,8 @@ class _Baseline(BaseModel):
 
 def load_baseline(value: str) -> dict[tuple[str, str], _Outcome]:
     """A previous `bf eval` reply, keyed by suite and case name."""
-    path = Path(value)
+    # `--baseline=~/x.json` reaches bf unexpanded, as shells expand only a word's leading tilde.
+    path = expand(Path(value))
     try:
         # Bounded bytes from a regular file: a plain open would wait on a FIFO.
         data = Store(path.parent).read(path.name)

@@ -732,7 +732,7 @@ def report(
     """Show each brain's cache, notes, records, sensor and routine freshness, errors, logs and usage."""
     if watch:
         if check:
-            raise typer.BadParameter("--check and --watch cannot be combined")
+            raise typer.BadParameter("cannot be combined with --check", param_hint="--watch")
         from bf.watch import watch as observe
 
         observe(one(brain), observe=True)
@@ -859,6 +859,7 @@ def _input() -> bytes:
 # would silently choose another brain or a directory, so they are invalid input; an omitted one keeps its default.
 _GIVEN = {
     "--brain": "give a brain name or path; an empty value would select another brain",
+    "--hook": "give an event name; an empty value would run the first argument as a routine",
     "--output": "give a directory; an empty value would name the brain's root",
     "DIR": "give a directory; an empty value would name the working directory",
     "PATH": "give a directory; an empty value would name the working directory",

@@ -149,8 +149,12 @@ def _scope(value: str, now: datetime | None) -> Scope:
     if index.identity(value) or value.lower().startswith("bf:"):
         # A tag scope takes no relation, unlike a read. Otherwise as `bf read` takes it: a page's #fragment would
         # scope nothing, a complete-looking empty reply.
-        links.tag(value)
+        tagged = links.tag(value)
         _syntax(value)
+        if not tagged and (parsed := links.parse(value)) and links.reserved(parsed.path):
+            # A page's address, such as bf://brain/projects or bf://brain/7d, is never a link target: it would
+            # scope nothing. Its brain-relative form, such as projects or 7d, scopes every selected brain.
+            raise Error(_SCOPE)
         return {"target": links.identity(value)}
     path = value.rstrip("/")
     try:

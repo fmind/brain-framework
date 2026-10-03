@@ -51,6 +51,19 @@ def test_skills_install_update_and_never_replace_edits(tmp_path: Path) -> None:
     assert statuses(run(str(destination), "--check", code=1))["bf-setup"] == "outdated"
     assert statuses(run(str(destination)))["bf-setup"] == "updated"
     assert not (destination / "bf-setup/retired.md").exists()
+    # Even --force keeps an edited file the new version dropped, as it keeps every file BF does not ship.
+    recorded = json.loads(manifest.read_text())
+    (destination / "bf-setup/retired.md").write_text("old, then edited\n")
+    recorded["files"]["retired.md"] = hashlib.sha256(b"old\n").hexdigest()
+    manifest.write_text(json.dumps(recorded))
+    assert run(str(destination), code=1)["skills"][1] == {
+        "name": "bf-setup",
+        "status": "modified",
+        "edited": ["retired.md"],
+    }
+    assert statuses(run(str(destination), "--force"))["bf-setup"] == "updated"
+    assert (destination / "bf-setup/retired.md").read_text() == "old, then edited\n"
+    (destination / "bf-setup/retired.md").unlink()
     # A person's edit is kept and reported; --force replaces it.
     skill = destination / "bf-use/SKILL.md"
     skill.write_text(skill.read_text() + "\nLocal rule.\n")

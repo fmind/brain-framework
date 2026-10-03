@@ -39,7 +39,7 @@ from bf.models import (
 )
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, writer
 
-SCHEMA = 31
+SCHEMA = 32
 CACHE = ".bf/index.sqlite"
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
@@ -141,6 +141,9 @@ CONTEXT = 3.0
 TITLE = 200
 # A listed field value longer than this stays in the exact read: listings show short facts only.
 FACT = 200
+# An item's listed fields, in name order, end before this many bytes of JSON: an item that declares hundreds of
+# fields, as a shared brain may, cannot push a listing, home or a note's backlinks past the reply limit.
+FACTS = 2048
 # SQL twins of markdown.action_note and markdown.entry_note over `items i`, for page builders.
 ACTION = (
     "i.kind='note' AND substr(i.path,1,8)='actions/' AND substr(i.path,-10)='/ACTION.md' "
@@ -412,6 +415,7 @@ def _facts(values: Mapping[str, JsonValue], config: Config) -> str:
     Listings show them beside each item, so sources that disagree appear side by side without another read.
     """
     facts = {}
+    size = 0
     for name, value in sorted(values.items()):
         definition = config.ontology.get(name)
         if definition is None or definition.cardinality == "many":
@@ -419,6 +423,10 @@ def _facts(values: Mapping[str, JsonValue], config: Config) -> str:
         with suppress(ValueError):
             normalized = definition.normalize(value)
             if isinstance(normalized, str | int | float | bool) and len(str(normalized)) <= FACT:
+                # The listed JSON's size: each entry with its two-byte separator, or the braces for the first.
+                size += len(json.dumps({name: normalized}, ensure_ascii=False).encode())
+                if size > FACTS:
+                    break
                 facts[name] = normalized
     return json.dumps(facts, ensure_ascii=False, sort_keys=True) if facts else ""
 

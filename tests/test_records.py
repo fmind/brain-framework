@@ -592,3 +592,23 @@ def test_projected_fields_keep_the_bounds_of_every_stored_record(brain: Store) -
     ]
     assert brain.read(name) == before
     records.load(brain, name)
+
+
+def test_a_commit_whose_completion_landed_succeeds_despite_a_late_sync_failure(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write = Store.write
+
+    def unsynced(self: Store, name: str, data: bytes, *, durable: bool = True) -> None:
+        write(self, name, data, durable=durable)
+        if name == "memories/.pending/manifest.json" and json.loads(data)["complete"]:
+            # The marker is in place; only its directory sync fails.
+            raise OSError(errno.EIO, "sync failed")
+
+    monkeypatch.setattr(Store, "write", unsynced)
+    records.upsert(brain, "meetings", [Record(id="decision-1", title="Moved")], snapshot=False)
+    monkeypatch.undo()
+    found = records.find(brain, "meetings", "decision-1")
+    assert found is not None
+    assert found[1].title == "Moved"
+    assert not (brain.root / "memories/.pending").exists()

@@ -29,7 +29,7 @@ from rich.text import Text
 from bf.collect import next_due
 from bf.config import load
 from bf.history import ROUTINES, SENSORS, environment, log_path, state
-from bf.models import Error, WatchSettings, decode, encode, local, present, terminal, timestamp
+from bf.models import Error, WatchSettings, decode, local, present, printable, terminal, timestamp
 from bf.storage import BusyError, Store, collecting
 from bf.update import selection
 from bf.watch_settings import Notifications, settings
@@ -460,7 +460,9 @@ class Job:
     """A separate BF process keeps keyboard input responsive and reuses provider cancellation."""
 
     def __init__(self, store: Store, sensors: tuple[str, ...], routines: tuple[str, ...]) -> None:
-        self.argv = [sys.executable, "-I", "-m", "bf", "update", "--brain", str(store.root)]
+        # Like -I without -s: PYTHON* variables and the working directory never change what runs, while a user-site
+        # installation, such as pip install --user, still imports bf.
+        self.argv = [sys.executable, "-E", "-P", "-m", "bf", "update", "--brain", str(store.root)]
         for flag, names in (("--sensor", sensors), ("--routine", routines)):
             for name in names:
                 self.argv.extend((flag, name))
@@ -510,7 +512,13 @@ class Job:
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()
             try:
-                self.process.wait(timeout=STOP)
+                try:
+                    self.process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    # The dashboard is gone: say why the terminal waits instead of seeming to hang.
+                    sys.stderr.write(f"bf: stopping the active update; this can take up to {STOP} seconds\n")
+                    sys.stderr.flush()
+                    self.process.wait(timeout=STOP - 1)
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
@@ -654,7 +662,8 @@ def _loop(
                         dashboard.message = warning
                         # The dashboard shows it; stderr text written under the alternate screen is lost.
                         if live is None:
-                            sys.stderr.write(encode({"warning": warning}).decode())
+                            # One diagnostic line, like every other bf: line on stderr.
+                            sys.stderr.write(f"bf: {printable(warning)}\n")
             except (Error, OSError, UnicodeError) as error:
                 dashboard.rows = []
                 # BF's own diagnostic names the invalid field, YAML position or unknown selected program without

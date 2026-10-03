@@ -50,6 +50,8 @@ If a query misses, use the evidence's own words and drop the scope. The sample s
 | `repo:github.com/example/new-website` | The identity's owner and the items linking to it.                      |
 | `bf://brain/tags/website`             | Notes carrying that tag; see [tag rules](link-reference.md#tag-rules). |
 
+A page's address, such as `bf://brain/projects` or `bf://brain/7d`, is invalid input: use its brain-relative form, `projects` or `7d`.
+
 ## Read a ref
 
 ```bash

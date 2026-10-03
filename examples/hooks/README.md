@@ -61,6 +61,16 @@ In the brain's project frontmatter, name the repository it belongs to, with its 
 aliases: [repo:github.com/example/new-website]
 ```
 
+Copy the hooks from the release tag matching `bf --version` and make them executable, since the host runs them as commands and a download does not keep the executable bit:
+
+```bash
+mkdir -p ~/brain/hooks
+examples="https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/hooks"
+curl -fsSLo ~/brain/hooks/session-context.py "$examples/session-context.py"
+curl -fsSLo ~/brain/hooks/prompt-context.py "$examples/prompt-context.py"
+chmod +x ~/brain/hooks/session-context.py ~/brain/hooks/prompt-context.py
+```
+
 Run the copied hook from that repository with Python 3.11 or later as `python3` and the `bf` release matching this checkout on PATH:
 
 ```bash

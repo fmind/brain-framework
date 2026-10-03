@@ -30,6 +30,8 @@ MAX_TITLE = 4096
 # An id holds no `[`: each citation scan then stops at the next one, so a long run of `[^` parses in linear time.
 _FOOTNOTE = re.compile(r"([ \t>]*)\[\^([^\[\]\s]+)\]:")
 _CITATION = re.compile(r"\[\^([^\[\]\s]+)\]")
+# A footnote's continuation line: indented by four spaces or a tab, which it loses in the parsed copy.
+_CONTINUED = re.compile(r" {4}|\t")
 _TASK = re.compile(r"\[([ xX])\]\s+(\S.*)")
 # Emphasis markers open or close a word; inside one, `_` and `*` belong to identifiers and arithmetic (MAX_SIZE, 2*3).
 _EMPHASIS = re.compile(r"(?<![\w\]])[*_`]{1,3}|[*_`]{1,3}(?![\w(])")
@@ -152,18 +154,30 @@ def parse(path: str, data: bytes) -> Markdown:
                 if okf(path):
                     raise
     # OKF claim footnotes (`[^id]: [Source](ref)`) are not link reference definitions in CommonMark;
-    # parse them as ordinary lines so their links are checked, on a copy with the same line numbers.
+    # parse them as ordinary lines so their links are checked, on a copy with the same line numbers. A fixed
+    # marker replaces the label, which could otherwise open a fence or an HTML block, such as [^```] or [^<pre>].
     copy: list[str] = []
-    # The footnote each definition line starts: its links support the section that first cites it, not the
-    # section where the definition happens to sit, usually the last one.
+    # The footnote each definition line starts, or an indented paragraph continues: its links support the section
+    # that first cites it, not the section where the definition happens to sit, usually the last one. Labels match
+    # case-insensitively, as on GitHub.
     definitions: dict[int, str] = {}
+    label = ""
     for number, line in enumerate(source_lines[offset:], offset + 1):
         definition = _FOOTNOTE.match(line)
         if definition:
-            definitions[number] = definition[2]
-        copy.append(definition.expand(r"\1\2:") + line[definition.end() :] if definition else line)
+            definitions[number] = definition[2].casefold()
+            copy.append(definition[1] + "^:" + line[definition.end() :])
+            # Only a definition outside a block quote continues on indented lines.
+            label = "" if ">" in definition[1] else definitions[number]
+        elif label and (continued := _CONTINUED.match(line)):
+            definitions[number] = label
+            copy.append(line[continued.end() :])
+        else:
+            # A blank line may separate a footnote's paragraphs; any other unindented line ends it.
+            label = label if not line.strip() else ""
+            copy.append(line)
     tokens = _parser().parse("".join(copy))
-    headings = _headings(path, tokens, offset)
+    headings = _headings(path, tokens, offset, strict=okf(path))
     sections = iter(headings)
     # Each link with its section, line and footnote, then the section first citing each footnote.
     found: list[tuple[str, str, int, str]] = []
@@ -200,7 +214,7 @@ def parse(path: str, data: bytes) -> Markdown:
             elif child.type == "text":
                 # Only text cites: `[^1]` in a code span is an example.
                 for citation in _CITATION.findall(child.content):
-                    cited.setdefault(citation, fragment)
+                    cited.setdefault(citation.casefold(), fragment)
             # An embedded image is a link too, so validation catches a missing asset; inline data names no target.
             elif child.type in {"link_open", "image"}:
                 target = str(child.attrGet("href" if child.type == "link_open" else "src"))
@@ -212,10 +226,11 @@ def parse(path: str, data: bytes) -> Markdown:
     return Markdown(text, attributes, headings, contexts, tasks, offset)
 
 
-def _title(path: str, inline: Token) -> tuple[str, str]:
+def _title(path: str, inline: Token, *, strict: bool) -> tuple[str, str]:
     """A heading's words and its explicit anchor, written last in its source as ` {#id}`.
 
-    The anchor is read from the source, so braces in a code span or escaped with a backslash stay words.
+    The anchor is read from the source, so braces in a code span or escaped with a backslash stay words. Outside
+    `strict` OKF notes, an anchor ending in .md stays words too.
     """
     title = "".join(
         " " if child.type in {"softbreak", "hardbreak"} else child.content
@@ -233,25 +248,34 @@ def _title(path: str, inline: Token) -> tuple[str, str]:
         return title, ""
     if anchor[1].endswith(".md"):
         # `note.md#part.md` would read as a file name, not a section.
+        if not strict:
+            return title, ""
         raise Error(f"{path}: explicit heading anchors cannot end in .md")
     return title.removesuffix(anchor[0]).rstrip(), anchor[1]
 
 
-def _headings(path: str, tokens: Sequence[Token], offset: int) -> list[Heading]:
+def _headings(path: str, tokens: Sequence[Token], offset: int, *, strict: bool) -> list[Heading]:
     """Headings with unique slugs: an explicit anchor, otherwise the title's slug or its next free `-N` suffix.
 
-    Generated suffixes skip every explicit anchor, wherever it appears; a title whose own slug another heading
-    anchors explicitly is ambiguous and fails, like two equal anchors.
+    Generated suffixes skip every explicit anchor, wherever it appears. In a `strict` OKF note, a title whose own
+    slug another heading anchors explicitly is ambiguous and fails, like two equal anchors. Ordinary Markdown, such as
+    a copied document, stays searchable: a repeated anchor yields to the first, and such a title takes a suffix.
     """
     titled = [
-        (int(token.tag[1:]), token.map[0] + offset, token.map[1] + offset, *_title(path, tokens[i + 1]))
+        (int(token.tag[1:]), token.map[0] + offset, token.map[1] + offset, *_title(path, tokens[i + 1], strict=strict))
         for i, token in enumerate(tokens)
         if token.type == "heading_open" and token.map is not None
     ]
     explicit = [anchor for *_, anchor in titled if anchor]
     reserved = set(explicit)
     if len(reserved) < len(explicit):
-        raise Error(f"{path}: duplicate explicit heading anchor")
+        if strict:
+            raise Error(f"{path}: duplicate explicit heading anchor")
+        kept: set[str] = set()
+        for number, (level, start, end, title, anchor) in enumerate(titled):
+            if anchor in kept:
+                titled[number] = (level, start, end, title, "")
+            kept.add(anchor)
     used: set[str] = set()
     # The last suffix each slug took, so repeated headings, as in a transcript, probe each suffix once.
     last: dict[str, int] = {}
@@ -261,7 +285,7 @@ def _headings(path: str, tokens: Sequence[Token], offset: int) -> list[Heading]:
         if not anchor:
             # A heading without word characters still needs an addressable, non-empty slug.
             stem = slug = slugify(title) or "section"
-            if stem in reserved:
+            if strict and stem in reserved:
                 raise Error(f"{path}: duplicate explicit heading anchor")
             suffix = last.get(stem, 0)
             while slug in used or slug in reserved:

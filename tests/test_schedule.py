@@ -173,7 +173,8 @@ def test_systemd_quotes_arguments_and_captures_only_safe_environment(
         "Preview only: no file was written; rerun with --output ~/.config/bf-schedules before the install commands."
     )
     assert preview in result["warnings"]
-    units = str(Path.home() / ".config/systemd/user")
+    # The user manager reads units below XDG_CONFIG_HOME, which the suite sets.
+    units = str(Path(os.environ["XDG_CONFIG_HOME"]) / "systemd/user")
     assert result["install"][1] == ["cp", "-i", *(str(suggested / name) for name in files), units]
     assert result["remove"][0][:4] == ["systemctl", "--user", "disable", "--now"]
 

@@ -81,6 +81,14 @@ def _state(store: Store, skill: str, wanted: dict[str, str]) -> tuple[str, list[
     return ("current" if recorded == wanted else "outdated"), [], recorded
 
 
+def _unedited(store: Store, name: str, recorded: str) -> bool:
+    """Whether a file still holds the bytes an install recorded."""
+    try:
+        return digest(store.read(name)) == recorded
+    except FileNotFoundError, Error:
+        return False
+
+
 def skills(destination: Path, *, check: bool = False, force: bool = False) -> dict[str, object]:
     """Install or update each packaged skill in `destination`, such as ~/.agents/skills.
 
@@ -110,7 +118,8 @@ def skills(destination: Path, *, check: bool = False, force: bool = False) -> di
                 # Helpers run directly: `scripts/NAME.py` is executable, like the packaged copy.
                 (store.root / skill / name).chmod(0o700 if name.startswith("scripts/") else 0o600)
             for name in sorted(set(recorded) - set(packaged)):
-                if (store.root / skill / name).is_file():
+                # Even `--force` keeps an edited file this version no longer ships: BF does not ship it.
+                if _unedited(store, f"{skill}/{name}", recorded[name]):
                     store.delete(f"{skill}/{name}")
             store.write(f"{skill}/{MANIFEST}", encode({"version": __version__, "files": wanted}))
             entry["status"] = "installed" if status == "missing" else "updated"

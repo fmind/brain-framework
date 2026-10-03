@@ -141,10 +141,10 @@ def explanations(connection: sqlite3.Connection, ref: str, targets: set[str]) ->
         "max(relation!='') OVER (PARTITION BY target,origin) AS typed FROM edges WHERE item=? "
         "AND (target IN (SELECT value FROM json_each(?)) OR EXISTS (SELECT 1 FROM json_each(?) s "
         "WHERE target>s.value||'#' AND target<s.value||'$'))) "
-        "WHERE relation!='' OR NOT typed ORDER BY relation,target,origin,subject LIMIT 51",
-        (row[0], json.dumps(sorted(targets)), json.dumps(index.sections(targets))),
+        "WHERE relation!='' OR NOT typed ORDER BY relation,target,origin,subject LIMIT ?",
+        (row[0], json.dumps(sorted(targets)), json.dumps(index.sections(targets)), CLAIMS + 1),
     ).fetchall()
-    return _claims(rows[:50]), len(rows) > 50
+    return _claims(rows[:CLAIMS]), len(rows) > CLAIMS
 
 
 def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> tuple[list[dict[str, object]], bool]:

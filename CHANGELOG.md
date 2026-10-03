@@ -4,6 +4,33 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v18.1.0](https://github.com/fmind/brain-framework/releases/tag/v18.1.0) - 2026-10-03
+
+A review release of fixes. The brain format (`version: 7`), `bf.yaml` and the reply schemas are unchanged; listed `fields` are bounded, and the search cache rebuilds once. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), then run `bf skills DIR`.
+
+### Fixed
+
+- `bf skills --force` keeps a file you edited that the new version no longer ships, as it keeps every other file BF does not ship, instead of deleting it.
+- A record commit whose completion marker landed before a final directory sync failed reports success instead of "nothing was written".
+- A registered brain whose folder exists but cannot be reached fails with `cannot reach the brain registered as NAME` instead of advice to register it again, which `bf register` then refused.
+- `bf run --hook ""`, as an unset variable gives it, is invalid input instead of running the first argument as a routine; `bf status --check --watch` names `--watch` in its invalid-input line.
+- `bf eval --baseline=~/eval.json` expands `~`, like every other path option. Without a home directory, commands fail with one `bf:` line naming `HOME` instead of a traceback.
+- `bf schedule` installs systemd units below `XDG_CONFIG_HOME` when it is set, where the user manager reads them.
+- `bf watch` runs updates for a `pip install --user` installation, and `bf watch --json` reports unavailable desktop alerts with a `bf:` line on stderr instead of a JSON object.
+- A claim footnote's label can no longer change a note's structure: `[^```]` or `[^<pre>]` used to open a block that hid the sections and links after it. Links in a footnote's continuation paragraph, indented by four spaces or a tab, now support the section that cites it, and labels match regardless of case, as on GitHub.
+- A copied document whose headings repeat an explicit anchor, or whose title's slug another heading anchors, stays searchable: the later heading takes a generated slug. OKF notes still fail `bf validate`.
+- An OKF `sources` entry whose `?rel=` names an undeclared relation still cites its target in reads; `bf validate` still reports the relation.
+- Validation messages count only the distinct problems they do not name.
+- The example sensor, routine and hook guides make a downloaded script executable with `chmod +x` before configuring it as a command, since a download drops the executable bit and `bf validate` then rejects the program; `github-history.md` copies from the release tag matching `bf --version` and says when to raise `timeout` for a large backfill.
+- Programs no longer inherit `ZDOTDIR`, `PHPRC` or `PHP_INI_SCAN_DIR`, which make zsh or PHP run code before the program starts.
+- The guarded-write helper follows a linked brain folder and links above it, such as `/home` on Fedora Atomic or `/tmp` on macOS, as bf does, instead of refusing every absolute path through them; links inside the brain are still refused.
+- `bf-use` asks before updating the skills for a newer `bf`, and names the folder to pass to `bf skills`.
+- Quitting `bf watch` while an update is still stopping prints `bf: stopping the active update; this can take up to 60 seconds` instead of leaving a silent terminal.
+- An exact read across several brains returns the brain that holds the ref with a `problems` entry for another brain that fails, such as on a malformed record of a shared source or a busy writer, instead of failing; when no brain holds it, the failure stands.
+- A page's address as `--scope`, such as `bf://brain/projects`, `bf://brain/7d` or `bf://brain/memories/gmail`, is invalid input instead of silently matching nothing; use its brain-relative form.
+- Listed `fields` stop at 2 KiB of JSON per item, in field-name order, so a shared brain declaring hundreds of fields cannot push home, a listing or a note's backlinks past the reply limit; exact reads keep every field.
+- The retrieval reference states that a relation page's `total` includes the claims of its narrower relations.
+
 ## [v18.0.0](https://github.com/fmind/brain-framework/releases/tag/v18.0.0) - 2026-10-03
 
 A review release. Review signals now follow upstream changes and the evidence a note cites, the home page and exact reads summarize what needs attention, and every interface reports invalid input the same way. The brain format (`version: 7`) and `bf.yaml` are unchanged apart from accepting empty sections; stricter identity rules and bounds are listed below. Reply schemas only gain optional fields, and the search cache rebuilds once.
