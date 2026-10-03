@@ -1,4 +1,5 @@
 ---
+icon: lucide/network
 description: Run a fictional four-tool example that collects evidence, records a conclusion and flags it when a source changes.
 ---
 

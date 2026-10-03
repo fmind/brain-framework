@@ -1,0 +1,19 @@
+{#- Extends Zensical's copyright partial with the legal links readers expect in a footer. -#}
+<div class="md-copyright">
+  {% if config.copyright %}
+    <div class="md-copyright__highlight">
+      {{ config.copyright }}
+    </div>
+  {% endif %}
+  <nav class="bf-footer-links" aria-label="Legal">
+    <a href="{{ 'docs/privacy/' | url }}">Privacy and security</a>
+    <a href="{{ 'third-party-notices/' | url }}">Third-party notices</a>
+    <a href="{{ 'license/' | url }}">MIT License</a>
+  </nav>
+  {% if not config.extra.generator == false %}
+    Made with
+    <a href="https://zensical.org/" target="_blank" rel="noopener">
+      Zensical
+    </a>
+  {% endif %}
+</div>

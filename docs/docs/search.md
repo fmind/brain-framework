@@ -1,4 +1,5 @@
 ---
+icon: lucide/search
 description: Find saved evidence, read exact sources and check whether results are complete.
 ---
 

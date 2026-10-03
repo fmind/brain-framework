@@ -4,6 +4,15 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v18.1.1](https://github.com/fmind/brain-framework/releases/tag/v18.1.1) - 2026-10-03
+
+A documentation release. The package, the brain format (`version: 7`), `bf.yaml`, the reply schemas and the search cache are unchanged; no upgrade step is needed.
+
+### Documentation
+
+- The documentation site gains offline search (Ctrl+K or `/`), header tabs for Start here, Guides, Reference and Privacy and legal, page icons, a light, dark and system color toggle, GitHub repository and edit links, and a footer with privacy, notices and license links. The changelog and license are site pages, so every navigation entry stays on the site. Search keeps the site free of accessibility violations in an axe-core audit: the closed dialog leaves the tab order, its controls are named and its result paths meet contrast.
+- Agents can read the guides as Markdown through [`llms.txt`](https://fmind.github.io/brain-framework/llms.txt), which summarizes each guide, [`llms-full.txt`](https://fmind.github.io/brain-framework/llms-full.txt) or `index.md` beside each page, which each guide's HTML advertises as its Markdown alternate. The overview now links every guide.
+
 ## [v18.1.0](https://github.com/fmind/brain-framework/releases/tag/v18.1.0) - 2026-10-03
 
 A review release of fixes. The brain format (`version: 7`), `bf.yaml` and the reply schemas are unchanged; listed `fields` are bounded, and the search cache rebuilds once. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), then run `bf skills DIR`.

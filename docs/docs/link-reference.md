@@ -1,4 +1,5 @@
 ---
+icon: lucide/tags
 description: Exact rules for BF addresses, section anchors, identities, relation links and tags.
 ---
 

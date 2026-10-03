@@ -1,4 +1,5 @@
 ---
+icon: lucide/repeat
 description: Run deterministic brain programs now, on a schedule or from Git hooks, and turn their output into logs or review actions.
 ---
 

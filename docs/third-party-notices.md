@@ -1,5 +1,6 @@
 ---
 title: Third-party notices
+icon: lucide/scale
 description: Licenses for the third-party code distributed by the bf documentation site.
 hide:
   - toc
@@ -13,6 +14,7 @@ The documentation site distributes these pinned third-party artifacts. Python di
 | ----------------------- | ------- | ----------------------------------------- | ----------------------------------------------------------------- |
 | Zensical                | 0.0.67  | Templates, styles, and site JavaScript    | [MIT](third-party/zensical-LICENSE.txt)                           |
 | Lucide Icons            | bundled | Inline interface icons                    | [ISC and MIT](third-party/lucide-LICENSE.txt)                     |
+| Simple Icons            | bundled | GitHub and PyPI brand icons               | [CC0-1.0](third-party/simple-icons-LICENSE.txt)                   |
 | Zensical browser bundle | 0.0.67  | Clipboard, escaping, focus, and RxJS code | [Component licenses](third-party/zensical-javascript-LICENSE.txt) |
 
 The linked license texts are exact copies from the locked Zensical distribution and are deployed with every site build.

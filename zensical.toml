@@ -11,6 +11,12 @@ site_dir = "site/brain-framework"
 strict = true
 extra_css = ["stylesheets/extra.css"]
 extra_javascript = ["javascripts/accessibility.js"]
+repo_url = "https://github.com/fmind/brain-framework"
+repo_name = "fmind/brain-framework"
+# Relative to repo_url; Zensical appends each page's path under docs_dir for the edit and view actions.
+edit_uri = "edit/main/docs/"
+# Top-level entries render as header tabs; their groups render as sidebar sections.
+# Keep every entry a site page: external URLs carry no outbound marker, so the footer and header own them.
 nav = [
   { "Overview" = "docs/index.md" },
   { "Start here" = [
@@ -19,21 +25,23 @@ nav = [
     { "Core concepts" = "docs/concepts.md" },
     { "Install and update" = "docs/upgrades.md" },
   ] },
-  { "Everyday use" = [
-    { "Write notes and actions" = "docs/brain.md" },
-    { "Search and read" = "docs/search.md" },
-    { "Linking knowledge" = "docs/links.md" },
-    { "Check your brain" = "docs/checks.md" },
-  ] },
-  { "Collect and automate" = [
-    { "Add a sensor" = "docs/sensors.md" },
-    { "Run routines" = "docs/routines.md" },
-    { "Watch and schedule updates" = "docs/schedule.md" },
-  ] },
-  { "Agents and teams" = [
-    { "Agent workflows" = "docs/agents.md" },
-    { "Connect an agent with MCP" = "docs/mcp.md" },
-    { "Team setup" = "docs/team.md" },
+  { "Guides" = [
+    { "Everyday use" = [
+      { "Write notes and actions" = "docs/brain.md" },
+      { "Search and read" = "docs/search.md" },
+      { "Linking knowledge" = "docs/links.md" },
+      { "Check your brain" = "docs/checks.md" },
+    ] },
+    { "Collect and automate" = [
+      { "Add a sensor" = "docs/sensors.md" },
+      { "Run routines" = "docs/routines.md" },
+      { "Watch and schedule updates" = "docs/schedule.md" },
+    ] },
+    { "Agents and teams" = [
+      { "Agent workflows" = "docs/agents.md" },
+      { "Connect an agent with MCP" = "docs/mcp.md" },
+      { "Team setup" = "docs/team.md" },
+    ] },
   ] },
   { "Reference" = [
     { "Commands" = "docs/commands.md" },
@@ -43,48 +51,154 @@ nav = [
     { "Retrieval" = "docs/retrieval.md" },
     { "Limits and safeguards" = "docs/limits.md" },
     { "Troubleshooting" = "docs/troubleshooting.md" },
+    { "Changelog" = "changelog.md" },
   ] },
   { "Privacy and legal" = [
     { "Privacy and security" = "docs/privacy.md" },
     { "Third-party notices" = "third-party-notices.md" },
+    { "License" = "license.md" },
   ] },
 ]
+
+# Fail strict builds on every Markdown reference and footnote problem, not only broken links.
+[project.validation]
+invalid_links = true
+invalid_link_anchors = true
+unresolved_references = true
+unresolved_footnotes = true
+unused_definitions = true
+unused_footnotes = true
+shadowed_definitions = true
+shadowed_footnotes = true
 
 [project.theme]
 custom_dir = "overrides"
 language = "en"
 logo = "assets/brain-framework.svg"
 favicon = "assets/brain-framework.svg"
+# Keep fonts local: Google Fonts would contact a third party on every visit.
 font = false
 features = [
+  "content.action.edit",
+  "content.action.view",
+  "content.code.annotate",
   "content.code.copy",
+  "content.code.select",
+  "content.footnote.tooltips",
+  "content.tabs.link",
+  "content.tooltips",
   "navigation.footer",
   "navigation.instant",
+  "navigation.instant.prefetch",
   "navigation.path",
   "navigation.sections",
+  "navigation.tabs",
   "navigation.top",
   "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
 ]
 
+[project.theme.icon]
+# Simple Icons are CC0; Lucide (the theme default) has no brand marks.
+repo = "simple/github"
+edit = "lucide/pencil"
+view = "lucide/eye"
+
+# Follow the system preference until the reader picks light or dark.
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
 [[project.extra.social]]
-icon = "lucide/git-branch"
+icon = "simple/github"
 link = "https://github.com/fmind/brain-framework"
 name = "Brain Framework on GitHub"
 
+[[project.extra.social]]
+icon = "simple/pypi"
+link = "https://pypi.org/project/brain-framework/"
+name = "Brain Framework on PyPI"
+
 [project.markdown_extensions]
+abbr = {}
+admonition = {}
 attr_list = {}
+def_list = {}
+footnotes = {}
 md_in_html = {}
 toc.permalink = true
+pymdownx.details = {}
 pymdownx.highlight.line_spans = "__span"
 pymdownx.highlight.pygments_lang_class = true
 pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.mark = {}
+# Changelog and license pages include the repository files; a missing file fails the build.
+pymdownx.snippets.check_paths = true
+pymdownx.snippets.restrict_base_path = true
 pymdownx.superfences = {}
+pymdownx.tabbed.alternate_style = true
+pymdownx.tasklist.custom_checkbox = true
 
 [project.plugins.redirects]
 # Preserve published URLs: the repository root leads to the overview, and merged pages lead to their new home.
 redirect_maps = { "index.md" = "docs/index.md", "docs/glossary.md" = "docs/concepts.md#glossary", "docs/highlights.md" = "docs/sensors.md#selected-highlights", "docs/pilot.md" = "docs/team.md#evaluate-a-pilot" }
 
+# Client-side and offline: the index ships with the site and queries never leave the browser.
 [project.plugins.search]
-# Zensical 0.0.65 search still has unlabeled controls, invalid ARIA and low-contrast results.
-# Recheck keyboard use and an accessibility audit before enabling it.
-enabled = false
+# Publish llms.txt and llms-full.txt so agents can read the guides as Markdown.
+[project.plugins.llmstxt]
+full_output = "llms-full.txt"
+markdown_description = "Brain Framework (`bf`) keeps a brain in plain files: collection, validation, a knowledge graph and offline retrieval for people and agents. Release notes and upgrade steps are in the [changelog](https://raw.githubusercontent.com/fmind/brain-framework/main/CHANGELOG.md)."
+
+[project.plugins.llmstxt.sections]
+# Descriptions repeat each page's front matter so agents can choose a page; tests/test_docs.py keeps them in sync.
+"Start here" = [
+  { "docs/index.md" = "Keep evidence, decisions and next steps in plain files that you and your agents search, read and connect." },
+  { "docs/getting-started.md" = "Create a brain, save your first project decision, search its reason and verify the result." },
+  { "docs/context-hub.md" = "Run a fictional four-tool example that collects evidence, records a conclusion and flags it when a source changes." },
+  { "docs/concepts.md" = "Understand projects, records, concepts and actions, the flow from evidence to decisions, and the terms BF uses." },
+  { "docs/upgrades.md" = "Install or update Brain Framework, match documentation to your version and verify the result." },
+]
+Guides = [
+  { "docs/brain.md" = "Write project notes, reusable concepts and resumable actions with complete Markdown examples." },
+  { "docs/search.md" = "Find saved evidence, read exact sources and check whether results are complete." },
+  { "docs/links.md" = "Connect notes and records with citations, typed fields, explicit identities and declared relations." },
+  { "docs/checks.md" = "Validate saved files and test that recurring questions still retrieve the expected evidence." },
+  { "docs/sensors.md" = "Collect a selected local document or highlight, configure sensors and understand update and replacement rules." },
+  { "docs/routines.md" = "Run deterministic brain programs now, on a schedule or from Git hooks, and turn their output into logs or review actions." },
+  { "docs/schedule.md" = "Run or observe due sensors and routines, set watch preferences and generate native schedules." },
+  { "docs/agents.md" = "Use the CLI, the packaged skills and optional hooks to find evidence and keep agent work resumable." },
+  { "docs/mcp.md" = "Connect an agent through local MCP search and read tools, then verify access to a saved decision." },
+  { "docs/team.md" = "Set up a private team brain, share reviewed evidence, coordinate collection and evaluate a pilot." },
+]
+Reference = [
+  { "docs/commands.md" = "Look up Brain Framework commands, previews, graph exports, replies, errors and exit codes." },
+  { "docs/configuration.md" = "Configure a brain, choose which brains a command uses, declare related brains and locate local state." },
+  { "docs/schema.md" = "Exact formats of bf.yaml, notes, records, shared fields and sensor mappings, with editor validation." },
+  { "docs/link-reference.md" = "Exact rules for BF addresses, section anchors, identities, relation links and tags." },
+  { "docs/retrieval.md" = "Reply fields and rules for search, read, pages, relation pages, continuations and MCP clients." },
+  { "docs/limits.md" = "Look up size, page and process limits, and the safeguards around running programs." },
+  { "docs/troubleshooting.md" = "Diagnose installation, retrieval, collection and file problems without losing evidence." },
+]
+"Privacy and legal" = [
+  { "docs/privacy.md" = "Understand local storage, cloud-agent boundaries, program execution and audience separation." },
+]

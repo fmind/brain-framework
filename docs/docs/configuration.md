@@ -1,4 +1,5 @@
 ---
+icon: lucide/settings
 description: Configure a brain, choose which brains a command uses, declare related brains and locate local state.
 ---
 

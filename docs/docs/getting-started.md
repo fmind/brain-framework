@@ -1,4 +1,5 @@
 ---
+icon: lucide/rocket
 description: Create a brain, save your first project decision, search its reason and verify the result.
 ---
 

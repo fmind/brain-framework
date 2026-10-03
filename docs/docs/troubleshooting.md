@@ -1,4 +1,5 @@
 ---
+icon: lucide/life-buoy
 description: Diagnose installation, retrieval, collection and file problems without losing evidence.
 ---
 
@@ -25,7 +26,7 @@ Read the file, field or program the diagnostic names before retrying. Diagnostic
 | `registered brain directory is absent …`    | Did the brain move, or is its disk unmounted?                              | Restore it, run `bf register` at its new place or remove its entry; see [registration](configuration.md#optional-machine-registration). |
 | `bf: invalid input: ARGUMENT: …`            | The named argument in `bf COMMAND -h`.                                     | Correct that value and retry; see [exit codes](commands.md#exit-codes-and-errors).                                                      |
 | An option is unknown                        | `bf --version` and `bf COMMAND --help`.                                    | [Match the docs to your version](upgrades.md#match-the-docs-to-your-version).                                                           |
-| `bf.yaml declares version …`                | The brain format in `bf.yaml` and `evals/*.yaml`.                          | Apply the upgrade steps in the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md).                            |
+| `bf.yaml declares version …`                | The brain format in `bf.yaml` and `evals/*.yaml`.                          | Apply the upgrade steps in the [changelog](../changelog.md).                                                                            |
 | A configuration field is rejected           | The named file and field.                                                  | Fix its type, spelling or duplicate key; use the [editor schema](schema.md#editor-schemas).                                             |
 | `reference not found; … did you mean …?`    | The suggested name.                                                        | Read the suggestion, or search for the evidence. A missing section lists the note's sections.                                           |
 | `"valid":false`                             | Each problem's `file` and `error`.                                         | Repair them and validate again; see [Check your brain](checks.md).                                                                      |

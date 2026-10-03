@@ -1,4 +1,5 @@
 ---
+icon: lucide/lightbulb
 description: Understand projects, records, concepts and actions, the flow from evidence to decisions, and the terms BF uses.
 ---
 

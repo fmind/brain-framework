@@ -1,4 +1,5 @@
 ---
+icon: lucide/gauge
 description: Look up size, page and process limits, and the safeguards around running programs.
 ---
 

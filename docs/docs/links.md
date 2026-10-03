@@ -1,4 +1,5 @@
 ---
+icon: lucide/link
 description: Connect notes and records with citations, typed fields, explicit identities and declared relations.
 ---
 

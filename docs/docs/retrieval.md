@@ -1,4 +1,5 @@
 ---
+icon: lucide/file-search
 description: Reply fields and rules for search, read, pages, relation pages, continuations and MCP clients.
 ---
 

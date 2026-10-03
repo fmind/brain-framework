@@ -1,4 +1,5 @@
 ---
+icon: lucide/braces
 description: Exact formats of bf.yaml, notes, records, shared fields and sensor mappings, with editor validation.
 ---
 

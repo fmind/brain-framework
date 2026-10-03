@@ -1,4 +1,5 @@
 ---
+icon: lucide/calendar-clock
 description: Run or observe due sensors and routines, set watch preferences and generate native schedules.
 ---
 

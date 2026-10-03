@@ -1,4 +1,5 @@
 ---
+icon: lucide/list-checks
 description: Validate saved files and test that recurring questions still retrieve the expected evidence.
 ---
 

@@ -1,4 +1,5 @@
 ---
+icon: lucide/shield
 description: Understand local storage, cloud-agent boundaries, program execution and audience separation.
 ---
 

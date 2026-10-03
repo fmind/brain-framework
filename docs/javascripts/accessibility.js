@@ -70,8 +70,12 @@
       }
     }
 
-    // The overlay duplicates the named drawer control; code action landmarks need distinct names.
+    // The compact header's search label carries an aria-label that labels may not have.
+    buttonFor(document.querySelector('header label[for="__search"]'));
+
+    // The overlay duplicates the named drawer control; landmarks need distinct names.
     document.querySelector(".md-overlay")?.setAttribute("aria-hidden", "true");
+    document.querySelector("nav.md-path")?.setAttribute("aria-label", "Breadcrumb");
     document.querySelectorAll("nav.md-code__nav").forEach((nav, index) => {
       nav.setAttribute("aria-label", `Code block ${index + 1} actions`);
     });
@@ -96,4 +100,64 @@
     }
   });
   document$.subscribe(synchronize);
+})();
+
+(() => {
+  // Zensical 0.0.67 renders search in an open shadow root whose class names are minified, so match structure:
+  // a panel holding the combobox and a scrollable results list, plus a filter panel holding a heading.
+  const contrast = new CSSStyleSheet();
+  // Result breadcrumbs default to 45% opacity text, below the 4.5:1 minimum; the class rule needs !important to lose.
+  contrast.replaceSync("menu { color: rgb(var(--color-foreground) / 0.72) !important; }");
+
+  const patch = (root) => {
+    const input = root.querySelector('input[role="combobox"]');
+    const top = root.firstElementChild;
+    if (!(input instanceof HTMLInputElement) || !(top instanceof HTMLElement)) return;
+    const panel = [...top.children].find((child) => child.contains(input));
+    const results = root.querySelector("ol");
+    if (!(panel instanceof HTMLElement) || !(results instanceof HTMLElement)) return;
+
+    // The closed dialog is only transparent; hide it from assistive technology and the tab order.
+    const open = getComputedStyle(panel).pointerEvents !== "none";
+    panel.style.visibility = open ? "" : "hidden";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-label", "Search");
+    results.id = "bf-search-results";
+    input.setAttribute("aria-label", "Search");
+    input.setAttribute("aria-controls", results.id);
+    input.setAttribute("aria-expanded", String(open));
+    const scroller = results.parentElement;
+    if (scroller instanceof HTMLElement && scroller !== panel) {
+      scroller.tabIndex = 0;
+      scroller.setAttribute("role", "region");
+      scroller.setAttribute("aria-label", "Search results");
+    }
+    for (const button of root.querySelectorAll("button")) {
+      button.querySelectorAll("svg").forEach((svg) => svg.setAttribute("aria-hidden", "true"));
+      if (button.querySelector("svg.lucide-search")) button.setAttribute("aria-label", "Search");
+      if (button.querySelector("svg.lucide-list-filter")) button.setAttribute("aria-label", "Filters");
+    }
+
+    // This site has no tags, so the filter panel and its button would offer only empty headings.
+    const filters = [...panel.querySelectorAll(":scope > *")].find((child) => !child.contains(input) && child.querySelector("h3"));
+    const empty = filters instanceof HTMLElement && !filters.querySelector("li");
+    if (filters instanceof HTMLElement) filters.hidden = empty;
+    root.querySelector("button:has(svg.lucide-list-filter)")?.toggleAttribute("hidden", empty);
+    if (!root.adoptedStyleSheets.includes(contrast)) root.adoptedStyleSheets = [...root.adoptedStyleSheets, contrast];
+  };
+
+  // The search host can render its shadow content after insertion, so watch every shadow root on the body.
+  const observed = new WeakSet();
+  const attach = () => {
+    for (const host of document.body.children) {
+      const root = host.shadowRoot;
+      if (!root || observed.has(root)) continue;
+      observed.add(root);
+      patch(root);
+      new MutationObserver(() => patch(root)).observe(root, { attributes: true, attributeFilter: ["class"], childList: true, subtree: true });
+    }
+  };
+  new MutationObserver(attach).observe(document.body, { childList: true });
+  document$.subscribe(attach);
 })();

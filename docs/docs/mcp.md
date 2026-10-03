@@ -1,4 +1,5 @@
 ---
+icon: lucide/plug
 description: Connect an agent through local MCP search and read tools, then verify access to a saved decision.
 ---
 

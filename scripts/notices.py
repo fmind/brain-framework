@@ -33,6 +33,7 @@ LEGAL = re.compile(r"(?:LICEN[CS]E|COPYING|NOTICE)[^/]*")
 BUNDLED = {
     "zensical-LICENSE.txt": "zensical-{version}.dist-info/licenses/LICENSE.md",
     "lucide-LICENSE.txt": "zensical/templates/.icons/lucide/LICENSE",
+    "simple-icons-LICENSE.txt": "zensical/templates/.icons/simple/LICENSE.md",
     "zensical-javascript-LICENSE.txt": "zensical/templates/assets/javascripts/LICENSE",
 }
 SITE_VERSION = re.compile(r"^(\| Zensical(?: browser bundle)? +\| )(\S+)", re.MULTILINE)

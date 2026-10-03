@@ -1,4 +1,5 @@
 ---
+icon: lucide/bot
 description: Use the CLI, the packaged skills and optional hooks to find evidence and keep agent work resumable.
 ---
 
@@ -17,6 +18,8 @@ Ask an agent, “Why did we choose a single product page?” It should find the 
 | Hooks              | Optional context at session start or with each prompt.                   | [Hooks](#bring-context-into-every-session).                                                    |
 
 CLI and MCP are alternative retrieval routes. Skills explain the workflow; hooks automate one narrow step. None of them grants permission to collect, edit or publish. Start your terminal agent inside `~/brain` and ask: “Use `bf search` to find why we chose a single product page, then `bf read` the matching ref and cite it.” No skill is needed for this first check.
+
+Agents can also read this documentation as Markdown: [llms.txt](https://fmind.github.io/brain-framework/llms.txt) indexes every guide, [llms-full.txt](https://fmind.github.io/brain-framework/llms-full.txt) holds their full text, and each page's Markdown sits at its URL followed by `index.md`, such as [the MCP guide](https://fmind.github.io/brain-framework/docs/mcp/index.md).
 
 Claude Code reads `CLAUDE.md` rather than `AGENTS.md`: give the brain a `CLAUDE.md` holding only `@AGENTS.md`, which imports the instructions:
 

@@ -1,4 +1,5 @@
 ---
+icon: lucide/package
 description: Install or update Brain Framework, match documentation to your version and verify the result.
 ---
 
@@ -23,7 +24,7 @@ This site follows the repository's current code, which can be newer than your in
 
 ## Update
 
-Stop watchers and scheduled collection, read the [changelog](https://github.com/fmind/brain-framework/blob/main/CHANGELOG.md) and back up the idle brain. Then upgrade and confirm the new version:
+Stop watchers and scheduled collection, read the [changelog](../changelog.md) and back up the idle brain. Then upgrade and confirm the new version:
 
 ```bash
 uv tool upgrade brain-framework

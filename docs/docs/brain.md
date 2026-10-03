@@ -1,4 +1,5 @@
 ---
+icon: lucide/notebook-pen
 description: Write project notes, reusable concepts and resumable actions with complete Markdown examples.
 ---
 

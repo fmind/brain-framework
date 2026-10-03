@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{#- Open Graph metadata gives shared links a title and summary; there is no raster preview image. -#}
+{% block extrahead %}
+  {% set name = page.meta and page.meta.title or page.title %}
+  {% set title = config.site_name if page.is_homepage or not name else name ~ " - " ~ config.site_name %}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ title | e }}">
+  <meta property="og:description" content="{{ (page.meta and page.meta.description or config.site_description) | e }}">
+  {% if page.canonical_url %}
+    <meta property="og:url" content="{{ page.canonical_url }}">
+  {% endif %}
+  <meta name="twitter:card" content="summary">
+  {#- The llmstxt plugin writes index.md beside every guide under docs/; point agents to that Markdown copy. -#}
+  {% if page.url is startingwith("docs/") %}
+    <link rel="alternate" type="text/markdown" title="Markdown" href="index.md">
+  {% endif %}
+{% endblock %}

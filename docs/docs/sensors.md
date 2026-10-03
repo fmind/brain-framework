@@ -1,4 +1,5 @@
 ---
+icon: lucide/radar
 description: Collect a selected local document or highlight, configure sensors and understand update and replacement rules.
 ---
 

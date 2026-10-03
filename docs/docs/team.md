@@ -1,4 +1,5 @@
 ---
+icon: lucide/users
 description: Set up a private team brain, share reviewed evidence, coordinate collection and evaluate a pilot.
 ---
 

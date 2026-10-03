@@ -1,5 +1,6 @@
 ---
-description: "🧠 Brain Framework: from information to informed actions."
+icon: lucide/house
+description: Keep evidence, decisions and next steps in plain files that you and your agents search, read and connect.
 ---
 
 ![Brain Framework Iris logo](../assets/brain-framework.svg){ width="256" height="256" }
@@ -42,18 +43,20 @@ Start with notes; add sources and routines as the work needs them. The [four-too
 
 ## Choose a guide
 
-| Need                   | Start here                                                                                                           |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Learn by doing         | [Getting started](getting-started.md), then the [four-tool walkthrough](context-hub.md).                             |
-| Understand the model   | [Core concepts](concepts.md), including the glossary and what BF does not do.                                        |
-| Use it each day        | [Write notes](brain.md), [search and read](search.md), [link knowledge](links.md) and [check your brain](checks.md). |
-| Bring in other sources | [Add a sensor](sensors.md), [run routines](routines.md), then [watch and schedule](schedule.md).                     |
-| Work with others       | [Use an agent](agents.md) or [set up a team brain](team.md).                                                         |
-| Look up exact behavior | [Commands](commands.md), [configuration](configuration.md) and the [retrieval reference](retrieval.md).              |
-| Resolve a problem      | [Troubleshooting](troubleshooting.md) or [install and update](upgrades.md).                                          |
+| Need                   | Start here                                                                                                                                                                               |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Learn by doing         | [Getting started](getting-started.md), then the [four-tool walkthrough](context-hub.md).                                                                                                 |
+| Understand the model   | [Core concepts](concepts.md), including the glossary and what BF does not do.                                                                                                            |
+| Use it each day        | [Write notes](brain.md), [search and read](search.md), [link knowledge](links.md) and [check your brain](checks.md).                                                                     |
+| Bring in other sources | [Add a sensor](sensors.md), [run routines](routines.md), then [watch and schedule](schedule.md).                                                                                         |
+| Work with others       | [Use an agent](agents.md), [connect one with MCP](mcp.md) or [set up a team brain](team.md).                                                                                             |
+| Look up exact behavior | [Commands](commands.md), [configuration](configuration.md), [file formats](schema.md), [link rules](link-reference.md), the [retrieval reference](retrieval.md) and [limits](limits.md). |
+| Resolve a problem      | [Troubleshooting](troubleshooting.md), [install and update](upgrades.md) or the [changelog](../changelog.md).                                                                            |
 
 ## Know the boundaries
 
 Notes are Markdown; collected records are JSON. A disposable SQLite cache makes them searchable by words and by exact names, such as a repository address, without any AI model. You choose what to collect and share, and programs run only when you ask. A cloud agent may send what it reads to its provider: read [Privacy and security](privacy.md) before connecting sensitive sources.
 
 These docs follow the repository's current code. Check `bf --version` and `bf COMMAND --help` if an option differs; see [version differences](upgrades.md#match-the-docs-to-your-version).
+
+Agents can read these pages as Markdown: [llms.txt](https://fmind.github.io/brain-framework/llms.txt) lists every guide with a summary, and [llms-full.txt](https://fmind.github.io/brain-framework/llms-full.txt) holds their full text. In a clone, the same guides are the Markdown files in `docs/docs/`.

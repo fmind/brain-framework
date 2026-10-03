@@ -1,4 +1,5 @@
 ---
+icon: lucide/square-terminal
 description: Look up Brain Framework commands, previews, graph exports, replies, errors and exit codes.
 ---
 
