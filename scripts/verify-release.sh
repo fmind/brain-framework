@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Verify a published release from the outside after CD succeeded: the remote tag's commit, a non-draft GitHub release
 # holding exactly the wheel and source archive, PyPI digests matching them, their build attestations and a clean install
-# from PyPI that initializes, validates, searches and reads a brain. It changes nothing but its own temporary folder.
+# of that verified wheel that initializes, validates, searches and reads a brain. It changes nothing but its own
+# temporary folder.
 set -euo pipefail
 
 version=${1:?usage: scripts/verify-release.sh X.Y.Z}
@@ -11,8 +12,6 @@ if ! [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 tag="v${version}"
 repository=${VERIFY_RELEASE_REPOSITORY:-fmind/brain-framework}
-attempts=${VERIFY_RELEASE_ATTEMPTS:-6} # PyPI's simple index can lag its JSON API for a minute after publication.
-delay=${VERIFY_RELEASE_DELAY:-20}
 wheel="brain_framework-${version}-py3-none-any.whl"
 sdist="brain_framework-${version}.tar.gz"
 
@@ -63,17 +62,11 @@ for name in "${wheel}" "${sdist}"; do
     fail "${name} has no valid build attestation from ${repository}"
 done
 
-# --no-config ignores user settings, such as an exclude-newer cutoff that refuses a minutes-old release.
+# The wheel whose digest PyPI just confirmed: PyPI's index can refuse a minutes-old version that its JSON API already
+# lists. --no-config ignores user settings, such as an exclude-newer cutoff.
 export UV_TOOL_DIR="${work}/tools" UV_TOOL_BIN_DIR="${work}/bin"
-installed=""
-for _ in $(seq "${attempts}"); do
-  if uv tool install --quiet --no-config --no-cache --python 3.14 "brain-framework==${version}"; then
-    installed=yes
-    break
-  fi
-  sleep "${delay}"
-done
-[[ -n ${installed} ]] || fail "could not install brain-framework==${version} from PyPI after ${attempts} attempts"
+uv tool install --quiet --no-config --no-cache --python 3.14 "${work}/assets/${wheel}" ||
+  fail "could not install the verified ${wheel}"
 
 # The installed bf runs with its own configuration and state, never the caller's registered brains.
 unset BF_BRAIN

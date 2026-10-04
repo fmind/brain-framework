@@ -6,7 +6,7 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ### Added
 
-- `scripts/verify-release.sh X.Y.Z` verifies a published release in one command: the remote tag's commit, a non-draft GitHub release holding exactly the wheel and source archive, PyPI digests matching them, their build attestations and a clean install from PyPI that initializes, validates, searches and reads a brain. The release checklist now gives the commands for the release worktree, checking tasks with the pinned mise, waiting for CD and syncing the primary checkout, runs the gate with `GITHUB_ACTIONS=true` and asks for an independent review before committing.
+- `scripts/verify-release.sh X.Y.Z` verifies a published release in one command: the remote tag's commit, a non-draft GitHub release holding exactly the wheel and source archive, PyPI digests matching them, their build attestations and a clean install of that wheel that initializes, validates, searches and reads a brain. The release checklist now gives the commands for the release worktree, checking tasks with the pinned mise, waiting for CD and syncing the primary checkout, runs the gate with `GITHUB_ACTIONS=true` and asks for an independent review before committing.
 
 ## [v18.1.3](https://github.com/fmind/brain-framework/releases/tag/v18.1.3) - 2026-10-04
 

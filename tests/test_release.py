@@ -155,8 +155,8 @@ def test_release_notes_print_exactly_one_section(tmp_path: Path) -> None:
 WHEEL = f"brain_framework-{__version__}-py3-none-any.whl"
 SDIST = f"brain_framework-{__version__}.tar.gz"
 # Fakes for verify-release: gh describes the release from FAKE_* variables and downloads two small assets, curl
-# prints FAKE_PYPI unless FAKE_PYPI_MISSING is set, and uv fails FAKE_UV_FAILURES times before installing a bf that
-# runs this checkout.
+# prints FAKE_PYPI unless FAKE_PYPI_MISSING is set, and uv installs the downloaded wheel, unless FAKE_UV_FAIL is set,
+# as a bf that runs this checkout.
 VERIFY_GH = """#!/bin/sh
 case "$1 $2" in
   "release view") printf '%s\\t%s\\t%s\\t%s\\n' "${FAKE_DRAFT-false}" false https://example.test/release "$FAKE_ASSETS" ;;
@@ -172,9 +172,9 @@ CURL = """#!/bin/sh
 printf '%s\\n' "$FAKE_PYPI"
 """
 UV = """#!/bin/sh
-count=$(cat "$FAKE_UV_COUNT" 2>/dev/null || echo 0)
-echo $((count + 1)) > "$FAKE_UV_COUNT"
-[ "$count" -lt "${FAKE_UV_FAILURES-0}" ] && exit 1
+for wheel; do :; done
+case "$wheel" in */"$FAKE_WHEEL") ;; *) echo "unexpected install $wheel" >&2; exit 64 ;; esac
+[ -n "${FAKE_UV_FAIL-}" ] && exit 1
 mkdir -p "$UV_TOOL_BIN_DIR"
 printf '#!/bin/sh\\nexec "%s" -m bf "$@"\\n' "$FAKE_PYTHON" > "$UV_TOOL_BIN_DIR/bf"
 chmod +x "$UV_TOOL_BIN_DIR/bf"
@@ -214,13 +214,10 @@ def verify_release(clone: Path, version: str = __version__, **fake: str) -> subp
         **os.environ,
         "PATH": f"{clone.parent / 'bin'}{os.pathsep}{os.environ['PATH']}",
         "XDG_CACHE_HOME": str(clone.parent / "cache"),
-        "VERIFY_RELEASE_ATTEMPTS": "2",
-        "VERIFY_RELEASE_DELAY": "0",
         "FAKE_ASSETS": f"{WHEEL} {SDIST}",
         "FAKE_WHEEL": WHEEL,
         "FAKE_SDIST": SDIST,
         "FAKE_PYPI": pypi(),
-        "FAKE_UV_COUNT": str(clone.parent / "uv-count"),
         "FAKE_PYTHON": sys.executable,
         **fake,
     }
@@ -230,8 +227,7 @@ def verify_release(clone: Path, version: str = __version__, **fake: str) -> subp
 
 
 def test_verify_release_checks_every_published_artifact(published: Path) -> None:
-    # The first install fails, as when PyPI's index still lags its JSON API right after publication.
-    result = verify_release(published, FAKE_UV_FAILURES="1")
+    result = verify_release(published)
     assert result.returncode == 0, result.stderr
     assert f"v{__version__} at {git(published, 'rev-parse', 'HEAD')}" in result.stdout
     assert "initialized, validated, searched and read a brain" in result.stdout
@@ -246,7 +242,7 @@ def test_verify_release_checks_every_published_artifact(published: Path) -> None
         ({"FAKE_PYPI_MISSING": "1"}, "PyPI does not serve"),
         ({"FAKE_PYPI": pypi(sdist="tampered")}, f"{SDIST} on GitHub does not match PyPI"),
         ({"FAKE_ATTESTATION": "1"}, "has no valid build attestation"),
-        ({"FAKE_UV_FAILURES": "2"}, "could not install"),
+        ({"FAKE_UV_FAIL": "1"}, f"could not install the verified {WHEEL}"),
     ],
 )
 def test_verify_release_fails_on_any_mismatch(published: Path, fake: dict[str, str], message: str) -> None:

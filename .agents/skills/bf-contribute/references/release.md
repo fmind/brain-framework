@@ -19,7 +19,7 @@ Use only for an explicitly authorized release. [CD](../../../../.github/workflow
    ```
 
    Then [sync the primary checkout](#sync-the-primary-checkout).
-1. **Verify.** Run `scripts/verify-release.sh X.Y.Z` from the checkout. It checks the remote tag's commit, a non-draft GitHub release holding exactly the wheel and source archive, PyPI SHA-256 digests matching them and their build attestations, then installs the release from PyPI in a temporary folder and runs version, initialization, validation, search and exact read. It retries the install while PyPI's index catches up, and `tests/test_release.py` checks each failure. Confirm CI's Pages deployment separately.
+1. **Verify.** Run `scripts/verify-release.sh X.Y.Z` from the checkout. It checks the remote tag's commit, a non-draft GitHub release holding exactly the wheel and source archive, PyPI SHA-256 digests matching them and their build attestations, then installs that verified wheel in a temporary folder and runs version, initialization, validation, search and exact read. Installing the downloaded wheel sidesteps PyPI's index, which can refuse a version for minutes after its JSON API lists it; `tests/test_release.py` checks each failure. Confirm CI's Pages deployment separately.
 1. **Report.** Provide the release URL, version, commit, [verified boundaries and remaining limits](../../../../CONTRIBUTING.md#release). Release tests use synthetic data and fake providers; provider freshness and native host routing require separate evidence.
 
 ## Build the release worktree
@@ -81,7 +81,7 @@ Inspect each listed `COMMIT:PATH` at that revision, extracting it with `git show
 - Retry failed CD jobs using the tested distributions retained for 30 days; do not rebuild successful distributions. The gate's vulnerability scans download advisory data: rerun a job that failed on a download, and fix a newly published advisory before publishing.
 - If a GitHub release already exists, creation deliberately fails. Inspect its assets and publication state, then finish a verified draft manually under release authorization. Never replace published assets or move the tag.
 - If pushing the tag failed, `push-and-tag` deleted the local tag: rerun `scripts/push-and-tag.sh X.Y.Z`. It repeats its checks, finds the successful CI run and tags the same commit, or stops if origin received the tag after all.
-- If `verify-release.sh` reports a digest or attestation mismatch, stop and investigate before announcing the release; a failed install alone may only mean PyPI is still catching up, so rerun it a few minutes later.
+- If `verify-release.sh` reports a digest or attestation mismatch, stop and investigate before announcing the release.
 - For a manual documentation deployment, rerun CI on `main`.
 
 Add future release lessons only when they change a concrete step.
