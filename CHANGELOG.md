@@ -17,7 +17,7 @@ A documentation release. The package behavior, the brain format (`version: 7`), 
 - The loop diagram names its five steps (gather, normalize, connect, act and learn), labels the agents' search and read and starts the act arrow from the agents rather than from `bf`.
 - The brain session diagram shows the agent noting its conclusion in the project note, as its "writes the outcome back" claim says, and the review diagram shows the full `bf read project:new-website` command.
 - The watch screenshot shows the log path the dashboard prints, `logs/unavailable.log`, instead of an outdated state-directory path, and the README shows it at the same width as the other diagrams.
-- The logo's title and description describe the picture instead of design notes. ||||||| base
+- The logo's title and description describe the picture instead of design notes.
 
 ## [v18.1.2](https://github.com/fmind/brain-framework/releases/tag/v18.1.2) - 2026-10-04
 
