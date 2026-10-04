@@ -146,7 +146,7 @@ run = "uv run --locked python scripts/render_watch.py"
 
 [tasks."check:shell"]
 description = "Lint every shipped and release shell helper"
-run = "shellcheck -S warning scripts/push-and-tag.sh scripts/release-notes.sh scripts/verify-release-tag.sh"
+run = "shellcheck -S warning scripts/push-and-tag.sh scripts/release-notes.sh scripts/verify-release-tag.sh scripts/verify-release.sh"
 
 [tasks."check:types"]
 alias = "ct"

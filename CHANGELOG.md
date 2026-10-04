@@ -4,6 +4,10 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+### Added
+
+- `scripts/verify-release.sh X.Y.Z` verifies a published release in one command: the remote tag's commit, a non-draft GitHub release holding exactly the wheel and source archive, PyPI digests matching them, their build attestations and a clean install from PyPI that initializes, validates, searches and reads a brain. The release checklist now gives the commands for the release worktree, checking tasks with the pinned mise, waiting for CD and syncing the primary checkout, runs the gate with `GITHUB_ACTIONS=true` and asks for an independent review before committing.
+
 ## [v18.1.3](https://github.com/fmind/brain-framework/releases/tag/v18.1.3) - 2026-10-04
 
 A documentation release. The package behavior, the brain format (`version: 7`), `bf.yaml`, the reply schemas and the search cache are unchanged; no upgrade step is needed.
@@ -13,7 +17,7 @@ A documentation release. The package behavior, the brain format (`version: 7`), 
 - The loop diagram names its five steps (gather, normalize, connect, act and learn), labels the agents' search and read and starts the act arrow from the agents rather than from `bf`.
 - The brain session diagram shows the agent noting its conclusion in the project note, as its "writes the outcome back" claim says, and the review diagram shows the full `bf read project:new-website` command.
 - The watch screenshot shows the log path the dashboard prints, `logs/unavailable.log`, instead of an outdated state-directory path, and the README shows it at the same width as the other diagrams.
-- The logo's title and description describe the picture instead of design notes.
+- The logo's title and description describe the picture instead of design notes. ||||||| base
 
 ## [v18.1.2](https://github.com/fmind/brain-framework/releases/tag/v18.1.2) - 2026-10-04
 
