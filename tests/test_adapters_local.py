@@ -335,7 +335,13 @@ def test_git_history_reads_history_refs_only(provider: Provider, tmp_path: Path)
     }
 
     def git(folder: Path, *args: str) -> None:
-        subprocess.run(["git", "-C", str(folder), *args], env=env, check=True, capture_output=True)  # noqa: S603,S607
+        subprocess.run(  # noqa: S603
+            ["git", "-C", str(folder), *args],  # noqa: S607
+            env=env,
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
 
     git(repository, "init", "-q", "-b", "main")
     git(repository, "config", "user.email", "owner@fmind.dev")

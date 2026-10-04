@@ -13,7 +13,7 @@ env -u BF_BRAIN XDG_CONFIG_HOME="$watch_demo/config" XDG_STATE_HOME="$watch_demo
   bf watch --brain "$watch_demo/brain"
 ```
 
-From a Brain Framework checkout, copy `examples/watch` instead and run each `bf` command in this guide as `uv run bf`.
+From a Brain Framework checkout, copy `examples/watch` instead and run each `bf` command in this guide from the checkout as `uv run bf`.
 
 The `watch` section in `bf.yaml` checks due work every five seconds, reads history every second and keeps notifications off for the intentional failure. Add `--notify all` to try failure/success/recovery alerts; a second `bf watch` observes the active collector without starting another. CLI options override `watch` values; restart the watcher after changing these preferences.
 

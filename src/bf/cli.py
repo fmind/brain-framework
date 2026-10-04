@@ -591,6 +591,8 @@ def perform(
     if hook:
         _option("--hook", _slug, hook)
         names, args = (), values
+    elif values and not values[0].strip():
+        raise typer.BadParameter("give a routine name; an empty value names none", param_hint="ROUTINE")
     elif values:
         names, args = values[:1], values[1:]
     else:
@@ -855,14 +857,20 @@ def _input() -> bytes:
     return data
 
 
-# Values that choose where a command acts, as help names them. Given empty, as an unset variable gives them, they
-# would silently choose another brain or a directory, so they are invalid input; an omitted one keeps its default.
+# Values that choose where or on what a command acts, as help names them. Given empty, as an unset variable gives
+# them, they would silently choose another brain, directory, window or operation, so they are invalid input; an
+# omitted one keeps its default.
 _GIVEN = {
     "--brain": "give a brain name or path; an empty value would select another brain",
     "--hook": "give an event name; an empty value would run the first argument as a routine",
     "--output": "give a directory; an empty value would name the brain's root",
+    "--reproject": "give a sensor name; an empty value would rebuild the cache instead",
+    "--routine": "give a routine name; an empty value names none",
+    "--sensor": "give a sensor name; an empty value names none",
+    "--since": "give a start time; an empty value would collect the default window",
     "DIR": "give a directory; an empty value would name the working directory",
     "PATH": "give a directory; an empty value would name the working directory",
+    "SENSOR": "give a sensor name from bf.yaml",
 }
 
 
@@ -903,7 +911,8 @@ class _Command(TyperCommand):
         for param in self.params:
             value = given.get(param.name)
             reason = _GIVEN.get(_named(param.get_error_hint(ctx)))
-            if reason and isinstance(value, str) and not value.strip():
+            values = value if isinstance(value, list) else [value]
+            if reason and any(isinstance(item, str) and not item.strip() for item in values):
                 return typer.BadParameter(reason, ctx, param)
         return None
 

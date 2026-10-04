@@ -4,9 +4,31 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v18.1.4](https://github.com/fmind/brain-framework/releases/tag/v18.1.4) - 2026-10-04
+
+A review release of fixes. The brain format (`version: 7`), `bf.yaml`, the reply schemas and the packaged skills are unchanged; the search cache rebuilds once. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin); no other step is needed.
+
+### Fixed
+
+- Search no longer lands on a section without the matching text: in a copied document with several H1s, text under a later H1 ranked as the H2 above it, whose exact read stops at that H1. An H1 after the first section is now a section of its own. The search cache rebuilds once.
+- A record's fields other than `text` are bounded by their encoded size, as the reply limit counts bytes: a record of long non-ASCII links or aliases passed the 2 MiB check, then every exact read of it failed with `response exceeds its byte limit`. Collection now rejects it with `fields other than text exceed 2 MiB`.
+- A registered brain whose folder exists but cannot be reached, such as a locked folder, is reported as `registered brain directory exists but cannot be reached; restore access to it` by search, read and `bf status` instead of as absent, whose advice to register it again `bf register` then refused. A registered path that became a regular file is absent everywhere, so `bf register` takes over its name.
+- An empty value, as an unset variable gives, is invalid input for `bf collect ""`, `bf run ""`, `--sensor ""`, `--routine ""`, `bf collect SENSOR --since ""` and `bf build --reproject ""`: they used to name an unknown program, collect the default window or rebuild the whole cache instead of reprojecting.
+- A zero-length window such as `0d` is an invalid period for `bf read` and `--scope` alike; the read used to return an empty page while the scope failed with `since must be earlier than until`. `bf validate` reports a link to such a page as an unresolved BF target.
+- `bf mcp` no longer writes the MCP SDK's log line for each rejected or failed tool call to stderr; the reply carries the error.
+- Excerpts of a large passage holding a few characters that folding changes, such as `²` or a no-break space, are computed faster.
+
+### Documentation
+
+- The four-tool guide and the watch example give the working checkout command, `uv run --project CHECKOUT bf` inside a copied brain; the README's four-tool reply names what it trims.
+
 ### Added
 
-- `scripts/verify-release.sh X.Y.Z` verifies a published release in one command: the remote tag's commit, a non-draft GitHub release holding exactly the wheel and source archive, PyPI digests matching them, their build attestations and a clean install of that wheel that initializes, validates, searches and reads a brain. The release checklist now gives the commands for the release worktree, checking tasks with the pinned mise, waiting for CD and syncing the primary checkout, runs the gate with `GITHUB_ACTIONS=true` and asks for an independent review before committing.
+- `scripts/verify-release.sh X.Y.Z` verifies a published release in one command: the annotated tag on origin, a non-draft GitHub release holding exactly the wheel and source archive, PyPI digests matching them, their build attestations and a clean install of that wheel that initializes, validates, searches and reads a brain. The release checklist now gives the commands for the release worktree, checking tasks with the pinned mise, waiting for CD and syncing the primary checkout, runs the gate with `GITHUB_ACTIONS=true` and asks for an independent review before committing. Tests cover `scripts/verify-release-tag.sh`, the guard CD runs before publishing.
+
+### Changed
+
+- Development tools: Python 3.14.8, uv 0.12.23, dprint 0.60.1, lefthook 2.1.16, trivy 0.75.0 and mise 2026.10.0 in the workflows. The package smoke test builds its environments in the disk cache instead of `/tmp`, and every test subprocess has a timeout.
 
 ## [v18.1.3](https://github.com/fmind/brain-framework/releases/tag/v18.1.3) - 2026-10-04
 

@@ -66,7 +66,7 @@ The first requires the right section in the first result. The second checks the 
 
 Three more cases reproduce misses measured on real brains, with fictional notes and records:
 
-- `project-next-actions-first` searches `Atlas next actions` among three other projects' Next actions sections and six short action Resume sections that mention Atlas. It requires Atlas's own section first: a section's note title ranks like a heading.
+- `project-next-actions-first` searches `Atlas next actions` among four other projects' Next actions sections and six short action Resume sections that mention Atlas. It requires Atlas's own section first: a section's note title ranks like a heading.
 - `one-result-per-document-url` finds the Atlas launch plan once. Its `documents` record and a shorter `catalog` entry share one URL, so search returns the document with `"also":["catalog:atlas-launch-plan"]` instead of two results. The catalog's `priority: low` halves its score, so the full document represents both.
 - `day-lists-low-priority-source-by-count` reads the `2026-09-11` page: it lists the document, while the catalog appears only as a count under `sources`, with its `memories/catalog/2026-09-11` page.
 

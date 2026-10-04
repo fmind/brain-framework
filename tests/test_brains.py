@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 
 from bf import records
 from bf.cli import app
-from bf.config import ABSENT, execution, load, one, register, related, select, user_path
+from bf.config import ABSENT, UNREACHABLE, execution, load, one, register, related, select, user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
 from bf.models import Error, Query, Record
@@ -388,7 +388,7 @@ def test_absent_registered_brains_make_answers_incomplete(tmp_path: Path, monkey
     assert absent in json.loads(result.stdout)["brains"]
     # With every registered brain absent, the error names them instead of suggesting registration.
     present.root.rename(tmp_path / "away")
-    with pytest.raises(Error, match="registered brains are absent on this machine: moved, present; restore them"):
+    with pytest.raises(Error, match="registered brains are unavailable on this machine: moved, present; restore them"):
         select()
 
 
@@ -466,6 +466,36 @@ def test_an_unreachable_registered_brain_is_not_called_absent(tmp_path: Path) ->
     store.root.rename(tmp_path / "gone")
     with pytest.raises(Error, match=f"^kept: {re.escape(ABSENT)}"):
         select("kept")
+
+
+def test_default_selection_tells_unreachable_from_absent_brains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    present = make(tmp_path / "present", "present")
+    (tmp_path / "locked").mkdir()
+    locked = make(tmp_path / "locked" / "brain", "locked")
+    filed = make(tmp_path / "filed", "filed")
+    for store in (present, locked, filed):
+        register(store)
+    # A registered path that became a regular file no longer holds a brain: it is absent, and bf register frees it.
+    filed.root.rename(tmp_path / "elsewhere")
+    filed.root.write_text("")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "locked").chmod(0)
+    try:
+        # A locked folder or disconnected mount is reported as unreachable, never as moved.
+        assert related(select())[1] == [
+            {"brain": "filed", "error": ABSENT},
+            {"brain": "locked", "error": UNREACHABLE},
+        ]
+        result = CliRunner().invoke(app, ["status", "--check"])
+        assert result.exit_code == 1
+        assert {"brain": "locked", "error": UNREACHABLE} in json.loads(result.stdout)["brains"]
+        with pytest.raises(Error, match=r"^cannot reach the brain registered as locked at"):
+            register(make(tmp_path / "other", "locked"))
+    finally:
+        (tmp_path / "locked").chmod(0o700)
+    assert register(Store(tmp_path / "elsewhere"))["replaced"] == str(filed.root)
 
 
 def test_an_exact_read_answers_while_another_brain_fails(tmp_path: Path) -> None:

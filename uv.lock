@@ -44,7 +44,7 @@ wheels = [
 
 [[package]]
 name = "brain-framework"
-version = "18.1.3"
+version = "18.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "markdown-it-py" },
@@ -58,6 +58,8 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "jsonschema" },
+    { name = "markdown" },
+    { name = "packaging" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-watcher" },
@@ -80,6 +82,8 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "jsonschema", specifier = ">=4.26.0,<5" },
+    { name = "markdown", specifier = ">=3.11" },
+    { name = "packaging", specifier = ">=26.3" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-watcher", specifier = ">=0.6.3" },

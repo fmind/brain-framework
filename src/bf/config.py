@@ -212,20 +212,17 @@ def register(store: Store) -> dict[str, object]:
         replaced = ""
         if (existing := registry.brains.get(name)) and existing.path != str(store.root):
             try:
-                registered = Store(Path(existing.path).expanduser())
+                registered = _registered(existing)
             except Error as error:
-                # Only a missing directory frees the name: an unreachable one may still hold that brain.
-                if not isinstance(error.__cause__, FileNotFoundError):
-                    raise Error(
-                        f"cannot reach the brain registered as {name} at {existing.path}; restore access to it, or "
-                        f"remove that entry from {path}"
-                    ) from error
-            else:
-                if registered.identity != store.identity:
-                    raise Error(
-                        f"another brain is already registered as {name} at {existing.path}; remove that entry from "
-                        f"{path}, or rename one of the brains in its bf.yaml"
-                    )
+                raise Error(
+                    f"cannot reach the brain registered as {name} at {existing.path}; restore access to it, or "
+                    f"remove that entry from {path}"
+                ) from error
+            if registered is not None and registered.identity != store.identity:
+                raise Error(
+                    f"another brain is already registered as {name} at {existing.path}; remove that entry from "
+                    f"{path}, or rename one of the brains in its bf.yaml"
+                )
             replaced = existing.path
         registry.brains[name] = Registration(path=str(store.root))
         document = {"brains": {key: value.model_dump() for key, value in sorted(registry.brains.items())}}
@@ -254,12 +251,30 @@ ABSENT = (
 )
 
 
-class Selection(list[Store]):
-    """Selected roots, plus the names of registered brains that are absent on this machine."""
+UNREACHABLE = "registered brain directory exists but cannot be reached; restore access to it"
 
-    def __init__(self, stores: Iterable[Store] = (), absent: Iterable[str] = ()) -> None:
+
+def _registered(entry: Registration) -> Store | None:
+    """A registered brain, or None when its directory is absent: missing, or no longer a directory.
+
+    One that exists but cannot be reached, such as a locked folder or a disconnected mount, may still hold that
+    brain and return: it fails with UNREACHABLE, so neither selection nor bf register treats it as moved.
+    """
+    try:
+        return Store(Path(entry.path).expanduser())
+    except Error as error:
+        cause = error.__cause__
+        if isinstance(cause, OSError) and not isinstance(cause, FileNotFoundError | NotADirectoryError):
+            raise Error(UNREACHABLE) from cause
+        return None
+
+
+class Selection(list[Store]):
+    """Selected roots, plus each registered brain this machine cannot use, by name, with its error."""
+
+    def __init__(self, stores: Iterable[Store] = (), unavailable: dict[str, str] | None = None) -> None:
         super().__init__(stores)
-        self.absent = tuple(absent)
+        self.unavailable = unavailable or {}
 
 
 def related(roots: list[Store]) -> tuple[list[Store], list[dict[str, object]]]:
@@ -272,7 +287,8 @@ def related(roots: list[Store]) -> tuple[list[Store], list[dict[str, object]]]:
         candidates.setdefault(store.identity, store)
     names: dict[str, set[str]] = {}
     problems: list[dict[str, object]] = [
-        {"brain": name, "error": ABSENT} for name in (roots.absent if isinstance(roots, Selection) else ())
+        {"brain": name, "error": error}
+        for name, error in (roots.unavailable.items() if isinstance(roots, Selection) else ())
     ]
     for store in roots:
         try:
@@ -342,14 +358,11 @@ def _located(value: str, *, execute: bool = False) -> Store:
     local, referenced = _claim(value, registered=entry is not None)
     if entry is not None:
         try:
-            store = Store(Path(entry.path).expanduser())
-        except Error as error:
-            # As bf register decides: only a missing directory is absent; an unreachable one may return.
-            if isinstance(error.__cause__, OSError) and not isinstance(
-                error.__cause__, FileNotFoundError | NotADirectoryError
-            ):
-                raise Error(f"cannot reach the brain registered as {value}; restore access to its directory") from None
-            raise Error(f"{value}: {ABSENT}") from None
+            store = _registered(entry)
+        except Error:
+            raise Error(f"cannot reach the brain registered as {value}; restore access to its directory") from None
+        if store is None:
+            raise Error(f"{value}: {ABSENT}")
         if local is not None and local.identity != store.identity:
             raise Error(
                 f"ambiguous brain name {value}: the registry and the enclosing brain name different directories; "
@@ -405,26 +418,32 @@ def select(value: str = "") -> list[Store]:
         return [_located(chosen)]
     if nearest := _nearest():
         return [nearest]
-    # Retrieval reports registered brains absent on this machine instead of silently answering without them.
-    stores, names, absent = [], [], []
+    # Retrieval reports registered brains this machine cannot use instead of silently answering without them.
+    stores: list[Store] = []
+    names: list[str] = []
+    unavailable: dict[str, str] = {}
     for name, entry in sorted(user_config().brains.items()):
-        path = Path(entry.path).expanduser()
-        if path.is_dir():
-            stores.append(Store(path))
-            names.append(name)
+        try:
+            store = _registered(entry)
+        except Error as error:
+            unavailable[name] = str(error)
+            continue
+        if store is None:
+            unavailable[name] = ABSENT
         else:
-            absent.append(name)
-    if absent and not stores:
+            stores.append(store)
+            names.append(name)
+    if unavailable and not stores:
         raise Error(
-            f"registered brains are absent on this machine: {', '.join(absent)}; restore them, run bf register at "
-            "their new place, or remove their registry entries"
+            f"registered brains are unavailable on this machine: {', '.join(unavailable)}; restore them or access to "
+            "them, run bf register at their new place, or remove their registry entries"
         )
     if not stores:
         raise Error("no brain selected; pass --brain, run inside a brain, or register one with bf register")
     # The only registered brain may have lost its bf.yaml: name that before a command reads or caches it. Of several,
     # retrieval reports each one whose bf.yaml does not load.
     only = [_configured(stores[0], f"registered brain {names[0]}")] if len(stores) == 1 else stores
-    return Selection(only, absent)
+    return Selection(only, unavailable)
 
 
 def brain_name(store: Store) -> str:

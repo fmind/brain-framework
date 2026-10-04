@@ -23,7 +23,7 @@ Look up exact limits for a skipped file, a partial reply or a stopped program. F
 | Backlink previews                             | 5 newest items per relation, excerpts of 160 characters                                                              |
 | Claims of a subject                           | 20 per relation and 50 in all                                                                                        |
 | Record file                                   | 16 MiB                                                                                                               |
-| Record fields other than `text`               | 2 MiB, so an exact read's first page stays within the reply limit                                                    |
+| Record fields other than `text`               | 2 MiB as UTF-8 JSON, so an exact read's first page stays within the reply limit                                      |
 | Record id                                     | 1–4,096 characters and 7,988 once percent-encoded                                                                    |
 | Record text                                   | 4,194,304 characters                                                                                                 |
 | Record links, aliases, field names            | 1,000 each                                                                                                           |

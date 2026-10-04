@@ -19,7 +19,7 @@ Use only for an explicitly authorized release. [CD](../../../../.github/workflow
    ```
 
    Then [sync the primary checkout](#sync-the-primary-checkout).
-1. **Verify.** Run `scripts/verify-release.sh X.Y.Z` from the checkout. It checks the remote tag's commit, a non-draft GitHub release holding exactly the wheel and source archive, PyPI SHA-256 digests matching them and their build attestations, then installs that verified wheel in a temporary folder and runs version, initialization, validation, search and exact read. Installing the downloaded wheel sidesteps PyPI's index, which can refuse a version for minutes after its JSON API lists it; `tests/test_release.py` checks each failure. Confirm CI's Pages deployment separately.
+1. **Verify.** Run `scripts/verify-release.sh X.Y.Z` from the checkout. It checks that origin holds the annotated tag, reporting its commit, then a non-draft GitHub release holding exactly the wheel and source archive, PyPI SHA-256 digests matching them and their build attestations, then installs that verified wheel in a temporary folder and runs version, initialization, validation, search and exact read. Installing the downloaded wheel sidesteps PyPI's index, which can refuse a version for minutes after its JSON API lists it; `tests/test_release.py` checks a draft release, the asset list, a missing PyPI version, digest and attestation mismatches and a failed install. Confirm CI's Pages deployment separately.
 1. **Report.** Provide the release URL, version, commit, [verified boundaries and remaining limits](../../../../CONTRIBUTING.md#release). Release tests use synthetic data and fake providers; provider freshness and native host routing require separate evidence.
 
 ## Build the release worktree

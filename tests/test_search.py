@@ -1265,6 +1265,25 @@ def test_nested_sections_rank_and_read_under_their_parent_headings(brain: Store)
     assert refs(brain, "Vega") == ["projects/portfolio.md#vega"]
 
 
+def test_a_later_h1_ends_the_section_search_lands_on(brain: Store) -> None:
+    # A copied document can hold several H1s. Before 18.1.4 text under a later H1 ranked as the H2 above it, whose
+    # exact read stops at that H1 and so lacked the match.
+    brain.write(
+        "projects/manual.md",
+        b"# Manual\n\n## Alpha\n\nAlpha setup.\n\n# Appendix\n\nThe quagga table.\n\n### Rows\n\nZebra rows.\n",
+    )
+    item = cast("list[dict[str, str]]", search([brain], Query(text="quagga"))["items"])[0]
+    assert (item["ref"], item["excerpt"]) == ("projects/manual.md#appendix", "The quagga table.")
+    assert "quagga" in cast(str, read([brain], item["ref"])["text"])
+    item = cast("list[dict[str, str]]", search([brain], Query(text="zebra"))["items"])[0]
+    assert (item["ref"], item["title"]) == ("projects/manual.md#rows", "Manual — Appendix — Rows")
+    assert "quagga" not in cast(str, read([brain], "projects/manual.md#alpha")["text"])
+    # The title's own H1 after a section ends that section too.
+    brain.write("projects/guide.md", b"## Preface\n\nPreface words.\n\n# Guide\n\nThe okapi table.\n")
+    item = cast("list[dict[str, str]]", search([brain], Query(text="okapi"))["items"])[0]
+    assert "okapi" in cast(str, read([brain], item["ref"])["text"])
+
+
 def test_whole_note_results_without_matching_text_preview_the_note_lead(brain: Store) -> None:
     brain.write("projects/atlas.md", b"---\ntype: project\n---\n# Atlas\n\n## Decision\n\nAtlas uses SQLite.\n")
     item = cast("list[dict[str, str]]", search([brain], Query(text="Atlas"))["items"])[0]

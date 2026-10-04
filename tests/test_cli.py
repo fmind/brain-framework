@@ -116,6 +116,13 @@ def test_routine_help_never_runs_a_routine(
         (["register", ""], "PATH"),
         (["skills", ""], "DIR"),
         (["schedule", "--output", ""], "--output"),
+        # Before 18.1.4 these rebuilt the whole cache, collected the default window or named an unknown program "".
+        (["build", "--reproject", ""], "--reproject"),
+        (["collect", "calendar", "--since", ""], "--since"),
+        (["collect", ""], "SENSOR"),
+        (["run", ""], "ROUTINE"),
+        (["update", "--sensor", "calendar", "--sensor", ""], "--sensor"),
+        (["schedule", "--routine", " "], "--routine"),
         # A suite path is relative to the brain, never the working directory: it keeps its own reason.
         (["eval", "--path", ""], "--path: expected a normalized brain-relative path"),
         # Python passes undecodable argument bytes, such as a Latin-1 é, as lone surrogates. Before 18 the read

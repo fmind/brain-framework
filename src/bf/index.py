@@ -39,7 +39,7 @@ from bf.models import (
 )
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, writer
 
-SCHEMA = 32
+SCHEMA = 33
 CACHE = ".bf/index.sqlite"
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
@@ -1060,9 +1060,10 @@ def _verbatim(snippet: str, original: str) -> str:
     """The original words behind a snippet of a folded passage, so `m²` or `…` never reads as `m2` or `...`.
 
     Folding each whitespace-separated run yields the folded passage, so every snippet position maps to one run.
+    ASCII is already folded, which keeps a large passage with a single `²` or no-break space fast.
     """
     runs = re.findall(r"\s+|\S+", original)
-    forms = [fold(run) for run in runs]
+    forms = [run if run.isascii() else fold(run) for run in runs]
     head = _ELLIPSIS if snippet.startswith(_ELLIPSIS) else ""
     tail = _ELLIPSIS if snippet.endswith(_ELLIPSIS) else ""
     window = snippet.removeprefix(head).removesuffix(tail)
@@ -1071,7 +1072,9 @@ def _verbatim(snippet: str, original: str) -> str:
         return snippet
     end, position, kept = start + len(window), 0, []
     for run, form in zip(runs, forms, strict=True):
-        if start < position + len(form) and position < end:
+        if position >= end:
+            break
+        if start < position + len(form):
             kept.append(run)
         position += len(form)
     return head + "".join(kept) + tail

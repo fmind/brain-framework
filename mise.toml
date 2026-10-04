@@ -1,15 +1,15 @@
 # https://mise.jdx.dev/configuration.html
 [tools]
 actionlint = "1.7.12"
-dprint = "0.57.4"
+dprint = "0.60.1"
 gitleaks = "8.30.1"
 jq = "1.8.2"
-lefthook = "2.1.14"
+lefthook = "2.1.16"
 lychee = "0.24.2"
-python = "3.14.7"
+python = "3.14.8"
 shellcheck = "0.11.0"
-trivy = "0.74.0"
-"aqua:astral-sh/uv" = "0.12.20"
+trivy = "0.75.0"
+"aqua:astral-sh/uv" = "0.12.23"
 # 1.30 requires GitHub's new $/ self-reference, which actionlint 1.7.12 cannot parse yet
 # (rhysd/actionlint#711). Keep both strict gates warning-free rather than suppressing either.
 zizmor = "1.29.0"

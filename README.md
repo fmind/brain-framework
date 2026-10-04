@@ -153,7 +153,7 @@ Reading files gives you one document at a time, and grep finds words, not connec
 bf read project:new-website
 ```
 
-The reply holds the project note and its backlinks, grouped by relation: four records from four tools, side by side, in the shared vocabulary (trimmed here to refs and fields):
+The reply holds the project note and its backlinks, grouped by relation: four records from four tools, side by side, in the shared vocabulary (trimmed here to refs, kinds and statuses):
 
 ```json
 {

@@ -37,7 +37,7 @@ Retrieval also includes each selected brain's direct `brains:` references: `sear
 - **A selected brain** is a folder holding `bf.yaml`. Selecting a subfolder such as `projects/`, or a parent, fails before anything runs, naming the selection as given: `PATH has no bf.yaml; pass the brain's root directory, or create a brain with bf init`, or `registered brain NAME has no bf.yaml`.
 - **An empty `--brain`** is invalid input (exit 2), never a request for the default; omit the option instead. An empty `BF_BRAIN` counts as unset.
 - **The enclosing brain** counts only when you own its folder and its `bf.yaml` is a regular file, as Git requires. Otherwise commands fail naming it from the working directory, such as `../bf.yaml is not a regular file owned by you`.
-- **Absent registered brains** are reported under `problems` by search and read, and fail `bf status --check`. Selecting one by name fails: restore it, run `bf register` at its new place, or remove its entry.
+- **Absent registered brains** are reported under `problems` by search and read, and fail `bf status --check`. Selecting one by name fails: restore it, run `bf register` at its new place, or remove its entry. A registered folder that exists but cannot be reached, such as a locked folder, is reported the same way as `registered brain directory exists but cannot be reached; restore access to it`.
 
 For example, this selects the team brain from anywhere, even inside `~/brain`:
 

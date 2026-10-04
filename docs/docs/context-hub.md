@@ -20,7 +20,7 @@ cp -R "$context_demo/source/examples/context-hub" "$context_demo/brain"
 cd "$context_demo/brain"
 ```
 
-The brain holds a minimal project note, `bf.yaml` and a small sensor, `sensors/demo.py`, that prints `fixtures/TOOL.json` as if each tool had returned it. Review both before running anything. From a source checkout, copy `examples/context-hub` instead and run `uv run bf`.
+The brain holds a minimal project note, `bf.yaml` and a small sensor, `sensors/demo.py`, that prints `fixtures/TOOL.json` as if each tool had returned it. Review both before running anything. From a source checkout, copy `examples/context-hub` instead and run each `bf` command as `uv run --project CHECKOUT bf`, where `CHECKOUT` is the checkout's path.
 
 ## Collect four tools
 

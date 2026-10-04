@@ -406,8 +406,8 @@ def _holders(
     for store in selected:
         try:
             value = _read(store, ref)
-        except InputError, NotFoundError:
-            # Malformed input and a missing section are the ref's problems, not a brain's.
+        except InputError:
+            # Malformed input is the ref's problem, not a brain's. A copy without the section is that brain's.
             raise
         except (Error, OSError, sqlite3.DatabaseError) as error:
             if len(selected) == 1:

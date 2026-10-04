@@ -33,6 +33,9 @@ def test_fields_beside_text_stay_within_a_readable_size() -> None:
         Record(id="bulky", title="Bulky", attributes={"a": half, "b": half})
     with pytest.raises(ValidationError, match="fields other than text exceed 2 MiB"):
         Record(id="linked", title="Linked", links=[f"repo:example/{n}-" + "y" * 4000 for n in range(600)])
+    # The reply limit counts bytes: 1.2 million characters of euro signs encode to 3.6 MB.
+    with pytest.raises(ValidationError, match="fields other than text exceed 2 MiB"):
+        Record(id="euros", title="Euros", links=[f"repo:example/{n}-" + "€" * 4000 for n in range(300)])
     # A record file of up to 16 MiB could hold millions of invalid field names: one error names the whole map.
     with pytest.raises(ValidationError) as raised:
         Record.model_validate({"id": "many", "title": "Many", "fields": {f"F{n}": 1 for n in range(100_000)}})

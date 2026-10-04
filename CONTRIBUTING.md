@@ -28,7 +28,7 @@ mise run all
 
 `install` syncs locked dependencies and installs Git hooks. Run `format` deliberately after editing; it rewrites source files, so preserve unrelated work and inspect its diff. `all` checks, tests (including runnable examples) and builds distributions without rewriting source files. Formatting drift fails the gate; fix it with `format`, then rerun the failed check. Tasks use `uv run --locked`, so an outdated `uv.lock` fails instead of being rewritten; run `uv lock` deliberately. Validation still writes ignored caches, coverage, documentation and build output.
 
-Use `uv run --locked bf` to exercise checkout code on a disposable brain. `mise run test:watch` reruns tests after edits; `mise run docs:watch` serves the documentation.
+Use `uv run --locked bf --brain BRAIN` from the checkout, or `uv run --locked --project CHECKOUT bf` inside a brain, to exercise checkout code on a disposable brain. `mise run test:watch` reruns tests after edits; `mise run docs:watch` serves the documentation.
 
 Use a focused check while editing, then run the full gate:
 

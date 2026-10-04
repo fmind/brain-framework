@@ -848,7 +848,7 @@ def test_shipped_offline_watch_example(tmp_path: Path) -> None:
     # Follow the README's source-addition command, then reuse watch's actual update subprocess.
     example = (source / "README.md").read_text().split("```bash\npython3 - <<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
     subprocess.run(  # noqa: S603 - repository-owned example, isolated fictional brain
-        [sys.executable, "-c", example], cwd=store.root, check=True
+        [sys.executable, "-c", example], cwd=store.root, check=True, timeout=60
     )
     job = Job(store, (), ())
     job.start()

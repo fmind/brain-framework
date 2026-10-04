@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from bf import index, usage
-from bf.config import ABSENT, Selection, brain_name, load, related
+from bf.config import Selection, brain_name, load, related
 from bf.history import ROUTINES, log_path, state
 from bf.models import CACHE, Config, Error, Program
 from bf.storage import Store
@@ -126,9 +126,8 @@ def attention(store: Store, now: datetime | None = None) -> list[dict[str, objec
 def report(stores: list[Store], now: datetime | None = None) -> dict[str, object]:
     """Per brain: cache, notes, records, source and routine freshness, errors, logs and usage."""
     now = now or datetime.now(UTC)
-    brains: list[dict[str, object]] = [
-        {"brain": name, "error": ABSENT} for name in (stores.absent if isinstance(stores, Selection) else ())
-    ]
+    unavailable = stores.unavailable if isinstance(stores, Selection) else {}
+    brains: list[dict[str, object]] = [{"brain": name, "error": error} for name, error in unavailable.items()]
     healthy = not brains
     for store in stores:
         try:
@@ -185,7 +184,7 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
         )
     # A reference that retrieval cannot include makes every search and read incomplete, like a skipped file.
     for problem in related(stores)[1]:
-        if problem["error"] == ABSENT:
+        if problem["brain"] in unavailable:
             continue
         healthy = False
         owners = [entry for entry in brains if entry["brain"] == problem["brain"] and "problems" in entry]

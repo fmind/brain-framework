@@ -80,7 +80,12 @@ def main() -> None:
     ]
     if any(len(matches) != 1 for matches in artifacts):
         raise SystemExit("expected exactly one brain-framework wheel and one source distribution")
-    with tempfile.TemporaryDirectory(prefix="bf-package-") as temporary:
+    # A disk-backed cache, not /tmp: two virtual environments are large for a RAM-backed /tmp.
+    scratch = Path(os.environ.get("XDG_CACHE_HOME", ""))
+    if not scratch.is_absolute():
+        scratch = Path.home() / ".cache"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="bf-package-", dir=scratch) as temporary:
         root = Path(temporary).resolve()
         for (artifact,) in artifacts:
             home = root / artifact.name

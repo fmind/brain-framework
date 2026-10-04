@@ -193,6 +193,8 @@ def server(stores: list[Store] | Callable[[], list[Store]]) -> MCPServer:
         title="Brain Framework",
         version=__version__,
         instructions=INSTRUCTIONS,
+        # The SDK logs each rejected or failed call at INFO on stderr, in its own format: replies already carry them.
+        log_level="WARNING",
         tools=[
             _strict(Tool.from_function(function, name=name, title=title, annotations=annotations), output)
             for name, title, function, output in (

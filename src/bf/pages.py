@@ -102,6 +102,9 @@ def period(value: str, now: datetime | None = None) -> Period | None:
         if value in {"today", "yesterday"}:
             day = now.date() - timedelta(days=value == "yesterday")
         elif value[-1] in "hdw":
+            # An empty window holds nothing: `0d` would be a page no search scope could match.
+            if not int(value[:-1]):
+                raise ValueError
             start = now - timedelta(hours=int(value[:-1]) * {"h": 1, "d": 24, "w": 168}[value[-1]])
             return Period(timestamp(start.isoformat()), timestamp(now.isoformat()))
         elif ".." in value:

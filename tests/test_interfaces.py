@@ -12,6 +12,7 @@ import subprocess
 import sys
 from importlib.metadata import version as distribution_version
 from pathlib import Path
+from select import select as readable
 
 import pytest
 from mcp.server.mcpserver import MCPServer
@@ -199,7 +200,7 @@ def test_console_errors_are_private_and_on_stderr(
     # Query and scope errors name the argument the user wrote, not the model field behind it.
     assert "QUERY: give words" in bf("search", "   ").stderr
     assert "QUERY: String should have at most 4096" in bf("search", "x" * 4097).stderr
-    assert "--scope: since must be earlier than until" in bf("search", "x", "--scope", "0d").stderr
+    assert "--scope: invalid period: 0d" in bf("search", "x", "--scope", "0d").stderr
     assert "--scope: String should have at most 4096" in bf("search", "x", "--scope", "projects/" + "a" * 5000).stderr
     for query in ("bf://me", "bf:foo", "bf://fixture/tags/a?rel=owner", "bf://Me/x"):
         # A malformed address is a usage error before any brain is read, as it is for read and --scope.
@@ -320,7 +321,7 @@ def test_encoding_failures_name_the_note_and_replies_stay_utf8(brain: Store) -> 
     [
         ("    query: offline\n    scope: soon\n    text: [offline]\n", "cases.1.scope", "scope accepts"),
         # Search's own rules on the scope's bounds: a nonempty window and a bounded prefix.
-        ("    query: offline\n    scope: 0d\n    empty: true\n", "cases.1.scope", "since must be earlier"),
+        ("    query: offline\n    scope: 0d\n    empty: true\n", "cases.1.scope", "invalid period: 0d"),
         (
             f"    query: offline\n    scope: projects/{'a' * 5000}\n    empty: true\n",
             "cases.1.scope",
@@ -630,7 +631,7 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
             ("search", {"query": "   "}, "invalid input: query: "),
             # Query-level reasons read like the CLI's, without pydantic's `Value error` label.
             ("search", {"query": "!!!"}, "invalid input: query: give words or an identity to search"),
-            ("search", {"query": "x", "scope": "0d"}, "invalid input: scope: since must be earlier than until"),
+            ("search", {"query": "x", "scope": "0d"}, "invalid input: scope: invalid period: 0d"),
             ("search", {"query": "x", "scope": "soon"}, "invalid input: scope: scope accepts"),
             # Before 18 the reply named the model field behind the scope: prefix.
             ("search", {"query": "x", "scope": "projects/" + "a" * 5000}, "invalid input: scope: String should"),
@@ -746,7 +747,7 @@ def test_mcp_stdio_handshake(tmp_path: Path) -> None:
             cwd=str(tmp_path),
         )
         async with (
-            stdio_client(parameters) as (incoming, outgoing),
+            stdio_client(parameters, errlog=errlog) as (incoming, outgoing),
             ClientSession(incoming, outgoing, read_timeout_seconds=10) as session,
         ):
             initialized = await session.initialize()
@@ -762,8 +763,13 @@ def test_mcp_stdio_handshake(tmp_path: Path) -> None:
             # the shape of a listing, which the published schema must accept.
             for arguments in ({}, {"ref": "7d"}, {"ref": "tasks"}, {"ref": "projects/offline.md"}):
                 assert not (await session.call_tool("read", arguments)).is_error
+            assert (await session.call_tool("search", {"query": "offline", "scop": "projects"})).is_error
 
-    asyncio.run(check())
+    # Before 18.1.4 the SDK logged that rejected call on stderr: diagnostics are `bf:` lines, and replies hold errors.
+    with (tmp_path / "stderr.log").open("w+") as errlog:
+        asyncio.run(check())
+        errlog.seek(0)
+        assert errlog.read() == ""
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT], ids=["stop", "interrupt"])
@@ -785,6 +791,8 @@ def test_mcp_stops_at_once_while_its_input_stays_open(brain: Store, signum: int)
             request = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": parameters}
             child.stdin.write(json.dumps(request).encode() + b"\n")
             child.stdin.flush()
+            # Bounded, so a server that never answers fails this test instead of holding the whole run.
+            assert readable([child.stdout], [], [], 10)[0], "no initialize reply within 10 seconds"
             assert json.loads(child.stdout.readline())["id"] == 1
             # Before 17 the server kept waiting for another input line, and a host's stop request timed out.
             child.send_signal(signum)

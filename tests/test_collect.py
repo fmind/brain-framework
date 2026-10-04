@@ -182,7 +182,7 @@ def test_printed_fields_fail_by_their_rule_whatever_their_keys(configured: Store
 
 def test_the_observed_stamp_cannot_push_a_record_over_the_size_bound(configured: Store) -> None:
     # Fields other than text exactly at the bound: valid as printed, but not once collection stamps `observed`.
-    padding = MAX_FIELDS - len("xt") - len(encode({"blob": ""})) - len(encode({}))
+    padding = MAX_FIELDS - len(encode(["x", "t", "", [], [], {"blob": ""}, {}]))
     printed: dict[str, object] = {"id": "x", "title": "t", "attributes": {"blob": "a" * padding}}
     assert Record.model_validate(printed)
     with pytest.raises(Error, match=r"sample: record 0: fields other than text exceed 2 MiB.*; nothing was written"):

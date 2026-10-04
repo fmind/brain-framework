@@ -485,6 +485,7 @@ def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
     for call, argument, message in (
         (lambda: retrieve.read([brain], "2026-13"), "ref", "invalid period: 2026-13"),
         (lambda: retrieve.read([brain], "memories/meetings/2026-13"), "ref", "invalid period: 2026-13"),
+        (lambda: retrieve.read([brain], "0d"), "ref", "invalid period: 0d"),
         (lambda: retrieve.read([brain], "projects", offset=-1), "offset", "offset must be an integer"),
         (lambda: retrieve.read([brain], "projects/", rel="links"), "rel", "not a page"),
         # An existing folder is a page only in its brain: the read finds it, then rejects the relation page.
@@ -493,7 +494,7 @@ def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
         (lambda: retrieve.read([brain], "projects/offline.md", rel="owner"), "rel", "undeclared relation"),
         (lambda: pages.query("!!!"), "query", "give words or an identity"),
         (lambda: pages.query("bf://Me/x"), "query", "invalid BF link"),
-        (lambda: pages.query("x", "0d"), "scope", "since must be earlier than until"),
+        (lambda: pages.query("x", "0d"), "scope", "invalid period: 0d"),
         (lambda: pages.query("x", "projects/" + "a" * 5000), "scope", "String should have at most 4096"),
         # Items carry note paths: a section ref, as search returns it, would scope nothing.
         (lambda: pages.query("x", "projects/offline.md#decision"), "scope", "whole note without its #section"),

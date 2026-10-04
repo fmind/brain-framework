@@ -457,9 +457,12 @@ def note(path: str, data: bytes | Markdown) -> Note:
     # H2+ sections are separate passages, so a search can land on the answering section.
     # Headings rank through each passage's title; its text, and so its excerpt, starts below them.
     # A section also ranks under its parents: `## Vega` then `### Budget` answers "Vega budget".
+    # An H1 after the first section, as in a copied document, is one too, even the title's: it ends the section
+    # above it, as an exact read of that section's ref does, so search never lands on a section without the match.
     source_lines = lines(markdown.text)
-    sections = [h for h in markdown.headings if h.level >= 2]
     titled = next((h for h in markdown.headings if h.level == 1 and h.title == title), None)
+    first = next((n for n, h in enumerate(markdown.headings) if h.level >= 2), len(markdown.headings))
+    sections = markdown.headings[first:]
     hidden = range(titled.line, titled.end) if titled else range(0)
     opening = range(markdown.offset, sections[0].line if sections else len(source_lines))
     introduction = "".join(source_lines[n] for n in opening if n not in hidden)

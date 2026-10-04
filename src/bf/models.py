@@ -452,9 +452,12 @@ class Record(Model):
         return value
 
     def readable(self) -> Record:
-        """An exact read pages only `text`: everything else must fit its first page within the reply limit."""
-        size = sum(map(len, (self.id, self.title, self.url, *self.links, *self.aliases)))
-        if size > MAX_FIELDS or size + len(encode(self.attributes)) + len(encode(self.fields)) > MAX_FIELDS:
+        """An exact read pages only `text`: everything else must fit its first page within the reply limit.
+
+        Counted in encoded bytes, as the reply limit is: non-ASCII or escaped characters take more than one.
+        """
+        others = [self.id, self.title, self.url, self.links, self.aliases, self.attributes, self.fields]
+        if len(encode(others)) > MAX_FIELDS:
             raise ValueError("fields other than text exceed 2 MiB; keep bulky content in text")
         return self
 

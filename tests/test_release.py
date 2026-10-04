@@ -254,3 +254,65 @@ def test_verify_release_needs_a_valid_version_and_its_tag(published: Path) -> No
     assert verify_release(published, "1.2").returncode == 2
     missing = verify_release(published, "9.9.9")
     assert (missing.returncode, "no annotated v9.9.9 on origin" in missing.stderr) == (1, True), missing.stderr
+
+
+VERIFY_RELEASE_TAG = ROOT / "scripts" / "verify-release-tag.sh"
+# A fake GitHub API: each `gh api PATH --jq EXPR` prints the tab-separated answer its variable holds.
+TAG_GH = """#!/bin/sh
+case "$2" in
+  */git/ref/tags/*) printf '%s\\n' "$FAKE_REF" ;;
+  */git/tags/*) printf '%s\\n' "$FAKE_TAG" ;;
+  */git/ref/heads/main) printf '%s\\n' "$FAKE_MAIN" ;;
+  */compare/*) printf '%s\\n' "$FAKE_COMPARE" ;;
+  *) echo "unexpected gh $*" >&2; exit 64 ;;
+esac
+"""
+COMMIT, OTHER = "a" * 40, "b" * 40
+
+
+def verify_release_tag(tmp_path: Path, **fake: str) -> subprocess.CompletedProcess[str]:
+    (tmp_path / "gh").write_text(TAG_GH)
+    (tmp_path / "gh").chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "GITHUB_REF_NAME": "v1.2.3",
+        "GITHUB_REPOSITORY": "owner/repo",
+        "GITHUB_SHA": COMMIT,
+        "FAKE_REF": f"commit\t{COMMIT}",
+        "FAKE_MAIN": f"commit\t{COMMIT}",
+        **fake,
+    }
+    return subprocess.run(  # noqa: S603 - the repository's own release guard against a fake API
+        [str(VERIFY_RELEASE_TAG)], env=env, capture_output=True, text=True, timeout=30, check=False
+    )
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        {},
+        # An annotated tag resolves through its tag object.
+        {"FAKE_REF": f"tag\t{OTHER}", "FAKE_TAG": f"commit\t{COMMIT}"},
+        # A later main still contains the release commit, so a rerun after publication keeps its authority.
+        {"FAKE_MAIN": f"commit\t{OTHER}", "FAKE_COMPARE": "ahead"},
+    ],
+    ids=["lightweight", "annotated", "main-advanced"],
+)
+def test_verify_release_tag_accepts_the_workflow_commit_on_main(tmp_path: Path, fake: dict[str, str]) -> None:
+    result = verify_release_tag(tmp_path, **fake)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("fake", "message"),
+    [
+        ({"FAKE_REF": f"commit\t{OTHER}"}, f"does not resolve to workflow commit {COMMIT}"),
+        ({"FAKE_REF": f"tag\t{OTHER}", "FAKE_TAG": f"tree\t{COMMIT}"}, "unsupported object type tree"),
+        # A tag on an unmerged branch never publishes.
+        ({"FAKE_MAIN": f"commit\t{OTHER}", "FAKE_COMPARE": "diverged"}, "is not contained in current main"),
+    ],
+)
+def test_verify_release_tag_refuses_any_other_commit(tmp_path: Path, fake: dict[str, str], message: str) -> None:
+    result = verify_release_tag(tmp_path, **fake)
+    assert (result.returncode, message in result.stderr) == (1, True), result.stderr
