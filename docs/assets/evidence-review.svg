@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="372" viewBox="0 0 960 372" role="img" aria-labelledby="title desc">
 <title id="title">When evidence moves on, BF flags the conclusion</title>
-<desc id="desc">Four steps from the four-tool demo. A sensor collects the Jira review in status In review, and you record in projects/new-website.md that public launch is on hold. The review then moves to Done upstream; bf collect jira reports one updated record. bf read flags the project with review true, the reason newer_evidence and the newer record jira:review. You read the record and update the conclusion: launch is no longer blocked, the next actions change and the review flag clears.</desc>
+<desc id="desc">Four steps from the four-tool demo. A sensor collects the Jira review in status In review, and you record in projects/new-website.md that public launch is on hold. The review then moves to Done upstream; bf collect jira reports one updated record. bf read project:new-website flags the project with review true, the reason newer_evidence and the newer record jira:review. You read the record and update the conclusion: launch is no longer blocked, the next actions change and the review flag clears.</desc>
 <defs>
 <style>
 text { font-family: "Google Sans", "Google Sans Text", Roboto, "Segoe UI", Helvetica, Arial, sans-serif; fill: #202124; }
@@ -64,11 +64,12 @@ text { font-family: "Google Sans", "Google Sans Text", Roboto, "Segoe UI", Helve
 <text class="caption" x="504" y="166">than the note's last edit.</text>
 <rect x="500" y="182" width="192" height="156" rx="8" fill="#FAD2CF"/>
 <text class="code" x="512" y="205"><tspan class="muted">$</tspan> bf read</text>
-<text class="code" x="512" y="229">"review": <tspan class="flag">true</tspan>,</text>
-<text class="code" x="512" y="251">"review_reasons":</text>
-<text class="code" x="526" y="271">[<tspan class="flag">"newer_evidence"</tspan>],</text>
-<text class="code" x="512" y="295">"newer":</text>
-<text class="code" x="526" y="315">[<tspan class="flag">"jira:review"</tspan>]</text>
+<text class="code" x="526" y="222">project:new-website</text>
+<text class="code" x="512" y="243">"review": <tspan class="flag">true</tspan>,</text>
+<text class="code" x="512" y="262">"review_reasons":</text>
+<text class="code" x="526" y="280">[<tspan class="flag">"newer_evidence"</tspan>],</text>
+<text class="code" x="512" y="301">"newer":</text>
+<text class="code" x="526" y="319">[<tspan class="flag">"jira:review"</tspan>]</text>
 
 <!-- 4 Update, and it clears -->
 <rect class="card" x="720" y="98" width="216" height="252" rx="12"/>

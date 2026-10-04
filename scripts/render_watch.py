@@ -16,6 +16,7 @@ from rich.console import CONSOLE_SVG_FORMAT, Console
 
 from bf.collect import next_due
 from bf.config import load
+from bf.history import log_path
 from bf.storage import Store
 from bf.watch import Dashboard, Row, Sort, State
 
@@ -73,7 +74,7 @@ ROWS = [
         60,
         next_due=at(18),
         error="program exited with status 1; nothing was written",
-        log="~/.local/state/bf/BRAIN-DIGEST/unavailable.log",
+        log=log_path("unavailable"),
     ),
 ]
 

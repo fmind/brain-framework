@@ -1,7 +1,7 @@
 <p align="center">
   <img
     src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-framework.svg"
-    alt="Brain Framework: an exposed brain in an opening shell above twin aperture eyes"
+    alt="Brain Framework: a robot head whose shell opens on a brain, above twin aperture eyes"
     width="256"
     height="256"
   >
@@ -34,7 +34,7 @@ Brain Framework (BF) changes the starting point. Create a brain, a plain folder,
 <a href="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/blank-vs-brain.svg">
   <img
     src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/blank-vs-brain.svg"
-    alt="Two fictional sessions ask whether the new website can launch. Opened anywhere, the agent asks you to paste Jira, GitHub and Google Cloud. Opened in a brain, it reads project:new-website and answers: not yet, Jira still blocks launch on accessibility review, citing each record."
+    alt="Two fictional sessions ask whether the new website can launch. Opened anywhere, the agent asks you to paste Jira, GitHub and Google Cloud. Opened in a brain, it reads project:new-website and answers: not yet, Jira still blocks launch on accessibility review, citing each record, then notes the launch hold in the project note."
     width="960"
   >
 </a>
@@ -280,7 +280,7 @@ After reviewing your sensors, run `bf watch` to keep them refreshed and see fail
   <img
     src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/watch.svg"
     alt="Watch dashboard for the fictional offline demo: five sensors sorted by state, with a failed sensor's details beside their last success, next due time, item count and record changes."
-    width="720"
+    width="960"
   >
 </a>
 

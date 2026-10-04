@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
-<title id="title">Brain Framework — Iris</title>
-<desc id="desc">Geometric aperture eyes retain the camera reference. An exposed brain between two opening shell halves above a face with twin optical eyes.</desc>
+<title id="title">Brain Framework</title>
+<desc id="desc">A robot head whose shell opens on a brain, above a face with twin aperture eyes.</desc>
 <rect width="256" height="256" fill="#FFFFFF"/>
 <g transform="translate(128 128) scale(1) translate(-128 -128)">
 <path d="M128 56 C112 52 98 63 94 75 C81 80 76 91 80 103 C74 117 85 130 99 131 C110 136 119 134 128 131 C137 134 146 136 157 131 C171 130 182 117 176 103 C180 91 175 80 162 75 C158 63 144 52 128 56 Z" fill="#D2E3FC" stroke="#174EA6" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>

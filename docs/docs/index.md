@@ -3,7 +3,7 @@ icon: lucide/house
 description: Keep evidence, decisions and next steps in plain files that you and your agents search, read and connect.
 ---
 
-![Brain Framework Iris logo](../assets/brain-framework.svg){ width="256" height="256" }
+![Brain Framework logo](../assets/brain-framework.svg){ width="256" height="256" }
 
 # Brain Framework 🧠
 
