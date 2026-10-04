@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-PUSH_AND_TAG = ROOT / "scripts" / "push-and-tag"
-RELEASE_NOTES = ROOT / "scripts" / "release-notes"
+PUSH_AND_TAG = ROOT / "scripts" / "push-and-tag.sh"
+RELEASE_NOTES = ROOT / "scripts" / "release-notes.sh"
 # A fake gh: CI lists run 42 unless FAKE_RUN is empty, watching it exits with FAKE_WATCH and it concludes with
 # FAKE_CONCLUSION. They differ when the watch succeeds on a run that ended without success, such as a skipped one.
 GH = """#!/bin/sh

@@ -28,7 +28,7 @@ Start from one project and a few questions the user keeps reconstructing across 
 
 ## Connect the agent
 
-1. A terminal agent can use the CLI directly: first try an explicit request such as "Use `bf search` to find why we chose X, then `bf read` the ref and cite it." Hosts load the brain's `AGENTS.md` as project instructions; Claude Code reads `CLAUDE.md` instead, so create one in the brain containing only `@AGENTS.md`.
+1. A terminal agent can use the CLI directly: first try an explicit request such as "Use `bf search` to find why we chose X, then `bf read` the ref and cite it." Hosts, including Claude Code 2.1.277+, load the brain's `AGENTS.md` as project instructions; do not add a `CLAUDE.md`, which Claude Code would load instead. On an older version, or a session that cannot load `AGENTS.md`, a `CLAUDE.md` holding only `@AGENTS.md` imports it.
 1. Install the skills into the directory the host discovers, such as `~/.agents/skills` or `~/.claude/skills`:
 
    ```bash

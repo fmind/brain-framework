@@ -199,7 +199,6 @@ BF stores each record as one JSON file in `memories/SOURCE/`, named by the SHA-2
 ```text
 bf.yaml                                  # name, fields, sensors, routines and watch preferences
 AGENTS.md                                # instructions for agents working in the brain
-CLAUDE.md                                # optional: only @AGENTS.md, so Claude Code loads it
 projects/<project>.md                    # one OKF note per project
 concepts/index.md, concepts/<concept>.md # reusable OKF knowledge
 actions/YYYY-MM-DD_topic/ACTION.md       # one work session, with its inputs/ and outputs/

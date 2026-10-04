@@ -43,7 +43,7 @@ jobs:
       - name: Recheck remote tag before PyPI publication
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/verify-release-tag
+        run: scripts/verify-release-tag.sh
       - name: Attest distribution provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
@@ -87,9 +87,9 @@ jobs:
       - name: Recheck remote tag before GitHub publication
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/verify-release-tag
+        run: scripts/verify-release-tag.sh
       - name: Extract release notes
-        run: scripts/release-notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+        run: scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -4,6 +4,19 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v18.1.2](https://github.com/fmind/brain-framework/releases/tag/v18.1.2) - 2026-10-04
+
+A documentation release. The brain format (`version: 7`), `bf.yaml`, the reply schemas and the search cache are unchanged. The packaged `bf-setup` skill only changes its Claude Code guidance: run `bf skills DIR` to refresh installed copies.
+
+### Documentation
+
+- The README presents BF as a second brain on your own computer: agents opened in a brain start from your projects and evidence instead of a blank session. Four diagrams show the gather-to-learn loop, a blank session beside a brain session, how field mappings turn four tools' names into one knowledge graph and how a project is flagged for review when its linked evidence changes. New sections cover the questions a brain answers and the tools behind them, the sources one brain can gather, `bf.yaml` as the coordination hub, personal and team brains shared through Git and the trade-offs: local execution, provider setup and the agent harness's data terms. It also points agents to `llms.txt`.
+- Claude Code 2.1.277+ loads a brain's `AGENTS.md` on its own, so the guides no longer ask for a `CLAUDE.md` holding `@AGENTS.md`; the agent guide keeps that import as the fallback for older versions, and an existing brain may keep its `CLAUDE.md`.
+
+### Changed
+
+- The release scripts carry a `.sh` extension: `scripts/push-and-tag.sh`, `scripts/release-notes.sh` and `scripts/verify-release-tag.sh`.
+
 ## [v18.1.1](https://github.com/fmind/brain-framework/releases/tag/v18.1.1) - 2026-10-03
 
 A documentation release. The package, the brain format (`version: 7`), `bf.yaml`, the reply schemas and the search cache are unchanged; no upgrade step is needed.

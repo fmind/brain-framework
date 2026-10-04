@@ -5,7 +5,7 @@
 # (`set -e` inside `( ... )` does not after `&&`).
 set -euo pipefail
 
-version=${1:?usage: scripts/push-and-tag X.Y.Z}
+version=${1:?usage: scripts/push-and-tag.sh X.Y.Z}
 if ! [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "push-and-tag: expected a version such as 16.1.0, not ${version}" >&2
   exit 2

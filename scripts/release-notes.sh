@@ -2,7 +2,7 @@
 # Print exactly one tagged section from CHANGELOG.md for the GitHub release.
 set -eu
 
-tag=${1:?usage: release-notes <tag> [changelog]}
+tag=${1:?usage: release-notes.sh <tag> [changelog]}
 changelog=${2:-CHANGELOG.md}
 
 awk -v tag="${tag}" -v prefix="## [${tag}]" '

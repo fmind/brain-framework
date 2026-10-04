@@ -1,7 +1,7 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "18.1.1"
+version = "18.1.2"
 description = "🧠 Brain Framework: from information to informed actions."
 readme = "README.md"
 requires-python = ">=3.14"

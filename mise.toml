@@ -71,7 +71,7 @@ run = [
 
 [tasks."check:changelog"]
 description = "Check that CHANGELOG.md has exactly one nonempty section for the project version"
-run = 'scripts/release-notes "v$(uv version --short)" > /dev/null'
+run = 'scripts/release-notes.sh "v$(uv version --short)" > /dev/null'
 
 [tasks."check:docs"]
 description = "Build strict documentation and check rendered links and anchors"
@@ -146,7 +146,7 @@ run = "uv run --locked python scripts/render_watch.py"
 
 [tasks."check:shell"]
 description = "Lint every shipped and release shell helper"
-run = "shellcheck -S warning scripts/push-and-tag scripts/release-notes scripts/verify-release-tag"
+run = "shellcheck -S warning scripts/push-and-tag.sh scripts/release-notes.sh scripts/verify-release-tag.sh"
 
 [tasks."check:types"]
 alias = "ct"

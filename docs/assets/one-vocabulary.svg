@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="400" viewBox="0 0 960 400" role="img" aria-labelledby="title desc">
+<title id="title">One vocabulary, one knowledge graph</title>
+<desc id="desc">Workspace, Jira, GitHub and Google Cloud name the same project with different fields: project, workstream, repository_project and service_project, and report status as state, status, state and health. Field mappings in bf.yaml translate them once, at collection, into shared fields: project, kind and status. Every record then points to the identity project:new-website, which the project note owns, so one read assembles the brief, the review, the pull request and the deployment.</desc>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#174EA6"/></marker>
+<style>
+text { font-family: "Google Sans", "Google Sans Text", Roboto, "Segoe UI", Helvetica, Arial, sans-serif; fill: #202124; }
+.code { font-family: "Google Sans Code", "JetBrains Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace; font-size: 12.5px; }
+.label { font-size: 12px; font-weight: 700; letter-spacing: 1.2px; fill: #595D62; }
+.tool { font-size: 14px; font-weight: 700; }
+.key { fill: #934900; }
+.muted { font-size: 12.5px; fill: #595D62; }
+.flow { fill: none; stroke: #174EA6; stroke-width: 1.75; }
+.edge { stroke: #4285F4; stroke-width: 1.75; }
+.rel { font-size: 11.5px; fill: #174EA6; font-style: italic; }
+.ok { fill: #0D652D; }
+.wait { fill: #934900; }
+</style>
+</defs>
+<rect x="1" y="1" width="958" height="398" rx="16" fill="#FFFFFF" stroke="#DADCE0"/>
+
+<!-- Sources -->
+<text class="label" x="170" y="36" text-anchor="middle">EACH TOOL, ITS OWN NAMES</text>
+<rect x="24" y="52" width="308" height="66" rx="10" fill="#F1F3F4"/>
+<text class="tool" x="40" y="76">Workspace</text><text class="code" x="316" y="76" text-anchor="end"><tspan class="key">state</tspan>: approved</text>
+<text class="code" x="40" y="102" style="font-size:12px"><tspan class="key">project</tspan>: project:new-website</text>
+<rect x="24" y="130" width="308" height="66" rx="10" fill="#F1F3F4"/>
+<text class="tool" x="40" y="154">Jira</text><text class="code" x="316" y="154" text-anchor="end"><tspan class="key">status</tspan>: In review</text>
+<text class="code" x="40" y="180" style="font-size:12px"><tspan class="key">workstream</tspan>: project:new-website</text>
+<rect x="24" y="208" width="308" height="66" rx="10" fill="#F1F3F4"/>
+<text class="tool" x="40" y="232">GitHub</text><text class="code" x="316" y="232" text-anchor="end"><tspan class="key">state</tspan>: merged</text>
+<text class="code" x="40" y="258" style="font-size:12px"><tspan class="key">repository_project</tspan>: project:new-website</text>
+<rect x="24" y="286" width="308" height="66" rx="10" fill="#F1F3F4"/>
+<text class="tool" x="40" y="310">Google Cloud</text><text class="code" x="316" y="310" text-anchor="end"><tspan class="key">health</tspan>: healthy</text>
+<text class="code" x="40" y="336" style="font-size:12px"><tspan class="key">service_project</tspan>: project:new-website</text>
+
+<!-- Mapping -->
+<path class="flow" d="M334 85 C350 85 352 150 370 150" marker-end="url(#arrow)"/>
+<path class="flow" d="M334 163 C350 163 352 186 370 186" marker-end="url(#arrow)"/>
+<path class="flow" d="M334 241 C350 241 352 222 370 222" marker-end="url(#arrow)"/>
+<path class="flow" d="M334 319 C350 319 352 258 370 258" marker-end="url(#arrow)"/>
+<text class="label" x="464" y="36" text-anchor="middle">ONE ONTOLOGY</text>
+<rect x="374" y="120" width="180" height="168" rx="12" fill="#FEEFC3" stroke="#E37400"/>
+<text class="code" x="392" y="148" style="font-size:14px;font-weight:700">bf.yaml fields:</text>
+<text class="code" x="392" y="182"><tspan class="key">project</tspan>  identity</text>
+<text class="code" x="392" y="208"><tspan class="key">kind</tspan>     string</text>
+<text class="code" x="392" y="234"><tspan class="key">status</tspan>   string</text>
+<text class="muted" x="464" y="270" text-anchor="middle">mapped once, at collection</text>
+<line class="flow" x1="558" y1="204" x2="600" y2="204" marker-end="url(#arrow)"/>
+
+<!-- Graph -->
+<text class="label" x="772" y="36" text-anchor="middle">ONE KNOWLEDGE GRAPH</text>
+<line class="edge" x1="772" y1="204" x2="684" y2="96"/>
+<line class="edge" x1="772" y1="204" x2="860" y2="96"/>
+<line class="edge" x1="772" y1="204" x2="684" y2="312"/>
+<line class="edge" x1="772" y1="204" x2="860" y2="312"/>
+<g text-anchor="middle">
+<rect x="708" y="139" width="40" height="15" fill="#FFFFFF"/><text class="rel" x="728" y="151">project</text>
+<rect x="796" y="139" width="40" height="15" fill="#FFFFFF"/><text class="rel" x="816" y="151">project</text>
+<rect x="708" y="254" width="40" height="15" fill="#FFFFFF"/><text class="rel" x="728" y="266">project</text>
+<rect x="796" y="254" width="40" height="15" fill="#FFFFFF"/><text class="rel" x="816" y="266">project</text>
+</g>
+<rect x="662" y="182" width="220" height="46" rx="23" fill="#174EA6"/>
+<text class="code" x="772" y="203" text-anchor="middle" style="font-size:13.5px;font-weight:700;fill:#FFFFFF">project:new-website</text>
+<text x="772" y="220" text-anchor="middle" style="font-size:11.5px;fill:#D2E3FC">projects/new-website.md</text>
+<g text-anchor="middle">
+<rect x="600" y="70" width="168" height="50" rx="10" fill="#FFFFFF" stroke="#174EA6" stroke-width="1.5"/>
+<text class="code" x="684" y="91">workspace:brief</text><text class="code ok" x="684" y="110">approved</text>
+<rect x="776" y="70" width="168" height="50" rx="10" fill="#FFFFFF" stroke="#174EA6" stroke-width="1.5"/>
+<text class="code" x="860" y="91">jira:review</text><text class="code wait" x="860" y="110">In review</text>
+<rect x="600" y="288" width="168" height="50" rx="10" fill="#FFFFFF" stroke="#174EA6" stroke-width="1.5"/>
+<text class="code" x="684" y="309" style="font-size:12px">github:implementation</text><text class="code ok" x="684" y="328">merged</text>
+<rect x="776" y="288" width="168" height="50" rx="10" fill="#FFFFFF" stroke="#174EA6" stroke-width="1.5"/>
+<text class="code" x="860" y="309">gcloud:deployment</text><text class="code ok" x="860" y="328">healthy</text>
+</g>
+<text class="code" x="772" y="376" text-anchor="middle" style="font-size:13.5px"><tspan fill="#595D62">$</tspan> bf read project:new-website</text>
+</svg>
