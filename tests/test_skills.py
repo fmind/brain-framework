@@ -38,7 +38,8 @@ DOCS = re.compile(r"https://fmind\.github\.io/brain-framework/docs/([a-z0-9-]*)/
 REPOSITORY = re.compile(r"https://github\.com/fmind/brain-framework/(?:blob|tree)/main/([\w./-]+)")
 MARKDOWN = MarkdownIt("commonmark").enable("table")
 # A bf invocation, optionally through exec or a brain's pinned runtime (uv run --project PATH --locked bf).
-INVOCATION = re.compile(r"\s*(?:exec\s+|uv\s+run\s+(?:--\S+\s+(?:(?!bf\s)\S+\s+)?)*)?bf\s")
+# An option's value never starts like an option, so each word parses one way and matching stays linear.
+INVOCATION = re.compile(r"\s*(?:exec\s+|uv\s+run\s+(?:--\S+\s+(?:(?!bf\s)(?:-?[^-\s]\S*|--?)\s+)?)*)?bf\s")
 # Each SKILL.md stays a short router: detail lives in the references it names.
 WORDS = 1300
 
@@ -114,7 +115,7 @@ def test_skills_never_retrieve_through_a_brain_pinned_runtime() -> None:
     # parent, and uv before 0.12 reads the uv.toml there. `uv python find --system --no-config --no-project` reads
     # neither, nor the brain's pyproject.toml.
     pinned = re.compile(
-        r"uv\s+run\s+(?:-\S+\s+(?:(?!bf\s)\S+\s+)?)*"
+        r"uv\s+run\s+(?:-\S+\s+(?:(?!bf\s)(?:[^-\s]\S*|-)\s+)?)*"
         r"(?:bf\s+(?:search|read|status|validate|eval|export|mcp|COMMAND|--version)\b|python3?\s|\S*scripts/)"
         r"|uv\s+python\s+find\s+(?!--system\s+--no-config\s+--no-project\s)"
     )
