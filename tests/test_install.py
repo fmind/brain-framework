@@ -39,7 +39,7 @@ def test_skills_install_update_and_never_replace_edits(tmp_path: Path) -> None:
         if path.is_file() and "__pycache__" not in path.parts:
             relative = path.relative_to(packaged)
             assert (destination / "bf-use" / relative).read_bytes() == path.read_bytes()
-    assert (destination / "bf-use/scripts/new-action.py").stat().st_mode & 0o100
+    assert (destination / "bf-use/scripts/evidence.py").stat().st_mode & 0o100
     assert json.loads((destination / "bf-use" / MANIFEST).read_text())["version"] == __version__
     assert statuses(run(str(destination), "--check")) == dict.fromkeys(SKILLS, "current")
     # An older install whose files are unedited updates, and a file the new version dropped goes away.
@@ -56,7 +56,7 @@ def test_skills_install_update_and_never_replace_edits(tmp_path: Path) -> None:
     (destination / "bf-setup/retired.md").write_text("old, then edited\n")
     recorded["files"]["retired.md"] = hashlib.sha256(b"old\n").hexdigest()
     manifest.write_text(json.dumps(recorded))
-    assert run(str(destination), code=1)["skills"][1] == {
+    assert run(str(destination), code=1)["skills"][SKILLS.index("bf-setup")] == {
         "name": "bf-setup",
         "status": "modified",
         "edited": ["retired.md"],
@@ -73,15 +73,15 @@ def test_skills_install_update_and_never_replace_edits(tmp_path: Path) -> None:
     assert statuses(run(str(destination), "--force"))["bf-use"] == "updated"
     assert not skill.read_text().endswith("Local rule.\n")
     # A deleted file leaves the skill incomplete: it is reported like an edit, and --force restores it.
-    (destination / "bf-use/scripts/new-action.py").unlink()
+    (destination / "bf-use/scripts/evidence.py").unlink()
     deleted = run(str(destination), "--check", code=1)
-    assert deleted["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["scripts/new-action.py"]}
+    assert deleted["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["scripts/evidence.py"]}
     assert statuses(run(str(destination), "--force"))["bf-use"] == "updated"
-    assert (destination / "bf-use/scripts/new-action.py").is_file()
+    assert (destination / "bf-use/scripts/evidence.py").is_file()
     # A file a person added where a newer version ships one is kept; the unchanged copy updates silently.
     manifest = destination / "bf-use" / MANIFEST
     recorded = json.loads(manifest.read_text())
-    for name in ("SKILL.md", "scripts/new-action.py"):
+    for name in ("SKILL.md", "scripts/evidence.py"):
         del recorded["files"][name]
     manifest.write_text(json.dumps(recorded))
     skill.write_text("My own skill.\n")
@@ -100,7 +100,12 @@ def test_skills_leave_foreign_and_linked_folders_alone(tmp_path: Path) -> None:
     elsewhere.mkdir()
     (destination / "bf-setup").symlink_to(elsewhere)
     reply = run(str(destination), code=1)
-    assert statuses(reply) == {"bf-use": "unmanaged", "bf-setup": "unmanaged", "bf-maintain": "installed"}
+    assert statuses(reply) == {
+        "bf-use": "unmanaged",
+        "bf-setup": "unmanaged",
+        "bf-maintain": "installed",
+        "bf-action": "installed",
+    }
     assert (destination / "bf-use/SKILL.md").read_text() == "# Mine\n"
     assert not any(elsewhere.iterdir())
     # Forcing never writes through a link: replacing it is the person's decision.
@@ -123,11 +128,11 @@ def test_a_link_inside_a_skill_is_listed_and_stops_a_forced_update(tmp_path: Pat
     destination = tmp_path / "skills"
     run(str(destination))
     older(destination / "bf-use")
-    helper = destination / "bf-use/scripts/new-action.py"
+    helper = destination / "bf-use/scripts/evidence.py"
     helper.unlink()
     helper.symlink_to(tmp_path / "elsewhere.py")
     edited = run(str(destination), code=1)
-    assert edited["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["scripts/new-action.py"]}
+    assert edited["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["scripts/evidence.py"]}
     # Forcing never writes through it: the run stops after replacing the files before it, and the next one still
     # lists only the link, never the packaged bytes already written.
     result = CliRunner().invoke(app, ["skills", str(destination), "--force"])
@@ -166,8 +171,8 @@ def test_an_interrupted_install_or_update_finishes_on_the_next_run(
         skills(destination)
     reply = run(str(destination), "--check", code=1)
     assert reply["skills"][0] == {"name": "bf-use", "status": "outdated"}
-    assert statuses(reply) == {"bf-use": "outdated", "bf-setup": "missing", "bf-maintain": "missing"}
-    assert statuses(run(str(destination))) == {"bf-use": "updated", "bf-setup": "installed", "bf-maintain": "installed"}
+    assert statuses(reply) == {"bf-use": "outdated", **dict.fromkeys(SKILLS[1:], "missing")}
+    assert statuses(run(str(destination))) == {"bf-use": "updated", **dict.fromkeys(SKILLS[1:], "installed")}
     assert statuses(run(str(destination), "--check")) == dict.fromkeys(SKILLS, "current")
     # An unedited older install whose update stops after one file: that file already holds the packaged bytes.
     folder = destination / "bf-use"
@@ -178,11 +183,11 @@ def test_an_interrupted_install_or_update_finishes_on_the_next_run(
     assert (folder / "SKILL.md").read_bytes() == (ROOT / "src/bf/skills/bf-use/SKILL.md").read_bytes()
     assert run(str(destination), "--check", code=1)["skills"][0] == {"name": "bf-use", "status": "outdated"}
     # Only a person's edit is listed, never the bytes BF already wrote beside it.
-    helper = folder / "scripts/new-action.py"
+    helper = folder / "scripts/evidence.py"
     helper.write_text("Local change.\n")
     edited = run(str(destination), code=1)
-    assert edited["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["scripts/new-action.py"]}
-    helper.write_bytes(b"old scripts/new-action.py\n")
+    assert edited["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["scripts/evidence.py"]}
+    helper.write_bytes(b"old scripts/evidence.py\n")
     assert statuses(run(str(destination)))["bf-use"] == "updated"
     assert statuses(run(str(destination), "--check")) == dict.fromkeys(SKILLS, "current")
 
@@ -214,7 +219,7 @@ def test_an_older_bf_leaves_a_newer_install_alone(tmp_path: Path, version: objec
         recorded["files"][name] = hashlib.sha256(data).hexdigest()
     (folder / MANIFEST).write_text(json.dumps(recorded))
     reply = run(str(destination), code=1 if status == "newer" else 0)
-    assert reply["skills"][1] == {"name": "bf-setup", "status": status}
+    assert reply["skills"][SKILLS.index("bf-setup")] == {"name": "bf-setup", "status": status}
     if status == "newer":
         assert (folder / "SKILL.md").read_text() == "Newer procedure.\n"
         assert (folder / "future.md").is_file()

@@ -87,7 +87,7 @@ Commit after review. Git history keeps committed evidence. A sleeping laptop doe
 ## Contribute without overwriting each other
 
 - **Notes:** make focused edits; keep one current decision and next step in the owning note.
-- **Actions:** give each session its own folder with a 12-character suffix, as in `actions/2026-09-27_review-3f9a1c2e5b7d/`, so teammates picking the same topic on the same day never collide. The `bf-use` [new-action helper](agents.md#resume-an-action) adds one with `--unique`.
+- **Actions:** give each session its own folder with a 12-character suffix, as in `actions/2026-09-27_review-3f9a1c2e5b7d/`, so teammates picking the same topic on the same day never collide. The `bf-action` [new-action helper](agents.md#resume-an-action) adds one with `--unique`.
 - **Records:** different ids live in different files. Competing revisions of one id need review.
 - **Sources:** use different source names for different permission scopes. A snapshot replaces its whole source, so never let a partial view replace a shared one.
 - **Conflicts:** keep both sides, reconcile them from evidence, then validate and evaluate. Never resolve evidence by last writer wins.

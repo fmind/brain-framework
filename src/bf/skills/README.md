@@ -6,11 +6,12 @@ Agent procedures for **gather → normalize → organize and connect → act →
 
 | Skill                               | Use it for                                                                              | Example request                                                         |
 | ----------------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| [bf-use](bf-use/SKILL.md)           | Finding and citing evidence, saving knowledge, tracking and reviewing work sessions     | “Why did we choose a single product page? Read and cite the source.”    |
+| [bf-use](bf-use/SKILL.md)           | Finding and citing evidence, saving knowledge and reviewing projects and decisions      | “Why did we choose a single product page? Read and cite the source.”    |
+| [bf-action](bf-action/SKILL.md)     | Starting, resuming, handing off and closing a tracked work session (an action)          | “/bf-action website-review”                                             |
 | [bf-setup](bf-setup/SKILL.md)       | Installing BF, creating a brain, connecting an agent, discovering and importing sources | “Set up `~/brain` and check that you can find our project decision.”    |
 | [bf-maintain](bf-maintain/SKILL.md) | Sensors, routines and hooks, collection, refresh, recovery and conflicts                | “Why is the local-documents source overdue? Diagnose it before fixing.” |
 
-Install all three: each one names its neighbors when a task crosses into their scope. `bf-use` covers everyday work, including "remember this" and "resume the website review"; `bf-setup` and `bf-maintain` hand selected sources to each other without collecting, scheduling or authenticating on their own.
+Install all four: each one names its neighbors when a task crosses into their scope. `bf-use` covers everyday work, including "remember this"; `bf-action` starts a session when invoked with a topic, so no request wording is needed, and resumes or hands one off; `bf-setup` and `bf-maintain` hand selected sources to each other without collecting, scheduling or authenticating on their own.
 
 ## Install and update
 
@@ -40,7 +41,8 @@ It exits 1 unless every skill is `current`. Start a fresh host session after ins
 
 ## What each skill contains
 
-- `bf-use`: retrieval and answering in `SKILL.md`; references for complete reads and graph context, writing knowledge back, links, evidence retention, reviews, consolidation, sharing, actions, working context, handoffs and decisions; the helpers `guarded-write.py`, `evidence.py`, `new-action.py` and `check-handoff.py`; project, concept and action templates.
+- `bf-use`: retrieval and answering in `SKILL.md`; references for complete reads and graph context, writing knowledge back, links, evidence retention, reviews, consolidation, sharing and decisions; the helpers `guarded-write.py` and `evidence.py`; project and concept templates.
+- `bf-action`: starting an action from a topic in `SKILL.md`; references for starting, resuming and closing a session, its working-context budget and handoffs; the helpers `new-action.py` and `check-handoff.py`; the action template.
 - `bf-setup`: installation, brain creation, agent access and verification in `SKILL.md`; references for scoped discovery, discovery methods and imports; the `inventory.py` helper.
 - `bf-maintain`: diagnosis and core commands in `SKILL.md`; references for integrations, operations and conflicts.
 

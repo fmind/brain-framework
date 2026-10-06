@@ -103,7 +103,7 @@ def test_same_routine_on_two_clones_creates_distinct_actions(tmp_path: Path) -> 
 
 
 def test_action_helper_creates_two_sessions_without_replacing_work(brain: Store) -> None:
-    script = Path(__file__).parents[1] / "src/bf/skills/bf-use/scripts/new-action.py"
+    script = Path(__file__).parents[1] / "src/bf/skills/bf-action/scripts/new-action.py"
     created = []
     for options in ((), (), ("--unique",)):
         reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
@@ -129,7 +129,7 @@ def test_a_session_named_after_a_routine_never_counts_as_its_action(brain: Store
     brain.write(
         "bf.yaml", b"version: 7\nname: fixture\nroutines:\n  review:\n    command: [fake]\n    output: action\n"
     )
-    script = Path(__file__).parents[1] / "src/bf/skills/bf-use/scripts/new-action.py"
+    script = Path(__file__).parents[1] / "src/bf/skills/bf-action/scripts/new-action.py"
     reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
         [sys.executable, str(script), "review", "--brain", str(brain.root), "--unique"],
         capture_output=True,
@@ -158,7 +158,7 @@ def test_action_helper_refuses_redirected_actions(brain: Store, tmp_path: Path) 
     outside = tmp_path / "outside"
     outside.mkdir()
     (brain.root / "actions").symlink_to(outside, target_is_directory=True)
-    script = Path(__file__).parents[1] / "src/bf/skills/bf-use/scripts/new-action.py"
+    script = Path(__file__).parents[1] / "src/bf/skills/bf-action/scripts/new-action.py"
     reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
         [sys.executable, str(script), "review", "--brain", str(brain.root)],
         capture_output=True,
@@ -174,7 +174,7 @@ def test_action_helper_follows_a_linked_brain_root_only(brain: Store, tmp_path: 
     # bf itself accepts a linked root, such as ~/brain pointing at a synced folder; links below it stay refused.
     linked = tmp_path / "linked-brain"
     linked.symlink_to(brain.root, target_is_directory=True)
-    script = Path(__file__).parents[1] / "src/bf/skills/bf-use/scripts/new-action.py"
+    script = Path(__file__).parents[1] / "src/bf/skills/bf-action/scripts/new-action.py"
     reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
         [sys.executable, str(script), "review", "--brain", str(linked)],
         capture_output=True,

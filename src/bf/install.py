@@ -13,7 +13,7 @@ from bf.storage import Store, expand
 
 # The installed files and their digests: a later install replaces only files that still match them.
 MANIFEST = ".bf-skill.json"
-SKILLS = ("bf-use", "bf-setup", "bf-maintain")
+SKILLS = ("bf-use", "bf-action", "bf-setup", "bf-maintain")
 # States that leave a folder as it is: a person's edits, files this command did not install or a newer version's.
 BLOCKED = frozenset({"modified", "unmanaged", "newer"})
 

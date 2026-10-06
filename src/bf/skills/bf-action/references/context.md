@@ -18,7 +18,7 @@ The objective and project decision are recorded. No draft exists yet. Next: read
 
 With several selected brains, keep refs brain-qualified (`uri`). Name external evidence by ref and say why it matters instead of copying its text. `problems`, `stale`, an `overdue` or `never` source and omitted evidence belong in the unknowns, not in an unqualified conclusion.
 
-Refresh Context and Resume in place only when the outcome, constraints, evidence or next step change, never merely to change a date. To keep a consequential revision for later comparison, follow the [evidence guide](evidence.md) rather than loading a capture's JSON into the conversation.
+Refresh Context and Resume in place only when the outcome, constraints, evidence or next step change, never merely to change a date. To keep a consequential revision for later comparison, follow the `bf-use` skill's evidence guide rather than loading a capture's JSON into the conversation.
 
 The [handoff checker](handoff.md) measures both whole sections, headings included, and returns their brain-qualified refs without printing their text. It checks sizes only: count the evidence refs and judge factual readiness yourself.
 

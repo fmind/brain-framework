@@ -25,7 +25,7 @@ Claude Code 2.1.277+ loads the brain's `AGENTS.md` when no `CLAUDE.md` sits in t
 
 ## Install the skills
 
-BF ships three skills in the package. Install them into a folder your agent host discovers:
+BF ships four skills in the package. Install them into a folder your agent host discovers:
 
 ```bash
 bf skills ~/.agents/skills
@@ -33,11 +33,12 @@ bf skills ~/.agents/skills
 
 The reply lists each skill with `"status":"installed"`. Each host looks in its own folder: use it instead, such as `~/.claude/skills` for Claude Code.
 
-| Skill                                                                                                  | Use it to                                                                        |
-| ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| [`bf-use`](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/SKILL.md)           | Find and cite evidence, write decisions and concepts, and track work in actions. |
-| [`bf-setup`](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-setup/SKILL.md)       | Onboard a brain, discover useful sources and import selected knowledge.          |
-| [`bf-maintain`](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-maintain/SKILL.md) | Build integrations, run collection and schedules, and keep checks passing.       |
+| Skill                                                                                                  | Use it to                                                                  |
+| ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| [`bf-use`](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/SKILL.md)           | Find and cite evidence, and write decisions and concepts.                  |
+| [`bf-action`](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/SKILL.md)     | Start, resume, hand off and close a tracked work session (an action).      |
+| [`bf-setup`](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-setup/SKILL.md)       | Onboard a brain, discover useful sources and import selected knowledge.    |
+| [`bf-maintain`](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-maintain/SKILL.md) | Build integrations, run collection and schedules, and keep checks passing. |
 
 Run the same command after each BF update: it updates the skills it installed and never overwrites your changes. An interrupted install or update reads `outdated` and finishes on the next run; an empty folder installs like a missing one. Three statuses leave a folder unchanged and make the command exit 1:
 
@@ -75,7 +76,9 @@ When a host cannot detect another session's edit, write through the [guarded-wri
 
 ## Resume an action
 
-An action keeps one session's objective, inputs, outputs and next step in `actions/YYYY-MM-DD_topic/ACTION.md`. The skill's [new-action helper](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/scripts/new-action.py) creates that folder with an `ACTION.md` skeleton and never joins an existing one: it adds a 12-character suffix when the folder exists, or always with `--unique`, which suits shared brains. Create the [website-review action](brain.md#actions), then read its stopping point:
+An action keeps one session's objective, inputs, outputs and next step in `actions/YYYY-MM-DD_topic/ACTION.md`. To start one, invoke the `bf-action` skill with a topic, such as `/bf-action website-review` in Claude Code: the invocation is the request, so no wording such as "start an action" is needed. The agent resumes an open action on that topic if one exists; otherwise it finds the owning project, creates the action and fills its Context, TODO and Resume, then reports a ref such as `actions/2026-09-27_website-review/ACTION.md`. Asking to start, track, resume or hand off a session selects the same skill.
+
+The skill's [new-action helper](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/scripts/new-action.py) creates that folder with an `ACTION.md` skeleton and never joins an existing one: it adds a 12-character suffix when the folder exists, or always with `--unique`, which suits shared brains. Create the [website-review action](brain.md#actions), then read its stopping point:
 
 ```bash
 bf read actions
@@ -84,11 +87,11 @@ bf read actions/2026-09-27_website-review/ACTION.md#resume
 
 The reply's `text` says the decision is saved and the next step is to check the product page. Update Resume as work progresses, so the next session starts from the last verified state.
 
-For longer sessions, the [action template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/templates/action.md) adds a Context section: the outcome, constraints, decision, unknowns and up to six refs, within 300 words. Before a handoff or context compaction, ask the agent to refresh Context and Resume, then run the [handoff checker](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/scripts/check-handoff.py). It checks the size budgets and returns exact section refs, without writing notes. The [handoff guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/references/handoff.md) covers the whole procedure.
+For longer sessions, the [action template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/templates/action.md) adds a Context section: the outcome, constraints, decision, unknowns and up to six refs, within 300 words. Before a handoff or context compaction, ask the agent to refresh Context and Resume, then run the [handoff checker](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/scripts/check-handoff.py). It checks the size budgets and returns exact section refs, without writing notes. The [handoff guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/references/handoff.md) covers the whole procedure.
 
 ## Decision workflows
 
-`bf-use` handles requests like these. They illustrate work to perform; the fictional website has not been tested.
+`bf-use` handles requests like these, and `bf-action` keeps the session that produces them. They illustrate work to perform; the fictional website has not been tested.
 
 | Ask your agent                                                                    | Keep in the brain                                                 |
 | --------------------------------------------------------------------------------- | ----------------------------------------------------------------- |

@@ -1,6 +1,6 @@
 # Track a work session
 
-An action holds one requested work session at `actions/YYYY-MM-DD_topic/ACTION.md`, with optional `inputs/` and `outputs/`. Start or resume one only when the user asks to track, hand off or resume a session; ordinary retrieval and note updates need no action. Routines with `output: action` also write actions for review.
+An action holds one requested work session at `actions/YYYY-MM-DD_topic/ACTION.md`, with optional `inputs/` and `outputs/`. Start or resume one only when the user invokes this skill or asks to start, track, hand off or resume a session; ordinary retrieval and note updates need no action. Routines with `output: action` also write actions for review.
 
 ## Resume a session
 
@@ -10,6 +10,7 @@ An action holds one requested work session at `actions/YYYY-MM-DD_topic/ACTION.m
 
 ## Start a session
 
+1. Check for an open action on the topic with `bf search "topic words" --scope actions`: resume a matching action that is not `deprecated` rather than starting a duplicate, and ask when several match.
 1. Find and read the owning project with `bf search "topic words" --scope projects`; clarify ownership only when it is unresolved.
 1. Create the action with the helper, naming the topic and the brain directory:
 
@@ -23,12 +24,12 @@ An action holds one requested work session at `actions/YYYY-MM-DD_topic/ACTION.m
 
 Without the helper, create the folder exclusively, add a suffix from `python3 -c 'import uuid; print(uuid.uuid4().hex[-12:])'` on a collision or in a shared brain, and never reuse or rename an existing action.
 
-Use the [decision guide](decisions.md) for consequential choices, conditional intentions and blocking questions: record expectations before outcomes.
+Use the `bf-use` skill's decision guide for consequential choices, conditional intentions and blocking questions: record expectations before outcomes.
 
 ## Finish or hand off
 
 1. Tick completed tasks and keep decisions, reasons and evidence refs. Update Context when its facts change and Resume with the last verified state, blocker and exact next step.
-1. When the work is done, fill Outcome and compare any expectation with the observed evidence. Move durable changes and unresolved questions into the owning project, following [writing knowledge back](learn.md).
+1. When the work is done, fill Outcome and compare any expectation with the observed evidence. Move durable changes and unresolved questions into the owning project, following the `bf-use` skill's guide to writing knowledge back.
 1. Before a handoff or a planned compaction, follow the [handoff guide](handoff.md): it checks the Context and Resume sizes and returns their exact refs.
 1. Run `bf validate`, fix what your edit introduced and show the diff. Report the action ref, the verified outcome and the remaining next step; commit only when authorized.
 

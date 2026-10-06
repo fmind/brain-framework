@@ -172,7 +172,7 @@ The draft describes the product but does not name its intended audience. We have
 Next: describe who the product helps, then test the explanation with a visitor.
 ```
 
-Keep session evidence in the action's `inputs/` and deliverables in `outputs/`; both are searchable, so keep them within the brain's audience. Reading the action folder returns `ACTION.md`, its files, linked projects and backlinks. Objective, Tasks, Resume and Outcome are useful headings, not required ones. The [action template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/templates/action.md) adds context and decision sections for longer sessions.
+Keep session evidence in the action's `inputs/` and deliverables in `outputs/`; both are searchable, so keep them within the brain's audience. Reading the action folder returns `ACTION.md`, its files, linked projects and backlinks. Objective, Tasks, Resume and Outcome are useful headings, not required ones. The [action template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/templates/action.md) adds context and decision sections for longer sessions.
 
 ## Records
 
@@ -219,4 +219,4 @@ Search covers Markdown under `projects/`, `concepts/` and `actions/`, and record
 
 Separate brains by audience: keep personal records in a private brain and share reviewed notes in a [team brain](team.md). Declare direct `brains:` paths in `bf.yaml` to search related brains together, and register a brain to select it by name from elsewhere; see [Configuration](configuration.md#related-brains). Neither runs a brain's programs.
 
-With an agent, the `bf-use` skill keeps sessions resumable and updates knowledge after an outcome; see [Agent workflows](agents.md#decision-workflows).
+With an agent, the `bf-action` skill keeps sessions resumable and the `bf-use` skill updates knowledge after an outcome; see [Agent workflows](agents.md#decision-workflows).

@@ -4,6 +4,16 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v18.2.0](https://github.com/fmind/brain-framework/releases/tag/v18.2.0) - 2026-10-06
+
+A skill release. The brain format (`version: 7`), `bf.yaml`, the reply schemas and the search cache are unchanged. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), then run `bf skills DIR` to install `bf-action` and update `bf-use`.
+
+### Added
+
+- A fourth packaged skill, `bf-action`, starts, resumes, hands off and closes a tracked work session. Invoking it with a topic, such as `/bf-action website-review` in Claude Code, is the request to start that action: the agent resumes an open action on that topic or, when none exists, finds the owning project, creates `actions/YYYY-MM-DD_website-review/ACTION.md` and fills its Context, TODO and Resume, with no need for wording such as "start an action". The action guide, the working-context and handoff guides, `new-action.py`, `check-handoff.py` and the action template move from `bf-use` to `bf-action`; `bf-use` keeps retrieval and writing knowledge back.
+
+Upgrade: run `bf skills DIR` to install `bf-action` and update `bf-use`, which removes the moved files. If you edited any `bf-use` file, the folder reads `modified` and stays unchanged: back up your edits, then rerun with `--force`, which keeps edited files the new version no longer ships. A Claude Code `SessionStart` hook that runs `bf-use/scripts/check-handoff.py` must point at `bf-action/scripts/check-handoff.py`. `bf init` now names both skills in the brain's `AGENTS.md`; merge that line as [Refresh brain instructions](https://fmind.github.io/brain-framework/docs/agents/#refresh-brain-instructions) shows.
+
 ## [v18.1.5](https://github.com/fmind/brain-framework/releases/tag/v18.1.5) - 2026-10-06
 
 A search fix. The brain format (`version: 7`), `bf.yaml`, the reply schemas, the packaged skills and the search cache are unchanged. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin); a copied `prompt-context.py` hook can take the example's new word list.

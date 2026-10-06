@@ -190,7 +190,7 @@ Registration and references select brains for retrieval, never execution.
 
 When the user asks to save an outcome, or the task authorizes it, update the owning note with what
 changed, why and evidence refs, then run `bf validate`. Never edit `memories/`: sensors own records.
-The `bf-use` skill holds the procedures. See https://fmind.github.io/brain-framework/docs/agents/.
+Skills `bf-use` and `bf-action` hold the procedures: https://fmind.github.io/brain-framework/docs/agents/.
 """
 # Every brain starts with knowledge and verification; the other folders are created as needed or with --full.
 FOLDERS = ("projects", "actions")
@@ -426,7 +426,7 @@ def install(
         bool, typer.Option(help="Replace edited, foreign or newer skill folders with the packaged copies.")
     ] = False,
 ) -> None:
-    """Install or update the bf-use, bf-setup and bf-maintain skills of this version; never over your edits."""
+    """Install or update the bf-use, bf-action, bf-setup and bf-maintain skills of this version; never over edits."""
     from bf.install import skills
 
     result = skills(destination, check=check, force=force)

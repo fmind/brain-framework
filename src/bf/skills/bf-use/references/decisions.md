@@ -18,7 +18,7 @@ Review after the next usability session. Outcome: unknown until the session note
 
 At review, compare the expectation with an observed result and its evidence: met, missed or unknown, with the circumstances that changed. A shipped change is delivery, not proof of impact. Keep a failed prediction, correct the current conclusion and link the lesson; one outcome does not establish causation. Before reusing a similar decision, inspect both its earlier conditions and its result.
 
-When an old rationale matters, keep a small dated decision note under the action's `outputs/` with supporting captures in `inputs/`. These are ordinary [attachments](actions.md#metadata-and-attachments), which ignore `stale_after`: keep the review deadline in the owning project. Correct a mistake explicitly or write a successor with a `supersedes` link; never silently rewrite an earlier prediction. See the [evidence guide](evidence.md) for captures and belief revision.
+When an old rationale matters, keep a small dated decision note under the action's `outputs/` with supporting captures in `inputs/`. These are ordinary action attachments (see the `bf-action` skill), which ignore `stale_after`: keep the review deadline in the owning project. Correct a mistake explicitly or write a successor with a `supersedes` link; never silently rewrite an earlier prediction. See the [evidence guide](evidence.md) for captures and belief revision.
 
 ## Remember an intention
 

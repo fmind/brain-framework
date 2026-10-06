@@ -138,7 +138,7 @@ Both hosts add a command hook's standard output to the agent's context on sessio
 
 Hosts without hooks can run the session script from their session instructions. Start a session in a repository that a project note names in its `aliases` and check that the context appears; `bf status` then counts its reads under `usage`. Then ask about a saved topic and check that the prompt hook's context reached the agent, for example in Claude Code's [debug log](https://code.claude.com/docs/en/hooks#debug-hooks). Local tests of the scripts do not establish host delivery.
 
-For an existing action, the `bf-use` skill's [handoff guide](../../src/bf/skills/bf-use/references/handoff.md) adds a size checker and an optional Claude Code check after compaction or resume. It reports Context and Resume refs and counts without inserting their text; refresh the action through the agent before a planned compaction.
+For an existing action, the `bf-action` skill's [handoff guide](../../src/bf/skills/bf-action/references/handoff.md) adds a size checker and an optional Claude Code check after compaction or resume. It reports Context and Resume refs and counts without inserting their text; refresh the action through the agent before a planned compaction.
 
 ## Contract
 

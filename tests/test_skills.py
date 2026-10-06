@@ -122,7 +122,7 @@ def test_skills_never_retrieve_through_a_brain_pinned_runtime() -> None:
     for name, text in TEXTS.items():
         assert not pinned.search(text), name
         # Retrieval and note updates never go through a pin, whatever `bf ...` command a sentence names.
-        if name.startswith("src/bf/skills/bf-use/") or name == "src/bf/cli.py:AGENTS":
+        if name.startswith(("src/bf/skills/bf-use/", "src/bf/skills/bf-action/")) or name == "src/bf/cli.py:AGENTS":
             assert not re.search(r"\buv\s+run\b", text), name
     assert pinned.search("uv run --project PATH --locked bf COMMAND ... --brain PATH")
     assert pinned.search("uv run --project PATH --locked bf read REF")
@@ -238,8 +238,18 @@ def test_distributed_skills_have_portable_metadata(skill: Path) -> None:
     assert f"Brain Framework {__version__.split('.')[0]} " in frontmatter["compatibility"]
 
 
+def test_invoking_bf_action_with_a_topic_starts_that_action() -> None:
+    # The skill exists so that `/bf-action TOPIC` needs no wording: its description and router both say so.
+    text = TEXTS["src/bf/skills/bf-action/SKILL.md"]
+    description = yaml.safe_load(text.split("---\n")[1])["description"]
+    assert "Invoking this skill with a topic" in description
+    assert "is the request to start that action now" in description
+    assert "Invoking this skill with a topic, or asking to start or track a session, is the explicit request" in text
+    assert "`bf-action`" in TEXTS["src/bf/skills/bf-use/SKILL.md"]
+
+
 def test_action_helper_writes_the_template_sections(brain: Store) -> None:
-    helper = SKILLS / "bf-use/scripts/new-action.py"
+    helper = SKILLS / "bf-action/scripts/new-action.py"
     reply = subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
         [sys.executable, str(helper), "review", "--brain", str(brain.root)],
         capture_output=True,
@@ -248,7 +258,7 @@ def test_action_helper_writes_the_template_sections(brain: Store) -> None:
         timeout=10,
     )
     created = brain.read(json.loads(reply.stdout)["action"]).decode()
-    template = (SKILLS / "bf-use/templates/action.md").read_text(encoding="utf-8")
+    template = (SKILLS / "bf-action/templates/action.md").read_text(encoding="utf-8")
     assert re.findall(r"^## .*", created, re.MULTILINE) == re.findall(r"^## .*", template, re.MULTILINE)
     assert validate(brain)["valid"]
     # A quoted `~user` that names no account is invalid input, not a traceback.
@@ -264,7 +274,7 @@ def test_action_helper_writes_the_template_sections(brain: Store) -> None:
 
 
 def test_action_helper_removes_only_what_a_failed_write_created(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    spec = importlib.util.spec_from_file_location("new_action", SKILLS / "bf-use/scripts/new-action.py")
+    spec = importlib.util.spec_from_file_location("new_action", SKILLS / "bf-action/scripts/new-action.py")
     assert spec is not None
     assert spec.loader is not None
     helper = importlib.util.module_from_spec(spec)
@@ -291,7 +301,7 @@ def test_unedited_templates_validate_and_keep_their_documented_anchors(brain: St
     for path in ("projects/one.md", "projects/two.md"):
         brain.write(path, (SKILLS / "bf-use/templates/project.md").read_bytes())
     brain.write("concepts/idea.md", (SKILLS / "bf-use/templates/concept.md").read_bytes())
-    brain.write("actions/2026-09-27_review/ACTION.md", (SKILLS / "bf-use/templates/action.md").read_bytes())
+    brain.write("actions/2026-09-27_review/ACTION.md", (SKILLS / "bf-action/templates/action.md").read_bytes())
     report = validate(brain)
     assert report["valid"], report
     for ref in ("projects/one.md#now", "projects/one.md#decision", "projects/one.md#next-actions"):

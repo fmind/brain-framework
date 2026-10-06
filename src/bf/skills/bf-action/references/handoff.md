@@ -24,7 +24,7 @@ A passing size check does not make an outdated decision current or authorize the
 
 Before a planned `/compact`, ask the agent to refresh the action within the current authorization, run the checker and show its result, then compact. Claude Code's [PreCompact hook](https://code.claude.com/docs/en/hooks#precompact) cannot save the action: its output does not reach the agent. The [SessionStart event](https://code.claude.com/docs/en/hooks#sessionstart) accepts a `compact` matcher and adds context after compaction.
 
-For an optional read-only check after compaction or resume, merge this entry into the repository's `.claude/settings.local.json`, keeping its other hooks. Replace `SKILL_DIR` with the absolute path of the installed `bf-use` folder (where `bf skills` put it) and the action with the one in progress; remove the entry when that action ends. BF installs no hooks.
+For an optional read-only check after compaction or resume, merge this entry into the repository's `.claude/settings.local.json`, keeping its other hooks. Replace `SKILL_DIR` with the absolute path of the installed `bf-action` folder (where `bf skills` put it) and the action with the one in progress; remove the entry when that action ends. BF installs no hooks.
 
 ```json
 {

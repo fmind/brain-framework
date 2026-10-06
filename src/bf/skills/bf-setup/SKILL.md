@@ -1,6 +1,6 @@
 ---
 name: bf-setup
-description: Set up Brain Framework (the bf command) and a brain, connect an agent to it, discover which sources are worth connecting and import selected documents or notes. Use when the user says "set up my brain", "install bf", "create a brain", "connect my agent", "install the skills", "which sources should I connect", "connect a source", "scan my tools or bookmarks", "import this handbook, vault or folder", or when bf is missing or has no brain yet.
+description: Install Brain Framework (bf), create a brain, connect an agent, install the skills, choose sources worth connecting and import documents or notes. Use for "set up my brain", "install bf", "which sources should I connect", "import this vault or folder", or when bf or a brain is missing.
 license: MIT
 compatibility: Requires Brain Framework 18 (the bf command) on Linux or macOS.
 ---
@@ -35,7 +35,7 @@ Start from one project and a few questions the user keeps reconstructing across 
    bf skills ~/.agents/skills
    ```
 
-   It installs or updates `bf-use`, `bf-setup` and `bf-maintain` from the installed package. A folder the user edited (`modified`), one BF did not install (`unmanaged`) and a different copy a newer `bf` installed (`newer`, such as a brain's pinned runtime sharing the directory) stay unchanged and make the command exit 1. Pass `--force` only when the user accepts replacing them; for `newer`, upgrade this `bf` or run the newer one instead, since `--force` installs this older copy. `bf skills DIR --check` reports drift after an upgrade without writing. Start a fresh host session so it discovers them.
+   It installs or updates `bf-use`, `bf-action`, `bf-setup` and `bf-maintain` from the installed package. A folder the user edited (`modified`), one BF did not install (`unmanaged`) and a different copy a newer `bf` installed (`newer`, such as a brain's pinned runtime sharing the directory) stay unchanged and make the command exit 1. Pass `--force` only when the user accepts replacing them; for `newer`, upgrade this `bf` or run the newer one instead, since `--force` installs this older copy. `bf skills DIR --check` reports drift after an upgrade without writing. Start a fresh host session so it discovers them.
 1. For a host that prefers tools, follow the [MCP guide](https://fmind.github.io/brain-framework/docs/mcp/): `bf mcp --brain PATH` serves only `search` and `read`. Give absolute paths to `bf` and the brain, since hosts may start the server from another folder; it checks the brain at startup and selects it again for each call, so registering or restoring a brain needs no restart.
 1. Optional [hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add the repository's project at session start and matching note refs to each prompt in Claude Code or Codex; register them only when the user wants one search per prompt.
 

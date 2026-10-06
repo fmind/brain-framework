@@ -251,11 +251,12 @@ bf skills ~/.agents/skills
 
 Each host reads its own folder: for Claude Code, use `~/.claude/skills` instead. Claude Code 2.1.277+ loads the brain's `AGENTS.md` when no `CLAUDE.md` sits in the brain or a folder above it, so do not add one; the [agent guide](https://fmind.github.io/brain-framework/docs/agents/#choose-how-your-agent-connects) gives the fallback for older versions.
 
-| Skill         | Teaches your agent to…                                                         |
-| ------------- | ------------------------------------------------------------------------------ |
-| `bf-use`      | Find evidence, cite it, and keep projects, concepts and actions current.       |
-| `bf-setup`    | Install BF, create a brain, connect the agent and choose sources worth adding. |
-| `bf-maintain` | Run sensors and routines, check the brain and upgrade it safely.               |
+| Skill         | Teaches your agent to…                                                          |
+| ------------- | ------------------------------------------------------------------------------- |
+| `bf-use`      | Find evidence, cite it, and keep projects and concepts current.                 |
+| `bf-action`   | Start, resume and hand off a tracked work session: `/bf-action website-review`. |
+| `bf-setup`    | Install BF, create a brain, connect the agent and choose sources worth adding.  |
+| `bf-maintain` | Run sensors and routines, check the brain and upgrade it safely.                |
 
 Working in a code repository instead? The [example session hook](https://github.com/fmind/brain-framework/tree/main/examples/hooks) prints the project that declares the repository, its next task and linked evidence when the session starts. Hosts that prefer tools can call `search` and `read` through [MCP](https://fmind.github.io/brain-framework/docs/mcp/). See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/).
 

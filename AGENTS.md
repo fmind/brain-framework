@@ -47,7 +47,7 @@ Judge a change by whether it helps someone gather relevant evidence, understand 
 | Files and configuration     | `storage.py`, `records.py`, `markdown.py`, `models.py`, `config.py`, `schemas.py` under `src/bf/`                                   |
 | Execution and maintenance   | `collect.py`, `history.py`, `update.py`, `health.py`, `validate.py`, `evaluate.py`, `usage.py` under `src/bf/`                      |
 | Watch and schedules         | `watch.py`, `watch_settings.py`, `schedule.py` under `src/bf/`; dashboard contracts in `tests/test_watch.py`                        |
-| Agent workflows             | [src/bf/skills/](src/bf/skills/README.md): `bf-use`, `bf-setup`, `bf-maintain`; `install.py` backs `bf skills`                      |
+| Agent workflows             | [src/bf/skills/](src/bf/skills/README.md): `bf-use`, `bf-action`, `bf-setup`, `bf-maintain`; `install.py` backs `bf skills`         |
 | Brain onboarding            | `src/bf/cli.py::AGENTS`: instructions emitted by `bf init`                                                                          |
 | CLI/MCP contracts           | `tests/test_interfaces.py`, `tests/test_retrieval_boundaries.py`; `tests/test_contract.py` against `tests/contract/`                |
 | Documented limits           | `docs/docs/limits.md`; edge cases in `tests/test_bounds.py`                                                                         |

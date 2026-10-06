@@ -1,6 +1,6 @@
 ---
 name: bf-use
-description: Answer from, save to and track work in the user's Brain Framework brain (the bf command) — project notes, decisions, concepts, actions and collected mail, calendar, chat, Git and agent-session records. Use when the user mentions "my brain" or "the brain", asks "what did we decide", "why did we choose", "what happened last week", "what is open", "what do we know about", wants to recall, resume or hand off work, says "remember this", "save this decision", "note the outcome" or "update the project", or asks to track, review, consolidate or share knowledge.
+description: Answer from and save to the user's Brain Framework brain (bf) — project notes, decisions, concepts and collected mail, calendar, chat and Git records. Use for "my brain", "what did we decide", "why did we choose", "what is open", "remember this", "save this decision", or to review, consolidate or share knowledge. Actions belong to bf-action.
 license: MIT
 compatibility: Requires Brain Framework 18 (the bf command) on Linux or macOS.
 ---
@@ -44,7 +44,7 @@ Write only what the user asked you to save or what the task authorizes; for a re
 
 ## Track a work session
 
-Only when the user asks to track, hand off or resume a session; ordinary retrieval and note updates need no action. Follow [actions](references/actions.md): resume an action from its `#context` and `#resume` sections, or start one with `python3 "$SKILL_DIR/scripts/new-action.py" TOPIC --brain PATH`. Keep Context and Resume within the [budget](references/context.md) and [check them](references/handoff.md) before a handoff or planned compaction.
+Starting, resuming, handing off and closing an action belong to the `bf-action` skill: use it only when the user invokes it or asks to track, hand off or resume a session. Ordinary retrieval and note updates need no action.
 
 ## Boundaries
 
@@ -54,7 +54,7 @@ Only when the user asks to track, hand off or resume a session; ordinary retriev
 
 ## References and helpers
 
-`SKILL_DIR` stands for the absolute path of the folder holding this `SKILL.md`. Run a helper from any directory with Python 3.11 or later: `python3 "$SKILL_DIR/scripts/NAME.py" ...`, or `"$(uv python find --system --no-config --no-project 3.14)" "$SKILL_DIR/scripts/NAME.py" ...` when `python3 --version` is older (macOS Command Line Tools ship 3.9). `evidence.py` and `check-handoff.py` call the installed `bf`, the first on PATH.
+`SKILL_DIR` stands for the absolute path of the folder holding this `SKILL.md`. Run a helper from any directory with Python 3.11 or later: `python3 "$SKILL_DIR/scripts/NAME.py" ...`, or `"$(uv python find --system --no-config --no-project 3.14)" "$SKILL_DIR/scripts/NAME.py" ...` when `python3 --version` is older (macOS Command Line Tools ship 3.9). `evidence.py` calls the installed `bf`, the first on PATH.
 
 - [references/retrieval.md](references/retrieval.md): paged results, source coverage, graph claims, review signals, invalid input and `bf export`.
 - [references/learn.md](references/learn.md): update an owning note, OKF metadata, guarded writes and retrieval cases.
@@ -63,12 +63,7 @@ Only when the user asks to track, hand off or resume a session; ordinary retriev
 - [references/review.md](references/review.md): a periodic project or decision review.
 - [references/consolidate.md](references/consolidate.md): derive a reusable procedure from several outcomes.
 - [references/share.md](references/share.md): prepare selected knowledge for another brain or audience.
-- [references/actions.md](references/actions.md): start, resume and close a tracked session.
-- [references/context.md](references/context.md): the Context and Resume budget of an action.
-- [references/handoff.md](references/handoff.md): check a handoff and resume after compaction.
 - [references/decisions.md](references/decisions.md): decisions with expectations, intentions and unknowns.
 - [scripts/guarded-write.py](scripts/guarded-write.py): replace a passage or the whole file only while it has the digest you read.
 - [scripts/evidence.py](scripts/evidence.py): read a whole exact reply, capture it, compare it with a later read.
-- [scripts/new-action.py](scripts/new-action.py): create a dated action without replacing another.
-- [scripts/check-handoff.py](scripts/check-handoff.py): measure an action's Context and Resume and return their refs.
-- [templates/project.md](templates/project.md), [templates/concept.md](templates/concept.md) and [templates/action.md](templates/action.md): starting points for new notes.
+- [templates/project.md](templates/project.md) and [templates/concept.md](templates/concept.md): starting points for new notes.

@@ -15,7 +15,7 @@ from bf.storage import Store
 from conftest import Provider
 
 ROOT = Path(__file__).resolve().parents[1]
-HELPER = ROOT / "src/bf/skills/bf-use/scripts/check-handoff.py"
+HELPER = ROOT / "src/bf/skills/bf-action/scripts/check-handoff.py"
 ACTION = "actions/2026-09-27_website/ACTION.md"
 CONTEXT = "## Context {#context}\n\nExplain the service before sign-up. Read the project decision.\n"
 RESUME = "## Resume {#resume}\n\nThe outline is verified. Next: draft the page; pricing is unknown.\n"
@@ -37,7 +37,9 @@ def install(provider: Provider, context: object = None, resume: object = None, *
 
 def execute(provider: Provider, *args: str) -> subprocess.CompletedProcess[str]:
     return provider.run(
-        "check-handoff.py", *(args or (ACTION, "--brain", "/brains/selected")), folder="../src/bf/skills/bf-use/scripts"
+        "check-handoff.py",
+        *(args or (ACTION, "--brain", "/brains/selected")),
+        folder="../src/bf/skills/bf-action/scripts",
     )
 
 

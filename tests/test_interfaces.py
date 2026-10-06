@@ -435,7 +435,7 @@ def test_generated_agent_instructions_name_real_commands_and_boundaries(tmp_path
         "read a result's `uri`\n(`bf://NAME/...`)",
         "When the user asks to save an outcome, or the task authorizes it",
         "then run `bf validate`. Never edit `memories/`",
-        "The `bf-use` skill holds the procedures",
+        "Skills `bf-use` and `bf-action` hold the procedures",
     ):
         assert sentence in text
     # Every agent loads this file: layout, loop and limits only; authoring rules live in the skills.
