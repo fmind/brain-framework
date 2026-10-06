@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.14"
 
 [[package]]
@@ -44,7 +44,7 @@ wheels = [
 
 [[package]]
 name = "brain-framework"
-version = "18.1.4"
+version = "18.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "markdown-it-py" },

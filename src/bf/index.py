@@ -111,13 +111,13 @@ _INDEXES = (
 # literal. English words that stem to one of them, such as "one" to "on", drop too: they would match nearly every text.
 _STOP = frozenset(
     """
-    a about am an and any are as at be been being but by can could did do does doing for from had has have having he
-    her hers him his how i if in into is it its me might must my not of on one ones or our ours please shall she
-    should so than that the their theirs them there these they this those to us was we were what when where which who
-    whom whose why will with would yet you your yours
-    ai au aux avec c ce ces cet cette d dans de des donc du elle elles en est et eu eux il ils j je l la le les leur
-    leurs lui m mais me mes moi mon n ne nos notre nous on ont ou où par pas pour pourquoi qu quand que quel quelle
-    quelles quels qui quoi s sa se ses si son sont sur t te tes toi ton tu un une vos votre vous y à été être
+    a about am an and another any are as at be been being but by can could did do does doing for from had has have
+    having he her hers him his how i if in into is it its me might must my not of on one ones or other others our ours
+    please shall she should so than that the their theirs them there these they this those to us was we were what when
+    where which who whom whose why will with would yet you your yours
+    ai au autre autres aux avec c ce ces cet cette d dans de des donc du elle elles en est et eu eux il ils j je l la le
+    les leur leurs lui m ma mais me mes moi mon n ne nos notre nous on ont ou où par pas pour pourquoi qu quand que quel
+    quelle quelles quels qui quoi s sa se ses si son sont sur t ta te tes toi ton tu un une vos votre vous y à été être
     """.split()  # noqa: SIM905 - one readable word list, grouped by language
 )
 # Written in capitals, a function word is an acronym and stays a term (EU AI Act, IT budget); AND and OR are

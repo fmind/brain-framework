@@ -984,6 +984,22 @@ def test_french_question_words_do_not_outweigh_the_subject(brain: Store) -> None
     assert "projects/noise.md" in refs(brain, "pourquoi")  # all-stopword queries remain literal
 
 
+def test_other_does_not_outrank_the_subject_in_a_mostly_english_brain(brain: Store) -> None:
+    # The subject appears in several notes, so it weighs less than a word only one French note holds.
+    brain.write("concepts/kotlin-first.md", b"# Kotlin first\n\nKotlin is the default language for services.\n")
+    for name in ("build", "mobile", "style"):
+        brain.write(f"concepts/{name}.md", f"# {name.title()}\n\nThe {name} guide covers Kotlin.\n".encode())
+    brain.write("concepts/contact.md", "# Contact\n\nVoir les autres échanges dans le dossier.\n".encode())
+    # Before, autre stayed a term and stemmed to the French note's autres, which ranked first; other is its English
+    # counterpart.
+    question = "Pourquoi Kotlin plutôt qu\u2019un autre langage ?"  # with the typographic apostrophe
+    assert index.terms(question) == ["Kotlin", "plutôt", "langage"]
+    assert index.terms("Why Kotlin over another language or other ones?") == ["Kotlin", "over", "language"]
+    assert index.terms("ma liste et ta liste") == ["liste"]  # like mon and ton
+    assert refs(brain, question)[0] == "concepts/kotlin-first.md"
+    assert refs(brain, "autres") == ["concepts/contact.md"]  # all-stopword queries remain literal
+
+
 def test_recent_identity_keeps_owners_ahead_of_newer_relations_across_brains(brain: Store, tmp_path: Path) -> None:
     records_file(
         brain,

@@ -4,6 +4,14 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v18.1.5](https://github.com/fmind/brain-framework/releases/tag/v18.1.5) - 2026-10-06
+
+A search fix. The brain format (`version: 7`), `bf.yaml`, the reply schemas, the packaged skills and the search cache are unchanged. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin); a copied `prompt-context.py` hook can take the example's new word list.
+
+### Fixed
+
+- Search drops `other`, `others` and `another`, and the French `autre`, `autres`, `ma` and `ta`, like other function words. In a mostly English brain, `Pourquoi Kotlin plutôt qu’un autre langage ?` ranked first a short French note that only shared `autres` with the question, a rare word that outweighed the subject; the note about Kotlin now ranks first. A query made only of such words still searches them literally. The example `prompt-context.py` hook mirrors the list.
+
 ## [v18.1.4](https://github.com/fmind/brain-framework/releases/tag/v18.1.4) - 2026-10-04
 
 A review release of fixes. The brain format (`version: 7`), `bf.yaml`, the reply schemas and the packaged skills are unchanged; the search cache rebuilds once. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin); no other step is needed.
