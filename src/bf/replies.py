@@ -127,6 +127,12 @@ _DEFS: dict[str, object] = {
             "subject": _STRING,
             "relation": _STRING,
             "target": _STRING,
+            "target_ref": {
+                **_STRING,
+                "description": "The ref of the one item in the asserting brain that the target names, when exactly "
+                "one does: read it to follow the claim.",
+            },
+            "target_title": {**_STRING, "description": "The title of the item `target_ref` names."},
             "origin": _STRING,
             "time": {**_INSTANT, "description": "When the asserting record happened; notes state `date` instead."},
             "date": {**_DATE, "description": "The asserting note's date."},
@@ -282,6 +288,13 @@ SEARCH: dict[str, object] = {
                 "minItems": 1,
                 "description": "Query words, quoted phrases or word* prefixes that match nothing in the selected brains' "
                 "caches, whatever the scope; check their spelling or search a variant.",
+            },
+            "suggestions": {
+                "type": "object",
+                "minProperties": 1,
+                "additionalProperties": {"type": "array", "items": _STRING, "minItems": 1, "maxItems": 3},
+                "description": "For unmatched words, up to three close words the selected brains hold, lowercased and "
+                "with Latin accents folded as search indexes them: search one to confirm.",
             },
             "sources": {"type": "array", "items": {"$ref": "#/$defs/Coverage"}},
             "sources_omitted": {"type": "integer", "minimum": 1},

@@ -64,6 +64,11 @@
         "relation": { "type": "string" },
         "subject": { "type": "string" },
         "target": { "type": "string" },
+        "target_ref": {
+          "description": "The ref of the one item in the asserting brain that the target names, when exactly one does: read it to follow the claim.",
+          "type": "string"
+        },
+        "target_title": { "description": "The title of the item `target_ref` names.", "type": "string" },
         "time": {
           "description": "When the asserting record happened; notes state `date` instead.",
           "format": "date-time",

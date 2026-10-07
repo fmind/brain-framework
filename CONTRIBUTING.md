@@ -88,7 +88,7 @@ mise run test -vv
 mise run report:coverage
 ```
 
-The first restores command echoes. The second runs verbose tests. The third reads the last saved coverage data, which includes the `python -m bf` subprocesses that tests start without replacing their environment; rerun tests first if the source changed. `mise run coverage` runs tests and writes an HTML report. A run that ends with every thread's traceback had a test still running after 300 seconds.
+The first restores command echoes. The second runs verbose tests; `test` runs them in parallel with pytest-xdist, so add `--numprocesses=0` to follow one test's output in order. The third reads the last saved coverage data, which includes the `python -m bf` subprocesses that tests start without replacing their environment; rerun tests first if the source changed. `mise run coverage` runs tests and writes an HTML report. A run that ends with every thread's traceback had a test still running after 300 seconds.
 
 ## Maintain the shared gate
 

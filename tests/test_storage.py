@@ -7,6 +7,7 @@ import fcntl
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -531,6 +532,37 @@ def test_writers_of_one_physical_brain_share_a_lock_whatever_the_path(brain: Sto
     folder, name = lock_file(brain, "write.lock")
     assert (folder.root / name).is_file()
     assert not folder.root.is_relative_to(brain.root)
+
+
+def test_writers_with_different_state_directories_still_exclude_each_other(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each state directory holds its own lock file: a shell and an MCP host with different XDG_STATE_HOME values
+    # used to commit at once, and a recovery could roll back the other writer's committed records.
+    with writer(brain):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "other-state"))
+        with pytest.raises(BusyError), writer(brain, wait=0.1):
+            pass
+        with pytest.raises(BusyError), reader(brain, wait=0.1):
+            pass
+    with reader(brain), reader(brain, wait=0.1):
+        pass
+
+
+def test_a_filesystem_that_cannot_lock_directories_keeps_the_state_lock(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = fcntl.flock
+
+    def refuse_directories(fd: int, operation: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EBADF, "Bad file descriptor")
+        real(fd, operation)
+
+    # NFS refuses an exclusive lock on a directory opened for reading.
+    monkeypatch.setattr(fcntl, "flock", refuse_directories)
+    with writer(brain), pytest.raises(BusyError), writer(brain, wait=0.1):
+        pass
 
 
 def test_json_and_yaml_reject_ambiguity() -> None:

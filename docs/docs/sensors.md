@@ -55,7 +55,7 @@ bf search "product explanation" --scope memories/local-documents
 bf read local-documents:website-demo/brief.txt
 ```
 
-The dry run executes the script and previews up to three records without saving them. The real collection stores one record under `memories/local-documents/`. Search returns `local-documents:website-demo/brief.txt`, and the exact read includes:
+The dry run executes the script and previews up to three records without saving them; its `added`, `updated`, `unchanged` and `removed` counts say what the collection would change. The real collection stores one record under `memories/local-documents/`. Search returns `local-documents:website-demo/brief.txt`, and the exact read includes:
 
 ```json
 {
@@ -177,7 +177,7 @@ A CLI, API, database query or export can become a sensor. The script owns authen
 }]
 ```
 
-Finish every source page before printing the array, and fail if one is missing. Test that failure with a fake provider. The [reviewed examples](https://github.com/fmind/brain-framework/tree/main/examples/sensors) cover local documents, highlights, Git history, [GitHub commits and issues](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md), Google Calendar and Drive folders. Copy them from the tag matching `bf --version`, as above.
+Finish every source page before printing the array, and fail if one is missing. Test that failure with a fake provider. The [reviewed examples](https://github.com/fmind/brain-framework/tree/main/examples/sensors) cover local documents, highlights, Git history, [GitHub commits and issues](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md), Google Calendar, Gmail headers and Drive folders. Copy them from the tag matching `bf --version`, as above.
 
 ## From meeting notes to GitHub issues
 
@@ -253,7 +253,7 @@ bf collect folders --dry-run          # check the returned scope first
 bf collect folders --allow-removal    # accept the removal for this run only
 ```
 
-The second command succeeds and reports its `removed` count; scheduled updates keep the guard. A list that loses most of its items every cycle suits a `window` sensor better.
+The dry run reports the `removed` count and `"removal_refused": true` when the guard would refuse the run. The second command succeeds and reports its `removed` count; scheduled updates keep the guard. A list that loses most of its items every cycle suits a `window` sensor better.
 
 ## Good records
 

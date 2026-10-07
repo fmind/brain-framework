@@ -33,7 +33,7 @@ Commands take the first selection available, in this order. An invalid explicit 
 
 Retrieval also includes each selected brain's direct `brains:` references: `search`, `read`, `export`, `mcp` and the cases of `eval`. `status --check` fails while one is unavailable. `validate` and `build` act on the selected brain only; validation lists targets in other brains under [`unresolved`](link-reference.md#across-brains). Execution never includes references: programs run in exactly one brain.
 
-- **Names** resolve through the machine registry first, then the enclosing brain and its references, then a folder below the working directory. When the enclosing brain or a reference claims a registered name for another folder, selection fails as `ambiguous brain name`: pass a path.
+- **Names** resolve through the machine registry first, then the enclosing brain and its references, then a folder below the working directory. When the enclosing brain or a reference claims a registered name for another folder, selection fails as `ambiguous brain name`: pass a path. A name that matches nothing suggests close known names, such as `did you mean work?` for `--brain wrok`.
 - **A selected brain** is a folder holding `bf.yaml`. Selecting a subfolder such as `projects/`, or a parent, fails before anything runs, naming the selection as given: `PATH has no bf.yaml; pass the brain's root directory, or create a brain with bf init`, or `registered brain NAME has no bf.yaml`.
 - **An empty `--brain`** is invalid input (exit 2), never a request for the default; omit the option instead. An empty `BF_BRAIN` counts as unset.
 - **The enclosing brain** counts only when you own its folder and its `bf.yaml` is a regular file, as Git requires. Otherwise commands fail naming it from the working directory, such as `../bf.yaml is not a regular file owned by you`.
@@ -106,7 +106,7 @@ Registration never runs a brain's programs. Before running a cloned brain's sens
 
 ## Local state
 
-Run history, locks and usage counts stay on this machine, in the `bf/` folder of the state folder: `XDG_STATE_HOME`, by default `~/.local/state`. `XDG_CONFIG_HOME` (default `~/.config`) holds the registry. Empty and relative values are ignored. Program logs live in the brain's own `logs/` folder instead, ignored by Git.
+Run history, locks and usage counts stay on this machine, in the `bf/` folder of the state folder: `XDG_STATE_HOME`, by default `~/.local/state`. Writers also lock the brain folder itself, so processes with different state folders, or accounts sharing a brain, never write at once; a network filesystem that cannot lock a folder, such as NFS, relies on the state lock alone, so keep one `XDG_STATE_HOME` for every process there. `XDG_CONFIG_HOME` (default `~/.config`) holds the registry. Empty and relative values are ignored. Program logs live in the brain's own `logs/` folder instead, ignored by Git.
 
 The state folder must be outside the brain. BF creates `bf/` with mode 700 and fails when another account owns it; set `XDG_STATE_HOME` to a writable folder if needed. The state folder, its `bf/` folder and everything below must be real folders: a symbolic link there makes every command fail with `state directory may not contain symlinks`. Links above them, such as `/home` pointing to `/var/home`, are fine.
 

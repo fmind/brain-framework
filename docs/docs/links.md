@@ -49,7 +49,7 @@ bf read projects/new-website.md
 bf read actions/2026-09-27_website-review/ACTION.md
 ```
 
-The project groups the action under `depends-on`. The action's `claims` show the same link with its origin, the Objective section. The claim records your assertion; it does not prove the dependency.
+The project groups the action under `depends-on`. The action's `claims` show the same link with its origin, the Objective section, and name the project as `target_ref` with its `target_title`. The claim records your assertion; it does not prove the dependency.
 
 ### Choose the right relation
 

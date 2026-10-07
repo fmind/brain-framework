@@ -224,7 +224,7 @@ def test_replace_refuses_a_missing_repeated_or_changed_passage(brain: Store) -> 
     brain.write(NOTE, b"# Offline\n\nKeep one.\n\nKeep one.\n\nPRIVATE unique line.\n")
     original = (brain.root / NOTE).read_bytes()
     digest = str(retrieve.read([brain], NOTE)["sha256"])
-    for old, message in (("absent passage", "does not occur in the file"), ("Keep one.", "occurs 2 times")):
+    for old, message in (("absent passage", "does not occur in the file"), ("Keep one.", "occurs several times")):
         result = write(brain, digest, "", NOTE, "--old", old, "--new", "x")
         assert result.returncode == 1
         assert message in result.stderr
@@ -242,6 +242,12 @@ def test_replace_refuses_a_missing_repeated_or_changed_passage(brain: Store) -> 
     tiny = str(retrieve.read([brain], "projects/tiny.md")["sha256"])
     assert write(brain, tiny, "", "projects/tiny.md", "--old", "x", "--new", "").returncode == 1
     assert (brain.root / "projects/tiny.md").read_bytes() == b"x"
+    # Overlapping occurrences are several too: the passage below starts on the first and on the second line.
+    brain.write("projects/tasks.md", b"- [ ] Review\n- [ ] Review\n- [ ] Review\n")
+    tasks = str(retrieve.read([brain], "projects/tasks.md")["sha256"])
+    result = write(brain, tasks, "", "projects/tasks.md", "--old", "- [ ] Review\n- [ ] Review", "--new", "x")
+    assert (result.returncode, "occurs several times" in result.stderr) == (1, True)
+    assert (brain.root / "projects/tasks.md").read_bytes() == b"- [ ] Review\n- [ ] Review\n- [ ] Review\n"
     assert not leftovers(brain)
 
 

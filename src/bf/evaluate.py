@@ -212,9 +212,16 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
             "\n".join(value for _, value in pairs),
             [],
         )
-    # The case's results are the leading items of a deeper search: continuing a search never reorders it.
-    reply = search([store], query(case.query, case.scope, limit=max(case.limit, DEPTH)), counted=False)
-    found = cast("list[dict[str, object]]", reply["items"])
+    # The case's results are the leading items of a deeper search: continuing a search never reorders it. A reply
+    # stops at its byte budget, so continue like a client until DEPTH items; the last page carries any problem.
+    found: list[dict[str, object]] = []
+    offset = 0
+    while True:
+        reply = search([store], query(case.query, case.scope, limit=DEPTH - len(found), offset=offset), counted=False)
+        found += cast("list[dict[str, object]]", reply["items"])
+        if len(found) >= DEPTH or "next_offset" not in reply or reply.get("problems") or reply.get("stale"):
+            break
+        offset = cast("int", reply["next_offset"])
     # With one selected brain, items omit their address: every item is the evaluated brain's.
     ranking = [
         (str(item["ref"]) if item.get("brain", name) == name else "", str(item.get("uri") or address(name, item)))

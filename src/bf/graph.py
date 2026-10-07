@@ -168,7 +168,25 @@ def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> tuple[list[d
         if seen[row["relation"]] <= RELATION:
             kept.append(row)
     truncated = any(count > RELATION for count in seen.values()) or len(kept) > CLAIMS
-    return _claims(kept[:CLAIMS]), truncated
+    claims = _claims(kept[:CLAIMS])
+    owners = _owners(connection, {str(claim["target"]) for claim in claims})
+    for claim in claims:
+        if owner := owners.get(str(claim["target"])):
+            claim["target_ref"], claim["target_title"] = owner
+    return claims, truncated
+
+
+def _owners(connection: sqlite3.Connection, targets: set[str]) -> dict[str, tuple[str, str]]:
+    """The one local item each target names, by its ref or a name no other item claims, so a reader can follow a
+    claim without searching; a target several items claim names none."""
+    rows = connection.execute(
+        """SELECT i.ref AS target,i.ref,i.title FROM items i WHERE i.ref IN (SELECT value FROM json_each(:targets))
+           UNION ALL SELECT o.name,i.ref,i.title FROM (SELECT name,min(item) AS item FROM names
+             WHERE name IN (SELECT value FROM json_each(:targets)) GROUP BY name HAVING count(*)=1) o
+           JOIN items i ON i.id=o.item""",
+        {"targets": json.dumps(sorted(targets))},
+    ).fetchall()
+    return {row["target"]: (row["ref"], row["title"]) for row in rows}
 
 
 def _claims(rows: list[sqlite3.Row]) -> list[dict[str, object]]:

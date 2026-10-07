@@ -717,6 +717,38 @@ def test_stopping_a_job_leaves_time_to_roll_back_a_commit(
     assert capsys.readouterr().err == (stopping if slow else "")
 
 
+def test_stopping_a_job_after_the_terminal_closed_still_waits_then_kills(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signals: list[str] = []
+
+    class Update:
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            signals.append("terminate")
+
+        def kill(self) -> None:
+            signals.append("kill")
+
+        def wait(self, timeout: float | None = None) -> int:
+            signals.append(f"wait {timeout}")
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("bf", timeout)
+            return -9
+
+    class HungUp(io.StringIO):
+        def write(self, _text: str) -> int:
+            raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(sys, "stderr", HungUp())
+    job = Job(brain, (), ())
+    job.process = cast("subprocess.Popen[bytes]", Update())
+    job.close()
+    assert signals == ["terminate", "wait 1", "wait 59", "kill", "wait None"]
+
+
 def test_job_tells_skipped_cache_files_apart_from_failed_programs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
@@ -1021,3 +1053,29 @@ def test_refresh_during_update_coalesces_and_waits_for_valid_configuration(
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
     _loop(brain, dashboard, Job(brain, (), ()), (), (), live=cast("Live", FakeLive()))
     assert len(starts) == 2
+
+
+def test_a_check_interval_slower_than_a_refresh_is_flagged(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    brain.write("bf.yaml", CONFIG)
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=iter([0.0]).__next__, sleep=lambda _: None))
+    monkeypatch.setattr(Job, "start", lambda _: None)
+    # Like bf schedule: a program is due only at a check, so checking slower than its refresh runs it late.
+    with pytest.raises(StopIteration):
+        watch(brain, interval=7200, json_output=True)
+    late = capsys.readouterr().err
+    assert late.startswith("bf: ")
+    assert "but checks happen every 7200s" in late
+    assert late.endswith("; lower the watch interval\n")
+    # The dashboard keeps it in its summary, whatever the message line says, and the guide explains it.
+    monkeypatch.setattr("bf.watch.time", time)
+    dashboard = Dashboard("fixture", late=late.removeprefix("bf: ").strip())
+    assert "Interval too slow; press ?" in screen(dashboard, 140, 36)
+    dashboard.help = True
+    assert "lower the watch interval" in screen(dashboard, 140, 36)
+    # An interval faster than every refresh says nothing.
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=iter([0.0]).__next__, sleep=lambda _: None))
+    with pytest.raises(StopIteration):
+        watch(brain, interval=60, json_output=True)
+    assert not capsys.readouterr().err

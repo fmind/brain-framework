@@ -39,21 +39,21 @@ Judge a change by whether it helps someone gather relevant evidence, understand 
 
 ## Where to work
 
-| Area                        | Start here                                                                                                                          |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Commands and MCP            | `cli.py`, `mcp.py` under `src/bf/`                                                                                                  |
-| Retrieval and pages         | `retrieve.py`, `pages.py`, `index.py` under `src/bf/`; the cache in `tests/test_cache.py` and `tests/test_cache_version.py`         |
-| Identities and relations    | `links.py`, `graph.py`, `ontology.py` under `src/bf/`                                                                               |
-| Files and configuration     | `storage.py`, `records.py`, `markdown.py`, `models.py`, `config.py`, `schemas.py` under `src/bf/`                                   |
-| Execution and maintenance   | `collect.py`, `history.py`, `update.py`, `health.py`, `validate.py`, `evaluate.py`, `usage.py` under `src/bf/`                      |
-| Watch and schedules         | `watch.py`, `watch_settings.py`, `schedule.py` under `src/bf/`; dashboard contracts in `tests/test_watch.py`                        |
-| Agent workflows             | [src/bf/skills/](src/bf/skills/README.md): `bf-use`, `bf-action`, `bf-setup`, `bf-maintain`; `install.py` backs `bf skills`         |
-| Brain onboarding            | `src/bf/cli.py::AGENTS`: instructions emitted by `bf init`                                                                          |
-| CLI/MCP contracts           | `tests/test_interfaces.py`, `tests/test_retrieval_boundaries.py`; `tests/test_contract.py` against `tests/contract/`                |
-| Documented limits           | `docs/docs/limits.md`; edge cases in `tests/test_bounds.py`                                                                         |
-| Sensors, routines and hooks | `examples/`: reviewed copies users adapt in their brains, tested as processes in `tests/test_adapters_*.py`                         |
-| Example brain               | `examples/brain/`: fictional brain exercised by `tests/test_example.py`; its `AGENTS.md` is sample content, not rules for this repo |
-| Tasks, hooks and CI         | `mise.toml`, `lefthook.yml`, `.github/workflows/verify.yml` (the gate shared by CI and CD), `scripts/`                              |
+| Area                        | Start here                                                                                                                                             |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Commands and MCP            | `cli.py`, `mcp.py` under `src/bf/`                                                                                                                     |
+| Retrieval and pages         | `retrieve.py`, `pages.py`, `index.py` under `src/bf/`; the cache in `tests/test_cache.py` and `tests/test_cache_version.py`                            |
+| Identities and relations    | `links.py`, `graph.py`, `ontology.py` under `src/bf/`                                                                                                  |
+| Files and configuration     | `storage.py`, `records.py`, `markdown.py`, `models.py`, `config.py`, `schemas.py` under `src/bf/`                                                      |
+| Execution and maintenance   | `collect.py`, `history.py`, `update.py`, `health.py`, `validate.py`, `evaluate.py`, `usage.py` under `src/bf/`                                         |
+| Watch and schedules         | `watch.py`, `watch_settings.py`, `schedule.py` under `src/bf/`; dashboard contracts in `tests/test_watch.py`                                           |
+| Agent workflows             | [src/bf/skills/](src/bf/skills/README.md): `bf-use`, `bf-action`, `bf-setup`, `bf-maintain`; `install.py` backs `bf skills`                            |
+| Brain onboarding            | `src/bf/starter/`: the `AGENTS.md`, ignore file, welcome notes and checks `bf init` writes; its `AGENTS.md` is sample content, not rules for this repo |
+| CLI/MCP contracts           | `tests/test_interfaces.py`, `tests/test_mcp.py`, `tests/test_retrieval_boundaries.py`; `tests/test_contract.py` against `tests/contract/`              |
+| Documented limits           | `docs/docs/limits.md`; edge cases in `tests/test_bounds.py`                                                                                            |
+| Sensors, routines and hooks | `examples/`: reviewed copies users adapt in their brains, tested as processes in `tests/test_adapters_*.py`                                            |
+| Example brain               | `examples/brain/`: fictional brain exercised by `tests/test_example.py`; its `AGENTS.md` is sample content, not rules for this repo                    |
+| Tasks, hooks and CI         | `mise.toml`, `lefthook.yml`, `.github/workflows/verify.yml` (the gate shared by CI and CD), `scripts/`                                                 |
 
 Keep decision, action and learning conventions in the existing skills and their guides, not in the core format. Extend the owning skill before adding another.
 

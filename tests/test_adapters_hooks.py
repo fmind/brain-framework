@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
+import runpy
 import subprocess
 from pathlib import Path
 from types import ModuleType
@@ -13,7 +15,7 @@ import pytest
 
 from bf import index, links
 from bf.markdown import split_ref
-from conftest import Provider
+from conftest import ROOT, Provider
 
 HOOKS = Path(__file__).parents[1] / "examples/hooks"
 
@@ -522,6 +524,30 @@ def test_session_context_reads_a_task_link_as_its_label() -> None:
         plain("Run the [retention action](../actions/2026-09-19_retention/ACTION.md).") == "Run the retention action."
     )
     assert plain("A `code` <tag> [label]") == "A code tag label"
+
+
+CONTEXT_PROGRAMS = ["hooks/session-context.py", "hooks/prompt-context.py", "routines/weekly-review.py"]
+
+
+@pytest.mark.parametrize("program", CONTEXT_PROGRAMS)
+def test_context_programs_keep_hidden_characters_visible(program: str) -> None:
+    # bf escapes them in its replies, but json.loads restores them: a tag character or bidi override in a shared
+    # note's title must not reach the agent's context, or a review action, as text nobody sees.
+    module = runpy.run_path(str(ROOT / "examples" / program))
+    assert module["plain"]("Ship\u202e it\U000e0069\u200b\x9b") == "Ship\\u202e it\\U000e0069\\u200b\\x9b"
+    assert module["code"]("projects/a\u200b.md") == "`projects/a\\u200b.md`"
+
+
+def test_context_program_visible_copies_stay_identical() -> None:
+    # Each program carries its own copy so an owner can copy one file.
+    copies = set()
+    for program in CONTEXT_PROGRAMS:
+        source = (ROOT / "examples" / program).read_text()
+        [node] = [
+            node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "visible"
+        ]
+        copies.add(ast.get_source_segment(source, node))
+    assert len(copies) == 1
 
 
 def test_prompt_context_mirrors_the_core_stopwords() -> None:

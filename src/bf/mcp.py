@@ -26,7 +26,7 @@ INSTRUCTIONS = (
     "collected records. Orient with read() for the home page, or read projects, tasks or 7d. Find with search: "
     "a few subject words or an exact identity, optionally within one scope. Any word matches and fuller matches "
     "rank first, so put variants in one query (inflections, synonyms, English and French); quote a phrase, end "
-    "a word with * for its prefixes, and respell the words listed in unmatched. Verify by reading each ref you "
+    "a word with * for its prefixes, and respell the words listed in unmatched, using any suggestions. Verify by reading each ref you "
     "rely on, preferring a path#section ref; a large note's first page lists its sections in outline. Follow "
     "next_offset with offset until it is absent. Backlinks preview 5 items per relation; read the same ref "
     "with rel to list one relation, rel=cites for notes citing it as a source, or rel=links for untyped links. "

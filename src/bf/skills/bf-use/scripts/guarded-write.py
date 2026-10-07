@@ -108,14 +108,13 @@ def substitute(old: bytes, new: bytes) -> Callable[[bytes], bytes]:
     """An edit replacing the one occurrence of `old`; none or several leave the file unchanged."""
 
     def edit(data: bytes) -> bytes:
-        count = data.count(old)
-        if count != 1:
-            raise EditError(
-                "the old text does not occur in the file; read it again and copy the passage exactly"
-                if not count
-                else f"the old text occurs {count} times; include surrounding text so it occurs once"
-            )
-        return data.replace(old, new, 1)
+        first = data.find(old)
+        if first < 0:
+            raise EditError("the old text does not occur in the file; read it again and copy the passage exactly")
+        # bytes.count skips overlapping occurrences: `a\na` occurs twice in `a\na\na` but counts once.
+        if data.find(old, first + 1) >= 0:
+            raise EditError("the old text occurs several times; include surrounding text so it occurs once")
+        return data[:first] + new + data[first + len(old) :]
 
     return edit
 

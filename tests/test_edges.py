@@ -9,6 +9,7 @@ import sqlite3
 import unicodedata
 from pathlib import Path
 from typing import cast
+from urllib.parse import quote
 
 import pytest
 from pydantic import ValidationError
@@ -237,6 +238,17 @@ def test_identities_reject_invisible_format_characters(brain: Store, character: 
         Record(id="x", title="X", aliases=[f"person:{lookalike}"])
     with pytest.raises(ValueError, match="invisible format characters"):
         SchemaField(description="Owner.", type="identity").normalize(f"person:{lookalike}")
+    # A BF address decodes its path: the percent-encoded form names the same lookalike subject.
+    encoded = quote(character)
+    brain.write(
+        "concepts/bob.md", f"---\ntype: person\nentity: bf://fixture/people/bob{encoded}\n---\n# Bob\n".encode()
+    )
+    assert not validate(brain)["valid"]
+    # Other schemes stay opaque: their percent signs are visible text.
+    brain.write(
+        "concepts/bob.md", f"---\ntype: person\nresource: https://example.test/bob{encoded}\n---\n# Bob\n".encode()
+    )
+    assert validate(brain)["valid"]
 
 
 def test_format_characters_have_one_definition_that_matches_unicode() -> None:

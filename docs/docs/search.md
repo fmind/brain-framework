@@ -28,13 +28,14 @@ The first search finds the decision's reason; the second searches project notes 
 | `"son" checklist`                     | Either word: quoting keeps a function word, such as French `son`, that search otherwise drops. |
 | `repo:github.com/example/new-website` | The identity's owner and every item linking to it.                                             |
 
-Each item has a `title`, an `excerpt` and a `ref`. A note states its `date`; a record states its event `time` with your local offset. `sections` lists up to three other matching sections of the same note, and `unmatched` names query words found nowhere, so you can rephrase:
+Each item has a `title`, an `excerpt` and a `ref`. A note states its `date`; a record states its event `time` with your local offset. `sections` lists up to three other matching sections of the same note, and `unmatched` names query words found nowhere, so you can rephrase; `suggestions` offers close words the brain holds for a misspelling:
 
 ```bash
 bf search '"clear explanation" zebra'
+bf search 'explenation'
 ```
 
-The reply returns the Decision section and `"unmatched":["zebra"]`. Section titles name their parent headings, such as `Portfolio review — Vega — Budget`, and a note's tags rank like headings. Among equal scores, the newest item comes first. Records of several sources that share a URL appear once; `also` lists the other refs.
+The first reply returns the Decision section and `"unmatched":["zebra"]`. The second finds nothing and returns `"unmatched":["explenation"]` with `"suggestions":{"explenation":["explanation"]}`: search the suggested word to confirm. Section titles name their parent headings, such as `Portfolio review — Vega — Budget`, and a note's tags rank like headings. Among equal scores, the newest item comes first. Records of several sources that share a URL appear once; `also` lists the other refs.
 
 If a query misses, use the evidence's own words and drop the scope. The sample says “visitors” and “signing up”, so “customer conversion” need not find it. Accents fold only in Latin script, and Chinese, Japanese, Thai or Devanagari text matches by runs or fragments rather than words; see [other scripts](retrieval.md#search).
 

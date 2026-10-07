@@ -33,7 +33,7 @@ HELPERS = sorted(SKILLS.glob("*/scripts/*.py"))
 ENTRIES = sorted(SKILLS.glob("*/SKILL.md"))
 # The generated brain instructions teach the same commands and links as the skills.
 TEXTS = {str(path.relative_to(ROOT)): path.read_text(encoding="utf-8") for path in sorted(SKILLS.rglob("*.md"))}
-TEXTS["src/bf/cli.py:AGENTS"] = cli.AGENTS
+TEXTS["src/bf/starter/AGENTS.md"] = (ROOT / "src/bf/starter/AGENTS.md").read_text(encoding="utf-8")
 DOCS = re.compile(r"https://fmind\.github\.io/brain-framework/docs/([a-z0-9-]*)/?(?:#([\w.-]+))?")
 REPOSITORY = re.compile(r"https://github\.com/fmind/brain-framework/(?:blob|tree)/main/([\w./-]+)")
 MARKDOWN = MarkdownIt("commonmark").enable("table")
@@ -122,7 +122,7 @@ def test_skills_never_retrieve_through_a_brain_pinned_runtime() -> None:
     for name, text in TEXTS.items():
         assert not pinned.search(text), name
         # Retrieval and note updates never go through a pin, whatever `bf ...` command a sentence names.
-        if name.startswith(("src/bf/skills/bf-use/", "src/bf/skills/bf-action/")) or name == "src/bf/cli.py:AGENTS":
+        if name.startswith(("src/bf/skills/bf-use/", "src/bf/skills/bf-action/")) or name == "src/bf/starter/AGENTS.md":
             assert not re.search(r"\buv\s+run\b", text), name
     assert pinned.search("uv run --project PATH --locked bf COMMAND ... --brain PATH")
     assert pinned.search("uv run --project PATH --locked bf read REF")

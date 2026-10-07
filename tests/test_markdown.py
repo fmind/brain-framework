@@ -93,6 +93,19 @@ def test_a_footnote_label_never_changes_the_note_structure(label: str) -> None:
     assert parsed.contexts == [("mail:m1", "web", 5), ("mail:m2", "later", 9)]
 
 
+@pytest.mark.parametrize("fence", ["```", "~~~~"])
+def test_a_footnote_example_inside_a_code_fence_defines_nothing(fence: str) -> None:
+    # Its indented lines used to lose their indentation as a footnote's continuation: the inner fence then closed
+    # the outer one early, and every later section disappeared.
+    data = (
+        f"# Guide\n\n{fence}markdown\n[^1]: A footnote\n    ```python\n    print(1)\n    ```\n{fence}\n\n"
+        "## After\n\nSee [Plan](mail:m1).\n"
+    ).encode()
+    parsed = note("projects/guide.md", data)
+    assert parsed.slugs == {"guide", "after"}
+    assert parsed.contexts == [("mail:m1", "after", 12)]
+
+
 def test_footnote_continuations_and_labels_follow_github() -> None:
     # An indented paragraph continues its footnote, and labels match regardless of case, as GitHub renders them.
     data = (

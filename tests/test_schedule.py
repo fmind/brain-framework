@@ -250,7 +250,7 @@ def test_a_check_interval_reaching_a_refresh_warns(scheduled: Store) -> None:
 
     # Every program is selected by default; git has the shortest refresh: a 15-minute check runs it late.
     late = (
-        "git refreshes every 300s, but the timer checks every 15 minutes: it will run late and status can report it "
+        "git refreshes every 300s, but checks happen every 900s: it will run late and status can report it "
         "overdue. Choose an --every shorter than the shortest refresh."
     )
     assert warned() == [late]

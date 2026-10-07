@@ -40,7 +40,7 @@ if "  new-calendar:" not in text:
 PYTHON
 ```
 
-Press `f` in the watcher (`u` also works). Expect `new-calendar` to appear and collect one record without restarting. To make the shortcut's timing visible, start this demo with `--interval 300`; otherwise its five-second checks may collect the new source before you press the key. Refresh during an active update queues one follow-up check; repeated presses coalesce. While paused, the row still appears but collection waits for Space. Existing fresh programs, failures waiting for retry, disabled programs and manual programs keep their normal timing. An observer only rereads configuration and history. This adds a fictional local sensor, not a live provider.
+Press `f` in the watcher (`u` also works). Expect `new-calendar` to appear and collect one record without restarting. To make the shortcut's timing visible, start this demo with `--interval 300`; otherwise its five-second checks may collect the new source before you press the key. The summary then shows `Interval too slow; press ?`, since the 30-second `calendar` runs late between checks. Refresh during an active update queues one follow-up check; repeated presses coalesce. While paused, the row still appears but collection waits for Space. Existing fresh programs, failures waiting for retry, disabled programs and manual programs keep their normal timing. An observer only rereads configuration and history. This adds a fictional local sensor, not a live provider.
 
 Try the sorting controls after that first cycle:
 
@@ -63,7 +63,7 @@ env -u BF_BRAIN XDG_CONFIG_HOME="$watch_demo/config" XDG_STATE_HOME="$watch_demo
   --output "$watch_demo/schedules"
 ```
 
-The JSON reply contains the native files and literal argv lists for installation, status and removal. Inspect the files; this example does not require installing them. Their PATH, XDG paths and executable point to the environment used to generate them, so regenerate a real schedule from the installation you intend to keep. The reply's `warnings` include `calendar refreshes every 30s, but the timer checks every 1 minutes`: one-minute checks collect the 30-second calendar late, and `bf status` can report it `overdue`. The scheduler checks eligibility; it does not override it.
+The JSON reply contains the native files and literal argv lists for installation, status and removal. Inspect the files; this example does not require installing them. Their PATH, XDG paths and executable point to the environment used to generate them, so regenerate a real schedule from the installation you intend to keep. The reply's `warnings` include `calendar refreshes every 30s, but checks happen every 60s`: one-minute checks collect the 30-second calendar late, and `bf status` can report it `overdue`. The scheduler checks eligibility; it does not override it.
 
 Observe the same local history without executing programs; its footer offers `u reread` instead of `f refresh` and no pause:
 

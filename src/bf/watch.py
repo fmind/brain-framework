@@ -31,7 +31,7 @@ from bf.config import load
 from bf.history import ROUTINES, SENSORS, environment, log_path, state
 from bf.models import Error, WatchSettings, decode, local, present, printable, terminal, timestamp
 from bf.storage import BusyError, Store, collecting
-from bf.update import selection
+from bf.update import late, selection
 from bf.watch_settings import Notifications, settings
 
 
@@ -222,6 +222,8 @@ class Dashboard:
     help: bool = False
     running: bool = False
     message: str = "Ready"
+    # Why the check interval runs a selected program late, shown in the summary and the guide.
+    late: str = ""
     next_check: float = 0
     preferences: WatchSettings = field(default_factory=WatchSettings)
     sort: Sort = Sort.NAME
@@ -305,6 +307,7 @@ class Dashboard:
             mode = [
                 f"Check: {duration(self.preferences.interval)} · history: {poll} · alerts: "
                 + self.preferences.notifications,
+                *([self.late + "."] if self.late else []),
                 "Configure watch in bf.yaml; restart to apply.",
                 "f (or u) reloads bf.yaml and checks due programs now.",
                 "While updating, refresh queues one check; pause still applies.",
@@ -369,7 +372,8 @@ class Dashboard:
             f"{len(self.rows)} programs   "
             + ("" if self.observe else f"{sum(row.included for row in self.rows)} selected   ")
             + f"{sum(row.status in ATTENTION for row in self.rows)} need attention   "
-            + ("Reading local history" if self.observe else working),
+            + ("Reading local history" if self.observe else working)
+            + ("   Interval too slow; press ?" if self.late else ""),
             style="dim",
             no_wrap=True,
             overflow="ellipsis",
@@ -515,9 +519,11 @@ class Job:
                 try:
                     self.process.wait(timeout=1)
                 except subprocess.TimeoutExpired:
-                    # The dashboard is gone: say why the terminal waits instead of seeming to hang.
-                    sys.stderr.write(f"bf: stopping the active update; this can take up to {STOP} seconds\n")
-                    sys.stderr.flush()
+                    # The dashboard is gone: say why the terminal waits instead of seeming to hang. A closed
+                    # terminal must not skip the wait and kill below, which would leave the update unsupervised.
+                    with suppress(OSError, ValueError):
+                        sys.stderr.write(f"bf: stopping the active update; this can take up to {STOP} seconds\n")
+                        sys.stderr.flush()
                     self.process.wait(timeout=STOP - 1)
             except subprocess.TimeoutExpired:
                 self.process.kill()
@@ -577,6 +583,11 @@ def watch(
     dashboard = Dashboard(
         load(store).name, observe=observe, rows=snapshot(store, sensors, routines), preferences=preferences
     )
+    if not observe and (reason := late(load(store), preferences.interval, sensors, routines)):
+        # Due programs run only at checks: a slower check runs them late, so status reports them overdue.
+        dashboard.late = f"{reason}; lower the watch interval"
+        if json_output:
+            sys.stderr.write(f"bf: {printable(dashboard.late)}\n")
     job = Job(store, sensors, routines)
     with ExitStack() as stack:
         if not observe:

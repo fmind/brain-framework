@@ -5,9 +5,9 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 from collections.abc import Iterator
 from datetime import datetime
-from urllib.parse import quote
 
 REPLY_BYTES = 4 << 20
 TIMEOUT = 120
@@ -55,10 +55,17 @@ def projects(brain: str) -> list[dict]:
     raise SystemExit("weekly-review: the projects listing is incomplete; narrow the selected brain")
 
 
+def visible(text: str) -> str:
+    """Escape controls and invisible format characters, which bf replies escape and JSON decoding restored."""
+    return "".join(
+        char.encode("unicode_escape").decode() if unicodedata.category(char) in {"Cc", "Cf"} else char for char in text
+    )
+
+
 def plain(value: object) -> str:
     """Titles become link labels: one line, a Markdown link reduced to its label, without link delimiters."""
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", str(value))
-    return re.sub(r"\s+", " ", re.sub(r"[\[\]()<>`]", "", text)).strip() or "untitled"
+    return visible(re.sub(r"\s+", " ", re.sub(r"[\[\]()<>`]", "", text)).strip()) or "untitled"
 
 
 def local(value: object) -> str:
@@ -79,15 +86,9 @@ def when(item: dict) -> str:
         return "undated"
 
 
-def link(item: dict) -> str:
-    """A brain-qualified address when several brains answer; otherwise a path from this action's folder."""
-    target = item.get("uri") or "../../" + quote(item["ref"], safe="/")
-    return f"[{plain(item.get('title', item['ref']))}]({target})"
-
-
 def code(value: object) -> str:
     """A code span no backtick inside a record id can close, so a ref never becomes Markdown or a link."""
-    text = str(value)
+    text = visible(str(value))
     fence = "`" * (max(map(len, re.findall(r"`+", text)), default=0) + 1)
     pad = " " if text.startswith("`") or text.endswith("`") else ""
     return f"{fence}{pad}{text}{pad}{fence}"
@@ -131,7 +132,7 @@ def render(day: str, home: dict, week: dict) -> Iterator[str]:
             details.append(f"review due {local(project['review_due'])}")
         if project.get("new_links"):
             details.append(f"{project['new_links']} newer linked items")
-        line = f"- [ ] {link(project)} ({', '.join(details)})"
+        line = f"- [ ] {mention(project)} ({', '.join(details)})"
         yield line + (f". Next: {plain(project['next'])}" if project.get("next") else "")
     if not review:
         yield "No project note is due for review."

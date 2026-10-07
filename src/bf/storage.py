@@ -466,6 +466,8 @@ def _lock(
     shared: bool = False,
     busy: str = "another writer is active for this brain; retry after it finishes",
 ) -> Iterator[None]:
+    # The writer lock also holds the brain directory; other locks order work that only this state directory sees.
+    whole = name == "write.lock"
     state, name = lock_file(store, name)
     with state.parent(name) as (parent, leaf):
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -479,14 +481,42 @@ def _lock(
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Error("invalid writer lock")
         deadline = time.monotonic() + wait
-        while True:
-            try:
-                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
-                break
-            except BlockingIOError as error:
-                if time.monotonic() >= deadline:
-                    raise BusyError(busy) from error
-                time.sleep(0.05)
+        _flock(fd, shared=shared, deadline=deadline, busy=busy)
+        if whole:
+            with _brain_lock(store, shared=shared, deadline=deadline, busy=busy):
+                yield
+        else:
+            yield
+    finally:
+        os.close(fd)
+
+
+def _flock(fd: int, *, shared: bool, deadline: float, busy: str) -> None:
+    while True:
+        try:
+            fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+            return
+        except BlockingIOError as error:
+            if time.monotonic() >= deadline:
+                raise BusyError(busy) from error
+            time.sleep(0.05)
+
+
+@contextmanager
+def _brain_lock(store: Store, *, shared: bool, deadline: float, busy: str) -> Iterator[None]:
+    """Also lock the brain directory itself: processes with different state directories, or accounts sharing the
+    brain, keep separate lock files, which alone would let two writers commit at once.
+
+    Some network filesystems cannot lock a directory, such as NFS for an exclusive lock: the state lock then stands
+    alone, as it did before.
+    """
+    fd = os.open(store.root, _DIR)
+    try:
+        try:
+            _flock(fd, shared=shared, deadline=deadline, busy=busy)
+        except OSError as error:
+            if error.errno not in {errno.EBADF, errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EINVAL}:
+                raise
         yield
     finally:
         os.close(fd)

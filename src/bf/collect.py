@@ -276,16 +276,18 @@ def _project(position: int, record: Record, sensor: Sensor, config: Config, obse
         raise Error(f"record {position}: {error}") from error
 
 
-def _check_shrink(store: Store, name: str, incoming: list[Record]) -> None:
-    """A wrong account, a lost folder or a truncated listing also looks like a smaller catalog."""
+def _shrink(store: Store, name: str, incoming: list[Record]) -> str:
+    """Why a snapshot's removal needs --allow-removal, or "": a wrong account, a lost folder or a truncated listing
+    also looks like a smaller catalog."""
     existing = records.files(store, name)
     kept = {records.path(name, record.id) for record in incoming}
     removed = sum(file not in kept for file in existing)
     if removed and (not incoming or (removed > len(existing) / 2 and removed > SHRINK_FLOOR)):
-        raise Error(
+        return (
             f"snapshot would remove {removed} of {len(existing)} records; kept the existing catalog. "
             f"Check the sensor's scope, then run bf collect {name} --allow-removal to accept the removal"
         )
+    return ""
 
 
 def collect(
@@ -346,18 +348,26 @@ def collect(
                 "reconcile": reconcile,
                 "output_bytes": len(raw),
             }
+            snapshot = sensor.mode == "snapshot"
             if dry_run:
+                # What a real run would change, from the records as they are: an interrupted commit that the run
+                # would first recover fails the preview instead, as reads do.
+                with records.reading(store):
+                    counts, _ = records.plan(store, name, incoming, snapshot=snapshot)
+                    refused = snapshot and not allow_removal and bool(_shrink(store, name, incoming))
                 return {
                     **result,
+                    **counts,
+                    **({"removal_refused": True} if refused else {}),
                     "elapsed_seconds": round(time.monotonic() - measured, 6),
                     "samples": [r.model_dump(exclude_defaults=True) for r in incoming[:3]],
                 }
             with writer(store, wait=120):
                 # An interrupted commit may have removed files already: count the catalog it restores.
                 records.recover(store)
-                if sensor.mode == "snapshot" and not allow_removal:
-                    _check_shrink(store, name, incoming)
-                result.update(records.upsert(store, name, incoming, snapshot=sensor.mode == "snapshot"))
+                if snapshot and not allow_removal and (refusal := _shrink(store, name, incoming)):
+                    raise Error(refusal)
+                result.update(records.upsert(store, name, incoming, snapshot=snapshot))
                 committed = True
                 result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
                 coverage, latest = _coverage(state(store).get(name, {}), start, end, observed, sensor)

@@ -6,33 +6,27 @@ import asyncio
 import json
 import os
 import re
-import shutil
 import sqlite3
-import stat
 import sys
-import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Event
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from mcp.types import CallToolResult
 from pydantic import ValidationError
 
-from bf import index, pages, records, retrieve, storage, usage
+from bf import index, pages, records, retrieve, usage
 from bf.cli import main
 from bf.config import register, user_path
 from bf.markdown import LEAD, entry_note
 from bf.mcp import server
-from bf.models import Config, Error, NotFoundError, Query, Record, digest, encode, timestamp
+from bf.models import Error, NotFoundError, Query, Record, digest, encode, timestamp
 from bf.pages import scope
 from bf.retrieve import read, search
-from bf.storage import UNNAMED, BusyError, Store, state_store, writer
+from bf.storage import UNNAMED, Store, state_store, writer
 from bf.update import update
 from bf.validate import validate
 from conftest import records_file
@@ -181,23 +175,6 @@ def test_demoted_notes_rank_last_but_stay_visible(brain: Store) -> None:
     assert found.index("projects/wip.md") < found.index("meetings:decision-1")
 
 
-def test_cache_follows_edits_additions_removals_and_touches(brain: Store) -> None:
-    assert refs(brain, "zirconium") == []
-    brain.write("concepts/new.md", b"---\ntype: concept\n---\n# New\n\nZirconium matters.\n")
-    assert refs(brain, "zirconium") == ["concepts/new.md"]
-    stat = (brain.root / "concepts/new.md").stat()
-    # A same-size edit that preserves mtime is still noticed through ctime.
-    with (brain.root / "concepts/new.md").open("r+b") as stream:
-        stream.write(b"---\ntype: concept\n---\n# New\n\nHafniums matters.\n")
-    os.utime(brain.root / "concepts/new.md", ns=(stat.st_atime_ns, stat.st_mtime_ns))
-    assert refs(brain, "hafniums") == ["concepts/new.md"]
-    (brain.root / "concepts/new.md").unlink()
-    assert refs(brain, "hafniums") == []
-    result = index.refresh(brain)
-    assert result["changed"] == 0
-    assert index.refresh(brain, full=True)["changed"] == 4
-
-
 def test_invalid_files_are_skipped_and_reported(brain: Store) -> None:
     brain.write("projects/broken.md", b"---\nstale_after: soon\n---\n# Broken\n")
     brain.write("memories/bad/2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881.json", b'{"id":"x"}\n')
@@ -335,49 +312,6 @@ def test_search_says_when_results_exist_beyond_the_limit(brain: Store) -> None:
     assert "more" not in reply
 
 
-def test_full_build_creates_every_index_after_loading_and_serves_in_wal_mode(brain: Store) -> None:
-    index.refresh(brain, full=True)
-    brain.write("concepts/late.md", b"# Late\n\nOsmium evidence.\n")
-    assert refs(brain, "osmium") == ["concepts/late.md"]
-    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
-        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        created = {row[0] for row in connection.execute("SELECT sql FROM sqlite_schema WHERE type='index'") if row[0]}
-    assert created == set(index._INDEXES)  # noqa: SLF001 - deferred secondary indexes
-
-
-def test_replies_find_skipped_files_through_their_own_index(brain: Store) -> None:
-    brain.write("projects/broken.md", b"---\nstale_after: soon\n---\n# Broken\n")
-    index.refresh(brain, full=True)
-    statements: list[str] = []
-    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
-        connection.row_factory = sqlite3.Row
-        connection.set_trace_callback(statements.append)
-        assert [problem["file"] for problem in index.problems(connection)] == ["projects/broken.md"]
-        assert retrieve._complete(connection, "ready", "meetings")  # noqa: SLF001 - an exact record read's check
-        connection.set_trace_callback(None)
-        # Every reply checks for skipped files: only their rows are read, not the row of every file.
-        assert len(statements) == 2
-        for statement in statements:
-            plan = " ".join(row[3] for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}"))
-            assert "files_problems" in plan, plan
-
-
-def test_one_reply_compares_files_with_the_cache_once_per_brain(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    checked: list[Path] = []
-    original = index.fresh
-
-    def counted(store: Store, counts: dict[str, int] | None = None) -> str:
-        checked.append(store.root)
-        return original(store, counts)
-
-    monkeypatch.setattr(index, "fresh", counted)
-    # A note with backlinks opens the cache for identities, backlinks and claims.
-    read([brain], "projects/offline.md")
-    assert checked == [brain.root]
-    search([brain], Query(text="offline"))
-    assert checked == [brain.root, brain.root]
-
-
 @pytest.mark.parametrize(
     "text",
     [
@@ -391,23 +325,6 @@ def test_one_reply_compares_files_with_the_cache_once_per_brain(brain: Store, mo
 )
 def test_record_leads_collapse_whitespace_of_a_prefix_like_the_whole_text(text: str) -> None:
     assert index.lead(Record(id="x", title="T", text=text)) == re.sub(r"\s+", " ", text).strip()[:LEAD]
-
-
-def test_outdated_or_corrupt_cache_is_rebuilt(brain: Store) -> None:
-    refs(brain, "offline")
-    cache = brain.root / index.CACHE
-    with sqlite3.connect(cache) as connection:
-        connection.execute("PRAGMA user_version=1")
-    connection.close()
-    assert refs(brain, "offline")[0] == "projects/offline.md"
-    for suffix in ("-wal", "-shm"):
-        cache.with_name(cache.name + suffix).unlink(missing_ok=True)
-    cache.write_bytes(b"not a database")
-    assert refs(brain, "offline")[0] == "projects/offline.md"
-    cache.unlink()
-    (brain.root / ".bf/index.sqlite").symlink_to(brain.root / "bf.yaml")
-    with pytest.raises(Error, match="regular file"):
-        refs(brain, "offline")
 
 
 def plant(store: Store, *statements: str) -> None:
@@ -427,256 +344,6 @@ def plant(store: Store, *statements: str) -> None:
 def cache_file(store: Store) -> str:
     with closing(sqlite3.connect(store.root / index.CACHE)) as connection:
         return connection.execute("SELECT file FROM ontology").fetchone()[0]
-
-
-def test_a_cache_copied_with_its_brain_is_rebuilt_instead_of_trusted(brain: Store, tmp_path: Path) -> None:
-    # A copy, clone or archive can carry a cache whose rows no brain file supports; only its file identity differs.
-    refs(brain, "offline")
-    plant(brain)
-    copy = Store(shutil.copytree(brain.root, tmp_path / "copy", symlinks=True))
-    assert refs(copy, "zanzibar") == []
-    assert refs(copy, "offline")[0] == "projects/offline.md"
-    assert cache_file(copy) != cache_file(brain)
-
-
-@pytest.mark.parametrize(
-    "statement",
-    ["CREATE TRIGGER planted AFTER INSERT ON files BEGIN SELECT 1; END", "CREATE VIEW planted AS SELECT 1"],
-    ids=["trigger", "view"],
-)
-def test_a_cache_holding_triggers_or_views_is_rebuilt_in_place(brain: Store, statement: str) -> None:
-    # bf never creates them: a trigger could add rows on refresh that no brain file supports.
-    refs(brain, "offline")
-    plant(brain, statement)
-    assert refs(brain, "zanzibar") == []
-    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
-        found = connection.execute("SELECT count(*) FROM sqlite_master WHERE type IN ('trigger','view')").fetchone()
-    assert found == (0,)
-
-
-def test_a_remount_that_changes_the_device_number_keeps_the_cache(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # btrfs subvolumes, NFS and FUSE mounts can get another device number after a remount or reboot.
-    refs(brain, "offline")
-    cache, lstat = brain.root / index.CACHE, Path.lstat
-
-    def remounted(self: Path) -> os.stat_result:
-        info = lstat(self)
-        if self != cache:
-            return info
-        values = list(info)
-        values[2] += 1  # st_dev
-        return os.stat_result(values)
-
-    monkeypatch.setattr(Path, "lstat", remounted)
-    assert index.refresh(brain)["changed"] == 0
-
-
-def test_a_busy_writer_serves_the_current_cache_as_stale(brain: Store) -> None:
-    refs(brain, "offline")
-    brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
-    with writer(brain):
-        reply = search([brain], Query(text="latecomer"))
-    # The stale cache does not hold the word yet: `stale` marks that answer, and its unmatched word, as outdated.
-    assert reply == {
-        "items": [],
-        "notice": reply["notice"],
-        "stale": ["fixture"],
-        "sources": reply["sources"],
-        "unmatched": ["latecomer"],
-    }
-    assert cast(list[dict], reply["sources"])[0]["source"] == "meetings"
-    assert refs(brain, "latecomer") == ["concepts/late.md"]
-
-
-def test_a_missing_cache_behind_a_busy_writer_fails_after_one_wait(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    for suffix in ("", "-wal", "-shm", "-journal"):
-        (brain.root / (index.CACHE + suffix)).unlink(missing_ok=True)
-    waits: list[float] = []
-
-    def busy(_store: Store, *, wait: float = 30, **_options: object) -> dict[str, object]:
-        waits.append(wait)
-        raise BusyError("another writer holds the brain")
-
-    monkeypatch.setattr(index, "refresh", busy)
-    # With nothing to serve, the read waits once for the writer, then names it instead of retrying the wait.
-    with pytest.raises(BusyError, match="another writer is building the search cache"), index.database(brain):
-        pass
-    assert waits == [120]
-
-
-@pytest.mark.parametrize("outdated", [False, True])
-def test_concurrent_first_search_waits_for_a_complete_cache(
-    brain: Store, monkeypatch: pytest.MonkeyPatch, outdated: bool
-) -> None:
-    if outdated:
-        index.refresh(brain)
-        with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
-            connection.execute(f"PRAGMA user_version={index.SCHEMA - 1}")
-    ingest_started, release_ingest, reader_refreshing = Event(), Event(), Event()
-    original_index, original_refresh = index._index, index.refresh  # noqa: SLF001 - coordinated ingestion failure boundary
-    waits: list[float] = []
-
-    def paused(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
-        ingest_started.set()
-        assert release_ingest.wait(10)
-        return original_index(connection, store, path, config)
-
-    def observe_refresh(store: Store, *, wait: float = 30, **options: Any) -> dict[str, object]:
-        waits.append(wait)
-        reader_refreshing.set()
-        return original_refresh(store, wait=wait, **options)
-
-    monkeypatch.setattr(index, "_index", paused)
-    monkeypatch.setattr(index, "refresh", observe_refresh)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        build = executor.submit(original_refresh, brain)
-        try:
-            assert ingest_started.wait(10)
-            result = executor.submit(search, [brain], Query(text="offline retrieval"), counted=False)
-            assert reader_refreshing.wait(10)
-            assert waits == [120]  # Incomplete generations cannot be served as stale evidence.
-        finally:
-            release_ingest.set()
-        assert build.result(timeout=10)["files"] == 4
-        reply = result.result(timeout=10)
-    assert "stale" not in reply
-    assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])][:2] == [
-        "projects/offline.md",
-        "meetings:decision-1",
-    ]
-
-
-def test_failed_or_abandoned_full_rebuilds_keep_the_live_cache(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    index.refresh(brain)
-    live = cache_file(brain)
-    original_index = index._index  # noqa: SLF001 - inject failure after a file was indexed
-    indexed: list[str] = []
-
-    def fail_second(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
-        if indexed:
-            raise sqlite3.OperationalError("simulated disk full")
-        indexed.append(path)
-        return original_index(connection, store, path, config)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(index, "_index", fail_second)
-        with pytest.raises(Error, match="check free space"):
-            index.refresh(brain, full=True)
-    assert len(indexed) == 1
-    assert not (brain.root / index.BUILD).exists()
-    assert cache_file(brain) == live
-    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == index.SCHEMA
-        assert connection.execute("SELECT count(*) FROM items").fetchone()[0] == 4
-    assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
-    # A killed build leaves its partial file and journal beside the cache; the next build replaces them. A read
-    # would remove them first (tests/test_cache.py), so the build runs next.
-    for suffix in ("", "-journal"):
-        (brain.root / (index.BUILD + suffix)).write_bytes(b"abandoned build")
-    assert index.refresh(brain, full=True)["files"] == 4
-    assert sorted(path.name for path in (brain.root / ".bf").iterdir()) == ["index.sqlite"]
-    assert cache_file(brain) != live
-
-
-def test_a_full_build_keeps_serving_and_refreshing_the_live_cache_until_it_publishes(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    index.refresh(brain)
-    live = cache_file(brain)
-    ingesting, finish = Event(), Event()
-    original_index = index._index  # noqa: SLF001 - pause the build after its scan
-
-    def paused(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
-        if not ingesting.is_set():
-            ingesting.set()
-            assert finish.wait(10)
-        return original_index(connection, store, path, config)
-
-    monkeypatch.setattr(index, "_index", paused)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        build = executor.submit(index.refresh, brain, full=True)
-        try:
-            assert ingesting.wait(10)
-            # The build holds no writer lock: a collection commits while searches read and refresh the live cache.
-            with writer(brain):
-                brain.write("concepts/late.md", b"# Late\n\nOsmium evidence.\n")
-                brain.delete(records.path("meetings", "lunch"))
-            assert refs(brain, "osmium") == ["concepts/late.md"]
-            assert cache_file(brain) == live
-        finally:
-            finish.set()
-        # The build fingerprinted its files before the commit: the removed record is neither indexed nor skipped.
-        assert build.result(timeout=10) == {"files": 4, "changed": 4, "removed": 0, "skipped": 0}
-    assert cache_file(brain) != live
-    # The file added after the build's scan has no fingerprint in the new generation: the next refresh indexes it.
-    reply = search([brain], Query(text="osmium lunch"), counted=False)
-    assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == ["concepts/late.md"]
-    assert "problems" not in reply
-
-
-def test_a_build_publishes_after_readers_close_the_generation_it_replaces(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    index.refresh(brain)
-    waiting = Event()
-
-    def sleep(seconds: float) -> None:
-        waiting.set()
-        time.sleep(seconds)
-
-    # The publish waits in the generation lock that readers hold while connected.
-    monkeypatch.setattr(storage, "time", SimpleNamespace(monotonic=time.monotonic, sleep=sleep))
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        with index.database(brain) as (connection, _state):
-            build = executor.submit(index.refresh, brain, full=True)
-            # SQLite finds -wal and -shm files by name: no reader of the old generation may outlive the rename.
-            assert waiting.wait(10)
-            assert not build.done()
-            assert connection.execute("SELECT count(*) FROM items").fetchone()[0] == 4
-        assert build.result(timeout=10)["files"] == 4
-    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
-        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-    assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
-    # A reader that outlasts the wait fails the build visibly; the live cache stays in service.
-    live = cache_file(brain)
-    monkeypatch.setattr(index, "_PUBLISH", 0)
-    with index.database(brain) as (connection, _state), pytest.raises(BusyError, match="readers kept"):
-        index.refresh(brain, full=True)
-    assert not (brain.root / index.BUILD).exists()
-    assert cache_file(brain) == live
-    assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
-
-
-def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
-    schema = b"version: 7\nname: fixture\nfields:\n  owner:\n    description: Who owns it.\n    type: identity\n"
-    brain.write("bf.yaml", schema + b"    relation: true\n")
-    index.refresh(brain)
-    generation = cache_file(brain)
-    reworded = schema.replace(b"Who owns it.", b"The accountable owner.")
-    brain.write("bf.yaml", reworded + b"    relation: true\n    examples: [person:ada]\n")
-    assert index.refresh(brain)["changed"] == 0
-    assert cache_file(brain) == generation
-    # A structural change still rebuilds: edges follow relation fields.
-    brain.write("bf.yaml", reworded)
-    assert index.refresh(brain)["changed"] == 4
-    assert cache_file(brain) != generation
-
-
-def test_live_pending_commit_serves_stale_cache_but_abandoned_commit_errors(brain: Store) -> None:
-    expected = refs(brain, "offline retrieval")
-    with writer(brain):
-        brain.write("memories/.pending/0.before", b"staged original")
-        reply = search([brain], Query(text="offline retrieval"), counted=False)
-    assert reply["stale"] == ["fixture"]
-    assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == expected
-    with pytest.raises(Error, match="interrupted transaction"):
-        search([brain], Query(text="offline retrieval"), counted=False)
-    assert brain.read("memories/.pending/0.before") == b"staged original"
 
 
 def test_several_brains_interleave_and_reads_name_their_brain(brain: Store, tmp_path: Path) -> None:
@@ -819,27 +486,6 @@ def test_removing_a_misnamed_record_clears_its_problem(brain: Store) -> None:
     assert index.status(brain)["problems"] == []
 
 
-def test_current_schema_cache_with_missing_table_rebuilds(brain: Store) -> None:
-    refs(brain, "offline")
-    with sqlite3.connect(brain.root / index.CACHE) as connection:
-        connection.execute("DROP TABLE files")
-    connection.close()
-    assert refs(brain, "offline")[0] == "projects/offline.md"
-    assert read([brain], "meetings:decision-1")["ref"] == "meetings:decision-1"
-
-
-def test_direct_record_read_survives_unavailable_cache(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    def unavailable(_store: Store, _counts: dict[str, int] | None = None) -> str:
-        raise Error("cache unavailable")
-
-    monkeypatch.setattr(index, "fresh", unavailable)
-    brain.write(
-        "memories/meetings/11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437.json",
-        b"malformed unrelated newer record\n",
-    )
-    assert read([brain], "meetings:decision-1")["ref"] == "meetings:decision-1"
-
-
 @pytest.mark.parametrize(
     "hint",
     [
@@ -956,27 +602,6 @@ def test_identity_search_does_not_infer_relations_from_words(brain: Store) -> No
     assert refs(brain, "repo:example/project") == ["projects/offline.md", "meetings:decision-1"]
 
 
-@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
-def test_cache_sidecars_cannot_redirect_reads(brain: Store, suffix: str) -> None:
-    cache = brain.root / index.CACHE
-    cache.parent.mkdir()
-    cache.with_name(cache.name + suffix).symlink_to(brain.root / "bf.yaml")
-    before = brain.read("bf.yaml")
-    with pytest.raises(Error, match="regular file"):
-        refs(brain, "offline")
-    assert brain.read("bf.yaml") == before
-
-
-def test_cache_write_failure_is_a_safe_actionable_error(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail(_store: Store, _config: Config) -> sqlite3.Connection:
-        raise sqlite3.OperationalError("database or disk is full")
-
-    monkeypatch.setattr(index, "_create", fail)
-    with pytest.raises(Error, match="check free space") as raised:
-        index.refresh(brain)
-    assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
-
-
 def test_french_question_words_do_not_outweigh_the_subject(brain: Store) -> None:
     brain.write("projects/storage.md", b"# Stockage\n\nLes fichiers gardent les preuves hors ligne.\n")
     brain.write("projects/noise.md", b"# Pourquoi les\n\nUn titre sans rapport avec le sujet.\n")
@@ -1074,36 +699,6 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
     assert search([brain, other], Query(text="offline"), counted=False)["items"]
     with pytest.raises(Error, match=r"invalid bf\.yaml"):
         search([other, other], Query(text="offline"), counted=False)
-
-
-def test_a_search_opens_a_generation_published_after_its_freshness_check(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    index.refresh(brain)
-    live = cache_file(brain)
-    checked, reopen = Event(), Event()
-    original_fresh = index.fresh
-
-    def paused_fresh(store: Store, counts: dict[str, int] | None = None) -> str:
-        state = original_fresh(store, counts)
-        checked.set()
-        assert reopen.wait(10)
-        return state
-
-    monkeypatch.setattr(index, "fresh", paused_fresh)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        query = executor.submit(search, [brain], Query(text="offline"), counted=False)
-        try:
-            assert checked.wait(10)
-            # A checked reader holds no connection yet, so the build publishes without waiting for it.
-            assert index.refresh(brain, full=True)["files"] == 4
-        finally:
-            reopen.set()
-        reply = query.result(timeout=10)
-    assert cache_file(brain) != live
-    assert isinstance(reply["items"], list)
-    assert reply["items"][0]["ref"] == "projects/offline.md"
-    assert "problems" not in reply
 
 
 def test_evaluation_names_missing_retrieval_cases(brain: Store) -> None:
@@ -1248,6 +843,11 @@ def test_search_names_query_words_that_match_nothing(brain: Store, tmp_path: Pat
     assert "unmatched" not in search([brain], Query(text="lunch offline", **scope("concepts")))
     # Identities, known or not, are never checked as words.
     assert "unmatched" not in search([brain], Query(text="repo:example/project"))
+    # A misspelling gets the close words the brain holds, spelled as a passage spells them; a word close to none,
+    # a phrase or a prefix gets none.
+    reply = search([brain], Query(text='retreival zzabsent "retrieval offline" retrievl*'))
+    assert reply["suggestions"] == {"retreival": ["retrieval"]}
+    assert search([brain], Query(text="retrieval"))["items"]
     # A word counts as matched when any selected brain holds it.
     root = tmp_path / "team"
     root.mkdir()
@@ -1410,6 +1010,23 @@ def test_evaluation_ranks_expected_refs_beyond_the_case_limit(brain: Store) -> N
         ["concepts/retention.md"],
     )
     assert reply["mrr"] == 0.5
+
+
+def test_evaluation_ranks_past_a_reply_that_stops_at_its_byte_budget(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bf.evaluate import evaluate
+
+    brain.write("concepts/retention.md", b"# Retention decision\n\nA retention decision.\n")
+    brain.write(
+        "evals/retrieval.yaml",
+        b"version: 7\ncases:\n  - name: decision\n    query: retention decision\n    limit: 1\n"
+        b"    expect: [projects/offline.md#decision]\n",
+    )
+    # Long items fill a reply early: each page now holds one item and names the next offset.
+    monkeypatch.setattr(pages, "fitting", lambda items: items[:1])
+    case = cast("list[dict[str, object]]", evaluate(brain)["cases"])[0]
+    assert case["rank"] == {"projects/offline.md#decision": 2}
 
 
 def test_records_of_several_sources_sharing_a_url_collapse_to_the_best_ranked_one(brain: Store, tmp_path: Path) -> None:
@@ -1629,20 +1246,6 @@ def test_brain_record_addresses_never_resolve_other_schemes_aliases(brain: Store
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
-def test_read_only_brains_name_the_cache_they_need(brain: Store) -> None:
-    index.refresh(brain)
-    folders = [brain.root / ".bf", brain.root]
-    for folder in folders:
-        folder.chmod(0o500)
-    try:
-        with pytest.raises(Error, match=r"write access to the brain.s \.bf cache"):
-            search([brain], Query(text="offline"))
-    finally:
-        for folder in folders:
-            folder.chmod(0o700)
-
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
 def test_an_unreadable_folder_is_reported_while_the_rest_of_the_brain_answers(brain: Store) -> None:
     brain.write("projects/private/plan.md", b"# Plan\n\nOffline secrets.\n")
     brain.write("memories/jira/.keep", b"")
@@ -1667,28 +1270,6 @@ def test_an_unreadable_folder_is_reported_while_the_rest_of_the_brain_answers(br
             folder.chmod(0o700)
 
 
-def test_hashed_inode_numbers_beyond_signed_64_bits_still_index(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    original = storage._fingerprint  # noqa: SLF001 - the one place every fingerprint passes through
-
-    def hashed(info: os.stat_result) -> tuple[int, int, int, int]:
-        # mergerfs and some FUSE mounts report inode numbers with the top bit set.
-        return original(
-            cast(
-                "os.stat_result",
-                SimpleNamespace(
-                    st_size=info.st_size,
-                    st_mtime_ns=info.st_mtime_ns,
-                    st_ctime_ns=info.st_ctime_ns,
-                    st_ino=info.st_ino | 1 << 63,
-                ),
-            )
-        )
-
-    monkeypatch.setattr(storage, "_fingerprint", hashed)
-    # Before 17 SQLite rejected the inode and every refresh failed with a traceback.
-    assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
-
-
 def test_a_note_alias_named_like_a_source_reads_without_parsing_that_source(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1710,37 +1291,3 @@ def test_words_starting_with_a_bf_scheme_stay_words(brain: Store) -> None:
     # Before 17 any query starting with bf: was parsed as an address and failed as an invalid link.
     assert refs(brain, "bf: how to configure sensors") == ["concepts/setup.md"]
     assert refs(brain, "Bf:setup") == ["concepts/setup.md"]
-
-
-def test_the_cache_directory_must_be_your_own_directory(
-    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cache = brain.root / ".bf"
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    elsewhere.chmod(0o755)
-    cache.symlink_to(elsewhere)
-    with pytest.raises(Error, match=r"^\.bf: expected a directory"):
-        search([brain], Query(text="offline"))
-    # The check never follows the link, so it tightens nothing elsewhere.
-    assert stat.S_IMODE(elsewhere.stat().st_mode) == 0o755
-    cache.unlink()
-    cache.write_bytes(b"not a directory")
-    with pytest.raises(Error, match=r"^\.bf: expected a directory"):
-        search([brain], Query(text="offline"))
-    cache.unlink()
-    cache.mkdir()
-    monkeypatch.setattr(os, "getuid", lambda: os.geteuid() + 1)
-    with pytest.raises(Error, match="belongs to another user"):
-        search([brain], Query(text="offline"))
-
-
-def test_the_cache_is_private_and_distrusts_its_own_schema(brain: Store) -> None:
-    (brain.root / ".bf").mkdir()
-    (brain.root / ".bf").chmod(0o755)
-    refs(brain, "offline")
-    assert stat.S_IMODE((brain.root / ".bf").stat().st_mode) == 0o700
-    assert stat.S_IMODE((brain.root / index.CACHE).stat().st_mode) == 0o600
-    with index.database(brain) as (connection, _state):
-        assert not connection.getconfig(sqlite3.SQLITE_DBCONFIG_TRUSTED_SCHEMA)
-        assert connection.getconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE)

@@ -246,6 +246,22 @@ def test_registry_paths_are_absolute_and_names_win_over_local_directories(
         select("shared")
 
 
+def test_a_mistyped_brain_name_suggests_close_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    register(make(tmp_path / "work", "work"))
+    make(tmp_path / "team", "team")
+    make(tmp_path / "personal", "personal", {"team": "../team"})
+    monkeypatch.chdir(tmp_path / "personal")
+    # Registered names, the enclosing brain's and its references are what a mistyped name may have meant.
+    for typed, meant in (("wrok", "work"), ("persnal", "personal"), ("taem", "team")):
+        with pytest.raises(Error, match=f"^brain directory does not exist; .*; did you mean {meant}\\?$"):
+            select(typed)
+    with pytest.raises(Error, match=r"^brain directory does not exist; pass an existing --brain or BF_BRAIN$"):
+        select("zzz")
+    # Execution commands select only registered or enclosing brains, and suggest those names too.
+    with pytest.raises(Error, match=r"neither registered nor the enclosing brain; .*; did you mean work\?$"):
+        execution("wrok")
+
+
 def test_an_enclosing_brain_cannot_replace_a_registered_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     registered = make(tmp_path / "registered", "shared")
     register(registered)
@@ -505,12 +521,15 @@ def test_an_exact_read_answers_while_another_brain_fails(tmp_path: Path) -> None
     records.upsert(second, "github", [Record(id="org/repo#7", title="Other")], snapshot=False)
     # A malformed record keeps the second brain from proving it holds no org/repo#12.
     second.write("memories/github/broken.json", b"{not json")
-    with pytest.raises(Error):
+    with pytest.raises(Error, match="expected memories/") as failed:
         read([second], "github:org/repo#12")
+    # Not NotFoundError, a subclass: the read must not claim an absence it cannot prove.
+    assert type(failed.value) is Error
     reply = cast(dict, read([first], "github:org/repo#12"))
     assert reply["record"]["title"] == "Merged fix"
     assert {problem["brain"] for problem in reply["problems"]} == {"second"}
     assert str(second.root) not in json.dumps(reply)
     # When no brain holds the ref, the failure stands instead of an absence the read cannot prove.
-    with pytest.raises(Error):
+    with pytest.raises(Error, match="expected memories/") as failed:
         read([first], "github:org/repo#99")
+    assert type(failed.value) is Error

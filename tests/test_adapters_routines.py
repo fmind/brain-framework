@@ -65,11 +65,12 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
     text = result.stdout
-    assert "- [ ] [Archive draft](bf://brain/projects/archive.md) (draft, edited 2026-09-01, 3 newer" in text
+    assert "- [ ] Archive draft (`bf://brain/projects/archive.md`) (draft, edited 2026-09-01, 3 newer" in text
     assert "Next: Document the retention policy." in text
     assert "projects/done.md" not in text
     assert "12 dated items; records by source: mail 8" in text
-    # Only projects under review are linked: a link from this dated action would flag any other note.
+    # Nothing is linked: a link from this dated action would flag its target with newer evidence, so every later
+    # review would count earlier reviews among a project's newer linked items.
     assert "- 2026-09-26 11:00+02:00: `bf://brain/calendar:standup` (record)" in text
     assert "- 2026-09-27: Launch (`bf://brain/projects/launch.md`)" in text
     assert "UTC" not in text
@@ -79,12 +80,12 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     validate_okf(path, text.encode())
     parsed = note(path, text.encode())
     assert (parsed.knowledge.type, parsed.knowledge.status, parsed.knowledge.updated) == ("action", "draft", day)
-    assert parsed.targets == ["bf://brain/projects/archive.md"]
+    assert parsed.targets == []
     assert [(task.done, task.text) for task in parsed.tasks] == [
         (
             False,
             (
-                "[Archive draft](bf://brain/projects/archive.md) (draft, edited 2026-09-01, 3 newer linked items). "
+                "Archive draft (bf://brain/projects/archive.md) (draft, edited 2026-09-01, 3 newer linked items). "
                 "Next: Document the retention policy."
             ),
         )
@@ -97,17 +98,17 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     ]
 
 
-def test_weekly_review_links_a_single_brains_projects_by_path(provider: Provider) -> None:
-    # With one selected brain, items omit their brain and address: the action links the note by its path.
+def test_weekly_review_names_a_single_brains_projects_by_path(provider: Provider) -> None:
+    # With one selected brain, items omit their brain and address: the action names the note by its path.
     single = {key: value for key, value in PROJECT.items() if key not in {"brain", "uri"}}
     tasks = {**EMPTY_TASKS, "total": 1, "items": [{"text": "Draft", "ref": "projects/archive.md#next", "line": 9}]}
     pages(provider, {"page": "", "projects": [{**single, "ref": "projects/an archive.md"}]}, {"total": 0}, tasks)
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
-    assert "- [ ] [Archive draft](../../projects/an%20archive.md) (draft" in result.stdout
+    assert "- [ ] Archive draft (`projects/an archive.md`) (draft" in result.stdout
     assert "- Draft (`projects/archive.md#next`, line 9)." in result.stdout
     path = "actions/2026-09-25_weekly-review/ACTION.md"
-    assert note(path, result.stdout.encode()).links == ["projects/an archive.md"]
+    assert note(path, result.stdout.encode()).links == []
 
 
 def test_weekly_review_keeps_hostile_record_ids_inert(provider: Provider) -> None:
@@ -122,8 +123,8 @@ def test_weekly_review_keeps_hostile_record_ids_inert(provider: Provider) -> Non
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
     assert "``mail:x` [ok](bf://brain/projects/p.md?rel=depends-on) `y`` (record)" in result.stdout
-    # The id stays inside its code span: the action links only the project under review.
-    assert note("actions/2026-09-25_weekly-review/ACTION.md", result.stdout.encode()).targets == [PROJECT["uri"]]
+    # The id stays inside its code span: the action links nothing.
+    assert note("actions/2026-09-25_weekly-review/ACTION.md", result.stdout.encode()).targets == []
 
 
 def test_weekly_review_names_items_by_brain_across_brains(provider: Provider) -> None:

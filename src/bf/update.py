@@ -31,6 +31,27 @@ def selection(
     return set(config.sensors), set(config.routines)
 
 
+def scheduled(config: Config, sensors: tuple[str, ...] = (), routines: tuple[str, ...] = ()) -> list[tuple[int, str]]:
+    """The selected enabled programs that refresh on their own, as (refresh seconds, name), fastest first."""
+    selected_sensors, selected_routines = selection(config, sensors, routines)
+    programs = [(name, config.sensors[name]) for name in selected_sensors] + [
+        (name, config.routines[name]) for name in selected_routines
+    ]
+    return sorted((program.refresh, name) for name, program in programs if program.enabled and program.refresh)
+
+
+def late(config: Config, every: int, sensors: tuple[str, ...] = (), routines: tuple[str, ...] = ()) -> str:
+    """Why checking every `every` seconds runs the fastest selected program late, or ""."""
+    programs = scheduled(config, sensors, routines)
+    if not programs or every < programs[0][0]:
+        return ""
+    refresh, name = programs[0]
+    return (
+        f"{name} refreshes every {refresh}s, but checks happen every {every}s: it will run late and status can "
+        "report it overdue"
+    )
+
+
 def _update(
     store: Store,
     *,

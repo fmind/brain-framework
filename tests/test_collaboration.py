@@ -105,6 +105,7 @@ def test_same_routine_on_two_clones_creates_distinct_actions(tmp_path: Path) -> 
 def test_action_helper_creates_two_sessions_without_replacing_work(brain: Store) -> None:
     script = Path(__file__).parents[1] / "src/bf/skills/bf-action/scripts/new-action.py"
     created = []
+    today = date.today().isoformat()
     for options in ((), (), ("--unique",)):
         reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
             [sys.executable, str(script), "review", "--brain", str(brain.root), *options],
@@ -114,8 +115,9 @@ def test_action_helper_creates_two_sessions_without_replacing_work(brain: Store)
             timeout=10,
         )
         created.append(json.loads(reply.stdout)["action"])
+    if date.today().isoformat() != today:
+        pytest.skip("the helpers ran across midnight, so their sessions belong to different days")
     # The first session takes the plain name; a later one on the same day, or --unique, adds a suffix.
-    today = date.today().isoformat()
     assert created[0] == f"actions/{today}_review/ACTION.md"
     for path in created[1:]:
         assert re.fullmatch(rf"actions/{today}_review-[0-9a-f]{{12}}/ACTION\.md", path)

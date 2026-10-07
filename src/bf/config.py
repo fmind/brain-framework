@@ -6,6 +6,7 @@ import os
 import re
 import stat
 from collections.abc import Iterable
+from contextlib import suppress
 from itertools import takewhile
 from pathlib import Path
 from typing import cast
@@ -15,7 +16,7 @@ import yaml.constructor
 import yaml.resolver
 from pydantic import ValidationError
 
-from bf.models import Config, Error, FormatError, Registration, UserConfig, check_version, digest, explain
+from bf.models import Config, Error, FormatError, Registration, UserConfig, check_version, digest, explain, suggest
 from bf.storage import Store, expand, writer, xdg
 
 _HEADER = "# https://fmind.github.io/brain-framework/\n"
@@ -370,9 +371,26 @@ def _located(value: str, *, execute: bool = False) -> Store:
             )
         return _configured(store, f"registered brain {value}")
     if execute and (local is None or referenced):
-        raise Error(f"brain {value} is neither registered nor the enclosing brain; pass --brain PATH")
+        raise Error(
+            f"brain {value} is neither registered nor the enclosing brain; pass --brain PATH{suggest(value, _names())}"
+        )
+    if local is not None:
+        return local
     # An unregistered name can still be a directory below the working directory.
-    return local or _configured(Store(expand(Path(value))), value)
+    path = expand(Path(value))
+    if not path.exists():
+        raise Error(f"brain directory does not exist; pass an existing --brain or BF_BRAIN{suggest(value, _names())}")
+    return _configured(Store(path), value)
+
+
+def _names() -> set[str]:
+    """Brain names a mistyped selection may have meant: registered ones, the enclosing brain's and its references."""
+    names = set(user_config().brains)
+    with suppress(Error, OSError, UnicodeError):
+        if (nearest := _nearest(required=False)) is not None:
+            config = load(nearest)
+            names |= {config.name, *config.brains}
+    return names
 
 
 def _configured(store: Store, given: str) -> Store:

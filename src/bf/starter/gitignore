@@ -1,0 +1,8 @@
+# Disposable cache, program logs and private evidence stay out of Git. To share a reviewed source,
+# replace /memories/ with /memories/* and one !/memories/<source>/ line each; see
+# https://fmind.github.io/brain-framework/docs/team/#collect-on-a-laptop
+/.bf/
+/logs/
+/memories/
+/originals/
+/inputs/

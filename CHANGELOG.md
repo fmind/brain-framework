@@ -4,6 +4,42 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v18.3.0](https://github.com/fmind/brain-framework/releases/tag/v18.3.0) - 2026-10-07
+
+A review and feature release. The brain format (`version: 7`) and `bf.yaml` are unchanged; the reply schemas only gain optional fields and the search cache rebuilds once. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin). Run `bf skills DIR` to update `bf-use`, and copy the updated example hooks, `weekly-review` routine and any new sensor into your brain.
+
+### Added
+
+- `bf search` suggests close words the brain holds for each misspelled word: `"suggestions":{"retension":["retention"]}` beside `unmatched`.
+- A claim names the note or record that owns its target, when exactly one item of its brain does, as `target_ref` and `target_title`: follow it without another search.
+- `bf collect --dry-run` reports the `added`, `updated`, `unchanged` and `removed` counts a collection would commit, and `"removal_refused": true` when the snapshot guard would refuse it, before you pass `--allow-removal`.
+- `bf watch` warns, like `bf schedule`, when its interval is at least the shortest selected `refresh`, which runs that program late and makes `bf status` report it overdue.
+- A mistyped `--brain` name suggests close registered, enclosing or referenced brain names: `did you mean work?`.
+- The example `gmail-headers.py` sensor collects Gmail senders, recipients, subjects, labels and dates through `gws`, never message bodies, with `person:email/` links, a `gmail-thread:` link per conversation and an RFC 2392 `mid:` alias.
+
+### Changed
+
+- Writers also lock the brain folder itself: two processes with different `XDG_STATE_HOME` values, or two accounts sharing a brain, used to commit at once, and one's recovery could roll back the other's committed records. A filesystem that cannot lock a folder, such as NFS, keeps the state lock alone.
+- The `weekly-review` routine names the projects to review by ref instead of linking them: its links flagged every listed project with newer evidence, so each later review counted the earlier ones.
+- `bf init` writes its starter files from the package's `starter/` folder; the generated `AGENTS.md` now holds one line per paragraph, so the [refresh comparison](https://fmind.github.io/brain-framework/docs/agents/#refresh-brain-instructions) shows every wrapped line once.
+- A search scoped to an authored folder no longer counts collected sources, and a cache is checked against the layout bf builds in one comparison. Tests run in parallel.
+
+### Fixed
+
+- `bf eval` ranks expected refs among the first 50 results even when they span several reply pages: a search reply stops at its 32 KiB budget, so a ref at rank 46 among long results read as missing and MRR dropped.
+- An action's `projects` include projects its `ACTION.md` links by entity, alias or BF address, as each project's backlinks already listed the action; only path links counted.
+- An identity whose BF address percent-encodes a format character, such as `bf://brain/people/bob%E2%80%8B`, is invalid like its raw form: it looked like another subject's address.
+- A footnote-looking line inside a code fence no longer hides the sections after it: its indented lines closed the fence early.
+- Period pages and scopes accept a trailing slash, such as `bf read 2026-09/` or `--scope 7d/`, like folder and tag pages.
+- A file that failed to read for a reason other than permissions, such as an I/O error on a network mount, is read again on the next refresh instead of staying skipped until it changed; the search cache rebuilds once.
+- A cache that another program locks, such as an open `sqlite3` shell, names the lock instead of advising to check free space.
+- `bf status` lists programs named `date`, `time`, `fields` or `attributes` like any other.
+- `bf init`, `bf skills` and other commands reject an argument that is not UTF-8 as invalid input before writing; `init` and `skills` used to create every file, then fail.
+- Recovery clears an interrupted record transaction that left one temporary file beside a full journal; every later collection used to fail.
+- `bf watch` waits for and stops its update when the terminal closed while it was stopping, instead of leaving it running.
+- The bf-use `guarded-write.py` helper refuses a passage that occurs twice in overlapping positions, as it refuses other repeated passages.
+- The example hooks and the `weekly-review` routine escape control and invisible format characters, as `bf` replies do: decoding the JSON restored them, so a shared note's title could reach the agent's context or a review action as hidden text. Copy the updated examples into your brain.
+
 ## [v18.2.0](https://github.com/fmind/brain-framework/releases/tag/v18.2.0) - 2026-10-06
 
 A skill release. The brain format (`version: 7`), `bf.yaml`, the reply schemas and the search cache are unchanged. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), then run `bf skills DIR` to install `bf-action` and update `bf-use`.

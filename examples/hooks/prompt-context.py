@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 
 INPUT_BYTES = 4 << 20
 REPLY_BYTES = 1 << 20
@@ -58,13 +59,21 @@ def search(words: str, brain: str) -> dict | None:
     return reply if isinstance(reply, dict) else None
 
 
+def visible(text: str) -> str:
+    """Escape controls and invisible format characters, which bf replies escape and JSON decoding restored."""
+    return "".join(
+        char.encode("unicode_escape").decode() if unicodedata.category(char) in {"Cc", "Cf"} else char for char in text
+    )
+
+
 def plain(value: object, limit: int = 120) -> str:
-    text = re.sub(r"\s+", " ", re.sub(r"[`\[\]<>]", "", str(value))).strip()
+    text = visible(re.sub(r"\s+", " ", re.sub(r"[`\[\]<>]", "", str(value))).strip())
     return text[: limit - 1] + "…" if len(text) > limit else text
 
 
 def code(value: str) -> str:
     """A code span that no backtick inside the value can close."""
+    value = visible(value)
     fence = "`" * (max(map(len, re.findall(r"`+", value)), default=0) + 1)
     pad = " " if value.startswith("`") or value.endswith("`") else ""
     return f"{fence}{pad}{value}{pad}{fence}"

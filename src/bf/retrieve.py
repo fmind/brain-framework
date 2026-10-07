@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import heapq
 import json
-import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, suppress
@@ -93,7 +92,8 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
             limit=bound,
             low=pages.low(store),
         )
-        known = set(index.sources(connection)) | set(load(store).sensors)
+        # Counting sources reads every record row: only a search that can return records needs them.
+        known = set(index.sources(connection)) | set(load(store).sensors) if collected else set()
         return {
             "store": store,
             "connection": connection,
@@ -139,6 +139,14 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
         missing = [index.unmatched(cast("sqlite3.Connection", part["connection"]), text) for _, part in parts]
         if unmatched := [term for term in missing[0] if all(term in other for other in missing[1:])]:
             reply["unmatched"] = unmatched
+            connections = [cast("sqlite3.Connection", part["connection"]) for _, part in parts]
+            suggested = {
+                term: close[: index.SUGGESTIONS]
+                for term in unmatched
+                if (close := list(dict.fromkeys(s for c in connections for s in index.suggestions(c, term))))
+            }
+            if suggested:
+                reply["suggestions"] = suggested
     coverage = []
     for name, part in parts:
         store = cast("Store", part["store"])
@@ -425,9 +433,8 @@ def _holders(
 
 def _action(ref: str, parsed: links.Address | None, path: str) -> str:
     """An action folder reads as its ACTION.md with the action's files and linked projects."""
-    if re.fullmatch(r"actions/[^/#]+", path.rstrip("/")) and not authored(path):
-        path = path.rstrip("/") + "/ACTION.md"
-        return links.address(parsed.brain, path) if parsed else path
+    if (target := pages.route(path)).kind == "action":
+        return links.address(parsed.brain, target.name) if parsed else target.name
     return ref
 
 

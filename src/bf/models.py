@@ -12,7 +12,7 @@ from collections.abc import Collection, Iterable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator, model_validator
 from pydantic.json_schema import JsonDict
@@ -200,6 +200,8 @@ def local(value: str) -> str:
 
 # Provider data and declared field values: replies return them exactly as the record or note stores them.
 _VERBATIM = frozenset({"attributes", "fields"})
+# Status maps keyed by program name: a sensor may be named `time` or `fields`, so only the entries are presented.
+_NAMED = frozenset({"routines", "sources"})
 
 
 def present(value: object) -> object:
@@ -211,6 +213,8 @@ def present(value: object) -> object:
         return {
             key: item
             if key in _VERBATIM
+            else {name: present(entry) for name, entry in item.items()}
+            if key in _NAMED and isinstance(item, dict)
             else local(item)
             if key in _INSTANTS and isinstance(item, str) and _CANONICAL.fullmatch(item)
             else present(item)
@@ -368,7 +372,10 @@ INVISIBLE = "identities must not contain invisible format characters, such as U+
 
 def invisible(value: str) -> bool:
     """Whether an identity holds a format character, such as U+200B or U+FEFF: two identities that look alike would
-    silently differ. ASCII holds none, so most identities need no scan."""
+    silently differ. ASCII holds none, so most identities need no scan. A BF address decodes its path, so its
+    percent-encoded form, such as `%E2%80%8B`, counts too; other schemes stay opaque."""
+    if value[:3].lower() == "bf:" and "%" in value:
+        value = unquote(value)
     return not value.isascii() and _INVISIBLE.search(value) is not None
 
 

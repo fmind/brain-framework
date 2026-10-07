@@ -439,3 +439,21 @@ def test_a_directory_name_without_a_plain_form_asks_for_a_name(tmp_path: Path, d
     assert result.exit_code == 2
     assert "pass --name NAME" in result.stderr
     assert not (tmp_path / directory).exists()
+
+
+def test_arguments_that_are_not_utf8_are_invalid_before_anything_is_written(tmp_path: Path) -> None:
+    # init and skills used to write everything, then fail to print the path; register showed pydantic's error.
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    target = os.fsencode(parent) + b"/bad\xff"
+    for arguments in ([b"init", target, b"--name", b"bad"], [b"skills", target], [b"register", target]):
+        result = subprocess.run(  # noqa: S603 - fixed interpreter and synthetic CLI arguments
+            [sys.executable, "-m", "bf", *arguments], capture_output=True, timeout=30, check=False
+        )
+        hint = b"DIR" if arguments[0] == b"skills" else b"PATH"
+        assert (result.returncode, result.stdout) == (2, b"")
+        assert result.stderr == b"bf: invalid input: %s: expected UTF-8 text (see python -m bf %s -h)\n" % (
+            hint,
+            arguments[0],
+        )
+    assert not list(parent.iterdir())

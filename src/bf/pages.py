@@ -12,7 +12,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from itertools import islice
-from typing import TypedDict, cast
+from typing import Literal, TypedDict, cast
 
 from pydantic import ValidationError
 
@@ -133,6 +133,38 @@ def period(value: str, now: datetime | None = None) -> Period | None:
         raise InputError(f"invalid period: {value}") from error
 
 
+@dataclass(frozen=True)
+class Route:
+    """What a brain-relative path names by its syntax alone: the one grammar of pages, folders, actions and notes.
+
+    `name` drops a trailing slash, as shell completion writes `projects/` or `7d/`; an action folder names its
+    ACTION.md. A note keeps its `#section`. `other` is a record, an identity or nothing; a `folder` below a root
+    is a page only where it exists.
+    """
+
+    kind: Literal["period", "tasks", "tags", "tag", "memories", "action", "note", "folder", "other"]
+    name: str
+    window: Period | None = None
+
+
+def route(path: str, now: datetime | None = None) -> Route:
+    name = path.rstrip("/")
+    if found := period(name, now):
+        return Route("period", name, found)
+    top = name.split("/")[0]
+    if name == "tasks":
+        return Route("tasks", name)
+    if top == "tags":
+        return Route("tags" if name == "tags" else "tag", name)
+    if top == "memories":
+        return Route("memories", name)
+    if authored(split_ref(path)[0]):
+        return Route("note", path)
+    if re.fullmatch(r"actions/[^/#]+", name):
+        return Route("action", name + "/ACTION.md")
+    return Route("folder", name) if top in AUTHORED else Route("other", path)
+
+
 def scope(value: str, now: datetime | None = None) -> Scope:
     """Search bounds for one scope: a period, an explicit identity, or a brain folder or file.
 
@@ -147,7 +179,7 @@ def scope(value: str, now: datetime | None = None) -> Scope:
 def _scope(value: str, now: datetime | None) -> Scope:
     if not value:
         return {}
-    if found := period(value, now):
+    if (found := route(value, now).window) is not None:
         return {"since": found.since, "until": found.until}
     if index.identity(value) or value.lower().startswith("bf:"):
         # A tag scope takes no relation, unlike a read. Otherwise as `bf read` takes it: a page's #fragment would
@@ -856,19 +888,18 @@ def page(
         if offset:
             raise Error("offset applies to listing pages; follow a home page's projects, actions or period link")
         return home(stores, now, counted=counted)
-    if found := period(path, now):
-        return timeline(stores, path, found, offset=offset, counted=counted)
-    parts = tuple(path.rstrip("/").split("/"))
-    if parts == ("tasks",):
-        return tasks(stores, offset=offset, counted=counted)
-    if parts[0] == "tags":
-        if len(parts) == 1:
+    target = route(path, now)
+    match target.kind:
+        case "period":
+            return timeline(stores, target.name, cast("Period", target.window), offset=offset, counted=counted)
+        case "tasks":
+            return tasks(stores, offset=offset, counted=counted)
+        case "tags":
             return tags(stores, offset=offset, counted=counted)
-        # The label of the normalized path: tags/LABEL/ reads like tags/LABEL, as projects/ reads like projects.
-        return tagged(stores, "/".join(parts[1:]), offset=offset, counted=counted)
-    if parts[0] == "memories":
-        relative("/".join(parts))
-        return memories(stores, parts, now, offset=offset, counted=counted)
+        case "tag":
+            return tagged(stores, target.name.removeprefix("tags/"), offset=offset, counted=counted)
+        case "memories":
+            return memories(stores, relative(target.name), now, offset=offset, counted=counted)
     if name := folder_page(stores, path):
         return folder(stores, name, now, offset=offset, counted=counted)
     return None
@@ -877,10 +908,9 @@ def page(
 def folder_page(stores: list[Store], path: str) -> str | None:
     """The folder page an authored path names: a root, or an existing folder below one other than an action's,
     which reads as its ACTION.md. Notes and their sections (`path#heading`) are items, not folders."""
-    parts = tuple(path.rstrip("/").split("/"))
-    if authored(split_ref(path)[0]) or parts[0] not in AUTHORED or (parts[0] == "actions" and len(parts) == 2):
+    if (target := route(path)).kind != "folder":
         return None
-    name = "/".join(parts)
+    name = target.name
     relative(name)
     # Entity names such as projects/archive are logical: only an existing folder is a page.
     return name if name in AUTHORED or any(_directory(store, name) for store in stores) else None
@@ -927,21 +957,20 @@ def _syntax(ref: str) -> tuple[str, bool]:
                 raise Error(_SECTIONLESS)
             return parsed.path, True
     path = parsed.path if parsed else value
-    parts = path.rstrip("/").split("/")
     note, fragment = split_ref(path)
     # A page, such as tasks or 7d, has no sections; a folder below a root may hold `#` in its name.
     if fragment and links.reserved(note.rstrip("/")):
         raise Error(_SECTIONLESS)
-    period(path)
-    if parts[0] == "tags" and len(parts) > 1:
-        _label("/".join(parts[1:]))
-    elif authored(note):
+    target = route(path)
+    if target.kind == "tag":
+        _label(target.name.removeprefix("tags/"))
+    elif target.kind == "note":
         # A note's section fragment is free text; only its path must be normalized.
         relative(note)
         return path, bool(fragment)
-    elif parts[0] in (*AUTHORED, "memories"):
+    elif target.kind in {"memories", "action", "folder"}:
         # Pages and folders check the whole path, including any `#`.
-        relative("/".join(parts))
+        parts = relative(target.name.removesuffix("/ACTION.md") if target.kind == "action" else target.name)
         if parts[0] == "memories" and len(parts) == 3:
             # A source's period page, such as memories/mail/7d.
             period(parts[2])
@@ -1130,14 +1159,14 @@ def context(stores: list[Store], owner: Store, brain: str, reply: dict[str, obje
 def _action(
     store: Store, brain: str, path: str, text: str, skipped: dict[str, tuple[int, int, int, int]]
 ) -> dict[str, object]:
-    """The files kept with an action, and the projects its ACTION.md links to."""
+    """The files kept with an action, and the projects its ACTION.md links to by path, address, entity or alias."""
     folder = path.rsplit("/", 1)[0]
     files = [
         name
         for name in store.files(folder, skipped=skipped)
         if name != path and not editor_lock(name) and not temporary(name)
     ][:LISTING]
-    projects = set()
+    projects, names = set(), set()
     for target in note(path, text.encode()).targets:
         resolved = reference(path, target)
         parsed = links.parse(resolved) if resolved.lower().startswith("bf:") else None
@@ -1146,11 +1175,16 @@ def _action(
         name = split_ref(parsed.path if parsed else resolved)[0]
         if name.startswith("projects/") and authored(name):
             projects.add(name)
+        elif parsed or index.identity(resolved):
+            # An identity names its one local owner, as backlinks do; a name several items claim names none.
+            names.add(links.address(parsed.brain, parsed.path) if parsed else resolved)
     with index.database(store) as (connection, _state):
         linked = _rows(
             connection,
-            "i.ref IN (SELECT value FROM json_each(:refs))",
-            {"refs": json.dumps(sorted(projects))},
+            "i.ref IN (SELECT value FROM json_each(:refs)) OR (substr(i.ref,1,9)='projects/' AND i.kind='note' AND "
+            "i.id IN (SELECT min(item) FROM names WHERE name IN (SELECT value FROM json_each(:names)) "
+            "GROUP BY name HAVING count(*)=1))",
+            {"refs": json.dumps(sorted(projects)), "names": json.dumps(sorted(names))},
             "i.ref",
             SECTION,
         )

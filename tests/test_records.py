@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue, ValidationError
 
-from bf import index, ontology, records, retrieve
+from bf import index, ontology, records, retrieve, storage
 from bf.collect import collect, reproject
 from bf.config import load, register
 from bf.models import MAX_FIELDS, MAX_RECORD, Error, Query, Record, encode
@@ -358,6 +358,21 @@ def test_pending_manifest_is_confined_and_incomplete_preparation_is_discarded(br
         records.find(brain, "meetings", "decision-1")
     index.refresh(brain, full=True)
     assert records.find(brain, "meetings", "decision-1") is not None
+    assert not (brain.root / "memories/.pending").exists()
+
+
+def test_recovery_clears_a_full_journal_beside_a_killed_write(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A commit stages up to MAX_FILES - 1 backups beside its manifest: a write killed while marking it complete left
+    # one entry more than a scan lists, and every later recovery, so every collection, failed.
+    monkeypatch.setattr(storage, "MAX_FILES", 3)
+    changes = [{"name": f"{char * 64}.json", "existed": True} for char in "ab"]
+    manifest = {"version": 1, "source": "catalog", "complete": True, "changes": changes}
+    brain.write("memories/.pending/manifest.json", json.dumps(manifest).encode())
+    for number in range(2):
+        brain.write(f"memories/.pending/{number}.before", b"{}")
+    brain.write("memories/.pending/.write-" + "a" * 32, b"killed completion marker")
+    with storage.writer(brain):
+        records.recover(brain)
     assert not (brain.root / "memories/.pending").exists()
 
 

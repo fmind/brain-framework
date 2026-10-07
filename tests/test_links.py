@@ -156,7 +156,8 @@ def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
     assert read([brain], "person:bob")["backlinks"] == bob["backlinks"]
     # A typed claim is also listed on its subject, where it was asserted.
     alice = read([brain], "person:alice")
-    assert alice["claims"] == [claim]
+    # Its target names Bob's note, which a reader can follow without searching.
+    assert alice["claims"] == [{**claim, "target_ref": "projects/bob.md", "target_title": "Bob"}]
     assert alice["backlinks"] == []
     # The identity's scope holds its owning note and what links to it, with the linking claims. The note answers
     # its own title before its "About Bob" section, which names Bob under that title too.

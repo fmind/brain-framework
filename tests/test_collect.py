@@ -489,6 +489,25 @@ def test_a_shrinking_snapshot_never_erases_most_of_a_catalog(configured: Store) 
     assert (state(configured)["folders"]["error"], state(configured)["folders"]["failures"]) == ("", 0)
 
 
+def test_a_dry_run_previews_the_changes_and_the_removal_guard(configured: Store) -> None:
+    collect(configured, "folders", start=START, end=END, runner=catalog(30))
+    before = sorted((configured.root / "memories/folders").iterdir())
+    # 10 kept, 20 removed and 5 added: the guard refuses a real run, which the preview says without writing.
+    preview = collect(configured, "folders", start=START, end=END, runner=catalog(15, 20), dry_run=True)
+    assert {key: preview[key] for key in ("added", "updated", "unchanged", "removed")} == {
+        "added": 5,
+        "updated": 0,
+        "unchanged": 10,
+        "removed": 20,
+    }
+    assert preview["removal_refused"] is True
+    accepted = collect(
+        configured, "folders", start=START, end=END, runner=catalog(15, 20), dry_run=True, allow_removal=True
+    )
+    assert "removal_refused" not in accepted
+    assert sorted((configured.root / "memories/folders").iterdir()) == before
+
+
 def test_allow_removal_accepts_one_deliberate_shrink(configured: Store) -> None:
     configured.write(
         "bf.yaml", CONFIG.replace(b"command: [echo]\n    mode: snapshot", b'command: [echo, "[]"]\n    mode: snapshot')

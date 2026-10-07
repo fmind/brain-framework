@@ -1,0 +1,17 @@
+# https://fmind.github.io/brain-framework/docs/checks/
+# Starter checks for the welcome note; extend or replace with your own questions and evidence.
+version: $version
+cases:
+  - name: find-knowledge-layout
+    query: Where should reusable knowledge live?
+    limit: 1
+    expect: [concepts/welcome.md]
+    text: [reusable knowledge in concepts/]
+  - name: read-knowledge-layout
+    # A qualified address still resolves once a related brain also holds concepts/welcome.md.
+    read: bf://$name/concepts/welcome.md
+    expect: [concepts/welcome.md]
+    text: [Write one note per project in projects/, reusable knowledge in concepts/]
+  - name: absent-starter-topic
+    query: bfabsentevidence9c4f2a7d
+    empty: true

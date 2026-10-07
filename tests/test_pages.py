@@ -254,6 +254,27 @@ def test_an_action_reads_as_a_resumable_page(brain: Store) -> None:
     assert read([brain], "actions/README.md#naming")["text"] == "## Naming\n\nDate first.\n"
 
 
+def test_an_action_lists_projects_it_links_by_entity_alias_or_address(brain: Store) -> None:
+    brain.write("projects/atlas.md", b"---\nentity: bf://fixture/work/atlas\n---\n# Atlas\n")
+    brain.write("projects/vega.md", b"---\naliases: [jira:VEGA]\n---\n# Vega\n")
+    brain.write("projects/orion.md", b"# Orion\n")
+    # An alias that two projects claim names neither of them.
+    brain.write("projects/shared-a.md", b"---\naliases: [jira:SHARED]\n---\n# Shared A\n")
+    brain.write("projects/shared-b.md", b"---\naliases: [jira:SHARED]\n---\n# Shared B\n")
+    brain.write(
+        "actions/2026-10-01_plan/ACTION.md",
+        b"---\ntype: action\nstatus: draft\n---\n# Plan\n\n"
+        b"For [Atlas](bf://fixture/work/atlas), [Vega](jira:VEGA), [Orion](bf://fixture/projects/orion.md#goal) "
+        b"and [shared](jira:SHARED); not [elsewhere](bf://other/work/atlas).\n",
+    )
+    # Only path links used to count, while each project's backlinks listed the action.
+    assert refs(read([brain], "actions/2026-10-01_plan"), "projects") == [
+        "projects/atlas.md",
+        "projects/orion.md",
+        "projects/vega.md",
+    ]
+
+
 def test_an_action_still_reads_when_its_context_is_unavailable(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     populate(brain)
 

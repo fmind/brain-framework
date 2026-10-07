@@ -64,6 +64,11 @@
         "relation": { "type": "string" },
         "subject": { "type": "string" },
         "target": { "type": "string" },
+        "target_ref": {
+          "description": "The ref of the one item in the asserting brain that the target names, when exactly one does: read it to follow the claim.",
+          "type": "string"
+        },
+        "target_title": { "description": "The title of the item `target_ref` names.", "type": "string" },
         "time": {
           "description": "When the asserting record happened; notes state `date` instead.",
           "format": "date-time",
@@ -239,6 +244,12 @@
       "description": "Brains whose search cache could not refresh.",
       "items": { "type": "string" },
       "type": "array"
+    },
+    "suggestions": {
+      "additionalProperties": { "items": { "type": "string" }, "maxItems": 3, "minItems": 1, "type": "array" },
+      "description": "For unmatched words, up to three close words the selected brains hold, lowercased and with Latin accents folded as search indexes them: search one to confirm.",
+      "minProperties": 1,
+      "type": "object"
     },
     "unmatched": {
       "description": "Query words, quoted phrases or word* prefixes that match nothing in the selected brains' caches, whatever the scope; check their spelling or search a variant.",

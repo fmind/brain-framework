@@ -2,15 +2,16 @@
 
 Standalone sensors for common providers. Copy the ones you need into a brain's `sensors/`, declare them in `bf.yaml`, and adapt and test them there; they then belong to the brain. The Python package neither bundles nor installs them.
 
-| Sensor                                         | Arguments                                                     | Saves                                                                                 |
-| ---------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `git-history.py`                               | `ROOT START END [--skip RELATIVE_REPO]...`                    | Commits on branches, tags and remote branches, with author and repository identities. |
-| [`github-history.py`](github-history.md)       | `OWNER/REPO commits\|issues\|pulls START END [--branch NAME]` | GitHub branch commits and all-age issues/PRs, with incremental refresh.               |
-| `local-documents.py`                           | `LABEL ROOT [--exclude GLOB]...`                              | A snapshot of supported documents in the chosen folder.                               |
-| `highlights.py`                                | `LABEL EXPORT.json`                                           | Selected passages, annotations and precise source locations.                          |
-| `google-calendar.py`                           | `CALENDAR START END [--agenda-days N]`                        | Calendar events, organizer/invitee identities and an optional agenda.                 |
-| `google-drive-folders.py`                      | `[START END]`                                                 | My Drive and shared-with-me folders with parent links; shared drives are excluded.    |
-| [Context demo](../context-hub/sensors/demo.py) | `workspace`, `jira`, `github` or `gcloud`                     | Fictional adapter records for the four-tool walkthrough; no provider access.          |
+| Sensor                                         | Arguments                                                     | Saves                                                                                  |
+| ---------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `git-history.py`                               | `ROOT START END [--skip RELATIVE_REPO]...`                    | Commits on branches, tags and remote branches, with author and repository identities.  |
+| [`github-history.py`](github-history.md)       | `OWNER/REPO commits\|issues\|pulls START END [--branch NAME]` | GitHub branch commits and all-age issues/PRs, with incremental refresh.                |
+| `local-documents.py`                           | `LABEL ROOT [--exclude GLOB]...`                              | A snapshot of supported documents in the chosen folder.                                |
+| `highlights.py`                                | `LABEL EXPORT.json`                                           | Selected passages, annotations and precise source locations.                           |
+| `google-calendar.py`                           | `CALENDAR START END [--agenda-days N]`                        | Calendar events, organizer/invitee identities and an optional agenda.                  |
+| `google-drive-folders.py`                      | `[START END]`                                                 | My Drive and shared-with-me folders with parent links; shared drives are excluded.     |
+| `gmail-headers.py`                             | `START END [--query=SEARCH]`                                  | Gmail senders, recipients, subjects and dates with thread links; never message bodies. |
+| [Context demo](../context-hub/sensors/demo.py) | `workspace`, `jira`, `github` or `gcloud`                     | Fictional adapter records for the four-tool walkthrough; no provider access.           |
 
 Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). For other sources, copy the selected script from the release tag matching `bf --version` and make it executable, since the configuration below runs each script as a command and a download does not keep the executable bit:
 
@@ -47,6 +48,10 @@ sensors:
     command: [sensors/google-drive-folders.py]
     mode: snapshot
     refresh: 86400
+  gmail:
+    command: [sensors/gmail-headers.py, "{{start}}", "{{end}}", "--query=-category:promotions"]
+    refresh: 3600
+    enabled: false # review the query before enabling
 ```
 
 For a bounded GitHub backfill, follow [GitHub history](github-history.md): one year of `main` commits, all available issues and PRs, then incremental refresh. This is separate from the broader local Git sensor.
@@ -124,6 +129,16 @@ Preview it with `bf collect google-calendar-agenda --dry-run`. Expected result: 
 - As a `mode: snapshot` source, it removes missing folders after a successful nonempty replacement.
 - A folder's `time` is its creation and `attributes.updated` its last modification.
 - Limits: 10,000 folders and 20 pages.
+
+### Gmail headers
+
+- Saves each message's `From`, `To` and `Cc` addresses, subject, labels and receipt time, never its body or attachments: it requests Gmail's `metadata` format only. A subject can still hold private text; keep the brain private.
+- Selects messages received in `[START, END)`; `--query=SEARCH` adds a [Gmail search](https://support.google.com/mail/answer/7190), such as `--query=-category:promotions` or `--query=label:work`. Write it with `=` so a leading `-` stays its value.
+- Links each address as a lowercase `person:email/` identity and every message of a conversation to `gmail-thread:THREAD`, so `bf read gmail-thread:THREAD` lists the thread. Its alias `mid:MESSAGE-ID` ([RFC 2392](https://www.rfc-editor.org/rfc/rfc2392)) lets another tool's record name the same message.
+- `url` opens the thread in the browser's default Gmail account.
+- Limits: 1,000 messages and 10 pages per window, one `gws` call per message: keep `refresh` short so windows stay small.
+
+Preview it with `bf collect gmail --since 1d --dry-run`. Expected result: each sample's `text` starts with `Subject:`, then the `From:` and `To:` addresses, and its `links` hold `person:email/` and `gmail-thread:` identities.
 
 ## Highlights export
 

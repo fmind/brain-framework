@@ -13,7 +13,7 @@ import pytest
 
 from conftest import ROOT
 
-ADAPTERS = ["google-calendar.py", "google-drive-folders.py", "git-history.py", "github-history.py"]
+ADAPTERS = ["google-calendar.py", "google-drive-folders.py", "gmail-headers.py", "git-history.py", "github-history.py"]
 
 
 def test_provider_run_copies_stay_identical() -> None:

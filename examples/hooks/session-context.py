@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 from datetime import date, datetime
 from urllib.parse import quote
 
@@ -78,15 +79,23 @@ def day(value: object) -> str:
         return ""
 
 
+def visible(text: str) -> str:
+    """Escape controls and invisible format characters, which bf replies escape and JSON decoding restored."""
+    return "".join(
+        char.encode("unicode_escape").decode() if unicodedata.category(char) in {"Cc", "Cf"} else char for char in text
+    )
+
+
 def plain(value: object, limit: int = 120) -> str:
     # A task's Markdown link reads as its label, as the note shows it.
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", str(value))
-    text = re.sub(r"\s+", " ", re.sub(r"[`\[\]<>]", "", text)).strip()
+    text = visible(re.sub(r"\s+", " ", re.sub(r"[`\[\]<>]", "", text)).strip())
     return text[: limit - 1] + "…" if len(text) > limit else text
 
 
 def code(value: str) -> str:
     """A code span that no backtick inside the value can close."""
+    value = visible(value)
     fence = "`" * (max(map(len, re.findall(r"`+", value)), default=0) + 1)
     pad = " " if value.startswith("`") or value.endswith("`") else ""
     return f"{fence}{pad}{value}{pad}{fence}"

@@ -26,7 +26,7 @@ Pass a multi-line passage or replacement through files with `--old-file` and `--
 Expect `{"written":"projects/new-website.md","sha256":"..."}`; that digest guards your next write. Every refusal exits 1 and leaves the file untouched:
 
 - `the file changed since it was read`: read it again, reapply your edit to the new text and retry with the new digest.
-- `the old text does not occur` or `occurs N times`: copy the passage exactly from your read, or include surrounding text until it is unique.
+- `the old text does not occur` or `occurs several times`: copy the passage exactly from your read, or include surrounding text until it is unique.
 
 The helper replaces only an existing regular file, atomically, and never empties it. Like bf, it follows a linked brain folder and links above it, such as `/home` on Fedora Atomic, but no symbolic link inside the brain, at the file or in its folders. An interrupted edit can leave a `.write-HEX` temporary file beside the note, as bf's own writes can; delete it when `bf validate` warns about it.
 

@@ -32,6 +32,8 @@ _FOOTNOTE = re.compile(r"([ \t>]*)\[\^([^\[\]\s]+)\]:")
 _CITATION = re.compile(r"\[\^([^\[\]\s]+)\]")
 # A footnote's continuation line: indented by four spaces or a tab, which it loses in the parsed copy.
 _CONTINUED = re.compile(r" {4}|\t")
+# A top-level code fence: its lines are literal, so a footnote-looking example inside it defines nothing.
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 _TASK = re.compile(r"\[([ xX])\]\s+(\S.*)")
 # Emphasis markers open or close a word; inside one, `_` and `*` belong to identifiers and arithmetic (MAX_SIZE, 2*3).
 _EMPHASIS = re.compile(r"(?<![\w\]])[*_`]{1,3}|[*_`]{1,3}(?![\w(])")
@@ -161,8 +163,15 @@ def parse(path: str, data: bytes) -> Markdown:
     # that first cites it, not the section where the definition happens to sit, usually the last one. Labels match
     # case-insensitively, as on GitHub.
     definitions: dict[int, str] = {}
-    label = ""
+    label = fence = ""
     for number, line in enumerate(source_lines[offset:], offset + 1):
+        if fence:
+            # Only a bare run of the same character, at least as long, closes the fence.
+            closing = _FENCE.fullmatch(line.rstrip("\r\n"))
+            if closing and closing[1][0] == fence[0] and len(closing[1]) >= len(fence) and not closing[2].strip():
+                fence = ""
+            copy.append(line)
+            continue
         definition = _FOOTNOTE.match(line)
         if definition:
             definitions[number] = definition[2].casefold()
@@ -175,6 +184,8 @@ def parse(path: str, data: bytes) -> Markdown:
         else:
             # A blank line may separate a footnote's paragraphs; any other unindented line ends it.
             label = label if not line.strip() else ""
+            if (opening := _FENCE.fullmatch(line.rstrip("\r\n"))) and not (opening[1][0] == "`" and "`" in opening[2]):
+                fence = opening[1]
             copy.append(line)
     tokens = _parser().parse("".join(copy))
     headings = _headings(path, tokens, offset, strict=okf(path))

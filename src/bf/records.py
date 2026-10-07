@@ -58,12 +58,7 @@ def interrupted(store: Store) -> bool:
     A completed manifest proves every record was committed or restored: only cleanup remains, which the next writer
     finishes, so reads need not wait for it. A missing or invalid manifest proves nothing.
     """
-    if not _pending(store):
-        return False
-    try:
-        return not _Journal.model_validate(decode(store.read(_MANIFEST, _MANIFEST_LIMIT))).complete
-    except FileNotFoundError, Error, ValidationError:
-        return True
+    return _pending(store) and not _completed(store)
 
 
 def _completed(store: Store) -> bool:
@@ -75,6 +70,8 @@ def _completed(store: Store) -> bool:
 
 
 def _clear(store: Store) -> None:
+    # A full journal holds MAX_FILES entries; a write killed while completing it leaves one more than a scan lists.
+    store.sweep(_PENDING)
     names = store.files(_PENDING)
     if any(
         not re.fullmatch(r"memories/\.pending/(?:manifest\.json|[0-9]+\.before|\.write-[0-9a-f]{32})", n) for n in names
@@ -327,6 +324,20 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
         raise Error("invalid record source")
     # Only writers holding the brain lock write records: a temporary file there belongs to a killed write.
     store.sweep(f"memories/{source}")
+    counts, replacements = plan(store, source, incoming, snapshot=snapshot)
+    _commit(store, source, replacements)
+    return counts
+
+
+def plan(
+    store: Store, source: str, incoming: list[Record], *, snapshot: bool
+) -> tuple[dict[str, int], dict[str, bytes | None]]:
+    """What an upsert would change, without writing: its counts and each replaced file's bytes, or None to remove it.
+
+    A dry run calls it under `reading`; `upsert` under the writer lock, after recovering.
+    """
+    if not re.fullmatch(NAME, source):
+        raise Error("invalid record source")
     wanted = {path(source, record.id): record for record in incoming}
     if len(wanted) != len(incoming):
         raise Error("duplicate incoming record ids; reconcile them before collecting")
@@ -362,8 +373,7 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
             if len(data) > MAX_RECORD:
                 raise Error(f"{name}: record exceeds its {MAX_RECORD}-byte limit")
             replacements[name] = data
-    _commit(store, source, replacements)
-    return counts
+    return counts, replacements
 
 
 def find(

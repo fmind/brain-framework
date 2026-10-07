@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import errno
 import json
 import os
@@ -39,7 +40,7 @@ from bf.models import (
 )
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, writer
 
-SCHEMA = 33
+SCHEMA = 34
 CACHE = ".bf/index.sqlite"
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
@@ -63,7 +64,8 @@ _PROBE = (
 Fingerprints = dict[str, tuple[int, int, int, int]]
 # `file` binds a generation to the database file bf created: a cache copied, cloned or extracted from
 # elsewhere has another inode, so it is rebuilt from the brain's files instead of trusted.
-_DDL = """
+_TOKENIZER = "porter unicode61 remove_diacritics 2"
+_DDL = f"""
 CREATE TABLE ontology(signature TEXT NOT NULL, file TEXT NOT NULL);
 -- A rowid table: secondary indexes of a WITHOUT ROWID table would copy its whole composite key.
 CREATE TABLE edges(item INTEGER NOT NULL, subject TEXT NOT NULL, relation TEXT NOT NULL, target TEXT NOT NULL,
@@ -83,7 +85,9 @@ CREATE TABLE tasks(item INTEGER NOT NULL, line INTEGER NOT NULL, fragment TEXT N
 -- `names` holds identity words; `context` the headings a passage ranks under: a note's tags, a section's parents.
 CREATE TABLE passages(id INTEGER PRIMARY KEY, item INTEGER NOT NULL, fragment TEXT NOT NULL, title TEXT NOT NULL,
                       original TEXT NOT NULL);
-CREATE VIRTUAL TABLE search USING fts5(title, text, names, context, tokenize='porter unicode61 remove_diacritics 2');
+CREATE VIRTUAL TABLE search USING fts5(title, text, names, context, tokenize='{_TOKENIZER}');
+-- The indexed terms, read for spelling suggestions; it stores nothing itself.
+CREATE VIRTUAL TABLE vocabulary USING fts5vocab(search, row);
 CREATE TABLE names(name TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY(name, item)) WITHOUT ROWID;
 CREATE TABLE links(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
 CREATE TABLE tags(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
@@ -132,7 +136,8 @@ WORDS = 32
 ALSO = 5
 # A lexical result names at most this many other matching sections of its note.
 SECTIONS = 3
-# A passage matching all of a query's several terms gains this fraction of its score; one matching a single term, none.
+# A passage matching all of a query's several terms gains this fraction of its score, one matching some of them a
+# proportional part: 2 of 3 terms gain half of it. A passage matching a single term gains nothing.
 COVERAGE = 0.2
 # The weight of a passage's context (a section's note title and parents, a note's tags) against a heading's 10: a
 # section mentioning its note's title still ranks below the note, while "Atlas next actions" finds that section.
@@ -232,31 +237,36 @@ def _open(store: Store, config: Config | None = None) -> sqlite3.Connection | No
     # connection: a page compares the same few dates on every row, and the next reply sees a changed timezone.
     connection.create_function("note_time", 1, lru_cache(maxsize=4096)(_note_time), deterministic=True)
     try:
-        # bf never creates triggers or views: rows they would add on refresh exist in no brain file.
-        planted = connection.execute("SELECT count(*) FROM sqlite_master WHERE type IN ('trigger','view')")
-        if connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA and not planted.fetchone()[0]:
-            # Version alone does not establish that an interrupted or damaged cache is usable.
-            for statement in (
-                "SELECT path,size,mtime,ctime,inode,error FROM files LIMIT 0",
-                (
-                    "SELECT ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-                    "tasks_open,tasks_done,next,weight,stale_after,fields FROM items LIMIT 0"
-                ),
-                "SELECT id,item,fragment,title,original FROM passages LIMIT 0",
-                "SELECT item,line,fragment,text,done FROM tasks LIMIT 0",
-                "SELECT name,item FROM names LIMIT 0",
-                "SELECT item,target FROM links LIMIT 0",
-                "SELECT item,target FROM tags LIMIT 0",
-                "SELECT item,subject,relation,target,origin FROM edges LIMIT 0",
-                "SELECT title,text,names,context FROM search LIMIT 0",
-            ):
-                connection.execute(statement)
-            if tuple(connection.execute("SELECT signature,file FROM ontology").fetchone() or ()) == expected:
-                return connection
+        # The layout bf creates, and nothing more: a trigger or view would add rows no brain file holds, and a
+        # missing or altered table would fail queries later. SQLite stores each statement's text as written.
+        if (
+            connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA
+            and _schema(connection) == _layout()
+            and tuple(connection.execute("SELECT signature,file FROM ontology").fetchone() or ()) == expected
+        ):
+            return connection
     except sqlite3.DatabaseError:
         pass
     connection.close()
     return None
+
+
+def _schema(connection: sqlite3.Connection) -> list[tuple[object, ...]]:
+    """A database's tables, indexes, triggers and views, without the statistics SQLite may add itself."""
+    rows = connection.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_stat%' ORDER BY type,name"
+    )
+    return [tuple(row) for row in rows]
+
+
+@cache
+def _layout() -> list[tuple[object, ...]]:
+    """The layout of a complete generation, from the statements that build one; FTS5 adds its own tables."""
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.executescript(_DDL)
+        for statement in _INDEXES:
+            connection.execute(statement)
+        return _schema(connection)
 
 
 def _connect(path: Path | str) -> sqlite3.Connection:
@@ -577,6 +587,9 @@ def refresh(
         _discard(store, wait)
         return _refresh(store, full=full, wait=wait, recover=full or recover, compared=compared)
     except sqlite3.DatabaseError as error:
+        if getattr(error, "sqlite_errorcode", 0) & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            # Another program, such as a sqlite3 shell, holds the cache: a rebuild would wait on it too.
+            raise Error("another process holds the search cache; close it and retry") from error
         raise Error("could not refresh the search cache; check free space and run bf build") from error
 
 
@@ -748,9 +761,20 @@ def _fill(
                 # Most parse errors name their file first, which `path` already holds: a long path would leave no
                 # room for the reason.
                 error = _capped(str(problem).removeprefix(f"{path}: ") or "invalid file")
-            except OSError:
+            except PermissionError:
+                # Restoring access changes the file's ctime, and so its fingerprint.
                 connection.execute("ROLLBACK TO file")
                 error = "inaccessible file or folder; check permissions"
+            except OSError:
+                # A transient failure, such as EIO on a network mount, leaves the file unchanged: a fingerprint that
+                # matches nothing makes the next refresh read it again instead of keeping the failure.
+                connection.execute("ROLLBACK TO file")
+                connection.execute("RELEASE file")
+                connection.execute(
+                    "INSERT INTO files VALUES(?,?,?,?,?,?)",
+                    (path, -1, -1, -1, -1, "unreadable file; retried next time"),
+                )
+                continue
             connection.execute("RELEASE file")
             connection.execute("INSERT INTO files VALUES(?,?,?,?,?,?)", (path, *current[path], error))
         for statement in _INDEXES if new else ():
@@ -976,6 +1000,44 @@ def unmatched(connection: sqlite3.Connection, text: str) -> list[str]:
         for term in terms(text)
         if connection.execute("SELECT 1 FROM search WHERE search MATCH ? LIMIT 1", (_string(term),)).fetchone() is None
     ]
+
+
+# An unmatched word gets up to SUGGESTIONS close indexed terms, chosen among CANDIDATES sharing its first two letters.
+SUGGESTIONS = 3
+CANDIDATES = 5000
+
+
+def suggestions(connection: sqlite3.Connection, term: str) -> list[str]:
+    """Words of this brain close to an unmatched word, compared as indexed stems; none for phrases and prefixes."""
+    if " " in term or term.endswith("*") or len(term) < 4:
+        return []
+    stem = _stem(term)
+    rows = connection.execute(
+        "SELECT term FROM vocabulary WHERE term>=? AND term<? LIMIT ?", (stem[:2], stem[:2] + "\U0010ffff", CANDIDATES)
+    )
+    close = difflib.get_close_matches(stem, [row[0] for row in rows], n=SUGGESTIONS, cutoff=0.75)
+    # The index holds stems, such as `polici`: show a word one of its passages spells, such as `policy`.
+    return list(dict.fromkeys(word for found in close if (word := _spelled(connection, found))))
+
+
+@lru_cache(maxsize=256)
+def _stem(word: str) -> str:
+    """A word as the search table indexes it, from the same tokenizer."""
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.execute(f"CREATE VIRTUAL TABLE t USING fts5(x, tokenize={_TOKENIZER!r})")
+        connection.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, row)")
+        connection.execute("INSERT INTO t VALUES(?)", (word,))
+        row = connection.execute("SELECT term FROM v LIMIT 1").fetchone()
+    return row[0] if row else word.lower()
+
+
+def _spelled(connection: sqlite3.Connection, stem: str) -> str:
+    """The first indexed spelling of a stem: a one-token snippet of a passage holding it."""
+    row = connection.execute(
+        "SELECT snippet(search,-1,char(1),char(2),'',1) FROM search WHERE search MATCH ? LIMIT 1", (_string(stem),)
+    ).fetchone()
+    found = re.search("\x01([^\x01\x02]+)\x02", row[0]) if row else None
+    return found[1].lower() if found else ""
 
 
 def _lexical(connection: sqlite3.Connection, params: dict[str, object]) -> Iterator[dict[str, object]]:
