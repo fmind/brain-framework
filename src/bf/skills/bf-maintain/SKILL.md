@@ -1,6 +1,6 @@
 ---
 name: bf-maintain
-description: Keep a Brain Framework brain (bf) healthy — add or fix sensors, field mappings, routines and Git hooks; collect, update, watch or schedule sources; diagnose overdue or failed collection; recover writes, fix bf validate problems, upgrade bf and resolve brain merge conflicts. Use for "connect this source", "collection failed", "my brain is out of date" or "upgrade bf".
+description: Keep a Brain Framework brain (bf) healthy — add or fix sensors, field mappings, routines, prompts and Git hooks; collect, update, watch or schedule sources; diagnose overdue or failed collection; recover writes, fix bf validate problems, upgrade bf and resolve brain merge conflicts. Use for "connect this source", "collection failed", "my brain is out of date" or "upgrade bf".
 license: MIT
 compatibility: Requires Brain Framework 18 (the bf command) on Linux or macOS.
 ---
@@ -22,8 +22,8 @@ bf validate
 bf eval
 ```
 
-- `bf status` reports, without running anything, each brain's cache, problems and the freshness and failures of its sources and routines, and `bf status --check` exits 1 when one needs attention: [reading status](references/operations.md#read-bf-status) explains each field.
-- Each sensor and routine logs every run to `logs/NAME.log` in the brain, newest last and bounded to 1 MiB. Read it locally and keep provider text out of reports; retrieval never reads `logs/`, which `bf init` keeps out of Git.
+- `bf status` reports, without running anything, each brain's cache, problems and the freshness and failures of its sources, routines and prompts, and `bf status --check` exits 1 when one needs attention: [reading status](references/operations.md#read-bf-status) explains each field.
+- Each program logs every run to `logs/NAME.log` in the brain, newest last and bounded to 1 MiB. Read it locally and keep provider text out of reports; retrieval never reads `logs/`, which `bf init` keeps out of Git.
 - `bf update --dry-run` lists due programs and their windows without running anything, and names the manual programs it would skip.
 - `bf validate` lists `problems` as `{file, error}`, each once per file: invalid OKF metadata or identities, broken links, a page link with a `#section`, a record ref in the wrong case, unresolved merge markers, a declared field written at the top level of a note's frontmatter, `?rel=` on a link that is not `bf://`, or an enabled program in `sensors/` or `routines/` that is not an executable regular file (check a disabled one with `test -x sensors/NAME`). Behind a command on PATH, such as `[python3, sensors/NAME.py]`, the first `sensors/` or `routines/` argument must exist.
 - Non-failing `warnings` name a source whose record `links` or `url` hold text that is neither an identity nor a URL (fix the sensor, then collect again), a `.write-HEX` temporary an interrupted write left (delete it) and identities differing only by letter case ([warnings](https://fmind.github.io/brain-framework/docs/checks/#warnings)).
@@ -33,18 +33,18 @@ bf eval
 
 ## Choose the work
 
-| Need                                                                      | Load                                                |
-| ------------------------------------------------------------------------- | --------------------------------------------------- |
-| Add or change a sensor, its `fields:` mappings, a routine or a Git hook   | [Integrations](references/integrations.md)          |
-| Repair or backfill collection, recover writes, watch or schedule, upgrade | [Operations and recovery](references/operations.md) |
-| Resolve Git conflicts or competing identities in a brain                  | [Conflict resolution](references/conflicts.md)      |
-| Correct authored knowledge or review a decision                           | the `bf-use` skill                                  |
+| Need                                                                              | Load                                                |
+| --------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Add or change a sensor, its `fields:` mappings, a routine, a prompt or a Git hook | [Integrations](references/integrations.md)          |
+| Repair or backfill collection, recover writes, watch or schedule, upgrade         | [Operations and recovery](references/operations.md) |
+| Resolve Git conflicts or competing identities in a brain                          | [Conflict resolution](references/conflicts.md)      |
+| Correct authored knowledge or review a decision                                   | the `bf-use` skill                                  |
 
 Core commands for that work:
 
 - `bf collect SENSOR` runs one sensor now; `--since`/`--until` bound a backfill (a window ending before now can extend coverage but never makes the source fresh), `--dry-run` previews samples without saving, and `--allow-removal` accepts, for one run, a snapshot that would empty its catalog or remove more than half and more than 10 of its records.
 - `bf build --reproject SENSOR` re-applies a sensor's current `fields:` mappings to its stored records without running it (`--dry-run` counts the changes); plain `bf build` recovers interrupted record writes and rebuilds the disposable `.bf/` cache.
-- `bf run ROUTINE [ARGS]...` runs one routine now, `bf run PROMPT [--stdin]` runs one prompt with piped text as its input, and `bf run --hook EVENT` runs every enabled routine listing that hook; both pass arguments through. A hook reads what Git pipes only when a routine lists it; a direct run reads piped input only with `--stdin`. A Git hook calls it with `exec bf run --hook pre-push -- "$@"`.
+- `bf run ROUTINE [ARGS]...` runs one routine now, `bf run PROMPT [--stdin]` runs one prompt with piped text as its input, and `bf run --hook EVENT` runs every enabled routine listing that hook; the routine forms pass arguments through, and a prompt takes none. A hook reads what Git pipes only when a routine lists it; a direct run reads piped input only with `--stdin`. A Git hook calls it with `exec bf run --hook pre-push -- "$@"`.
 - `bf update` runs due sensors, then due routines, then due prompts, then refreshes the cache; `bf watch` does so continuously in a dashboard, running prompts in a second process beside collection (`--json` for rows); `bf schedule` writes native scheduler files and activates nothing.
 - `bf skills DIR --check` reports whether installed skills match this version; `bf skills DIR` updates the unedited ones and leaves `modified`, `unmanaged` and `newer` folders unchanged ([upgrades](references/operations.md#upgrade-brain-framework)).
 

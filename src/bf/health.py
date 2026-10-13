@@ -134,7 +134,7 @@ def prompt_health(store: Store, *, now: datetime | None = None) -> dict[str, dic
         if success:
             item["last_success"] = success
         if entry.get("run") and not entry.get("error"):
-            # Like a source's last_run: the latest successful run, scheduled or direct.
+            # Like a source's last_run: the latest scheduled run, which only a scheduled success or failure writes.
             item["last_run"] = {
                 "at": entry["run"],
                 **{key: entry[key] for key in ("elapsed_seconds", "output_bytes") if key in entry},

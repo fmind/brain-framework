@@ -17,7 +17,7 @@ name: brain
 
 `version` is the brain format of `bf.yaml`, `evals/*.yaml`, record files and the `memories/` layout; it is independent of the package version. A missing or different version fails before any other field, naming the supported one: `bf.yaml declares version 6; this release reads version: 7`. The changelog lists the upgrade steps of each format.
 
-Add `fields`, [sensors](sensors.md#sensor-settings), [routines](routines.md#routine-settings), related `brains` and [watch preferences](schedule.md#watch-preferences) only as needed. `bf init` writes the version, the name and four starter relations. A program's `command` starts with a bare command name found on PATH, or a normalized path below `sensors/` or `routines/`; absolute paths, other folders, `..` and placeholders there are errors.
+Add `fields`, [sensors](sensors.md#sensor-settings), [routines](routines.md#routine-settings), [prompts](prompts.md#prompt-settings), related `brains` and [watch preferences](schedule.md#watch-preferences) only as needed. `bf init` writes the version, the name and four starter relations. A program's `command` starts with a bare command name found on PATH, or a normalized path below `sensors/` or `routines/`; absolute paths, other folders, `..` and placeholders there are errors.
 
 ## Editor schemas
 

@@ -857,6 +857,9 @@ class Prompt(Program):
         default=1800, description="Seconds between due runs; zero keeps the prompt manual, run only by bf run."
     )
     timeout: Annotated[int, Field(ge=1, le=3600)] = Field(default=900, description="Maximum runtime in seconds.")
+    lookback: Annotated[int, Field(ge=1, le=31_536_000)] = Field(
+        default=86_400, description="Seconds {{start}} reaches back when no scheduled run has finished yet."
+    )
     # The reply becomes a record's text, which a record bounds at 4 MiB.
     max_bytes: Annotated[int, Field(ge=1, le=4 << 20)] = Field(
         default=1 << 20, description="Maximum stdout in bytes; exceeding it fails without recording the run."

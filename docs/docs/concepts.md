@@ -34,12 +34,13 @@ Projects, concepts and action `ACTION.md` notes are Markdown with YAML metadata 
 
 ## Programs
 
-A brain can hold two kinds of programs, both declared in `bf.yaml` and reviewed by you:
+A brain can hold three kinds of programs, all declared in `bf.yaml` and reviewed by you:
 
 | Program | Purpose                                                                         | Runs when                                               |
 | ------- | ------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | Sensor  | Print selected evidence as records; its records form a **source**.              | `bf collect`, or `bf update` and `bf watch` when due.   |
 | Routine | Any other deterministic brain program, such as a weekly review or a validation. | `bf run`, a hook such as Git's pre-commit, or when due. |
+| Prompt  | Your agent harness run over a Markdown prompt; each run becomes a record.       | `bf run`, or `bf update` and `bf watch` when due.       |
 
 Each program keeps its recent output and errors in `logs/NAME.log`. [Sensors](sensors.md), [routines](routines.md) and [watch and schedule](schedule.md) explain their setup.
 
@@ -70,13 +71,13 @@ Each program keeps its recent output and errors in `logs/NAME.log`. [Sensors](se
 
 These boundaries hold everywhere; other pages link here instead of repeating them.
 
-- **It runs no model.** Search matches words and exact identities, without embeddings, translation or generated answers.
+- **It never runs a model itself.** Search matches words and exact identities, without embeddings, translation or generated answers; [prompts](prompts.md) start your agent harness, which does the reasoning.
 - **It infers nothing.** Similar names never establish an identity, and prose never creates a relation. Links, aliases and field mappings are explicit.
 - **It does not verify truth.** Validation checks structure and links; a passing retrieval case checks the chosen evidence. A record shows what its source said.
 - **Retrieval never collects.** `bf search` and `bf read` never contact providers or run programs. A fresh cache can hold old evidence: check source coverage before calling evidence current.
 - **An incomplete result proves no absence.** A reply with `problems` or `stale`, a failed source or a missing period cannot show that something does not exist. One page of results is not the whole result.
 - **Reminders are not reviews.** A `review` flag comes from dates, file edits and linked evidence. It never marks a note as checked.
-- **Programs run only when you ask.** Sensors and routines run through `bf collect`, `bf run`, `bf update`, `bf watch` or a schedule you install, in one selected brain. Registration and references never grant execution.
+- **Programs run only when you ask.** Sensors, routines and prompts run through `bf collect`, `bf run`, `bf update`, `bf watch` or a schedule you install, in one selected brain. Registration and references never grant execution.
 - **It is not a sandbox or a backup.** Programs run with your account's permissions; keep backups of your brain.
 
 ## Glossary
@@ -101,6 +102,6 @@ These boundaries hold everywhere; other pages link here instead of repeating the
 | Reprojection     | Applying a sensor's current mappings to the records it already collected, without running it.                                                                                                                                                  | [Reproject](schema.md#reproject-stored-records)                        |
 | Retrieval case   | A saved question and the evidence that search or read must return.                                                                                                                                                                             | [Retrieval cases](checks.md#retrieval-cases)                           |
 | Review flag      | `"review":true` on a project, or a note with `stale_after`: its review is due, or linked evidence is newer than its last edit; `newer` names that evidence.                                                                                    | [Review reminders](brain.md#review-reminders)                          |
-| Source           | The records of one sensor, stored in `memories/SENSOR/`. Not to be confused with a note's OKF `sources` (see Cites).                                                                                                                           | [Records](brain.md#records)                                            |
+| Source           | The records of one sensor or prompt, stored in `memories/NAME/`. Not to be confused with a note's OKF `sources` (see Cites).                                                                                                                   | [Records](brain.md#records)                                            |
 | Stale            | A search or read reply served while another writer updates the cache; retry for newer results. In `bf status`, `"cache":"stale"` instead means an interrupted write awaits recovery.                                                           | [Incomplete answers](search.md#incomplete-answers-and-freshness)       |
 | Tag              | An exact topic label in a note's `tags`; never an identity or a dependency.                                                                                                                                                                    | [Tag rules](link-reference.md#tag-rules)                               |

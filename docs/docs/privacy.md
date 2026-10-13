@@ -31,7 +31,7 @@ Disabling training or optional telemetry does not make cloud inference local. BF
 ## Build a fully local workflow
 
 1. Keep the brain and backups on storage you control, with disk and backup encryption for sensitive files.
-1. Use BF's CLI directly, or an agent configured with a locally hosted model.
+1. Use BF's CLI directly, or an agent configured with a locally hosted model; declare [prompts](prompts.md) only for a harness on a local model.
 1. Review that agent's network access, telemetry, extensions and tools before giving it private evidence.
 1. Collect local files when you need a workflow without external services; cloud sensors still contact their providers.
 

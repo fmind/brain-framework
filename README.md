@@ -130,7 +130,7 @@ watch: # keep sources fresh and alert on failure
   notifications: failure
 ```
 
-BF runs each program with its configured arguments and no shell, bounds its time and output, validates what it prints and keeps its stderr in `logs/`. A failed run never changes your evidence. `bf watch` keeps due sensors and routines fresh in a terminal dashboard, and `bf schedule` generates native systemd, launchd or cron jobs for you to install. See [sensors](https://fmind.github.io/brain-framework/docs/sensors/), [routines](https://fmind.github.io/brain-framework/docs/routines/) and [watch and schedule](https://fmind.github.io/brain-framework/docs/schedule/).
+BF runs each program with its configured arguments and no shell, bounds its time and output, validates what it prints and keeps its stderr in `logs/`. A failed run never changes your evidence. `bf watch` keeps due sensors, routines and prompts fresh in a terminal dashboard, and `bf schedule` generates native systemd, launchd or cron jobs for you to install. See [sensors](https://fmind.github.io/brain-framework/docs/sensors/), [routines](https://fmind.github.io/brain-framework/docs/routines/) and [watch and schedule](https://fmind.github.io/brain-framework/docs/schedule/).
 
 ### One vocabulary, set at collection
 
@@ -257,7 +257,7 @@ Each host reads its own folder: for Claude Code, use `~/.claude/skills` instead.
 | `bf-use`      | Find evidence, cite it, and keep projects and concepts current.                 |
 | `bf-action`   | Start, resume and hand off a tracked work session: `/bf-action website-review`. |
 | `bf-setup`    | Install BF, create a brain, connect the agent and choose sources worth adding.  |
-| `bf-maintain` | Run sensors and routines, check the brain and upgrade it safely.                |
+| `bf-maintain` | Run sensors, routines and prompts, check the brain and upgrade it safely.       |
 
 Working in a code repository instead? The [example session hook](https://github.com/fmind/brain-framework/tree/main/examples/hooks) prints the project that declares the repository, its next task and linked evidence when the session starts. During collection, a usable cached reply carries an “Index refreshing” note. Hosts that prefer tools can call `search` and `read` through [MCP](https://fmind.github.io/brain-framework/docs/mcp/). See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/).
 

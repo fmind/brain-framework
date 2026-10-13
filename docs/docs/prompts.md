@@ -21,7 +21,7 @@ Add the prompt under `prompts:` in `bf.yaml`:
 prompts:
   assistant:
     prompt: prompts/assistant.md
-    command: [agy, --model, gemini-3.8-flash-high, --output-format, json, --print-timeout, 14m, -p={{prompt}}]
+    command: [agy, --model, gemini-3.8-flash-high, --output-format, json, --print-timeout, 14m, "-p={{prompt}}"]
     text: /response
     timeout: 900
 ```
@@ -60,28 +60,28 @@ BF expands these placeholders in the prompt file once, so a placeholder in your 
 | `{{end}}`   | Now.                                                                                    |
 | `{{input}}` | The text `bf run PROMPT --stdin` received, such as a message; empty on a scheduled run. |
 
-The expanded prompt replaces `{{prompt}}` in `command`, also inside an argument such as `-p={{prompt}}`. A command without `{{prompt}}` receives it on standard input instead. Linux bounds one argument at 128 KiB, so an expanded prompt holds at most 120,000 bytes. The command's other arguments take `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`, as a routine's do.
+The expanded prompt replaces `{{prompt}}` in `command`, also inside an argument such as `-p={{prompt}}`. Quote such an argument in YAML, as in `"-p={{prompt}}"`: unquoted inside `[...]`, a brace opens a mapping and `bf.yaml` fails to load. A command without `{{prompt}}` receives it on standard input instead. Linux bounds one argument at 128 KiB, so an expanded prompt holds at most 120,000 bytes. The command's other arguments take `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`, as a routine's do.
 
 `text` is a JSON Pointer to the reply in the command's JSON output; its other members, such as token usage and a conversation id, become the record's `output` attribute. Without `text`, all of stdout is the reply. Two harnesses as examples:
 
 | Harness     | `command`                                                                        | `text`      |
 | ----------- | -------------------------------------------------------------------------------- | ----------- |
-| Antigravity | `[agy, --model, gemini-3.8-flash-high, --output-format, json, -p={{prompt}}]`    | `/response` |
+| Antigravity | `[agy, --model, gemini-3.8-flash-high, --output-format, json, "-p={{prompt}}"]`  | `/response` |
 | Claude Code | `[claude, --print, --output-format, json]`, reading the prompt on standard input | `/result`   |
 
 Pass the harness's own time limit below `timeout`, such as `--print-timeout 14m` for Antigravity: BF ends a run at its `timeout` and records nothing.
 
 ## What a run records
 
-Each successful run writes one record in `memories/NAME/`, a source like a sensor's: search, pages, `bf read memories/NAME/24h` and record refs work on it, and Git ignores it. A prompt's records are model output, so they rank like a [low-priority source](sensors.md#sensor-settings): at half weight in word searches, and only as a count on period and home pages, so a summary never outranks the evidence it summarizes. Its source page, exact reads and `--scope memories/NAME` list them normally.
+Each successful run writes one record in `memories/NAME/`, a source like a sensor's: search, pages, `bf read memories/NAME/24h` and record refs work on it, and Git ignores it. A prompt's records are model output, so they rank like a [low-priority source](sensors.md#quiet-a-high-volume-source): at half weight in word searches, and only as a count on period and home pages, so a summary never outranks the evidence it summarizes. Its source page, exact reads and `--scope memories/NAME` list them normally.
 
-| Record field | Value                                                                                                |
-| ------------ | ---------------------------------------------------------------------------------------------------- |
-| `id`         | The run's UTC start and a random suffix, such as `20261013T143000Z-1a2b3c4d`.                        |
-| `title`      | The reply's first line without Markdown heading marks.                                               |
-| `text`       | The reply.                                                                                           |
-| `time`       | When the run started.                                                                                |
-| `attributes` | `trigger` (`schedule` or `run`), `window` (`start`, `end`), `elapsed_seconds`, `input` and `output`. |
+| Record field | Value                                                                                                                              |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `id`         | The run's UTC start and a random suffix, such as `20261013T143000Z-1a2b3c4d`.                                                      |
+| `title`      | The reply's first line without Markdown heading marks, cut to 120 characters; `NAME run without a reply` when empty.               |
+| `text`       | The reply.                                                                                                                         |
+| `time`       | When the run started.                                                                                                              |
+| `attributes` | `observed`, `trigger` (`schedule` or `run`), `window` (`start`, `end`), `elapsed_seconds`, and `input` and `output` when nonempty. |
 
 A run that exits nonzero, times out, prints more than `max_bytes`, prints no JSON object while `text` is set, or lacks a text string at `text` writes no record. Its stderr goes to `logs/NAME.log`. A failed scheduled run backs off as a sensor's does; a failed direct run is only logged, so it never moves the schedule or its attention.
 

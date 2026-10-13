@@ -41,7 +41,7 @@ For analysis outside BF, `bf export` streams one JSON line per edge of the selec
 
 ## Interpret attention signals
 
-The home page's `attention` lists scheduled sensors and routines that failed, are `overdue` or `never` succeeded. Home lists the projects needing review first, as many as fit its 32 KiB page; `projects_total` counts every project that is not `deprecated`, and `bf read projects` lists them all.
+The home page's `attention` lists scheduled sensors, routines and prompts that failed, are `overdue` or `never` succeeded. Home lists the projects needing review first, as many as fit its 32 KiB page; `projects_total` counts every project that is not `deprecated`, and `bf read projects` lists them all.
 
 Projects and notes that set `stale_after`, unless `deprecated`, carry review signals on home and folder pages and on a whole read, beside their `tasks` and `next` task: `modified` (the file's last change), `review_due` (the local day a review falls due), `review_source`, `new_links` (the count of linked items that happened or changed upstream after the note's last edit) and, when the note needs attention, `review: true` with its `review_reasons`. `newer` names up to 5 of those items, newest first: read them before relying on the note. A section read states its note's `title`, `type`, `status` and `date` instead. The [review guide](review.md) says when a note falls due, and the [retrieval reference](https://fmind.github.io/brain-framework/docs/retrieval/#ordering-and-review-signals) lists every reason. A reminder, an edit or newer linked evidence is a reason to inspect, never evidence of verification.
 

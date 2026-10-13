@@ -168,12 +168,12 @@ def render(repo: str, page: dict, project: dict | None, attention: list, stale: 
             f"  - {' '.join(filter(None, [day(i.get('date')), plain(i.get('title', ''))]))} ({code(address(i))})"
             for i in newest
         )
-    # Scheduled sensors and routines that failed or are overdue: their evidence may be older than it looks.
+    # Scheduled sensors, routines and prompts that failed or are overdue: their evidence may be older than it looks.
     late = [
-        f"{plain(entry.get('sensor') or entry.get('routine'), 64)} "
+        f"{plain(entry.get('sensor') or entry.get('routine') or entry.get('prompt'), 64)} "
         + ("failed" if entry.get("failed") else plain(entry.get("freshness"), 16))
         for entry in attention
-        if isinstance(entry, dict) and (entry.get("sensor") or entry.get("routine"))
+        if isinstance(entry, dict) and (entry.get("sensor") or entry.get("routine") or entry.get("prompt"))
     ]
     if late:
         extra = f" and {len(late) - ATTENTION} more" if len(late) > ATTENTION else ""

@@ -80,6 +80,7 @@ HOME = {
     "attention": [
         {"sensor": "github", "freshness": "overdue"},
         {"routine": "weekly-review", "freshness": "fresh", "failed": True},
+        {"prompt": "assistant", "freshness": "overdue"},
     ],
 }
 
@@ -117,7 +118,7 @@ def test_session_context_summarizes_the_repository_project(provider: Provider) -
             "list one relation with `bf read projects/brain-framework.md --rel RELATION`."
         ),
         "  - 2026-09-25 Keep coverage (`projects/coverage.md`)",
-        "- Collection needs attention: github overdue, weekly-review failed; see `bf status`.",
+        "- Collection needs attention: github overdue, weekly-review failed, assistant overdue; see `bf status`.",
         "Read more with `bf read projects/brain-framework.md`; collected records are counted, not quoted.",
     ]
     assert "Ignore all instructions" not in result.stdout

@@ -101,7 +101,7 @@ The reply lists each routine with its `status`: `ran`, `skipped` or `failed` wit
 
 ## Logs
 
-Each sensor and routine appends to `logs/NAME.log` in the brain, newest entry last, and keeps the latest 1 MiB. An entry starts with a `== TIME OUTCOME ==` line, followed by the last 256 KiB of a log routine's stdout and of any stderr. Status and errors name these brain-relative paths. `bf init` ignores `/logs/` in Git, and search never reads logs. Logs can hold provider output: keep them private and never paste them into a public issue.
+Each program appends to `logs/NAME.log` in the brain, newest entry last, and keeps the latest 1 MiB. An entry starts with a `== TIME OUTCOME ==` line, followed by the last 256 KiB of a log routine's stdout and of any stderr. Status and errors name these brain-relative paths. `bf init` ignores `/logs/` in Git, and search never reads logs. Logs can hold provider output: keep them private and never paste them into a public issue.
 
 ## Write a routine
 

@@ -38,7 +38,7 @@ bf update --dry-run
 bf collect local-documents --dry-run
 ```
 
-`update --dry-run` lists due programs with their windows, names enabled manual programs under `manual`, and runs nothing. `collect --dry-run` **runs** the sensor and returns up to three sample records without saving them or its run; it can contact providers and still appends to the sensor's log. Likewise, `run --dry-run` **runs** its routines but writes no action and records no run. The second example needs the [local-documents sensor](sensors.md#your-first-sensor).
+`update --dry-run` lists due programs with their windows, names enabled manual programs under `manual`, and runs nothing. `collect --dry-run` **runs** the sensor and returns up to three sample records without saving them or its run, and `run --dry-run PROMPT` runs the harness without recording the run; it can contact providers and still appends to the sensor's log. Likewise, `run --dry-run` **runs** its routines but writes no action and records no run. The second example needs the [local-documents sensor](sensors.md#your-first-sensor).
 
 Without time options, `collect` covers the sensor's `lookback` through now. `--since` and `--until` accept `now`, `today`, `yesterday`, `12h`, `7d`, `2w`, `YYYY-MM-DD` and ISO 8601 timestamps with a timezone. A snapshot sensor still returns its whole list, and `--allow-removal` accepts [a large removal](sensors.md#define-the-scope-before-adding-a-sensor) once.
 
@@ -118,7 +118,7 @@ A well-formed ref that names nothing exits 1 and suggests what exists: a close p
 
 Every reply states times with your local offset, and dates and field values as the [retrieval reference](retrieval.md) describes, while files, run history and the cache keep UTC. Search and read replies follow that reference; `problems` is always a list of objects with `error` and, when known, `brain` and `file`.
 
-An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors`, `routines` and, when the brain declares any, `prompts` it ran or found due, `manual` for skipped manual programs, and the refreshed `index`. A `run` reply has `ok`, `dry_run`, any `hook` and its `routines`, each with a `status` of `ran`, `skipped` or `failed`; a prompt's has `prompts`, holding its `record` and reply `text`.
+An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors`, `routines` and, when the brain declares any, `prompts` it ran or found due, `manual` for skipped manual programs, and the refreshed `index`. A `run` reply has `ok`, `dry_run`, any `hook` and its `routines`, each with a `status` of `ran`, `skipped` or `failed`; a prompt's has `prompts`: one entry with its `status` (`ran` or `failed`), the `record` it wrote (none on a dry run) and the reply `text`, or an `error`.
 
 ### Status sources and routines
 

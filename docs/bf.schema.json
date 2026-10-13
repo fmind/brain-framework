@@ -71,7 +71,7 @@
         },
         "lookback": {
           "default": 86400,
-          "description": "Seconds covered by a sensor's first run, each snapshot run and bf collect without --since, and by a routine run without history.",
+          "description": "Seconds {{start}} reaches back when no scheduled run has finished yet.",
           "maximum": 31536000,
           "minimum": 1,
           "title": "Lookback",

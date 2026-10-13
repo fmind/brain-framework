@@ -24,7 +24,7 @@ A valid New website note can still omit the reason for its decision: validation 
 - Declared relations: a link naming an undeclared one, a `?rel=` on a link that is not `bf://`, a relation written at the top of frontmatter instead of under `fields:`, and identities outside a relation's `targets`.
 - [Identities](links.md#give-a-subject-a-stable-identity): a BF `entity`, alias or `resource` names a whole subject in this brain, and no identity holds invisible format characters, such as U+200B.
 - Record files: their names, the fixed record format and stored `fields` against the current `fields:`.
-- Each enabled program: a script run directly must be an executable regular file, and behind a command on PATH, such as `[uv, run, ..., sensors/brief.py]`, the first `sensors/` or `routines/` path among the arguments must exist.
+- Each enabled program: a script run directly must be an executable regular file, and behind a command on PATH, such as `[uv, run, ..., sensors/brief.py]`, the first `sensors/` or `routines/` path among the arguments must exist. An enabled prompt's `prompt` file must be a regular file.
 
 Each distinct problem appears once per file; a link relation problem names the frontmatter key, such as `links:`, or the `line N` where it first occurs. A note whose frontmatter or links cannot be parsed reports that first, and its other problems once it is fixed. Validation lists at most 200 problems, then `"problems_truncated":true`: fix these and validate again. Targets in other brains appear under [`unresolved`](link-reference.md#across-brains) without making the brain invalid.
 

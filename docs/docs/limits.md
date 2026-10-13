@@ -46,7 +46,7 @@ Look up exact limits for a skipped file, a partial reply or a stopped program. F
 | Reprojection                                  | 1,000 changed records per transaction; 200 failed records listed                                                     |
 | Sensor output                                 | 64 MiB by default, up to 256 MiB                                                                                     |
 | Action routine output                         | 1 MiB by default, up to 4 MiB; a log routine's output only feeds its log                                             |
-| Routine input from `bf run`                   | 1 MiB, ending within 10 seconds when piped                                                                           |
+| Routine or prompt input from `bf run`         | 1 MiB, ending within 10 seconds when piped                                                                           |
 | Prompt output                                 | 1 MiB by default, up to 4 MiB                                                                                        |
 | Expanded prompt                               | 120,000 bytes, below Linux's 128 KiB bound on one argument                                                           |
 | Program command                               | The program and up to 127 arguments of at most 16,384 characters each                                                |
