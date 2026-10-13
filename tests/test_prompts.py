@@ -19,7 +19,7 @@ from bf.cli import app
 from bf.collect import Runner, due_prompts, prompt
 from bf.health import attention, report
 from bf.history import PROMPTS, log_path, state
-from bf.models import Config, Error, Program, Prompt
+from bf.models import Config, Error, Program, Prompt, local, present
 from bf.retrieve import read
 from bf.storage import Store, collecting
 from bf.update import run_prompt, update
@@ -222,9 +222,92 @@ def test_a_direct_run_answers_its_input_without_moving_the_schedule(configured: 
 )
 def test_an_unreadable_reply_writes_no_record(configured: Store, output: bytes, message: str) -> None:
     with pytest.raises(Error, match=message):
-        prompt(configured, "assistant", start=START, end=END, runner=replying(output), clock=lambda: NOW)
+        prompt(
+            configured, "assistant", start=START, end=END, scheduled=True, runner=replying(output), clock=lambda: NOW
+        )
     assert stored(configured) == []
     assert state(configured, PROMPTS)["assistant"]["failures"] == 1
+
+
+def test_a_direct_run_never_touches_the_schedule(configured: Store) -> None:
+    reply = json.dumps(REPLY).encode()
+    prompt(configured, "assistant", start=START, end=END, scheduled=True, runner=replying(reply), clock=lambda: NOW)
+    scheduled = state(configured, PROMPTS)["assistant"]
+    later = NOW + timedelta(minutes=1)
+    with pytest.raises(Error, match="no record was written"):
+        prompt(configured, "assistant", start=START, end=END, runner=failing, clock=lambda: later)
+    # A failed message neither triggers an early review nor reports the schedule as failing.
+    assert state(configured, PROMPTS)["assistant"] == scheduled
+    assert due_prompts(configured, later + timedelta(minutes=1)) == []
+    assert attention(configured, later) == []
+    assert "failed: program exited with status 3" in configured.read(log_path("assistant")).decode()
+    # A failing schedule stays failing after a successful message.
+    with pytest.raises(Error):
+        prompt(
+            configured,
+            "assistant",
+            start=START,
+            end=END,
+            scheduled=True,
+            runner=failing,
+            clock=lambda: NOW + timedelta(hours=1),
+        )
+    prompt(
+        configured, "assistant", start=START, end=END, runner=replying(reply), clock=lambda: NOW + timedelta(hours=2)
+    )
+    history = state(configured, PROMPTS)["assistant"]
+    assert (history["failures"], history["runs"]) == (1, 2)
+
+
+def test_a_scheduled_run_rechecks_that_it_is_due_once_it_holds_the_lock(configured: Store) -> None:
+    reply = json.dumps(REPLY).encode()
+    prompt(configured, "assistant", start=START, end=END, scheduled=True, runner=replying(reply), clock=lambda: NOW)
+    calls: list[tuple[list[str], bytes]] = []
+    # Another process ran it a minute ago: a stale due list must not run it again or move its history back.
+    later = NOW + timedelta(minutes=1)
+    result = prompt(
+        configured,
+        "assistant",
+        start=START,
+        end=END,
+        scheduled=True,
+        runner=replying(reply, calls),
+        clock=lambda: later,
+    )
+    assert result == {"prompt": "assistant", "skipped": "another run of this prompt just succeeded"}
+    assert calls == []
+    assert state(configured, PROMPTS)["assistant"]["success"] == END
+    # A cycle dated before that run, such as a long update, skips too instead of moving the history back.
+    earlier = prompt(
+        configured,
+        "assistant",
+        start=START,
+        end=END,
+        scheduled=True,
+        runner=replying(reply, calls),
+        clock=lambda: NOW - timedelta(minutes=5),
+    )
+    assert "skipped" in earlier
+    assert calls == []
+    # When due, the run covers the time since the last scheduled one, whatever window the caller computed.
+    due = NOW + timedelta(minutes=31)
+    prompt(
+        configured, "assistant", start=START, end=END, scheduled=True, runner=replying(reply, calls), clock=lambda: due
+    )
+    assert f"Window {END} to 2026-09-25T08:31:00.000000Z" in calls[0][0][2]
+
+
+def test_titles_drop_control_characters_and_arguments_stay_within_linux_bounds(
+    configured: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tabbed = json.dumps({"response": "Summary:\tTwo replies owed"}).encode()
+    prompt(configured, "assistant", start=START, end=END, runner=replying(tabbed), clock=lambda: NOW)
+    assert stored(configured)[0]["title"] == "Summary: Two replies owed"
+    with pytest.raises(Error, match="cannot hold a NUL character"):
+        prompt(configured, "assistant", start=START, end=END, text="a\x00b", runner=failing)
+    monkeypatch.setattr(collector, "MAX_ARGUMENT", 64)
+    with pytest.raises(Error, match="exceeds Linux's 128 KiB limit"):
+        prompt(configured, "assistant", start=START, end=END, runner=failing)
 
 
 def test_failures_write_no_record_and_back_off(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -301,6 +384,13 @@ def test_status_reports_prompts_and_their_records(configured: Store) -> None:
         "record": f"assistant:{RECORD}",
     }
     assert (last["at"], last["output_bytes"], type(last["elapsed_seconds"])) == (END, len(json.dumps(REPLY)), float)
+    # Replies state the instant with the local offset, as they do last_success.
+    [shown] = cast(
+        "list[dict[str, object]]", cast("dict[str, object]", present(report([configured], now=NOW)))["brains"]
+    )
+    assert cast("dict[str, dict[str, dict[str, object]]]", shown["prompts"])["assistant"]["last_run"]["at"] == local(
+        END
+    )
     assert prompts["piped"]["freshness"] == "manual"
     assert prompts["paused"] == {"state": "disabled", "freshness": "unknown", "runs": 0}
     source = cast("dict[str, dict[str, object]]", brain["sources"])["assistant"]

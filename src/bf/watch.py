@@ -701,11 +701,18 @@ def _loop(
             next_read = 0
         if agent is not None and dashboard.prompting and (code := agent.poll()) is not None:
             dashboard.prompting = False
+            # As for collection: a cycle the search cache alone failed still completed its prompts.
+            skipped = agent.skipped() if code else 0
             agent.discard()
             dashboard.message = (
-                "Prompt run complete" if code == 0 else "Prompt run failed; inspect its details or run bf status"
+                "Prompt run complete"
+                if code == 0
+                else f"Search cache skipped {skipped} files; run bf validate"
+                if skipped
+                else "Prompt run failed; inspect its details or run bf status"
             )
             next_prompt = now + preferences.interval
+            code = 0 if skipped else code
             completed = code if completed is None else completed or code
             next_read = 0
         if now >= next_read:
@@ -731,6 +738,8 @@ def _loop(
                         now=now,
                     )
                     completed = None
+                    # Each success counts as work once, whichever process finishes next.
+                    previous = {(row.kind, row.name): row.success for row in dashboard.rows}
                     if warning:
                         dashboard.message = warning
                         # The dashboard shows it; stderr text written under the alternate screen is lost.

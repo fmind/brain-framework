@@ -26,6 +26,7 @@ from bf.config import load
 from bf.history import PROMPTS, ROUTINES, SENSORS, append_log, environment, log_path, remember, state
 from bf.markdown import note, parse, validate_okf
 from bf.models import (
+    _CONTROL,
     RECORD_KEYS,
     Config,
     Error,
@@ -55,8 +56,10 @@ SHRINK_FLOOR = 10
 REPROJECT = 1000
 LIMIT = 200
 _EXISTS = "an action for this routine already exists today"
-# Linux bounds one argument at 128 KiB (MAX_ARG_STRLEN): an expanded prompt passed as {{prompt}} stays below it.
+# Linux bounds one argument at 128 KiB (MAX_ARG_STRLEN, its NUL included): an expanded prompt passed as {{prompt}}
+# stays below it, and so must the whole argument holding it.
 MAX_PROMPT = 120_000
+MAX_ARGUMENT = (128 << 10) - 1
 _TEMPLATE = re.compile(r"\{\{(brain|home|start|end|input)\}\}")
 # A record title shows the reply's first line, shortened.
 _TITLE = 120
@@ -634,9 +637,9 @@ def _reply(raw: bytes, pointer: str | None) -> tuple[str, dict[str, JsonValue]]:
 
 
 def _title(name: str, reply: str) -> str:
-    """The reply's first line without Markdown heading marks, else a neutral title."""
+    """The reply's first line without Markdown heading marks or control characters, else a neutral title."""
     for line in reply.splitlines():
-        if line := line.strip().lstrip("#").strip():
+        if line := _CONTROL.sub(" ", line).strip().lstrip("#").strip():
             return line if len(line) <= _TITLE else line[: _TITLE - 1].rstrip() + "…"
     return f"{name} run without a reply"
 
@@ -656,9 +659,11 @@ def prompt(
     """Run one prompt over [start, end) with `text` as its input, and record the reply in memories/NAME/.
 
     The prompt file, with {{brain}}, {{home}}, {{start}}, {{end}} and {{input}} expanded, replaces {{prompt}} in the
-    command, or is its standard input when the command holds no {{prompt}}. A scheduled run holds the prompt's lock and
-    advances its window; a direct run, such as an owner's message, never waits for a scheduled one and leaves the
-    schedule unchanged. A failure writes no record.
+    command, or is its standard input when the command holds no {{prompt}}. A scheduled run holds the prompt's lock,
+    then checks again that the prompt is due and covers the window since its last scheduled run: another process may
+    have just run it. It reports `skipped` instead. A direct run, such as an owner's message, never waits for a
+    scheduled one and leaves the schedule's history unchanged, failures included: only its log and run count change.
+    A failure writes no record.
     """
     start, end = _window(start, end)
     config = load(store)
@@ -667,6 +672,15 @@ def prompt(
         if scheduled:
             stack.enter_context(collecting(store, name))
         started = clock()
+        if scheduled:
+            last = state(store, PROMPTS).get(name, {})
+            success = datetime.fromisoformat(str(last["success"])) if last.get("success") else None
+            # A success after this run's own clock, within one refresh, is another process's run that started later,
+            # such as watch's prompt process during a long update; a larger gap is a clock correction, which runs.
+            recent = success is not None and timedelta(0) < success - started < timedelta(seconds=program.refresh)
+            if recent or not _due(program, last, started):
+                return {"prompt": name, "skipped": "another run of this prompt just succeeded"}
+            start, end = window(store, name, started)
         observed = timestamp(started.isoformat())
         measured = time.monotonic()
         committed = False
@@ -682,7 +696,13 @@ def prompt(
             if len(expanded.encode()) > MAX_PROMPT:
                 raise Error(f"the expanded prompt exceeds {MAX_PROMPT:,} bytes; shorten {program.prompt} or its input")
             passed = any("{{prompt}}" in argument for argument in program.command)
+            if passed and "\x00" in expanded:
+                raise Error("a prompt passed as {{prompt}} cannot hold a NUL character; remove it from the input")
             argv = _argv(store, program, start, end, expanded if passed else "")
+            if passed and max(len(os.fsencode(argument)) for argument in argv) > MAX_ARGUMENT:
+                raise Error(
+                    "the argument holding {{prompt}} exceeds Linux's 128 KiB limit; shorten the prompt or its input"
+                )
             raw = runner(argv, program, store, name, b"" if passed else expanded.encode())
             reply, output = _reply(raw, program.text)
             elapsed = round(time.monotonic() - measured, 6)
@@ -710,27 +730,26 @@ def prompt(
                 records.upsert(store, name, [record], snapshot=False)
                 committed = True
                 runs = int(str(state(store, PROMPTS).get(name, {}).get("runs", 0))) + 1
-                remember(
-                    store,
-                    name,
-                    PROMPTS,
-                    run=observed,
-                    error="",
-                    failures=0,
-                    runs=runs,
-                    record=ref,
-                    records=1,
-                    elapsed_seconds=elapsed,
-                    output_bytes=len(raw),
-                    # Only the schedule's own runs move it: answering a message leaves the next review due.
-                    **({"success": observed, "start": start, "end": end} if scheduled else {}),
-                )
-        except (Error, OSError, UnicodeError, ValueError) as error:
+                # Only the schedule's own runs move it: answering a message leaves the next review, its retry
+                # backoff and any failure it reported as they were.
+                scheduling = {
+                    "run": observed,
+                    "success": observed,
+                    "start": start,
+                    "end": end,
+                    "error": "",
+                    "failures": 0,
+                    "records": 1,
+                    "elapsed_seconds": elapsed,
+                    "output_bytes": len(raw),
+                }
+                remember(store, name, PROMPTS, runs=runs, record=ref, **(scheduling if scheduled else {}))
+        except (Error, OSError, UnicodeError, ValidationError) as error:
             message = (
                 str(error)
                 if isinstance(error, Error)
-                else "prompt reply is not a valid record; keep it under 4 MiB of UTF-8"
-                if isinstance(error, ValueError)
+                else "prompt reply is not a valid record: " + explain(error, RECORD_KEYS)
+                if isinstance(error, ValidationError)
                 else "prompt files are inaccessible; check the prompt file, its command and free space"
             )
             message = (
@@ -738,7 +757,8 @@ def prompt(
                 if committed
                 else f"{message}; no record was written"
             )
-            _failed(store, name, PROMPTS, started, message, error, dry_run=dry_run)
+            # A direct run's failure is logged only: it never moves the schedule's retry backoff or attention.
+            _failed(store, name, PROMPTS, started, message, error, dry_run=dry_run or not scheduled)
         with suppress(Error, OSError):
             append_log(store, name, f"{_now()} recorded {ref}")
         return result

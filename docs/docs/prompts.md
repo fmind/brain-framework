@@ -83,15 +83,15 @@ Each successful run writes one record in `memories/NAME/`, a source like a senso
 | `time`       | When the run started.                                                                                |
 | `attributes` | `trigger` (`schedule` or `run`), `window` (`start`, `end`), `elapsed_seconds`, `input` and `output`. |
 
-A run that exits nonzero, times out, prints more than `max_bytes`, prints no JSON object while `text` is set, or lacks a text string at `text` writes no record. Its stderr goes to `logs/NAME.log`, and scheduled retries back off as a sensor's do.
+A run that exits nonzero, times out, prints more than `max_bytes`, prints no JSON object while `text` is set, or lacks a text string at `text` writes no record. Its stderr goes to `logs/NAME.log`. A failed scheduled run backs off as a sensor's does; a failed direct run is only logged, so it never moves the schedule or its attention.
 
 ## Schedule and overlap
 
-A prompt is due when it is enabled, has a nonzero `refresh` (30 minutes by default) and its last scheduled run did not succeed within it. Only scheduled runs move the schedule: answering a message with `bf run` never postpones the next review.
+A prompt is due when it is enabled, has a nonzero `refresh` (30 minutes by default) and its last scheduled run did not succeed within it. Only scheduled runs move the schedule: answering a message with `bf run` never postpones the next review, and neither its success nor its failure changes the schedule's history.
 
-`bf update` runs due prompts after its sensors and routines, outside the update lock other cycles wait for. `bf watch` runs them in a separate process beside collection, as `bf update --kind prompt`, so a long agent run never delays a sensor. A scheduled run that is still active elsewhere makes the next one skip and keep its window. A direct `bf run` never waits for a scheduled run, so a message is answered while a review continues.
+`bf update` runs due prompts after its sensors and routines, outside the update lock other cycles wait for. `bf watch` runs them in a separate process beside collection, as `bf update --kind prompt`, so a long agent run never delays a sensor. A scheduled run that is still active elsewhere makes the next one skip and keep its window, and a scheduled run checks again, once it holds the prompt's lock, that no other process ran it meanwhile. A direct `bf run` never waits for a scheduled run, so a message is answered while a review continues.
 
-`bf status` reports each prompt under `prompts` with its `state`, `freshness`, `runs`, `last_success` (the last scheduled run), `last_run` (`at`, `elapsed_seconds`, `output_bytes` of the latest successful run), latest `record`, and `failed`, `error`, `failures` and `log` after a failure; its `attention` lists failing or overdue prompts. The watch dashboard marks prompts with `@` and shows their runs.
+`bf status` reports each prompt under `prompts` with its `state`, `freshness`, `runs` (successful runs, scheduled or direct), `last_success` and `last_run` (`at`, `elapsed_seconds` and `output_bytes` of the latest scheduled run, omitted after its failure), the latest `record` of any run, and `failed`, `error`, `failures` and `log` after a failure; its `attention` lists failing or overdue prompts. The watch dashboard marks prompts with `@` and shows their runs.
 
 ## Prompt settings
 

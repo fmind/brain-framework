@@ -169,6 +169,7 @@ _CANONICAL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\
 # Reply keys holding instants; record `fields` keep their stored values.
 _INSTANTS = frozenset(
     {
+        "at",
         "end",
         "last_collected",
         "last_success",

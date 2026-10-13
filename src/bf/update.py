@@ -109,6 +109,7 @@ def _update(
     hold the brain's update lock, computing their due list inside it; prompts run after its release, each skipping
     while a scheduled run of it is still active.
     """
+    given = now
     now = now or datetime.now(UTC)
     config = load(store)
     selected_sensors, selected_routines, selected_prompts = selection(config, sensors, routines, prompts, kinds)
@@ -146,17 +147,17 @@ def _update(
                 failed = True
             ran.append(result)
     asked: list[dict[str, object]] = []
-    for program, start, end in [item for item in due_prompts(store, now) if item[0] in selected_prompts]:
+    # Sensors and earlier prompts can run for minutes: each prompt is due, and dated, by the time it starts.
+    clock = (lambda: given) if given else (lambda: datetime.now(UTC))
+    for program, start, end in [item for item in due_prompts(store, clock()) if item[0] in selected_prompts]:
         result = {"prompt": program, "start": start, "end": end}
         if dry_run:
             asked.append({**result, "status": "due"})
             continue
         try:
-            result.update(
-                prompt(store, program, start=start, end=end, scheduled=True, runner=runner, clock=lambda: now)
-            )
+            result.update(prompt(store, program, start=start, end=end, scheduled=True, runner=runner, clock=clock))
             result.pop("text", None)
-            result["status"] = "ran"
+            result["status"] = "skipped" if "skipped" in result else "ran"
         except BusyError:
             # A scheduled run still answering keeps its window: the next cycle covers this one too.
             result.update(status="skipped", skipped="a scheduled run of this prompt is still active")
