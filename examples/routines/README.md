@@ -42,7 +42,7 @@ EOF
 )
 ```
 
-The dry run lists the due sensor and routine. The update collects one fictional record, then reports the routine with `"status":"ran"` and an `action` at `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, where `XXXXXXXX` is a random suffix. The action lists open-task counts and source refs; validation returns `"valid":true`. A second update within the week creates nothing. Read the returned action to continue the review: the routine completes no task for you.
+The dry run lists the due sensor and routine. The update collects one fictional record, then reports the routine with `"status":"ran"` and an `action` at `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, where `XXXXXXXX` is a random suffix. The action lists projects as plain bullets, overdue reviews first and earliest deadline first, plus open-task counts and source refs; validation returns `"valid":true`. A second update within the week creates nothing. Read the returned action to continue the review: the routine completes no task for you.
 
 ## Validate before each commit
 
@@ -121,6 +121,7 @@ The routine reads the brain BF passes as `{{brain}}` with the first `bf` on PATH
 - An `output: action` routine prints one OKF action or nothing. BF validates its metadata and declared links before writing. Use `status: draft|stable|deprecated` for note maturity and checkboxes for work progress.
 - Never link from the action: a link from a dated action counts as newer evidence for its target, so every later review would list the earlier ones. Name notes and records by their returned `uri`, or by ref when items omit it: two selected brains can hold the same ref. Do not copy record titles into authored notes.
 - A failed or incomplete page (`problems`, `stale`) exits nonzero with nothing on stdout and one generic sentence on stderr; BF then writes nothing and retries after the [failure backoff](../../docs/docs/sensors.md#collect-and-update).
+- Project bullets create no new checkbox tasks; complete work in the owning notes. Overdue reviews (`review_reasons: [due]`) come first, ordered by deadline.
 - Project review follows every `next_offset`, up to 100 pages, and fails before writing when a continuation stalls or more pages remain.
 - Task counts cover the selected notes; up to ten open tasks are previewed with source refs and lines, as plain bullets that duplicate no checkbox. Follow `bf read tasks` for the complete list.
 - A routine never edits notes: people and agents read its action and update the owning notes.

@@ -42,7 +42,7 @@ The hook, like a routine's nested `bf` call, runs the first `bf` on `PATH`. In a
 
 ## Prepare a weekly review
 
-The reviewed [weekly review](https://github.com/fmind/brain-framework/blob/main/examples/routines/weekly-review.py) reads your projects and recent activity and prints an action with review tasks. Copy it from the release tag matching `bf --version`, then review it:
+The reviewed [weekly review](https://github.com/fmind/brain-framework/blob/main/examples/routines/weekly-review.py) reads your projects and recent activity and prints an action with a review list. Copy it from the release tag matching `bf --version`, then review it:
 
 ```bash
 mkdir -p routines
@@ -66,7 +66,7 @@ bf read actions
 bf validate
 ```
 
-When projects need review, tasks are open or items are dated in the last seven days, the reply names the new `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, with a random 8-character suffix. The action lists open-task counts, up to ten open tasks with their sections, and recent activity by source. Empty output creates nothing. With `refresh: 604800`, `bf update` and `bf watch` also run it weekly.
+When projects need review, tasks are open or items fall in the last seven days, the reply names the new `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, with a random 8-character suffix. The action lists projects as plain bullets, overdue reviews first and earliest deadline first, then open-task counts, up to ten open tasks with their sections, and recent activity by source. The list creates no duplicate checkbox tasks; complete work in the owning notes. Empty output creates nothing. With `refresh: 604800`, `bf update` and `bf watch` also run it weekly.
 
 An action routine writes at most one action per day in a brain: a second run that day reports `"status":"skipped"` and keeps the existing action, even one another clone wrote. Only a folder holding an `ACTION.md` counts as today's action, not one left with a killed write's temporary file or an editor's lock. BF validates the Markdown's OKF metadata, declared relations and relative links, including headings, before writing; invalid or excessive output, or a failure, creates nothing. `bf validate` also checks its `bf://` targets and cited records.
 

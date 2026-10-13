@@ -65,10 +65,10 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
     text = result.stdout
-    assert "- [ ] Archive draft (`bf://brain/projects/archive.md`) (draft, edited 2026-09-01, 3 newer" in text
+    assert "- Archive draft (`bf://brain/projects/archive.md`) (draft, edited 2026-09-01, 3 newer" in text
     assert "Next: Document the retention policy." in text
     assert "projects/done.md" not in text
-    assert "12 dated items; records by source: mail 8" in text
+    assert "12 items in the period; records by source: mail 8" in text
     # Nothing is linked: a link from this dated action would flag its target with newer evidence, so every later
     # review would count earlier reviews among a project's newer linked items.
     assert "- 2026-09-26 11:00+02:00: `bf://brain/calendar:standup` (record)" in text
@@ -81,15 +81,7 @@ def test_weekly_review_renders_a_valid_action(provider: Provider) -> None:
     parsed = note(path, text.encode())
     assert (parsed.knowledge.type, parsed.knowledge.status, parsed.knowledge.updated) == ("action", "draft", day)
     assert parsed.targets == []
-    assert [(task.done, task.text) for task in parsed.tasks] == [
-        (
-            False,
-            (
-                "Archive draft (bf://brain/projects/archive.md) (draft, edited 2026-09-01, 3 newer linked items). "
-                "Next: Document the retention policy."
-            ),
-        )
-    ]
+    assert parsed.tasks == []
     assert provider.calls("bf") == [
         ["read", "--brain", "/brains/main"],
         ["read", "7d", "--brain", "/brains/main"],
@@ -105,7 +97,7 @@ def test_weekly_review_names_a_single_brains_projects_by_path(provider: Provider
     pages(provider, {"page": "", "projects": [{**single, "ref": "projects/an archive.md"}]}, {"total": 0}, tasks)
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
-    assert "- [ ] Archive draft (`projects/an archive.md`) (draft" in result.stdout
+    assert "- Archive draft (`projects/an archive.md`) (draft" in result.stdout
     assert "- Draft (`projects/archive.md#next`, line 9)." in result.stdout
     path = "actions/2026-09-25_weekly-review/ACTION.md"
     assert note(path, result.stdout.encode()).links == []
@@ -216,6 +208,8 @@ def test_weekly_review_summarizes_open_work_without_duplicating_tasks(provider: 
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
     assert "51 open tasks; 8 completed across 12 notes" in result.stdout
+    assert "notes with checkboxes.\n\n- Task 0" in result.stdout
+    assert "line 19).\n\nShowing 10" in result.stdout
     assert "Task 9" in result.stdout
     assert "Task 10" not in result.stdout
     assert "Showing 10 of 51 open tasks" in result.stdout
@@ -246,3 +240,18 @@ def test_weekly_review_rejects_incomplete_task_counts(provider: Provider) -> Non
     assert result.returncode == 1
     assert result.stdout == ""
     assert "incomplete" in result.stderr
+
+
+def test_weekly_review_lists_overdue_projects_first(provider: Provider) -> None:
+    projects = [
+        {**PROJECT, "title": "New evidence", "review_reasons": ["newer_evidence"], "review_due": "2026-09-30"},
+        {**PROJECT, "title": "Due later", "review_reasons": ["due"], "review_due": "2026-09-24"},
+        {**PROJECT, "title": "Due first", "review_reasons": ["due", "newer_evidence"], "review_due": "2026-09-20"},
+    ]
+    pages(provider, {"projects": projects}, {"total": 0})
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert result.returncode == 0, result.stderr
+    assert (
+        result.stdout.index("- Due first") < result.stdout.index("- Due later") < result.stdout.index("- New evidence")
+    )
+    assert note("actions/2026-09-25_weekly-review/ACTION.md", result.stdout.encode()).tasks == []

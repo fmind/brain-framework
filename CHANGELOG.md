@@ -4,6 +4,10 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+### Fixed
+
+- The `weekly-review` example lists projects as plain bullets, with overdue reviews first and earliest deadlines first, and separates the open-task preview from its surrounding paragraphs. Generated reviews no longer create duplicate checkbox tasks; complete work in the owning notes.
+
 ### Changed
 
 - CI and security workflows pin `jdx/mise-action` v5.1.1. The explicit mise `2026.10.0` pin keeps tool-manager upgrades deliberate; the action's 24-hour release-age default applies only without that pin.
