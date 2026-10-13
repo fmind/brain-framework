@@ -23,9 +23,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install locked toolchain
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
-          version: 2026.10.0
+          version: 2026.10.0 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
           cache: false # Like CI: scans and installation checks never restore a cache.
       - name: Scan complete Git history
         run: gitleaks git --redact=100 --verbose --no-banner
@@ -52,9 +52,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install locked toolchain
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
-          version: 2026.10.0
+          version: 2026.10.0 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
           cache: false # Like CI: scans and installation checks never restore a cache.
       - name: Build distributions
         run: uv build --clear

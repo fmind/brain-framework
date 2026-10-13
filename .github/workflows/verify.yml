@@ -16,9 +16,9 @@ jobs:
           fetch-depth: 100 # check:leaks scans the last 100 commits; a shallower clone hides them.
           persist-credentials: false
       - name: Install locked toolchain
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
-          version: 2026.10.0
+          version: 2026.10.0 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
           cache: false # These artifacts can be published; never restore a PR cache.
       - name: Match release version to tag
         if: github.ref_type == 'tag'
@@ -57,9 +57,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install locked toolchain
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
-          version: 2026.10.0
+          version: 2026.10.0 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
           cache: false # These artifacts can be published; never restore a PR cache.
       - name: Run tests
         run: mise run test

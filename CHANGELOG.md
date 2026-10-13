@@ -4,6 +4,10 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+### Changed
+
+- CI and security workflows pin `jdx/mise-action` v5.1.1. The explicit mise `2026.10.0` pin keeps tool-manager upgrades deliberate; the action's 24-hour release-age default applies only without that pin.
+
 ## [v18.3.0](https://github.com/fmind/brain-framework/releases/tag/v18.3.0) - 2026-10-07
 
 A review and feature release. The brain format (`version: 7`) and `bf.yaml` are unchanged; the reply schemas only gain optional fields and the search cache rebuilds once. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin). Run `bf skills DIR` to update `bf-use`, and copy the updated example hooks, `weekly-review` routine and any new sensor into your brain.
