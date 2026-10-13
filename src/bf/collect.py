@@ -1,4 +1,4 @@
-"""Run configured sensors and routines with direct argv, bounded output and process-group cancellation."""
+"""Run configured sensors, routines and prompts with direct argv, bounded output and process-group cancellation."""
 
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import current_thread, main_thread
 from types import FrameType
-from typing import Annotated, NoReturn, Protocol
+from typing import Annotated, NoReturn, Protocol, cast
 from uuid import uuid4
 
-from pydantic import FailFast, TypeAdapter, ValidationError
+from pydantic import FailFast, JsonValue, TypeAdapter, ValidationError
 
 from bf import ontology, records
 from bf.config import load
-from bf.history import ROUTINES, SENSORS, append_log, environment, log_path, remember, state
+from bf.history import PROMPTS, ROUTINES, SENSORS, append_log, environment, log_path, remember, state
 from bf.markdown import note, parse, validate_okf
 from bf.models import (
     RECORD_KEYS,
@@ -55,6 +55,11 @@ SHRINK_FLOOR = 10
 REPROJECT = 1000
 LIMIT = 200
 _EXISTS = "an action for this routine already exists today"
+# Linux bounds one argument at 128 KiB (MAX_ARG_STRLEN): an expanded prompt passed as {{prompt}} stays below it.
+MAX_PROMPT = 120_000
+_TEMPLATE = re.compile(r"\{\{(brain|home|start|end|input)\}\}")
+# A record title shows the reply's first line, shortened.
+_TITLE = 120
 
 
 class Runner(Protocol):
@@ -487,9 +492,12 @@ def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, ob
     }
 
 
-def _argv(store: Store, program: Program, start: str, end: str) -> list[str]:
-    values = {"brain": str(store.root), "home": str(Path.home()), "start": start, "end": end}
-    return [re.sub(r"\{\{(brain|home|start|end)\}\}", lambda match: values[match[1]], arg) for arg in program.command]
+def _argv(store: Store, program: Program, start: str, end: str, prompt: str = "") -> list[str]:
+    values = {"brain": str(store.root), "home": str(Path.home()), "start": start, "end": end, "prompt": prompt}
+    # One pass: an expanded prompt that mentions a placeholder keeps it as text.
+    return [
+        re.sub(r"\{\{(brain|home|start|end|prompt)\}\}", lambda match: values[match[1]], arg) for arg in program.command
+    ]
 
 
 def _written(store: Store, prefix: str) -> bool:
@@ -600,14 +608,154 @@ def routine(
         return result
 
 
+def _reply(raw: bytes, pointer: str | None) -> tuple[str, dict[str, JsonValue]]:
+    """The reply text, and the other members of a JSON reply; the error never quotes the output."""
+    try:
+        output = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise Error("prompt command must print UTF-8") from error
+    if pointer is None:
+        return output.strip(), {}
+    try:
+        document = decode(raw)
+    except Error as error:
+        raise Error("prompt command must print one JSON object when text is set") from error
+    if not isinstance(document, dict):
+        raise Error("prompt command must print one JSON object when text is set")
+    value = ontology.pointer(cast(JsonValue, document), pointer)
+    if not isinstance(value, str):
+        raise Error(f"prompt reply has no text string at {pointer}")
+    parent, _, key = pointer.rpartition("/")
+    holder = ontology.pointer(cast(JsonValue, document), parent) if parent else document
+    if isinstance(holder, dict):
+        # The reply is the record's text: keep it once.
+        holder.pop(key.replace("~1", "/").replace("~0", "~"), None)
+    return value.strip(), cast(dict[str, JsonValue], document)
+
+
+def _title(name: str, reply: str) -> str:
+    """The reply's first line without Markdown heading marks, else a neutral title."""
+    for line in reply.splitlines():
+        if line := line.strip().lstrip("#").strip():
+            return line if len(line) <= _TITLE else line[: _TITLE - 1].rstrip() + "…"
+    return f"{name} run without a reply"
+
+
+def prompt(
+    store: Store,
+    name: str,
+    *,
+    start: str,
+    end: str,
+    text: str = "",
+    scheduled: bool = False,
+    dry_run: bool = False,
+    runner: Runner = run,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> dict[str, object]:
+    """Run one prompt over [start, end) with `text` as its input, and record the reply in memories/NAME/.
+
+    The prompt file, with {{brain}}, {{home}}, {{start}}, {{end}} and {{input}} expanded, replaces {{prompt}} in the
+    command, or is its standard input when the command holds no {{prompt}}. A scheduled run holds the prompt's lock and
+    advances its window; a direct run, such as an owner's message, never waits for a scheduled one and leaves the
+    schedule unchanged. A failure writes no record.
+    """
+    start, end = _window(start, end)
+    config = load(store)
+    program = enabled(config.prompts, "prompt", name)
+    with ExitStack() as stack:
+        if scheduled:
+            stack.enter_context(collecting(store, name))
+        started = clock()
+        observed = timestamp(started.isoformat())
+        measured = time.monotonic()
+        committed = False
+        try:
+            template = store.read(program.prompt, MAX_PROMPT + 1)
+            if len(template) > MAX_PROMPT:
+                raise Error(f"{program.prompt} exceeds {MAX_PROMPT:,} bytes")
+            values = {"brain": str(store.root), "home": str(Path.home()), "start": start, "end": end, "input": text}
+            try:
+                expanded = _TEMPLATE.sub(lambda match: values[match[1]], template.decode("utf-8"))
+            except UnicodeError as error:
+                raise Error(f"{program.prompt} must be UTF-8 Markdown") from error
+            if len(expanded.encode()) > MAX_PROMPT:
+                raise Error(f"the expanded prompt exceeds {MAX_PROMPT:,} bytes; shorten {program.prompt} or its input")
+            passed = any("{{prompt}}" in argument for argument in program.command)
+            argv = _argv(store, program, start, end, expanded if passed else "")
+            raw = runner(argv, program, store, name, b"" if passed else expanded.encode())
+            reply, output = _reply(raw, program.text)
+            elapsed = round(time.monotonic() - measured, 6)
+            # Runs a second apart, such as a message answered during a scheduled run, keep distinct records.
+            record = Record(
+                id=started.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[-8:],
+                title=_title(name, reply),
+                text=reply,
+                time=observed,
+                attributes={
+                    "observed": observed,
+                    "trigger": "schedule" if scheduled else "run",
+                    "window": {"start": start, "end": end},
+                    "elapsed_seconds": elapsed,
+                    **({"input": text} if text else {}),
+                    **({"output": output} if output else {}),
+                },
+            ).readable()
+            ref = f"{name}:{record.id}"
+            result: dict[str, object] = {"prompt": name, "record": ref, "text": reply}
+            if dry_run:
+                return {key: value for key, value in result.items() if key != "record"}
+            with writer(store, wait=120):
+                records.recover(store)
+                records.upsert(store, name, [record], snapshot=False)
+                committed = True
+                runs = int(str(state(store, PROMPTS).get(name, {}).get("runs", 0))) + 1
+                remember(
+                    store,
+                    name,
+                    PROMPTS,
+                    run=observed,
+                    error="",
+                    failures=0,
+                    runs=runs,
+                    record=ref,
+                    records=1,
+                    elapsed_seconds=elapsed,
+                    output_bytes=len(raw),
+                    # Only the schedule's own runs move it: answering a message leaves the next review due.
+                    **({"success": observed, "start": start, "end": end} if scheduled else {}),
+                )
+        except (Error, OSError, UnicodeError, ValueError) as error:
+            message = (
+                str(error)
+                if isinstance(error, Error)
+                else "prompt reply is not a valid record; keep it under 4 MiB of UTF-8"
+                if isinstance(error, ValueError)
+                else "prompt files are inaccessible; check the prompt file, its command and free space"
+            )
+            message = (
+                "the run was recorded but local run history could not be saved"
+                if committed
+                else f"{message}; no record was written"
+            )
+            _failed(store, name, PROMPTS, started, message, error, dry_run=dry_run)
+        with suppress(Error, OSError):
+            append_log(store, name, f"{_now()} recorded {ref}")
+        return result
+
+
 def hooked(config: Config, hook: str) -> list[str]:
     """The enabled routines a hook runs, in name order."""
     return sorted(name for name, program in config.routines.items() if program.enabled and hook in program.hooks)
 
 
 def window(store: Store, name: str, now: datetime) -> tuple[str, str]:
-    """The window a routine run covers now: since the end of its last reviewed window, else its lookback."""
-    program, last = load(store).routines[name], state(store, ROUTINES).get(name, {})
+    """The window a routine or prompt run covers now: since the end of its last reviewed window, else its lookback."""
+    config = load(store)
+    if name in config.prompts:
+        program, last = config.prompts[name], state(store, PROMPTS).get(name, {})
+    else:
+        program, last = config.routines[name], state(store, ROUTINES).get(name, {})
     start = now - timedelta(seconds=program.lookback)
     if last.get("end") and (reviewed := datetime.fromisoformat(str(last["end"]))) < now:
         start = reviewed
@@ -644,6 +792,16 @@ def due_routines(store: Store, now: datetime) -> list[tuple[str, str, str]]:
     return [
         (name, *window(store, name, now))
         for name, program in sorted(config.routines.items())
+        if _due(program, history.get(name, {}), now)
+    ]
+
+
+def due_prompts(store: Store, now: datetime) -> list[tuple[str, str, str]]:
+    """Due prompts; each covers the time since the end of its last scheduled window."""
+    config, history = load(store), state(store, PROMPTS)
+    return [
+        (name, *window(store, name, now))
+        for name, program in sorted(config.prompts.items())
         if _due(program, history.get(name, {}), now)
     ]
 

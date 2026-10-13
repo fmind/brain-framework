@@ -12,7 +12,7 @@ cd ~/brain
 bf read projects/new-website.md#decision
 ```
 
-Each brain's `bf.yaml` holds its format `version`, its `name` and optional `brains`, [`fields`](schema.md#shared-fields-and-sensor-mappings), [`sensors`](sensors.md#sensor-settings), [`routines`](routines.md#routine-settings) and [`watch`](schedule.md#watch-preferences) sections. Unknown keys, duplicate keys and invalid values fail with the file and field named. An optional section left empty, such as `sensors:` with every entry commented out, holds nothing, and an empty `watch:` keeps its defaults. The [JSON Schema](../bf.schema.json) describes the format; see [editor schemas](schema.md#editor-schemas).
+Each brain's `bf.yaml` holds its format `version`, its `name` and optional `brains`, [`fields`](schema.md#shared-fields-and-sensor-mappings), [`sensors`](sensors.md#sensor-settings), [`routines`](routines.md#routine-settings), [`prompts`](prompts.md#prompt-settings) and [`watch`](schedule.md#watch-preferences) sections. Unknown keys, duplicate keys and invalid values fail with the file and field named. An optional section left empty, such as `sensors:` with every entry commented out, holds nothing, and an empty `watch:` keeps its defaults. The [JSON Schema](../bf.schema.json) describes the format; see [editor schemas](schema.md#editor-schemas).
 
 | File                       | Purpose                                             | Needed when…                                     |
 | -------------------------- | --------------------------------------------------- | ------------------------------------------------ |
@@ -102,7 +102,7 @@ Names are unique. After moving a brain, run `bf register` at its new place: it t
 
 Any other conflict fails and names the entry to remove from the registry, such as another brain registered under that name, or a registered folder that exists but cannot be reached, like a locked folder or a disconnected network mount: `cannot reach the brain registered as NAME at PATH`.
 
-Registration never runs a brain's programs. Before running a cloned brain's sensors or routines, review its `bf.yaml`, `sensors/` and `routines/`, then select it explicitly, as with `bf update --brain ~/team-brain`. Delete a registry entry to stop selecting a brain by default; its files stay in place, and an empty `brains:` is valid.
+Registration never runs a brain's programs. Before running a cloned brain's sensors, routines or prompts, review its `bf.yaml`, `sensors/`, `routines/` and `prompts/`, then select it explicitly, as with `bf update --brain ~/team-brain`. Delete a registry entry to stop selecting a brain by default; its files stay in place, and an empty `brains:` is valid.
 
 ## Local state
 

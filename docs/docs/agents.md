@@ -5,7 +5,7 @@ description: Use the CLI, the packaged skills and optional hooks to find evidenc
 
 # Agent workflows
 
-Ask an agent, “Why did we choose a single product page?” It should find the saved decision, read it and cite the source. The same agent can then help with the next task and record what changed. BF runs no model and never starts agent work itself. Complete [Getting started](getting-started.md) first.
+Ask an agent, “Why did we choose a single product page?” It should find the saved decision, read it and cite the source. The same agent can then help with the next task and record what changed. BF never runs a model itself; it starts agent work only through the [prompts](prompts.md) you declare. Complete [Getting started](getting-started.md) first.
 
 ## Choose how your agent connects
 

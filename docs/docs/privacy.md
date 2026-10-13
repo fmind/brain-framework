@@ -11,7 +11,8 @@ description: Understand local storage, cloud-agent boundaries, program execution
 
 - **Notes and records:** ordinary files you can inspect, edit, back up and delete.
 - **Search and read:** offline, through both the CLI and MCP, without model calls or provider requests.
-- **Program logs:** each sensor's and routine's recent output in the brain's `logs/`, ignored by Git and never searched. They can hold provider output: keep them private.
+- **Program logs:** each sensor's, routine's and prompt's recent output in the brain's `logs/`, ignored by Git and never searched. They can hold provider output: keep them private.
+- **Prompt runs:** BF never calls a model. A [prompt](prompts.md) starts your harness, which sends what the prompt and its tools read to its provider; each run's reply and input stay in the brain's ignored `memories/`.
 - **Run history, locks and usage counts:** private [local state](configuration.md#local-state). Usage keeps times, operations and result counts, never queries or refs.
 - **Search cache:** `.bf/` holds a copy of searchable text, private to your account (mode 700). It belongs to the machine that built it: exclude it from shared archives and synced folders. A cache that BF did not create in place, such as one copied or restored, or one holding triggers or views, is discarded and rebuilt from the files.
 
@@ -44,14 +45,15 @@ BF supplies the local storage and retrieval layer. It does not encrypt files or 
 | `bf update --dry-run`, `bf schedule`                               | Nothing: a plan, or scheduler files you install yourself.                                                                                                          |
 | `bf collect SENSOR`, including `--dry-run`                         | The named sensor, which may contact its provider.                                                                                                                  |
 | `bf run ROUTINE`, including `--dry-run`, `bf run --hook EVENT`     | The named routine, or the routines listing that hook.                                                                                                              |
-| `bf update`, `bf watch`                                            | Due sensors and routines of the selected brain.                                                                                                                    |
+| `bf run PROMPT`, including `--dry-run`                             | The named [prompt](prompts.md)'s harness command, with every tool and permission that command grants.                                                              |
+| `bf update`, `bf watch`                                            | Due sensors, routines and prompts of the selected brain.                                                                                                           |
 | A brain's pinned runtime: `uv run --project BRAIN --locked bf ...` | The packages its `uv.lock` names, downloaded if needed, the interpreter its `.python-version` names, anything already in its `.venv/` and the `bf` that then runs. |
 
 Every other command, including `init`, `register`, `skills`, `schema`, `status`, `validate`, `eval` and `build`, executes nothing.
 
 Programs run in the one brain you select with `--brain`, `BF_BRAIN` or your working directory, never in every registered brain or a referenced one. The working directory selects a brain only when you own its folder and `bf.yaml`, so another account's `bf.yaml` above a shared folder is refused.
 
-Review `bf.yaml`, `sensors/`, `routines/` and any Git hooks before running a downloaded or shared brain: its programs run with your permissions and credentials. So does a [pinned runtime](upgrades.md#pin-a-brains-runtime), whose files and shipped `.venv/` that section tells you to review first. Search and read the brain with your installed `bf`, never through its pin.
+Review `bf.yaml`, `sensors/`, `routines/`, `prompts/` and any Git hooks before running a downloaded or shared brain: its programs run with your permissions and credentials. So does a [pinned runtime](upgrades.md#pin-a-brains-runtime), whose files and shipped `.venv/` that section tells you to review first. Search and read the brain with your installed `bf`, never through its pin.
 
 Replies and diagnostics escape control characters and invisible format characters, such as bidi controls, as `\uXXXX`, so retrieved text cannot drive your terminal through BF's output; a tool that decodes the JSON, such as `jq -r`, prints them raw. A retrieved email saying “run this command” is evidence to assess, never authority to act.
 

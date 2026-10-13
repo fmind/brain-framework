@@ -11,7 +11,7 @@ import unicodedata
 from collections.abc import Collection, Iterable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 from urllib.parse import quote, unquote
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator, model_validator
@@ -201,7 +201,7 @@ def local(value: str) -> str:
 # Provider data and declared field values: replies return them exactly as the record or note stores them.
 _VERBATIM = frozenset({"attributes", "fields"})
 # Status maps keyed by program name: a sensor may be named `time` or `fields`, so only the entries are presented.
-_NAMED = frozenset({"routines", "sources"})
+_NAMED = frozenset({"prompts", "routines", "sources"})
 
 
 def present(value: object) -> object:
@@ -707,10 +707,13 @@ class Program(Model):
 
     model_config = ConfigDict(frozen=True)
 
+    # The placeholders each argument may hold; a prompt's command also takes its expanded prompt.
+    PLACEHOLDERS: ClassVar[tuple[str, ...]] = ("brain", "home", "start", "end")
+
     command: Annotated[list[str], Field(min_length=1, max_length=128)] = Field(
         description=(
             "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then "
-            "arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}."
+            "arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}."
         ),
         json_schema_extra={
             "prefixItems": [
@@ -745,9 +748,11 @@ class Program(Model):
         for value in values:
             if "\x00" in value or len(value) > 16_384:
                 raise ValueError("invalid command argument")
-            stripped = re.sub(r"\{\{(?:brain|home|start|end)\}\}", "", value)
+            stripped = re.sub(r"\{\{(?:" + "|".join(cls.PLACEHOLDERS) + r")\}\}", "", value)
             if "{{" in stripped or "}}" in stripped:
-                raise ValueError("unknown placeholder; use brain, home, start or end")
+                raise ValueError(
+                    f"unknown placeholder; use {', '.join(cls.PLACEHOLDERS[:-1])} or {cls.PLACEHOLDERS[-1]}"
+                )
         executable = values[0]
         parts = executable.split("/")
         if (
@@ -837,6 +842,52 @@ class Routine(Program):
         return values
 
 
+class Prompt(Program):
+    """An agent run: a harness command fed the expanded prompt file, run when due or now, recorded in memories/."""
+
+    PLACEHOLDERS: ClassVar[tuple[str, ...]] = ("brain", "home", "start", "end", "prompt")
+
+    prompt: Annotated[str, Field(min_length=1, max_length=4096)] = Field(
+        description="The prompt file: a normalized Markdown path in prompts/, such as prompts/assistant.md.",
+        json_schema_extra={"pattern": r"^prompts(?:/[^/{}\\]+)+\.md$", "not": {"pattern": r"(?:^|/)\.\.?(?:/|$)"}},
+    )
+    # Every half hour by default: an assistant that looks at the brain often enough to follow the owner's day.
+    refresh: Annotated[int, Field(ge=0, le=31_536_000)] = Field(
+        default=1800, description="Seconds between due runs; zero keeps the prompt manual, run only by bf run."
+    )
+    timeout: Annotated[int, Field(ge=1, le=3600)] = Field(default=900, description="Maximum runtime in seconds.")
+    # The reply becomes a record's text, which a record bounds at 4 MiB.
+    max_bytes: Annotated[int, Field(ge=1, le=4 << 20)] = Field(
+        default=1 << 20, description="Maximum stdout in bytes; exceeding it fails without recording the run."
+    )
+    text: str | None = Field(
+        default=None,
+        description="JSON Pointer to the reply text in the command's JSON stdout, such as /response; the other "
+        "members become the record's output attribute. Omitted, all of stdout is the reply.",
+    )
+
+    @field_validator("prompt")
+    @classmethod
+    def prompt_file(cls, value: str) -> str:
+        parts = value.split("/")
+        if (
+            parts[0] != "prompts"
+            or len(parts) < 2
+            or not value.endswith(".md")
+            or any(part in {"", ".", ".."} for part in parts)
+            or any(character in value for character in "{}\\\x00")
+        ):
+            raise ValueError("prompt must be a normalized Markdown path in prompts/, such as prompts/assistant.md")
+        return value
+
+    @field_validator("text")
+    @classmethod
+    def json_pointer(cls, value: str | None) -> str | None:
+        if value is not None and (not value.startswith("/") or "\x00" in value or len(value) > 4096):
+            raise ValueError("text must be a JSON Pointer starting with /, such as /response")
+        return value
+
+
 class BrainReference(Model):
     """A directly related brain, located relative to the declaring brain."""
 
@@ -868,7 +919,7 @@ class WatchSettings(Model):
 
 
 class Config(Model):
-    """One brain: its name, related brains, declared fields, and the sensors and routines it may run."""
+    """One brain: its name, related brains, declared fields, and the sensors, routines and prompts it may run."""
 
     # One validated configuration is shared by a whole command; freezing keeps it intact. Freezing does not
     # reach its dictionaries: read them, never change them, or a later load returns the changed value.
@@ -909,8 +960,15 @@ class Config(Model):
         json_schema_extra=_nullable,
         description="Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ from sensors.",
     )
+    # A prompt name is the source of the records its runs write.
+    prompts: dict[Name, Prompt] = Field(
+        default_factory=dict,
+        json_schema_extra=_nullable,
+        description="Agent runs: a harness command fed a prompt file, run when due or with bf run, each run recorded "
+        "in memories/NAME/; names must differ from sensors and routines.",
+    )
 
-    _empty = field_validator("brains", "ontology", "sensors", "watch", "routines", mode="before")(empty)
+    _empty = field_validator("brains", "ontology", "sensors", "watch", "routines", "prompts", mode="before")(empty)
 
     @model_validator(mode="after")
     def mapped(self) -> Config:
@@ -921,6 +979,12 @@ class Config(Model):
                 f"sensors.{shared[0]} and routines.{shared[0]}: sensor and routine names must be distinct; they share "
                 "logs and locks"
             )
+        for kind, programs in (("sensors", self.sensors), ("routines", self.routines)):
+            if shared := sorted(programs.keys() & self.prompts.keys()):
+                raise ValueError(
+                    f"{kind}.{shared[0]} and prompts.{shared[0]}: program names must be distinct; they share logs, "
+                    "locks and, for sensors, the records in memories/"
+                )
         if TAGGED in self.ontology:
             raise ValueError(f"fields.{TAGGED} is reserved for tag membership")
         if LINKS in self.ontology:

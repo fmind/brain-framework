@@ -1,11 +1,11 @@
 ---
 icon: lucide/calendar-clock
-description: Run or observe due sensors and routines, set watch preferences and generate native schedules.
+description: Run or observe due sensors, routines and prompts, set watch preferences and generate native schedules.
 ---
 
 # Watch and schedule updates
 
-Keep reviewed sensors and routines current with their `enabled` and `refresh` settings in `bf.yaml`. A program is due when it is enabled, has a nonzero `refresh` and has not succeeded within it. Start inside your brain.
+Keep reviewed sensors, routines and [prompts](prompts.md) current with their `enabled` and `refresh` settings in `bf.yaml`. A program is due when it is enabled, has a nonzero `refresh` and has not succeeded within it. Start inside your brain.
 
 | You want to…                              | Use                                                                       |
 | ----------------------------------------- | ------------------------------------------------------------------------- |
@@ -19,7 +19,7 @@ BF installs no background service. First run your programs once by hand.
 
 ```bash
 bf update --dry-run    # list due work; run nothing
-bf update              # run due sensors, then routines
+bf update              # run due sensors, then routines, then prompts
 bf status --check
 ```
 
@@ -31,7 +31,7 @@ The dry run lists due programs with their windows, and names under `manual` the 
 bf watch
 ```
 
-Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. It can contact providers. A failed program retries after 1 minute, then waits twice as long per consecutive failure, up to its `refresh`. Closing watch stops its collection.
+Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. Due [prompts](prompts.md#schedule-and-overlap) run in a second process beside that cycle, so a long agent run never delays collection; the dashboard marks them with `@`. It can contact providers. A failed program retries after 1 minute, then waits twice as long per consecutive failure, up to its `refresh`. Closing watch stops its collection.
 
 The dashboard shows each program's state, last success, next due time, returned items and record changes. `never` means no success on this machine, such as a sensor that only backfilled older windows; `failed` means the last attempt failed. Items counts the records the last completed collection returned, even a backfill, not the stored total. Manual and disabled programs stay visible without running. Use `bf status --check` for full health.
 
@@ -95,7 +95,7 @@ Command-line options override `bf.yaml`, then defaults apply. Every command load
 
 ## Select programs
 
-Repeat `--sensor` and `--routine` on `update`, `watch` or `schedule`:
+Repeat `--sensor`, `--routine` and `--prompt` on `update`, `watch` or `schedule`:
 
 ```bash
 bf update --sensor git-commits --dry-run
@@ -103,7 +103,7 @@ bf watch --sensor git-commits --routine weekly-review
 bf schedule --sensor git-commits --name git-only
 ```
 
-With no selector, every configured program is eligible, including programs added later. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run.
+With no selector, every configured program is eligible, including programs added later. `bf update --kind KIND`, repeatable, keeps only sensors, routines or prompts, as watch does for its prompt process. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run.
 
 ## Generate a native schedule
 

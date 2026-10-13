@@ -200,6 +200,7 @@ def generate(
     name: str = "update",
     sensors: tuple[str, ...] = (),
     routines: tuple[str, ...] = (),
+    prompts: tuple[str, ...] = (),
     executable: Path | None = None,
     output: Path | None = None,
 ) -> dict[str, object]:
@@ -211,14 +212,14 @@ def generate(
             "schedule name must start with a lowercase letter and contain only lowercase letters, digits or hyphens"
         )
     config = load(store)
-    if not scheduled(config, sensors, routines):
+    if not scheduled(config, sensors, routines, prompts):
         raise Error("selection contains no enabled scheduled programs; configure a nonzero refresh first")
     executable = executable or Path(sys.executable).parent / "bf"
     executable = expand(executable).absolute()
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise Error("bf executable is unavailable; pass --executable with the absolute installed bf path")
     argv = [str(executable), "update", "--brain", str(store.root)]
-    for flag, values in (("--sensor", sensors), ("--routine", routines)):
+    for flag, values in (("--sensor", sensors), ("--routine", routines), ("--prompt", prompts)):
         for value in dict.fromkeys(values):
             argv.extend((flag, value))
     for value in argv:
@@ -243,7 +244,7 @@ def generate(
         "PATH and XDG locations are captured; credentials and other environment variables are not copied.",
     ]
     # A slower check can be deliberate: warn, since a program is due only once its refresh has passed.
-    if reason := late(config, every * 60, sensors, routines):
+    if reason := late(config, every * 60, sensors, routines, prompts):
         warnings.append(f"{reason}. Choose an --every shorter than the shortest refresh.")
     # Like other brain-relative options, a relative output directory resolves against the brain root.
     source = Path(os.path.normpath(store.root / expand(output or DEFAULT_OUTPUT)))

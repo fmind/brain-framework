@@ -35,7 +35,7 @@ After changing a sensor's `fields:` mappings, stored records keep their old proj
 
 ## Routines
 
-A routine is any deterministic brain program under `routines:`: a review generator, a backup, a check run from a Git hook. It uses no model and makes no decision; it may read the brain with `bf read` and `bf search`, since every program receives `BF_BRAIN` set to its brain. Start from the reviewed [routine example](https://github.com/fmind/brain-framework/tree/main/examples/routines) and the [routine contract](https://fmind.github.io/brain-framework/docs/routines/).
+A routine is any deterministic brain program under `routines:`: a review generator, a backup, a check run from a Git hook. It uses no model and makes no decision (a [prompt](https://fmind.github.io/brain-framework/docs/prompts/) runs the agent harness instead, recording each run in `memories/NAME/`); it may read the brain with `bf read` and `bf search`, since every program receives `BF_BRAIN` set to its brain. Start from the reviewed [routine example](https://github.com/fmind/brain-framework/tree/main/examples/routines) and the [routine contract](https://fmind.github.io/brain-framework/docs/routines/).
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/routines/

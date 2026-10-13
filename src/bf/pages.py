@@ -239,8 +239,12 @@ def _request(argument: str, **values: object) -> Query:
 
 
 def low(store: Store) -> list[str]:
-    """Sensors configured with `priority: low`, read at query time so a change needs no cache rebuild."""
-    return sorted(name for name, sensor in load(store).sensors.items() if sensor.priority == "low")
+    """Sensors configured with `priority: low`, and every prompt, read at query time so a change needs no rebuild.
+
+    A prompt's records are model output: its summaries must never outrank the evidence they summarize.
+    """
+    config = load(store)
+    return sorted({*(name for name, sensor in config.sensors.items() if sensor.priority == "low"), *config.prompts})
 
 
 def _counts(store: Store, rows: list[tuple[str, int]], page: str) -> list[dict[str, object]]:
@@ -740,7 +744,8 @@ def memories(
     def known(store: Store, connection: sqlite3.Connection) -> dict[str, object] | None:
         """The source's record count in a brain that indexes or configures it."""
         counts = index.sources(connection)
-        if source not in counts and source not in load(store).sensors:
+        config = load(store)
+        if source not in counts and source not in config.sensors and source not in config.prompts:
             return None
         return counts.get(source, {"records": 0})
 

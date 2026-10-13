@@ -243,6 +243,7 @@
               "brain": { "type": "string" },
               "failed": { "const": true },
               "freshness": { "type": "string" },
+              "prompt": { "type": "string" },
               "routine": { "type": "string" },
               "sensor": { "type": "string" }
             },

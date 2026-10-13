@@ -334,6 +334,7 @@ READ: dict[str, object] = {
                         "properties": {
                             "sensor": _STRING,
                             "routine": _STRING,
+                            "prompt": _STRING,
                             "freshness": _STRING,
                             "failed": {"const": True},
                             "brain": _STRING,

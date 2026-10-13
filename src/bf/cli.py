@@ -51,7 +51,7 @@ from bf.models import (
 from bf.retrieve import edges, identities, read, search
 from bf.schemas import Kind, document
 from bf.storage import Store, expand, relative, writer
-from bf.update import run_routines, update
+from bf.update import KINDS, ProgramKind, run_prompt, run_routines, update
 from bf.validate import validate
 
 
@@ -160,6 +160,7 @@ SensorOption = Annotated[
 RoutineOption = Annotated[
     list[str] | None, typer.Option("--routine", help="Select a routine; repeat to select several.")
 ]
+PromptOption = Annotated[list[str] | None, typer.Option("--prompt", help="Select a prompt; repeat to select several.")]
 # Every brain starts with knowledge and verification; the other folders are created as needed or with --full.
 FOLDERS = ("projects", "actions")
 OPTIONAL = ("memories", "assets", "sensors", "routines", "skills")
@@ -510,9 +511,9 @@ def perform(
         # A mistyped option, such as --dryrun, is invalid input instead of an argument to a routine that then runs
         # for real: routine arguments that start with a dash follow `--`.
         typer.Argument(
-            metavar="[ROUTINE] [ARGS]...",
-            help="A routine from bf.yaml, then arguments appended to its command; with --hook, only arguments. "
-            "Put -- before arguments that start with a dash.",
+            metavar="[PROGRAM] [ARGS]...",
+            help="A routine from bf.yaml, then arguments appended to its command, or a prompt; with --hook, only "
+            "arguments. Put -- before arguments that start with a dash.",
         ),
     ] = None,
     hook: Annotated[
@@ -521,32 +522,49 @@ def perform(
     ] = "",
     brain: RunOption = "",
     dry_run: Annotated[
-        bool, typer.Option(help="Run the routines, but write no action and record no run; logs still grow.")
+        bool,
+        typer.Option(
+            help="Run the routines or the prompt, but write no action or record and record no run; logs still grow."
+        ),
     ] = False,
     forward: Annotated[
         bool,
         typer.Option(
             "--stdin",
-            help="Pass piped input to the routine. A hook passes what Git pipes to the routines it runs; otherwise "
-            "none.",
+            help="Pass piped input to the routine, or as a prompt's {{input}}. A hook passes what Git pipes to the "
+            "routines it runs; otherwise none.",
         ),
     ] = False,
 ) -> None:
-    """Run one routine, or every routine of a hook, now; a hook's piped input reaches each routine."""
+    """Run one routine or prompt, or every routine of a hook, now; a hook's piped input reaches each routine."""
     values = tuple(arguments or ())
     if hook:
         _option("--hook", _slug, hook)
         names, args = (), values
     elif values and not values[0].strip():
-        raise typer.BadParameter("give a routine name; an empty value names none", param_hint="ROUTINE")
+        raise typer.BadParameter("give a routine or prompt name; an empty value names none", param_hint="PROGRAM")
     elif values:
         names, args = values[:1], values[1:]
     else:
-        raise typer.BadParameter("name a routine, or pass --hook EVENT", param_hint="ROUTINE")
+        raise typer.BadParameter("name a routine or prompt, or pass --hook EVENT", param_hint="PROGRAM")
     store = execution(brain)
+    config = load(store)
+    if names and names[0] in config.prompts:
+        if args:
+            raise typer.BadParameter("a prompt takes no arguments; pipe its input with --stdin", param_hint="ARGS")
+        stdin = _input() if forward else b""
+        try:
+            text = stdin.decode("utf-8")
+        except UnicodeError as error:
+            raise Error("prompt input must be UTF-8 text") from error
+        result = run_prompt(store, names[0], text=text, dry_run=dry_run)
+        emit(result)
+        if not result["ok"]:
+            raise typer.Exit(1)
+        return
     # Git closes a hook's input; an agent's shell can hold its own open, so a direct run reads it only on request,
     # and a hook only for the routines it runs: a hook that no routine lists succeeds at once.
-    stdin = _input() if forward or (hook and hooked(load(store), hook)) else b""
+    stdin = _input() if forward or (hook and hooked(config, hook)) else b""
     result = run_routines(store, names=names, hook=hook, args=args, stdin=stdin, dry_run=dry_run)
     emit(result)
     if not result["ok"]:
@@ -558,15 +576,34 @@ def refresh(
     brain: RunOption = "",
     sensor: SensorOption = None,
     routine: RoutineOption = None,
+    prompt: PromptOption = None,
+    kind: Annotated[
+        list[str] | None,
+        typer.Option(help="Run only this kind of program: sensor, routine or prompt; repeat for several."),
+    ] = None,
     dry_run: Annotated[
-        bool, typer.Option(help="List due sensors and routines with their windows; run nothing.")
+        bool, typer.Option(help="List due sensors, routines and prompts with their windows; run nothing.")
     ] = False,
 ) -> None:
-    """Run due sensors, then due routines, of one brain, then refresh its search cache."""
-    result = update(execution(brain), dry_run=dry_run, sensors=tuple(sensor or ()), routines=tuple(routine or ()))
+    """Run due sensors, then due routines, then due prompts, of one brain, then refresh its search cache."""
+    result = update(
+        execution(brain),
+        dry_run=dry_run,
+        sensors=tuple(sensor or ()),
+        routines=tuple(routine or ()),
+        prompts=tuple(prompt or ()),
+        kinds=_kinds(kind or []),
+    )
     emit(result)
     if not result["ok"]:
         raise typer.Exit(1)
+
+
+def _kinds(values: list[str]) -> frozenset[ProgramKind]:
+    """The program kinds an update runs; none given runs every kind."""
+    if unknown := sorted(set(values) - KINDS):
+        raise typer.BadParameter(f"{unknown[0]} is not sensor, routine or prompt", param_hint="--kind")
+    return cast("frozenset[ProgramKind]", frozenset(values)) if values else KINDS
 
 
 @app.command("watch", rich_help_panel="Collect and automate")
@@ -574,6 +611,7 @@ def monitor(
     brain: RunOption = "",
     sensor: SensorOption = None,
     routine: RoutineOption = None,
+    prompt: PromptOption = None,
     interval: Annotated[
         int | None,
         typer.Option(min=5, max=86400, help="Seconds between cycles; overrides bf.yaml watch.interval (default 60)."),
@@ -605,6 +643,7 @@ def monitor(
         execution(brain),
         sensors=tuple(sensor or ()),
         routines=tuple(routine or ()),
+        prompts=tuple(prompt or ()),
         interval=interval,
         poll_interval=poll_interval,
         notifications=notify,
@@ -617,6 +656,7 @@ def scheduling(
     brain: RunOption = "",
     sensor: SensorOption = None,
     routine: RoutineOption = None,
+    prompt: PromptOption = None,
     backend: Annotated[
         Literal["auto", "systemd", "launchd", "cron"],
         typer.Option(help="Scheduler format; auto detects available platform tools."),
@@ -656,6 +696,7 @@ def scheduling(
             executable=executable,
             sensors=tuple(sensor or ()),
             routines=tuple(routine or ()),
+            prompts=tuple(prompt or ()),
         )
     )
 
@@ -677,7 +718,7 @@ def report(
         ),
     ] = False,
 ) -> None:
-    """Show each brain's cache, notes, records, sensor and routine freshness, errors, logs and usage."""
+    """Show each brain's cache, notes, records, sensor, routine and prompt freshness, errors, logs and usage."""
     if watch:
         if check:
             raise typer.BadParameter("cannot be combined with --check", param_hint="--watch")
@@ -809,6 +850,7 @@ def _input() -> bytes:
 _GIVEN = {
     "--brain": "give a brain name or path; an empty value would select another brain",
     "--hook": "give an event name; an empty value would run the first argument as a routine",
+    "--prompt": "give a prompt name; an empty value names none",
     "--output": "give a directory; an empty value would name the brain's root",
     "--reproject": "give a sensor name; an empty value would rebuild the cache instead",
     "--routine": "give a routine name; an empty value names none",

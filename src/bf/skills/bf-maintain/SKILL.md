@@ -7,7 +7,7 @@ compatibility: Requires Brain Framework 18 (the bf command) on Linux or macOS.
 
 # bf-maintain
 
-Sensors collect records from providers and routines are deterministic brain programs; both are declared in `bf.yaml` and run with the user's permissions. Diagnose offline first, then execute only with authority that covers the selected programs and scope.
+Sensors collect records from providers, routines are deterministic brain programs and prompts run the user's agent harness; all are declared in `bf.yaml` and run with the user's permissions. Diagnose offline first, then execute only with authority that covers the selected programs and scope.
 
 ## Select one brain
 
@@ -44,8 +44,8 @@ Core commands for that work:
 
 - `bf collect SENSOR` runs one sensor now; `--since`/`--until` bound a backfill (a window ending before now can extend coverage but never makes the source fresh), `--dry-run` previews samples without saving, and `--allow-removal` accepts, for one run, a snapshot that would empty its catalog or remove more than half and more than 10 of its records.
 - `bf build --reproject SENSOR` re-applies a sensor's current `fields:` mappings to its stored records without running it (`--dry-run` counts the changes); plain `bf build` recovers interrupted record writes and rebuilds the disposable `.bf/` cache.
-- `bf run ROUTINE [ARGS]...` runs one routine now and `bf run --hook EVENT` runs every enabled routine listing that hook; both pass arguments through. A hook reads what Git pipes only when a routine lists it; a direct run reads piped input only with `--stdin`. A Git hook calls it with `exec bf run --hook pre-push -- "$@"`.
-- `bf update` runs due sensors, then due routines, then refreshes the cache; `bf watch` does so continuously in a dashboard (`--json` for rows); `bf schedule` writes native scheduler files and activates nothing.
+- `bf run ROUTINE [ARGS]...` runs one routine now, `bf run PROMPT [--stdin]` runs one prompt with piped text as its input, and `bf run --hook EVENT` runs every enabled routine listing that hook; both pass arguments through. A hook reads what Git pipes only when a routine lists it; a direct run reads piped input only with `--stdin`. A Git hook calls it with `exec bf run --hook pre-push -- "$@"`.
+- `bf update` runs due sensors, then due routines, then due prompts, then refreshes the cache; `bf watch` does so continuously in a dashboard, running prompts in a second process beside collection (`--json` for rows); `bf schedule` writes native scheduler files and activates nothing.
 - `bf skills DIR --check` reports whether installed skills match this version; `bf skills DIR` updates the unedited ones and leaves `modified`, `unmanaged` and `newer` folders unchanged ([upgrades](references/operations.md#upgrade-brain-framework)).
 
 For a retrieval miss, save the question as an `evals/` case (a suite starts with the same `version` as `bf.yaml`) before changing the owning note or sensor, and never weaken an assertion to make a case pass.

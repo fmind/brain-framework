@@ -4,7 +4,20 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
-Proposed patch release. The brain format (`version: 7`), `bf.yaml`, reply schemas and search cache format are unchanged. After publication, upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), run `bf skills DIR` to refresh the retrieval guide, and copy the updated example hooks and `weekly-review` routine into your brain, preserving local adaptations.
+A feature release. The brain format (`version: 7`) and the search cache format are unchanged; `bf.yaml` gains an optional `prompts:` section, which an older `bf` rejects, and the reply schemas only gain optional fields. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), run `bf skills DIR` to update `bf-maintain`, which now covers prompts, and the retrieval guide, and copy the updated example hooks and `weekly-review` routine into your brain, preserving local adaptations.
+
+### Added
+
+- Prompts run your agent harness over the brain, every 30 minutes by default or now with `bf run PROMPT --stdin`. Declare one under `prompts:` with a Markdown `prompt` file in `prompts/` and a direct-argv `command`: BF expands `{{brain}}`, `{{home}}`, `{{start}}`, `{{end}}` and `{{input}}` in the file once, then passes it as the command's `{{prompt}}` argument or, without one, on standard input. BF never runs a model itself. Each successful run becomes a record in `memories/NAME/` with the reply as its text (`text` selects it in JSON output, such as `/response`), its input, window, duration and the harness's other output, such as token usage, so later runs, `bf search` and your agents read it back; those records rank like a low-priority source, so a summary never outranks its evidence. See [Run prompts](https://fmind.github.io/brain-framework/docs/prompts/).
+- `bf update` runs due prompts after sensors and routines, outside the update lock; `bf watch` runs them in a second process beside collection, so a long agent run never delays a sensor, and marks them `@` with their run counts. A direct run never waits for a scheduled one and leaves the schedule unchanged.
+- `bf update --kind sensor|routine|prompt`, repeatable, keeps only those kinds of program; `update`, `watch` and `schedule` accept `--prompt NAME` selectors.
+- `bf status` reports `prompts` with their state, freshness, runs, last run, latest record and failures; `attention` and the home page list failing or overdue prompts, and `bf validate` checks that each enabled prompt's file exists.
+
+### Changed
+
+- `bf run` takes a routine or a prompt: its argument is named `PROGRAM`.
+- A routine's `{{prompt}}` placeholder is invalid, as before; only a prompt's command takes it.
+- CI and security workflows pin `jdx/mise-action` v5.1.1. The explicit mise `2026.10.0` pin keeps tool-manager upgrades deliberate; the action's 24-hour release-age default applies only without that pin.
 
 ### Fixed
 
@@ -12,10 +25,6 @@ Proposed patch release. The brain format (`version: 7`), `bf.yaml`, reply schema
 - Period pages and search scopes place records without `time` by `attributes.observed`, including source counts and ordering across brains. Replies keep observation separate from event time; records with neither timestamp remain outside periods, and `undated` still selects every record without event time.
 - The `weekly-review` example lists projects as plain bullets, with overdue reviews first and earliest deadlines first, and separates the open-task preview from its surrounding paragraphs. Generated reviews no longer create duplicate checkbox tasks; complete work in the owning notes.
 - The session and prompt hooks keep nonempty stale cache results while collection runs, showing “Index refreshing”. They tolerate only the exact stale-cache identity problem; empty generations, malformed metadata and other problems stay silent.
-
-### Changed
-
-- CI and security workflows pin `jdx/mise-action` v5.1.1. The explicit mise `2026.10.0` pin keeps tool-manager upgrades deliberate; the action's 24-hour release-age default applies only without that pin.
 
 ## [v18.3.0](https://github.com/fmind/brain-framework/releases/tag/v18.3.0) - 2026-10-07
 

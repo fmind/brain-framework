@@ -20,8 +20,8 @@ description: Look up Brain Framework commands, previews, graph exports, replies,
 | `read [REF] [--rel RELATION] [--offset N]`                                               | Open home, a page, note, section, record or identity; `--rel` lists one relation's links.                                                |
 | `export [--kind edges\|identities]`                                                      | Print the graph of the selected brains as JSON Lines, from their caches.                                                                 |
 | `collect SENSOR [--since TIME] [--until TIME] [--dry-run] [--allow-removal]`             | Run one sensor now.                                                                                                                      |
-| `run [ROUTINE] [ARGS]... [--hook EVENT] [--stdin] [--dry-run]`                           | Run one routine, or every routine of a hook, now; see [routines](routines.md).                                                           |
-| `update [--sensor NAME] [--routine NAME] [--dry-run]`                                    | Run due sensors, then due routines, then refresh the cache.                                                                              |
+| `run [PROGRAM] [ARGS]... [--hook EVENT] [--stdin] [--dry-run]`                           | Run one routine or [prompt](prompts.md), or every routine of a hook, now; see [routines](routines.md).                                   |
+| `update [--sensor NAME] [--routine NAME] [--prompt NAME] [--kind KIND] [--dry-run]`      | Run due sensors, then due routines, then due prompts, then refresh the cache.                                                            |
 | `watch [--interval N] [--poll-interval N] [--notify MODE] [--json]`                      | Run due programs until you quit, with a live dashboard; see [watch](schedule.md).                                                        |
 | `schedule [--backend NAME] [--every N] [--name NAME] [--output DIR] [--executable PATH]` | Generate native scheduler files and their installation commands; run nothing.                                                            |
 | `status [--check] [--watch]`                                                             | Report caches, records, program health, logs and local usage.                                                                            |
@@ -29,7 +29,7 @@ description: Look up Brain Framework commands, previews, graph exports, replies,
 | `eval [--path evals] [--baseline FILE]`                                                  | Run retrieval cases; compare ranks with a saved reply.                                                                                   |
 | `build [--reproject SENSOR [--dry-run]]`                                                 | Recover interrupted record writes and rebuild the search cache; `--reproject` [re-applies mappings](schema.md#reproject-stored-records). |
 
-Every command taking `--brain NAME|PATH` selects brains as [Configuration](configuration.md#select-a-brain) describes. `collect`, `run`, `update`, `watch` and `schedule` act on exactly one brain; `update`, `watch` and `schedule` also accept repeatable `--sensor` and `--routine` [selectors](schedule.md#select-programs).
+Every command taking `--brain NAME|PATH` selects brains as [Configuration](configuration.md#select-a-brain) describes. `collect`, `run`, `update`, `watch` and `schedule` act on exactly one brain; `update`, `watch` and `schedule` also accept repeatable `--sensor`, `--routine` and `--prompt` [selectors](schedule.md#select-programs).
 
 ### Preview an update or a collection
 
@@ -118,11 +118,11 @@ A well-formed ref that names nothing exits 1 and suggests what exists: a close p
 
 Every reply states times with your local offset, and dates and field values as the [retrieval reference](retrieval.md) describes, while files, run history and the cache keep UTC. Search and read replies follow that reference; `problems` is always a list of objects with `error` and, when known, `brain` and `file`.
 
-An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors` and `routines` it ran or found due, `manual` for skipped manual programs, and the refreshed `index`. A `run` reply has `ok`, `dry_run`, any `hook` and its `routines`, each with a `status` of `ran`, `skipped` or `failed`.
+An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors`, `routines` and, when the brain declares any, `prompts` it ran or found due, `manual` for skipped manual programs, and the refreshed `index`. A `run` reply has `ok`, `dry_run`, any `hook` and its `routines`, each with a `status` of `ran`, `skipped` or `failed`; a prompt's has `prompts`, holding its `record` and reply `text`.
 
 ### Status sources and routines
 
-`bf status` groups results under `brains`. Each brain has its `cache`, `notes`, `problems`, `attention`, `sources`, `routines`, `coverage` totals and `usage`. `healthy` is false when any brain has a problem, an `attention` entry, an unavailable cache or cannot load. A brain that cannot load appears with only `brain`, `error` and, when known, `path`.
+`bf status` groups results under `brains`. Each brain has its `cache`, `notes`, `problems`, `attention`, `sources`, `routines`, [`prompts`](prompts.md#schedule-and-overlap), `coverage` totals and `usage`. `healthy` is false when any brain has a problem, an `attention` entry, an unavailable cache or cannot load. A brain that cannot load appears with only `brain`, `error` and, when known, `path`.
 
 | Field                                | Meaning                                                                                                                                                                               |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -137,6 +137,7 @@ An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors` and `routines`
 | `last_run`                           | Counters of the last committed run: `records`, `added`, `updated`, `unchanged`, `removed`, `requested_start`, `requested_end`, `reconcile`, `elapsed_seconds`, `output_bytes`.        |
 | `reconciled`                         | The last scheduled [reconciliation](sensors.md#frequent-updates-and-periodic-reconciliation).                                                                                         |
 | `action`                             | A routine's latest action.                                                                                                                                                            |
+| `runs`, `record`                     | A prompt's successful runs and the record its latest run wrote; its `last_run` holds `at`, `elapsed_seconds` and `output_bytes`.                                                      |
 | `failed`, `error`, `failures`, `log` | The last attempt failed: its diagnostic, consecutive failures and `logs/NAME.log`.                                                                                                    |
 | `usage`                              | `7d` and `30d` counts of `search`, `empty` (searches without results) and `read`; `since`, the oldest event counted, when [rotation](limits.md#processes-and-logs) cut that window.   |
 

@@ -44,6 +44,83 @@
       "title": "Mapping",
       "type": "object"
     },
+    "Prompt": {
+      "additionalProperties": false,
+      "description": "An agent run: a harness command fed the expanded prompt file, run when due or now, recorded in memories/.",
+      "properties": {
+        "command": {
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "items": { "type": "string" },
+          "maxItems": 128,
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
+              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines)(?:/[^/{}\\\\]+)+)$",
+              "type": "string"
+            }
+          ],
+          "title": "Command",
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Allow execution; false disables both manual and due runs.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "lookback": {
+          "default": 86400,
+          "description": "Seconds covered by a sensor's first run, each snapshot run and bf collect without --since, and by a routine run without history.",
+          "maximum": 31536000,
+          "minimum": 1,
+          "title": "Lookback",
+          "type": "integer"
+        },
+        "max_bytes": {
+          "default": 1048576,
+          "description": "Maximum stdout in bytes; exceeding it fails without recording the run.",
+          "maximum": 4194304,
+          "minimum": 1,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "prompt": {
+          "description": "The prompt file: a normalized Markdown path in prompts/, such as prompts/assistant.md.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
+          "pattern": "^prompts(?:/[^/{}\\\\]+)+\\.md$",
+          "title": "Prompt",
+          "type": "string"
+        },
+        "refresh": {
+          "default": 1800,
+          "description": "Seconds between due runs; zero keeps the prompt manual, run only by bf run.",
+          "maximum": 31536000,
+          "minimum": 0,
+          "title": "Refresh",
+          "type": "integer"
+        },
+        "text": {
+          "anyOf": [{ "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "JSON Pointer to the reply text in the command's JSON stdout, such as /response; the other members become the record's output attribute. Omitted, all of stdout is the reply.",
+          "title": "Text"
+        },
+        "timeout": {
+          "default": 900,
+          "description": "Maximum runtime in seconds.",
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Timeout",
+          "type": "integer"
+        }
+      },
+      "required": ["command", "prompt"],
+      "title": "Prompt",
+      "type": "object"
+    },
     "Reconciliation": {
       "additionalProperties": false,
       "description": "Occasionally revisit older evidence in the same window source.",
@@ -72,7 +149,7 @@
       "description": "A deterministic brain program: run when due, by a named hook, or now with `bf run`.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -232,7 +309,7 @@
       "if": { "properties": { "reconcile": { "type": "object" } }, "required": ["reconcile"] },
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -372,7 +449,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "One brain: its name, related brains, declared fields, and the sensors and routines it may run.",
+  "description": "One brain: its name, related brains, declared fields, and the sensors, routines and prompts it may run.",
   "properties": {
     "brains": {
       "anyOf": [
@@ -407,6 +484,19 @@
       "pattern": "^[a-z][a-z0-9-]{0,63}$",
       "title": "Name",
       "type": "string"
+    },
+    "prompts": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Prompt" } },
+          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+          "type": "object"
+        },
+        { "type": "null" }
+      ],
+      "description": "Agent runs: a harness command fed a prompt file, run when due or with bf run, each run recorded in memories/NAME/; names must differ from sensors and routines.",
+      "title": "Prompts"
     },
     "routines": {
       "anyOf": [

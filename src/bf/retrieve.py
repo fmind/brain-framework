@@ -93,7 +93,8 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
             low=pages.low(store),
         )
         # Counting sources reads every record row: only a search that can return records needs them.
-        known = set(index.sources(connection)) | set(load(store).sensors) if collected else set()
+        config = load(store) if collected else None
+        known = set(index.sources(connection)) | set(config.sensors) | set(config.prompts) if config else set()
         return {
             "store": store,
             "connection": connection,

@@ -120,7 +120,7 @@ def test_routine_help_never_runs_a_routine(
         (["build", "--reproject", ""], "--reproject"),
         (["collect", "calendar", "--since", ""], "--since"),
         (["collect", ""], "SENSOR"),
-        (["run", ""], "ROUTINE"),
+        (["run", ""], "PROGRAM"),
         (["update", "--sensor", "calendar", "--sensor", ""], "--sensor"),
         (["schedule", "--routine", " "], "--routine"),
         # A suite path is relative to the brain, never the working directory: it keeps its own reason.

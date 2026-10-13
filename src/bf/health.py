@@ -9,7 +9,7 @@ from typing import cast
 
 from bf import index, usage
 from bf.config import Selection, brain_name, load, related
-from bf.history import ROUTINES, log_path, state
+from bf.history import PROMPTS, ROUTINES, log_path, state
 from bf.models import CACHE, Config, Error, Program
 from bf.storage import Store
 
@@ -47,9 +47,23 @@ def source_health(
 ) -> dict[str, dict[str, object]]:
     """Describe active, disabled and historical sources without running them or exposing logs."""
     now = now or datetime.now(UTC)
-    config, history = load(store), state(store)
+    config, history, asked = load(store), state(store), state(store, PROMPTS)
     result: dict[str, dict[str, object]] = {}
-    for name in sorted({*config.sensors, *names}):
+    for name in sorted({*config.sensors, *config.prompts, *names}):
+        if name in config.prompts:
+            # A prompt's records are its runs: the prompt is their source.
+            prompt = config.prompts[name]
+            entry = asked.get(name, {})
+            success = str(entry.get("success", ""))
+            item: dict[str, object] = {"state": "active" if prompt.enabled else "disabled", "freshness": "unknown"}
+            if success:
+                item["last_collected"] = success
+            if entry.get("error"):
+                item["failed"] = True
+            if prompt.enabled:
+                item["freshness"] = _freshness(prompt, success, now)
+            result[name] = item
+            continue
         settings = config.sensors.get(name)
         entry = history.get(name, {})
         success = str(entry.get("success", ""))
@@ -104,12 +118,46 @@ def routine_health(store: Store, *, now: datetime | None = None) -> dict[str, di
     return result
 
 
+def prompt_health(store: Store, *, now: datetime | None = None) -> dict[str, dict[str, object]]:
+    """Each configured prompt's state, freshness, last scheduled success, runs, latest record and failure."""
+    now = now or datetime.now(UTC)
+    config, history = load(store), state(store, PROMPTS)
+    result: dict[str, dict[str, object]] = {}
+    for name, settings in sorted(config.prompts.items()):
+        entry = history.get(name, {})
+        success = str(entry.get("success", ""))
+        item: dict[str, object] = {
+            "state": "active" if settings.enabled else "disabled",
+            "freshness": _freshness(settings, success, now) if settings.enabled else "unknown",
+            "runs": entry.get("runs", 0),
+        }
+        if success:
+            item["last_success"] = success
+        if entry.get("run") and not entry.get("error"):
+            # Like a source's last_run: the latest successful run, scheduled or direct.
+            item["last_run"] = {
+                "at": entry["run"],
+                **{key: entry[key] for key in ("elapsed_seconds", "output_bytes") if key in entry},
+            }
+        if entry.get("record"):
+            item["record"] = entry["record"]
+        result[name] = {**item, **_failure(name, entry)}
+    return result
+
+
 def _attention(
-    config: Config, sources: dict[str, dict[str, object]], routines: dict[str, dict[str, object]]
+    config: Config,
+    sources: dict[str, dict[str, object]],
+    routines: dict[str, dict[str, object]],
+    prompts: dict[str, dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
     """Scheduled programs this machine runs that failed or have not succeeded recently: only those are late."""
     result: list[dict[str, object]] = []
-    for kind, healths, programs in (("sensor", sources, config.sensors), ("routine", routines, config.routines)):
+    for kind, healths, programs in (
+        ("sensor", {name: health for name, health in sources.items() if name not in config.prompts}, config.sensors),
+        ("routine", routines, config.routines),
+        ("prompt", prompts or {}, config.prompts),
+    ):
         for name, health in healths.items():
             settings, failed = programs.get(name), health.get("failed")
             if settings and settings.enabled and settings.refresh and (failed or health["freshness"] in _LATE):
@@ -118,13 +166,15 @@ def _attention(
 
 
 def attention(store: Store, now: datetime | None = None) -> list[dict[str, object]]:
-    """Scheduled sensors and routines this machine runs that failed or have not succeeded recently."""
+    """Scheduled sensors, routines and prompts this machine runs that failed or have not succeeded recently."""
     now = now or datetime.now(UTC)
-    return _attention(load(store), source_health(store, now=now), routine_health(store, now=now))
+    return _attention(
+        load(store), source_health(store, now=now), routine_health(store, now=now), prompt_health(store, now=now)
+    )
 
 
 def report(stores: list[Store], now: datetime | None = None) -> dict[str, object]:
-    """Per brain: cache, notes, records, source and routine freshness, errors, logs and usage."""
+    """Per brain: cache, notes, records, source, routine and prompt freshness, errors, logs and usage."""
     now = now or datetime.now(UTC)
     unavailable = stores.unavailable if isinstance(stores, Selection) else {}
     brains: list[dict[str, object]] = [{"brain": name, "error": error} for name, error in unavailable.items()]
@@ -145,8 +195,9 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
         counts = cast("dict[str, dict[str, object]]", summary.pop("sources"))
         coverage = source_health(store, counts, now=now)
         sources: dict[str, dict[str, object]] = {}
-        for name in sorted({*config.sensors, *counts}):
-            run = history.get(name, {})
+        for name in sorted({*config.sensors, *config.prompts, *counts}):
+            # A prompt's run counters belong to its prompts entry.
+            run = {} if name in config.prompts else history.get(name, {})
             # One shape shared with retrieval coverage, plus indexed totals and local run diagnostics.
             entry: dict[str, object] = {**coverage[name], **counts.get(name, {"records": 0, "bytes": 0})}
             if counters := {key: run[key] for key in _COUNTERS if key in run}:
@@ -156,8 +207,9 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             entry.update(_failure(name, run))
             sources[name] = {key: value for key, value in entry.items() if value != ""}
         routines = routine_health(store, now=now)
+        prompts = prompt_health(store, now=now)
         # The reasons a brain is unhealthy, beside its problems: the home page's list of late or failed programs.
-        alerts = _attention(config, coverage, routines)
+        alerts = _attention(config, coverage, routines, prompts)
         # A busy cache still serves its last generation, marked stale in replies, while a live writer finishes.
         healthy &= not alerts and not summary["problems"] and summary["cache"] in {"ready", "busy"}
         brains.append(
@@ -168,6 +220,7 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
                 "attention": alerts,
                 "sources": sources,
                 **({"routines": routines} if routines else {}),
+                **({"prompts": prompts} if prompts else {}),
                 "coverage": {
                     kind: {
                         "sources": sum(value["state"] == kind for value in coverage.values()),

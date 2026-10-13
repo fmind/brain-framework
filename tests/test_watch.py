@@ -919,7 +919,7 @@ def test_json_watch_reports_completion_rows_and_delivery_warning(
     assert len(starts) == 2
     assert any(event["message"] == "Update complete" for event in events)
     assert not events[-1]["running"]
-    assert set(events[0]) == {"brain", "running", "message", "programs"}
+    assert set(events[0]) == {"brain", "running", "prompting", "message", "programs"}
     calendar = next(row for row in events[0]["programs"] if row["name"] == "calendar")
     assert (calendar["records"], calendar["added"], calendar["updated"]) == (10, 1, None)
     assert calendar["success"] == "2026-09-01T12:00:00+00:00"

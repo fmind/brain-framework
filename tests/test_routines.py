@@ -511,7 +511,7 @@ def test_a_direct_run_never_waits_for_input_an_agent_shell_holds_open(hooked: St
 @pytest.mark.parametrize(
     ("arguments", "code", "message"),
     [
-        ([], 2, "name a routine, or pass --hook EVENT"),
+        ([], 2, "name a routine or prompt, or pass --hook EVENT"),
         (["--hook", "Pre Push"], 2, "hook names are lowercase words"),
         (["missing"], 1, "unknown routine missing"),
         (["paused"], 1, "routine paused is disabled in bf.yaml; set enabled: true to run it"),

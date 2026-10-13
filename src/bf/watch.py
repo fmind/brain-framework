@@ -28,10 +28,10 @@ from rich.text import Text
 
 from bf.collect import next_due
 from bf.config import load
-from bf.history import ROUTINES, SENSORS, environment, log_path, state
+from bf.history import PROMPTS, ROUTINES, SENSORS, environment, log_path, state
 from bf.models import Error, WatchSettings, decode, local, present, printable, terminal, timestamp
 from bf.storage import BusyError, Store, collecting
-from bf.update import late, selection
+from bf.update import KINDS, ProgramKind, late, selection
 from bf.watch_settings import Notifications, settings
 
 
@@ -69,17 +69,29 @@ class Row:
     log: str = ""
     action: str = ""
     records: int | None = None
+    # A prompt's successful runs and the record its latest run wrote.
+    runs: int | None = None
+    record: str = ""
 
 
-def snapshot(store: Store, sensors: tuple[str, ...] = (), routines: tuple[str, ...] = ()) -> list[Row]:
+# The table marks each kind beside its name; sensors carry none.
+MARKERS = {"routine": "* ", "prompt": "@ "}
+# Watch runs prompts in their own process beside collection: a long agent run never delays sensors.
+LANES: tuple[frozenset[ProgramKind], frozenset[ProgramKind]] = (frozenset({"sensor", "routine"}), frozenset({"prompt"}))
+
+
+def snapshot(
+    store: Store, sensors: tuple[str, ...] = (), routines: tuple[str, ...] = (), prompts: tuple[str, ...] = ()
+) -> list[Row]:
     """Read only configuration and small local history files; never scan evidence or run providers."""
     config = load(store)
-    selected = selection(config, sensors, routines)
+    selected = selection(config, sensors, routines, prompts)
     now = datetime.now(UTC)
     rows = []
     for kind, programs, file, included in (
         ("sensor", config.sensors, SENSORS, selected[0]),
         ("routine", config.routines, ROUTINES, selected[1]),
+        ("prompt", config.prompts, PROMPTS, selected[2]),
     ):
         # state() validates every entry, so each present field already has its history type.
         history = state(store, file)
@@ -121,6 +133,8 @@ def snapshot(store: Store, sensors: tuple[str, ...] = (), routines: tuple[str, .
                     log=log_path(name) if error else "",
                     action=str(entry.get("action", "")),
                     records=cast(int | None, entry.get("records")),
+                    runs=cast(int, entry.get("runs", 0)) if kind == "prompt" else None,
+                    record=str(entry.get("record", "")),
                 )
             )
     return rows
@@ -221,6 +235,8 @@ class Dashboard:
     attention: bool = False
     help: bool = False
     running: bool = False
+    # A prompt cycle runs in its own process beside the collection cycle.
+    prompting: bool = False
     message: str = "Ready"
     # Why the check interval runs a selected program late, shown in the summary and the guide.
     late: str = ""
@@ -311,7 +327,7 @@ class Dashboard:
                 "Configure watch in bf.yaml; restart to apply.",
                 "f (or u) reloads bf.yaml and checks due programs now.",
                 "While updating, refresh queues one check; pause still applies.",
-                "Selection, refresh intervals and retry backoff still apply.",
+                "Selection, refresh and backoff apply; prompts run beside collection.",
                 "Space pauses future checks; q cancels an active update.",
             ]
         lines = [
@@ -321,7 +337,7 @@ class Dashboard:
             "Newest/largest first; name, state, due, refresh and kind ascend.",
             "Unknown values stay last; ties use name. Sorting is session-only.",
             "Items: records the last committed collection returned, not total stored.",
-            "+ added / ~ updated / - removed; changes sorts their sum. * marks routines.",
+            "+ added / ~ updated / - removed; changes sorts the sum. * routine, @ prompt",
             "Failed runs keep prior counts. — means unknown or not applicable.",
             *mode,
             "Fresh is local success, not proof the provider is unchanged.",
@@ -344,6 +360,10 @@ class Dashboard:
             detail.append("Log: " + clean(row.log) + "\n", style="dim")
         elif row.action:
             detail.append("Latest action: " + clean(row.action) + "\n")
+        if row.runs is not None:
+            detail.append(f"Runs: {row.runs:,}\n")
+        if row.record and not row.error:
+            detail.append("Latest record: " + clean(row.record) + "\n")
         detail.append(f"Refresh: {duration(row.refresh) if row.refresh else 'manual only'}\n")
         detail.append("Last OK: " + (local(row.success) if row.success else "never") + "\n")
         detail.append("Last run items: " + ("—" if row.records is None else f"{row.records:,}") + "\n")
@@ -351,7 +371,9 @@ class Dashboard:
             detail.append(f"Last run: {row.elapsed_seconds:.2f}s · {row.output_bytes:,} bytes\n")
             if row.reconcile:
                 detail.append("Wider reconciliation window\n", style="cyan")
-        if not row.error and not row.action:
+        if row.kind == "prompt" and not row.error:
+            detail.append("Only due prompts run here. Use bf run NAME to ask one now.")
+        elif not row.error and not row.action:
             detail.append("Only due programs run. Use bf collect for an intentional manual collection.")
         detail.rstrip()
         return detail
@@ -361,6 +383,8 @@ class Dashboard:
         now = now or datetime.now(UTC)
         mode = "OBSERVE · no execution" if self.observe else "PAUSED" if self.paused else "WATCH · collection enabled"
         working = "Updating…" if self.running else f"Next check in {duration(self.next_check - time.monotonic())}"
+        if self.prompting:
+            working += " · prompt running"
         header = Text.assemble(
             (" BF ", "bold white on blue"),
             (f"  {clean(self.brain)}", "bold cyan"),
@@ -409,7 +433,7 @@ class Dashboard:
             due = datetime.fromisoformat(row.next_due) if row.next_due else None
             table.add_row(
                 # The routine marker leads so that shortening a long name never hides it.
-                Text(("> " if index == self.cursor else "  ") + ("* " if row.kind == "routine" else "") + row.name),
+                Text(("> " if index == self.cursor else "  ") + MARKERS.get(row.kind, "") + row.name),
                 Text(row.status, style=COLORS.get(row.status, "dim")) if row.included else Text("excluded", "dim"),
                 Text(duration((now - success).total_seconds()) + " ago" if success else "never"),
                 Text("—" if due is None else "now" if due <= now else duration((due - now).total_seconds())),
@@ -429,7 +453,7 @@ class Dashboard:
         elif visible:
             detail = self.details(visible[self.cursor])
         else:
-            detail = Text("Add a reviewed sensor or routine in bf.yaml. Press ? for controls and timing.")
+            detail = Text("Add a reviewed sensor, routine or prompt in bf.yaml. Press ? for controls and timing.")
         keys = (
             "s sort  r reverse  n name  t last OK  i items  ? help  q quit\nj/k ↑/↓ select  g/G first/last  Tab attention  "
             + ("u reread" if self.observe else "f refresh  Space pause")
@@ -463,13 +487,23 @@ class Dashboard:
 class Job:
     """A separate BF process keeps keyboard input responsive and reuses provider cancellation."""
 
-    def __init__(self, store: Store, sensors: tuple[str, ...], routines: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        store: Store,
+        sensors: tuple[str, ...],
+        routines: tuple[str, ...],
+        prompts: tuple[str, ...] = (),
+        kinds: frozenset[ProgramKind] = KINDS,
+    ) -> None:
         # Like -I without -s: PYTHON* variables and the working directory never change what runs, while a user-site
         # installation, such as pip install --user, still imports bf.
         self.argv = [sys.executable, "-E", "-P", "-m", "bf", "update", "--brain", str(store.root)]
-        for flag, names in (("--sensor", sensors), ("--routine", routines)):
+        for flag, names in (("--sensor", sensors), ("--routine", routines), ("--prompt", prompts)):
             for name in names:
                 self.argv.extend((flag, name))
+        if kinds != KINDS:
+            for kind in sorted(kinds):
+                self.argv.extend(("--kind", kind))
         self.process: subprocess.Popen[bytes] | None = None
         self.reply: IO[bytes] | None = None
 
@@ -500,7 +534,11 @@ class Job:
             return 0
         if not isinstance(value, dict):
             return 0
-        programs = [*cast(list[object], value.get("sensors") or []), *cast(list[object], value.get("routines") or [])]
+        programs = [
+            *cast(list[object], value.get("sensors") or []),
+            *cast(list[object], value.get("routines") or []),
+            *cast(list[object], value.get("prompts") or []),
+        ]
         cache = value.get("index")
         if any(not isinstance(item, dict) or item.get("status") == "failed" for item in programs):
             return 0
@@ -562,6 +600,7 @@ def watch(
     *,
     sensors: tuple[str, ...] = (),
     routines: tuple[str, ...] = (),
+    prompts: tuple[str, ...] = (),
     interval: int | None = None,
     poll_interval: float | None = None,
     notifications: str | None = None,
@@ -581,14 +620,15 @@ def watch(
             else "watch needs an interactive terminal; use bf watch --json or bf status"
         )
     dashboard = Dashboard(
-        load(store).name, observe=observe, rows=snapshot(store, sensors, routines), preferences=preferences
+        load(store).name, observe=observe, rows=snapshot(store, sensors, routines, prompts), preferences=preferences
     )
-    if not observe and (reason := late(load(store), preferences.interval, sensors, routines)):
+    if not observe and (reason := late(load(store), preferences.interval, sensors, routines, prompts)):
         # Due programs run only at checks: a slower check runs them late, so status reports them overdue.
         dashboard.late = f"{reason}; lower the watch interval"
         if json_output:
             sys.stderr.write(f"bf: {printable(dashboard.late)}\n")
-    job = Job(store, sensors, routines)
+    selected = (sensors, routines, prompts)
+    job, agent = (Job(store, *selected, kinds=lane) for lane in LANES)
     with ExitStack() as stack:
         if not observe:
             try:
@@ -599,8 +639,9 @@ def watch(
                 dashboard.observe = True
                 dashboard.message = "Observing an active watcher; its selection and settings control collection"
         stack.callback(job.close)
+        stack.callback(agent.close)
         if json_output:
-            _loop(store, dashboard, job, sensors, routines)
+            _loop(store, dashboard, job, *selected, agent=agent)
         else:
             console = Console(markup=False, highlight=False)
             with (
@@ -609,7 +650,15 @@ def watch(
                     console=console, screen=True, auto_refresh=False, redirect_stdout=False, redirect_stderr=False
                 ) as live,
             ):
-                _loop(store, dashboard, job, sensors, routines, live=live, descriptor=descriptor)
+                _loop(store, dashboard, job, *selected, agent=agent, live=live, descriptor=descriptor)
+
+
+def _prompt_due(rows: list[Row], now: datetime) -> bool:
+    """Whether a selected scheduled prompt is due, failure backoff included: only then start a prompt cycle."""
+    return any(
+        row.kind == "prompt" and row.included and row.next_due and datetime.fromisoformat(row.next_due) <= now
+        for row in rows
+    )
 
 
 def _loop(
@@ -618,11 +667,15 @@ def _loop(
     job: Job,
     sensors: tuple[str, ...],
     routines: tuple[str, ...],
+    prompts: tuple[str, ...] = (),
     *,
+    agent: Job | None = None,
     live: Live | None = None,
     descriptor: int = -1,
 ) -> None:
     preferences = dashboard.preferences
+    # A finished prompt cycle waits one interval: a run skipped as still active elsewhere must not restart at once.
+    next_prompt = 0.0
     next_read = next_frame = 0.0
     size = (0, 0)
     notifications = Notifications(preferences)
@@ -646,9 +699,18 @@ def _loop(
             dashboard.next_check = now + preferences.interval
             completed = 0 if skipped else code
             next_read = 0
+        if agent is not None and dashboard.prompting and (code := agent.poll()) is not None:
+            dashboard.prompting = False
+            agent.discard()
+            dashboard.message = (
+                "Prompt run complete" if code == 0 else "Prompt run failed; inspect its details or run bf status"
+            )
+            next_prompt = now + preferences.interval
+            completed = code if completed is None else completed or code
+            next_read = 0
         if now >= next_read:
             try:
-                dashboard.replace_rows(snapshot(store, sensors, routines))
+                dashboard.replace_rows(snapshot(store, sensors, routines, prompts))
                 if invalid:
                     dashboard.message = "Configuration recovered"
                 invalid = False
@@ -697,6 +759,19 @@ def _loop(
                 refresh_requested = False
                 dashboard.running = True
                 dashboard.message = "Running due sensors, then routines; existing per-program limits apply"
+            if (
+                agent is not None
+                and not invalid
+                and not dashboard.observe
+                and not dashboard.paused
+                and not dashboard.prompting
+                and now >= next_prompt
+                and _prompt_due(dashboard.rows, datetime.now(UTC))
+            ):
+                previous.update({(row.kind, row.name): row.success for row in dashboard.rows if row.kind == "prompt"})
+                agent.start()
+                dashboard.prompting = True
+                dashboard.message = "Running due prompts beside collection"
             if live is None:
                 # Bytes, like every command reply: JSON Lines stay UTF-8 whatever the terminal's locale.
                 sys.stdout.buffer.write(
@@ -705,6 +780,7 @@ def _loop(
                             {
                                 "brain": dashboard.brain,
                                 "running": dashboard.running,
+                                "prompting": dashboard.prompting,
                                 "message": dashboard.message,
                                 "programs": [asdict(row) for row in dashboard.rows],
                             }
