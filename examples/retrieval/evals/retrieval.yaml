@@ -116,3 +116,16 @@ cases:
     read: "2026-09-10..2026-09-14"
     expect: ["documents:atlas-launch-plan", "meetings:offline", "meetings:zephyr"]
     forbid: ["calendar:atlas-status-2026-09-08", "calendar:atlas-status-2026-09-15"]
+  - name: period-falls-back-to-observation
+    read: "2026-09-22"
+    expect: ["feed:observed", "feed:dated"]
+    forbid: ["feed:neither"]
+  - name: source-period-falls-back-to-observation
+    read: "memories/feed/2026-09-22"
+    expect: ["feed:observed", "feed:dated"]
+    forbid: ["feed:neither"]
+  - name: scoped-search-falls-back-to-observation
+    query: bulletin
+    scope: "memories/feed/2026-09-22"
+    expect: ["feed:observed", "feed:dated"]
+    forbid: ["feed:neither"]

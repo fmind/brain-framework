@@ -1,6 +1,6 @@
 # Runnable retrieval example
 
-Two fictional projects have different budgets. This example checks that questions find the right project's evidence, rank it first among competing notes and duplicate records, preserve scopes and explicit identities, and report absent evidence. Its 23 cases use `bf eval`, without an LLM, credentials or network calls.
+Two fictional projects have different budgets. This example checks that questions find the right project's evidence, rank it first among competing notes and duplicate records, preserve scopes and explicit identities, and report absent evidence. Its 26 cases use `bf eval`, without an LLM, credentials or network calls.
 
 Run from the Brain Framework checkout after `uv sync --locked`. This subshell copies the brain, isolates configuration and state, and removes its temporary files on exit:
 
@@ -19,10 +19,14 @@ Run from the Brain Framework checkout after `uv sync --locked`. This subshell co
   }
   bf validate
   bf eval
+  bf read memories/feed/2026-09-22
+  bf read 2026-09-22
+  bf search bulletin --scope memories/feed/2026-09-22
+  bf read memories/feed/undated
 )
 ```
 
-Expect validation to return `"valid":true`, with 15 notes and six records, and evaluation to return `"passed":true`, `"score":"23/23"` and `"mrr":1.0`. The cases require Atlas's budget of 4200 credits to rank first, excluding Zephyr's competing budget of 900 credits.
+Expect validation to return `"valid":true`, with 15 notes and nine records, and evaluation to return `"passed":true`, `"score":"26/26"` and `"mrr":1.0`. The cases require Atlas's budget of 4200 credits to rank first, excluding Zephyr's competing budget of 900 credits.
 
 `bf.yaml`, `projects/`, `concepts/`, `actions/` and `memories/` form the brain; `evals/retrieval.yaml` holds its questions and expected results. The records are checked in: a disabled `catalog` sensor entry only sets that source's `priority: low`, and nothing is collected. There are no routines or related brains. The example pins UTC and uses fixed dates. Retrieval may refresh the disposable `.bf/` cache; it does not collect or count evaluation reads as user usage.
 
@@ -82,6 +86,12 @@ Six cases cover the finer search rules:
 Each search case with `expect` reports `rank`, the position of each expected ref within the first 50 results, even below the case's `limit`, and the run reports `mrr`, the mean reciprocal rank. Every case ranks an expected ref first, hence `1.0`; the launch plan outranks a glossary definition sharing two of its three words, because a passage matching all the query's words gains 20%. To check a ranking change, save a reply with `bf eval > ../baseline.json` before it and run `bf eval --baseline ../baseline.json` after it: `regressions` lists cases that fail or rank lower, and `improvements` those that pass or rank higher. See [track ranking changes](../../docs/docs/checks.md#track-ranking-changes).
 
 These assertions evaluate retrieval, not generated prose, semantic equivalence or source truth. Search `text` is matched across all returned excerpts, so it does not bind an answer fragment to a particular hit when several hits are allowed. A passing score covers only these cases and this corpus; it does not establish performance on arbitrary questions, live freshness or private brains.
+
+## Browse a feed without publication dates
+
+The three fictional `feed` records cover an event time, observation alone, and neither timestamp. The walkthrough ends by reading both period pages, searching within that source period and listing its undated records.
+
+Both period pages list `feed:observed` before `feed:dated`, with `"total":2`; the scoped search finds both. The first record keeps `observed` and has no `time`: the period uses when it was observed without inventing a publication date. The dated record stays on September 22 even though it was observed on September 23. The record with neither timestamp appears only in `undated`, alongside `feed:observed`, because both lack event time. The three corresponding evaluation cases keep this behavior reproducible.
 
 ## Add a useful case
 

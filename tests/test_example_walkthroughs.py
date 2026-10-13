@@ -27,7 +27,7 @@ def export() -> str:
             None,
             ['"score":"16/16"', export(), '"state":"unchanged"', '"state":"changed"', '"brain":"example-team"'],
         ),
-        ("retrieval", 0, ['"score":"23/23"', '"mrr":1.0', '"valid":true']),
+        ("retrieval", 0, ['"score":"26/26"', '"mrr":1.0', '"valid":true']),
         (
             "hooks",
             0,

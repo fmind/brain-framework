@@ -18,7 +18,7 @@ Pages are computed views, not files. They combine the selected brains; `bf read 
 | none                                              | Home: projects, recent actions and notes, activity, upcoming items and failing programs.                     |
 | `projects`, `concepts`, `actions` or a subfolder  | Notes with their tasks; one `ACTION.md` per action.                                                          |
 | `tasks`                                           | Open checkboxes and counts.                                                                                  |
-| `today`, `yesterday`, `12h`, `7d`, `2w`           | Items dated in that period, items modified in it and source counts.                                          |
+| `today`, `yesterday`, `12h`, `7d`, `2w`           | Items placed by date or observation, items modified in the period and source counts.                         |
 | `2026-09-27`, `2026-09`, `2026-09-21..2026-09-25` | The same for a local day, month or inclusive range of days; `previous` and `next` name the adjacent periods. |
 | `memories`                                        | Sources with counts, freshness and collected windows.                                                        |
 | `memories/SOURCE`, `memories/SOURCE/PERIOD`       | One source's coverage and records; `undated` selects records without a time.                                 |
@@ -36,7 +36,7 @@ Listed items show declared single-value `fields`, such as a status, when the not
 | Concepts / actions | Title order / newest first.                                                                                                                                                                                              |
 | Home `projects`    | Those needing review first, each group newest first, as many as fit the 32 KiB page beside the other sections; `projects_total` counts every project that is not deprecated, and `bf read projects` lists them all.      |
 | Home               | 10 latest actions; notes dated in the last 7 days (`changed`); record counts of the last 24 hours (`activity`); items in the next 7 days (`upcoming`). `changed` and `upcoming` hold at most 20 items, without excerpts. |
-| Period `changed`   | Up to 20 items modified in the period but dated outside it; not paginated.                                                                                                                                               |
+| Period `changed`   | Up to 20 items modified in the period but placed outside it; not paginated.                                                                                                                                              |
 | Home `attention`   | Scheduled programs that failed or are `overdue` or `never` succeeded on this machine.                                                                                                                                    |
 
 Records of a [`priority: low`](sensors.md#quiet-a-high-volume-source) source leave period `items`, `changed` and home `upcoming`; period `sources` and home `activity` keep their counts with `"priority":"low"`. Only `deprecated` closes a note: it ranks last and leaves every home section, reminders and the task list.
@@ -73,6 +73,8 @@ A future event counts once it happens, and editing the note clears `newer_eviden
 | Review signals        | A linked item's event time or upstream `updated`, against the note file's `modified`. |
 
 A message sent last week and edited today keeps last week's event time and appears in today's `changed` list.
+
+Period pages, their source counts, home `activity` and period search scopes use a record's `time`, falling back to `attributes.observed` only when `time` is absent. They sort period items by that placement time, newest first. Replies keep `observed` separate and never invent an event `time`. Records with neither timestamp stay out of periods; `memories/SOURCE/undated` still lists every record without event time, even one placed by observation. Observation alone never creates an upcoming event or a newer-evidence review signal. Try the [fictional feed example](https://github.com/fmind/brain-framework/tree/main/examples/retrieval#browse-a-feed-without-publication-dates).
 
 ## Tasks
 

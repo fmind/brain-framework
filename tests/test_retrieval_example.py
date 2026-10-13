@@ -20,7 +20,7 @@ def test_retrieval_example_validates_and_answers_its_questions(tmp_path: Path) -
         reply = json.loads(result.stdout)
         assert reply[field] is True, reply
         if command == "eval":
-            assert (reply["score"], reply["mrr"]) == ("23/23", 1.0), reply
+            assert (reply["score"], reply["mrr"]) == ("26/26", 1.0), reply
             ranks = {case["name"]: case.get("rank") for case in reply["cases"]}
             # Before 15.0.0 three other projects' Next actions sections mentioning Atlas ranked first.
             assert ranks["project-next-actions-first"] == {"projects/atlas.md#next-actions": 1}

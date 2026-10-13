@@ -919,3 +919,95 @@ def test_listed_fields_stop_before_their_byte_budget(brain: Store) -> None:
     assert list(listed) == sorted(facts)[: len(listed)]
     assert len(listed) < len(facts)
     assert cast("dict[str, object]", read([brain], "jira:WEB-9")["record"])["fields"] == facts
+
+
+@pytest.mark.parametrize("period_ref", ["7d", "2026-09-18..2026-09-25"])
+def test_periods_place_undated_records_by_observation(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, period_ref: str
+) -> None:
+    original = pages.period
+    monkeypatch.setattr(pages, "period", lambda value, _now=None: original(value, NOW))
+    records_file(
+        brain,
+        "feed",
+        [
+            Record(
+                id="dated",
+                title="Feed entry",
+                time="2026-09-24T10:00:00Z",
+                attributes={"observed": "2026-09-25T10:00:00Z"},
+            ),
+            Record(
+                id="observed",
+                title="Feed entry",
+                attributes={"observed": "2026-09-24T14:00:00+01:00", "updated": "2026-09-24T12:00:00Z"},
+            ),
+            Record(id="neither", title="Feed entry"),
+            Record(
+                id="old",
+                title="Feed entry",
+                time="2026-09-01T10:00:00Z",
+                attributes={"observed": "2026-09-24T12:00:00Z"},
+            ),
+            Record(id="future", title="Feed entry", attributes={"observed": "2026-09-26T12:00:00Z"}),
+        ],
+    )
+    for ref in (period_ref, f"memories/feed/{period_ref}"):
+        reply = read([brain], ref)
+        assert refs(reply) == ["feed:observed", "feed:dated"]
+        assert reply["total"] == 2
+        first = cast("list[dict]", reply["items"])[0]
+        assert "time" not in first
+        assert first["observed"] == "2026-09-24T13:00:00.000000Z"
+        assert set(refs(search([brain], Query(text="entry", **pages.scope(ref))))) == {"feed:observed", "feed:dated"}
+    assert read([brain], period_ref)["sources"] == [
+        {"source": "feed", "records": 2, "page": f"memories/feed/{period_ref}"}
+    ]
+    assert refs(read([brain], period_ref), "changed") == []
+    assert set(refs(read([brain], "memories/feed/undated"))) == {"feed:observed", "feed:neither", "feed:future"}
+    assert "feed:future" not in refs(pages.home([brain], NOW), "upcoming")
+    assert pages.home([brain], NOW)["activity"] == [
+        {"brain": "fixture", "source": "feed", "records": 1, "page": "memories/feed/24h"}
+    ]
+
+
+def test_observed_period_pagination_merges_brains_and_keeps_boundaries(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 7\nname: team\n")
+    for store, hours in ((brain, (0, 4, 8)), (team, (2, 6, 10))):
+        records_file(
+            store,
+            "feed",
+            [
+                Record(id=str(hour), title="Entry", attributes={"observed": f"2026-09-25T{hour:02}:00:00Z"})
+                for hour in hours
+            ],
+        )
+    records_file(team, "feed", [Record(id="outside", title="Entry", attributes={"observed": "2026-09-26T00:00:00Z"})])
+    monkeypatch.setattr(pages, "PAGE", 2)
+    for ref in ("2026-09-25", "memories/feed/2026-09-25"):
+        found = []
+        offset = 0
+        while True:
+            reply = read([brain, team], ref, offset=offset)
+            assert reply["total"] == 6
+            found.extend(refs(reply))
+            if "next_offset" not in reply:
+                break
+            offset = cast("int", reply["next_offset"])
+        assert found == [f"feed:{hour}" for hour in (10, 8, 6, 4, 2, 0)]
+
+
+def test_low_priority_observed_records_stay_in_period_counts(brain: Store) -> None:
+    brain.write(
+        "bf.yaml", b"version: 7\nname: fixture\nsensors:\n  feed:\n    command: [feed-cli]\n    priority: low\n"
+    )
+    records_file(brain, "feed", [Record(id="entry", title="Entry", attributes={"observed": "2026-09-25T10:00:00Z"})])
+    reply = read([brain], "2026-09-25")
+    assert reply["items"] == []
+    assert reply["sources"] == [{"source": "feed", "records": 1, "page": "memories/feed/2026-09-25", "priority": "low"}]
+    assert refs(read([brain], "memories/feed/2026-09-25")) == ["feed:entry"]

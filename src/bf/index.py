@@ -933,6 +933,8 @@ def _note_time(value: str) -> str:
 
 # Fixed SQL expressions over `items i`, shared with page builders: event time and last modification.
 TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE i.time END"
+# Period placement keeps observation separate from event time in replies and review signals.
+PERIOD_TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i.time,''),i.observed) END"
 # A note's date as written: replies state it instead of the local midnight that orders it.
 DATE = "CASE WHEN i.kind='note' THEN substr(i.time,1,10) ELSE '' END"
 UPDATED = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i.updated,''),i.time) END"
@@ -942,6 +944,7 @@ WITHIN = (
     "((i.kind='record' AND i.time>=:since AND i.time<:until) "
     "OR (i.kind='note' AND i.time!='' AND note_time(i.time)>=:since AND note_time(i.time)<:until))"
 )
+PERIOD_WITHIN = f"({WITHIN} OR (i.kind='record' AND i.time='' AND i.observed>=:since AND i.observed<:until))"
 # UPDATED within [:since, :until), both given, with the same split over items_kind_modified.
 MODIFIED = (
     "((i.kind='record' AND coalesce(nullif(i.updated,''),i.time)>=:since "
@@ -958,7 +961,8 @@ _ROW = f"{_FIELDS},'' AS fragment,i.title,i.lead AS excerpt,i.tasks_open,i.tasks
 # and CROSS JOIN keeps the few section prefixes as the outer loop of each range search.
 _LINKING = """SELECT l.item FROM links l WHERE l.target IN (SELECT value FROM json_each(:targets))
   UNION SELECT l.item FROM json_each(:sections) s CROSS JOIN links l ON l.target>s.value||'#' AND l.target<s.value||'$'"""
-_FILTERS = f"""((:since='' AND :until='') OR i.time!='') AND (:since='' OR ({TIME})>=:since) AND (:until='' OR ({TIME})<:until)
+_FILTERS = f"""((:since='' AND :until='') OR ({PERIOD_TIME})!='')
+  AND (:since='' OR ({PERIOD_TIME})>=:since) AND (:until='' OR ({PERIOD_TIME})<:until)
   AND (NOT :undated OR i.time='') AND (:prefix='' OR i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')
   AND (:target='' OR (:tag_scope AND i.id IN (SELECT item FROM tags WHERE target=:target))
        OR (NOT :tag_scope AND (i.ref IN (SELECT value FROM json_each(:targets)) OR i.id IN ({_LINKING}))))"""  # noqa: S608
@@ -1434,13 +1438,13 @@ def sources(connection: sqlite3.Connection) -> dict[str, dict[str, object]]:
 
 
 def activity(connection: sqlite3.Connection, since: str, until: str) -> list[tuple[str, int]]:
-    """Records per source whose event time falls in [since, until), busiest first."""
+    """Records per source placed in [since, until) by event time or observation, busiest first."""
     return [
         (row[0], row[1])
         for row in connection.execute(
-            "SELECT source,count(*) FROM items WHERE kind='record' AND time!='' AND time>=? AND time<? "
+            f"SELECT source,count(*) FROM items i WHERE kind='record' AND {PERIOD_WITHIN} "  # noqa: S608 - fixed SQL; bounds are parameters
             "GROUP BY source ORDER BY count(*) DESC,source",
-            (since, until),
+            {"since": since, "until": until},
         )
     ]
 

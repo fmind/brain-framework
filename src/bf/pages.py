@@ -490,6 +490,10 @@ def _time_key(item: dict[str, object]) -> tuple[str, str]:
     return str(item.get("time", "")), str(item["ref"])
 
 
+def _period_key(item: dict[str, object]) -> tuple[str, str]:
+    return str(item.get("time") or item.get("observed", "")), str(item["ref"])
+
+
 def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now: datetime) -> None:
     """Derive reminders from local edits, explicit deadlines and newer linked evidence, without asserting a review.
 
@@ -644,16 +648,18 @@ def timeline(
         params = {"since": found.since, "until": found.until, "low": json.dumps(low(store))}
         changed = _rows(
             connection,
-            f"{index.MODIFIED} AND NOT ({index.WITHIN}) AND {_LOUD}",
+            f"{index.MODIFIED} AND NOT ({index.PERIOD_WITHIN}) AND {_LOUD}",
             params,
             f"({index.UPDATED}) DESC,i.ref DESC",
             SECTION,
         )
         sources = _counts(store, index.activity(connection, found.since, found.until), name)
-        rows, total = index.listing(connection, f"{index.WITHIN} AND {_LOUD}", params, "time DESC,i.ref DESC")
+        rows, total = index.listing(
+            connection, f"{index.PERIOD_WITHIN} AND {_LOUD}", params, f"({index.PERIOD_TIME}) DESC,i.ref DESC"
+        )
         return {"changed": changed, "sources": sources, "rows": (label(brain, row) for row in rows), "total": total}
 
-    reply, parts = _paged(stores, build, _time_key, PAGE, offset, counted=counted, reverse=True)
+    reply, parts = _paged(stores, build, _period_key, PAGE, offset, counted=counted, reverse=True)
     return {
         "page": name,
         "since": found.since,
@@ -763,7 +769,7 @@ def memories(
     name = parts[2]
     window = None if name.endswith(".json") else period(name, now)
     if window:
-        where = "i.kind='record' AND i.source=:source AND i.time!='' AND i.time>=:since AND i.time<:until"
+        where = f"i.kind='record' AND i.source=:source AND {index.PERIOD_WITHIN}"
         params = {"source": source, "since": window.since, "until": window.until}
     elif name == "undated":
         where, params = "i.kind='record' AND i.source=:source AND i.time=''", {"source": source}
@@ -776,7 +782,15 @@ def memories(
         return None if known(store, connection) is None else {}
 
     reply, found = _listing(
-        stores, where, params, "time DESC,i.ref DESC", _time_key, PAGE, offset, counted=counted, summary=exists
+        stores,
+        where,
+        params,
+        f"({index.PERIOD_TIME}) DESC,i.ref DESC" if window else "time DESC,i.ref DESC",
+        _period_key if window else _time_key,
+        PAGE,
+        offset,
+        counted=counted,
+        summary=exists,
     )
     if not found:
         raise absent(reply)
