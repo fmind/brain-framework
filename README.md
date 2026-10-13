@@ -258,7 +258,7 @@ Each host reads its own folder: for Claude Code, use `~/.claude/skills` instead.
 | `bf-setup`    | Install BF, create a brain, connect the agent and choose sources worth adding.  |
 | `bf-maintain` | Run sensors and routines, check the brain and upgrade it safely.                |
 
-Working in a code repository instead? The [example session hook](https://github.com/fmind/brain-framework/tree/main/examples/hooks) prints the project that declares the repository, its next task and linked evidence when the session starts. Hosts that prefer tools can call `search` and `read` through [MCP](https://fmind.github.io/brain-framework/docs/mcp/). See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/).
+Working in a code repository instead? The [example session hook](https://github.com/fmind/brain-framework/tree/main/examples/hooks) prints the project that declares the repository, its next task and linked evidence when the session starts. During collection, a usable cached reply carries an “Index refreshing” note. Hosts that prefer tools can call `search` and `read` through [MCP](https://fmind.github.io/brain-framework/docs/mcp/). See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/).
 
 Agents can read this documentation as Markdown: [llms.txt](https://fmind.github.io/brain-framework/llms.txt) indexes every guide with a summary, [llms-full.txt](https://fmind.github.io/brain-framework/llms-full.txt) holds their full text, and each guide's Markdown sits at its URL followed by `index.md`.
 

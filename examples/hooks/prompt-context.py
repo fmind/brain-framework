@@ -12,6 +12,7 @@ REPLY_BYTES = 1 << 20
 # The prompt waits for this hook: a slow search (such as a large cache refresh) means no context, not a delay.
 SEARCH_SECONDS = 5
 LIMIT = 3
+STALE_CACHE = "identity resolution used a stale cache"
 # Any query word matches, so a whole prompt would match nearly everything: keep its first few content words.
 WORDS = 8
 # bf search's English and French function words (src/bf/index.py _STOP): the words a prompt adds to its subject.
@@ -56,7 +57,18 @@ def search(words: str, brain: str) -> dict | None:
         reply = json.loads(result.stdout)
     except ValueError:
         return None
-    return reply if isinstance(reply, dict) else None
+    if not isinstance(reply, dict):
+        return None
+    problems, stale = reply.get("problems", []), reply.get("stale", [])
+    if (
+        not isinstance(problems, list)
+        or not isinstance(stale, list)
+        or any(not isinstance(name, str) for name in stale)
+        or any(not isinstance(problem, dict) or problem.get("error") != STALE_CACHE for problem in problems)
+        or (problems and not stale)
+    ):
+        return None
+    return reply
 
 
 def visible(text: str) -> str:
@@ -79,7 +91,7 @@ def code(value: str) -> str:
     return f"{fence}{pad}{value}{pad}{fence}"
 
 
-def render(items: list, more: bool) -> list[str]:
+def render(items: list, more: bool, stale: bool = False) -> list[str]:
     """Up to LIMIT results; with `more`, further results may hold more records, so their count is a minimum."""
     notes, records = [], 0
     for item in items:
@@ -98,6 +110,8 @@ def render(items: list, more: bool) -> list[str]:
     if records:
         count = f"{records}+ collected records" if more else f"{records} collected record{'s' if records > 1 else ''}"
         lines.append(f"- {count} also matched.")
+    if stale:
+        lines.append("- Index refreshing: may miss the newest collection.")
     lines.append("Read refs with `bf read` before relying on them; collected records are counted, not quoted.")
     return lines
 
@@ -113,10 +127,9 @@ def main(argv: list[str]) -> int:
     if not words:
         return 0
     reply = search(words, brain)
-    # Incomplete retrieval could hide the relevant note: stay silent rather than suggest a partial picture.
-    if not reply or reply.get("problems") or reply.get("stale") or not isinstance(reply.get("items"), list):
+    if not reply or not isinstance(reply.get("items"), list):
         return 0
-    lines = render(reply["items"], "next_offset" in reply)
+    lines = render(reply["items"], "next_offset" in reply, bool(reply.get("stale")))
     if lines:
         sys.stdout.write("\n".join(lines) + "\n")
     return 0

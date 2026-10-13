@@ -4,10 +4,13 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+Proposed patch release. The brain format (`version: 7`), `bf.yaml`, reply schemas and search cache format are unchanged. After publication, upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), run `bf skills DIR` to refresh the retrieval guide, and copy the updated example hooks and `weekly-review` routine into your brain, preserving local adaptations.
+
 ### Fixed
 
 - Period pages and search scopes place records without `time` by `attributes.observed`, including source counts and ordering across brains. Replies keep observation separate from event time; records with neither timestamp remain outside periods, and `undated` still selects every record without event time.
 - The `weekly-review` example lists projects as plain bullets, with overdue reviews first and earliest deadlines first, and separates the open-task preview from its surrounding paragraphs. Generated reviews no longer create duplicate checkbox tasks; complete work in the owning notes.
+- The session and prompt hooks keep nonempty stale cache results while collection runs, showing “Index refreshing”. They tolerate only the exact stale-cache identity problem; empty generations, malformed metadata and other problems stay silent.
 
 ### Changed
 

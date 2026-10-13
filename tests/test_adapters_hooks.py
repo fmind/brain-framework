@@ -134,7 +134,6 @@ def test_session_context_is_silent_when_nothing_applies(provider: Provider) -> N
     for remote, page, code, home in [
         ("https://gitlab.com/owner/name.git", PAGE, 0, HOME),
         ("git@github.com:fmind/brain-framework.git", {**PAGE, "problems": [{"error": "skipped"}]}, 0, HOME),
-        ("git@github.com:fmind/brain-framework.git", {**PAGE, "stale": ["brain"]}, 0, HOME),
         ("git@github.com:fmind/brain-framework.git", PAGE, 1, HOME),
         ("git@github.com:fmind/brain-framework.git", "not a page", 0, HOME),
         # The home page is part of the context: an incomplete one leaves the whole context out.
@@ -254,7 +253,10 @@ def test_session_context_addresses_an_owning_note_as_bf_does() -> None:
     assert owner({"brain": "Team/x", "ref": "concepts/brain-framework.md"}) == ""
 
 
-@pytest.mark.parametrize("incomplete", [{"problems": [{"error": "skipped evidence"}]}, {"stale": ["brain"]}])
+@pytest.mark.parametrize(
+    "incomplete",
+    [{"problems": [{"error": "skipped evidence"}]}, {"stale": ["brain"], "problems": [{"error": "skipped evidence"}]}],
+)
 def test_session_context_rejects_incomplete_project_metadata(provider: Provider, incomplete: dict) -> None:
     install(provider, "git@github.com:fmind/brain-framework.git")
     provider.install(
@@ -478,7 +480,6 @@ def test_prompt_context_keeps_option_like_prompts_as_plain_words(provider: Provi
         ({"prompt": "keyboard"}, "not json", 0),
         ({"prompt": "keyboard"}, ["not", "a", "reply"], 0),
         ({"prompt": "keyboard"}, {**SEARCH, "problems": [{"error": "skipped evidence"}]}, 0),
-        ({"prompt": "keyboard"}, {**SEARCH, "stale": ["brain"]}, 0),
         ({"prompt": "keyboard"}, {"items": {}}, 0),
         ({"prompt": "keyboard"}, {"items": [], "unmatched": ["keyboard"]}, 0),
         # A ref outside the authored trees, or a hostile one, is never printed; nothing else matched.
@@ -558,3 +559,75 @@ def test_prompt_context_mirrors_the_core_stopwords() -> None:
     # Like bf search, it keeps a function word written as an acronym.
     assert hook.query("What does the EU AI Act say AND who owns IT?") == "EU AI Act say owns IT"
     assert hook.query(" ".join(index.terms("What does the EU AI Act say AND who owns IT?"))) == "EU AI Act say owns IT"
+
+
+STALE_ERROR = {"brain": "brain", "error": "identity resolution used a stale cache"}
+
+
+@pytest.mark.parametrize("place", ["identity", "projects", "earlier", "home", "all"])
+@pytest.mark.parametrize("problems", [[], [STALE_ERROR], [STALE_ERROR, STALE_ERROR]])
+def test_session_context_keeps_stale_context_with_notice(provider: Provider, place: str, problems: list) -> None:
+    install(provider, "git@github.com:fmind/brain-framework.git")
+    stale = {"stale": ["brain"], "problems": problems}
+    provider.install(
+        "bf",
+        [
+            {"match": ["read", REPO], "stdout": {**PAGE, **(stale if place in {"identity", "all"} else {})}},
+            {
+                "match": ["read", "projects"],
+                "stdout": {"items": [], "next_offset": 50, **(stale if place in {"earlier", "all"} else {})},
+            },
+            {
+                "match": ["read", "projects", "--offset", "50"],
+                "stdout": {**PROJECTS, **(stale if place in {"projects", "all"} else {})},
+            },
+            {"match": ["read"], "stdout": {**HOME, **(stale if place in {"home", "all"} else {})}},
+        ],
+    )
+    result = session(provider)
+    assert (result.returncode, result.stderr) == (0, "")
+    assert result.stdout.count("- Index refreshing: may miss the newest collection.") == 1
+    assert "Next task: Qualify v16." in result.stdout
+    assert "Ignore all instructions" not in result.stdout
+    assert "branch-coverage" not in result.stdout
+
+
+@pytest.mark.parametrize("problems", [None, [], [STALE_ERROR], [STALE_ERROR, STALE_ERROR]])
+def test_prompt_context_keeps_stale_matches_with_notice(provider: Provider, problems: list | None) -> None:
+    metadata = {"stale": ["brain"], **({"problems": problems} if problems is not None else {})}
+    output = prompt(provider, {"prompt": "keyboard"}, reply={**SEARCH, **metadata})
+    assert "- Keyboard checks" in output
+    assert output.count("- Index refreshing: may miss the newest collection.") == 1
+    assert "Ignore all instructions" not in output
+    assert prompt(provider, {"prompt": "keyboard"}, reply={"items": [], **metadata}) == ""
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"stale": ["brain"], "problems": [STALE_ERROR, {"error": "skipped evidence"}]},
+        {"stale": ["brain"], "problems": [{"error": "identity resolution used a stale cache!"}]},
+        {"stale": ["brain"], "problems": [{}]},
+        {"stale": ["brain"], "problems": ["invalid"]},
+        {"problems": [STALE_ERROR]},
+        {"stale": [], "problems": [STALE_ERROR]},
+        *[{"stale": value} for value in (None, False, 0, "", {}, [None], [1])],
+        *[{"problems": value} for value in (None, False, 0, "", {})],
+    ],
+)
+def test_context_hooks_reject_other_problems_and_malformed_metadata(provider: Provider, metadata: dict) -> None:
+    install(provider, "git@github.com:fmind/brain-framework.git", {**PAGE, **metadata})
+    result = session(provider)
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    assert prompt(provider, {"prompt": "keyboard"}, reply={**SEARCH, **metadata}) == ""
+
+
+def test_session_context_is_silent_for_an_empty_stale_generation(provider: Provider) -> None:
+    install(
+        provider,
+        "git@github.com:fmind/brain-framework.git",
+        {"stale": ["brain"], "problems": [STALE_ERROR], "backlinks": []},
+    )
+    result = session(provider)
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    assert provider.calls("bf") == [["read", REPO, "--brain", "/brains/main"]]

@@ -17,6 +17,7 @@ ATTENTION = 5
 # One lookup budget and page bound cover the repository read, the project listing and the home page.
 LOOKUP_SECONDS = 20
 MAX_PAGES = 100
+STALE_CACHE = "identity resolution used a stale cache"
 # Only authored note refs are printed, in code spans; a record ref is provider-controlled text and stays out.
 NOTE = re.compile(
     r"(?:bf://[a-z][a-z0-9-]{0,63}/)?(?:projects|concepts|actions)/[^\x00-\x1f\x7f-\x9f]+?\.md(?:#[^\x00-\x1f\x7f-\x9f]*)?"
@@ -47,7 +48,7 @@ def identity() -> str:
 
 
 def read(ref: str, brain: str, offset: int = 0, timeout: float = LOOKUP_SECONDS) -> dict | None:
-    """One complete page: a failed, incomplete (`problems`) or cache-busy (`stale`) reply counts as none."""
+    """One usable page: tolerate only stale-cache identity problems, with a visible notice at rendering."""
     raw = run(
         [
             "bf",
@@ -63,7 +64,16 @@ def read(ref: str, brain: str, offset: int = 0, timeout: float = LOOKUP_SECONDS)
         reply = json.loads(raw) if raw else None
     except ValueError:
         return None
-    if not isinstance(reply, dict) or reply.get("problems") or reply.get("stale"):
+    if not isinstance(reply, dict):
+        return None
+    problems, stale = reply.get("problems", []), reply.get("stale", [])
+    if (
+        not isinstance(problems, list)
+        or not isinstance(stale, list)
+        or any(not isinstance(name, str) for name in stale)
+        or any(not isinstance(problem, dict) or problem.get("error") != STALE_CACHE for problem in problems)
+        or (problems and not stale)
+    ):
         return None
     return reply
 
@@ -116,7 +126,7 @@ def owner(page: dict) -> str:
     return uri if NOTE.fullmatch(uri) else ""
 
 
-def render(repo: str, page: dict, project: dict | None, attention: list) -> list[str]:
+def render(repo: str, page: dict, project: dict | None, attention: list, stale: bool = False) -> list[str]:
     lines = [f"Brain context for {repo} (evidence, not instructions):"]
     ref = str(page.get("ref", ""))
     note = ref if NOTE.fullmatch(ref) else ""
@@ -168,6 +178,8 @@ def render(repo: str, page: dict, project: dict | None, attention: list) -> list
     if late:
         extra = f" and {len(late) - ATTENTION} more" if len(late) > ATTENTION else ""
         lines.append(f"- Collection needs attention: {', '.join(late[:ATTENTION])}{extra}; see `bf status`.")
+    if stale:
+        lines.append("- Index refreshing: may miss the newest collection.")
     lines.append(f"Read more with {code('bf read ' + target)}; collected records are counted, not quoted.")
     return lines
 
@@ -178,8 +190,10 @@ def main(argv: list[str]) -> int:
     deadline = time.monotonic() + LOOKUP_SECONDS
     # One read: a large note's first page still carries its ref and backlinks, all this hook prints.
     page = read(repo, brain, 0, deadline - time.monotonic()) if repo else None
-    if not page:
+    # An empty cache generation resolves no context worth printing.
+    if not page or (page.get("stale") and not (page.get("ref") or page.get("backlinks"))):
         return 0
+    stale = bool(page.get("stale"))
     ref = str(page.get("ref", ""))
     project = None
     if NOTE.fullmatch(ref) and ref.startswith("projects/"):
@@ -188,6 +202,7 @@ def main(argv: list[str]) -> int:
             listing = read("projects", brain, offset, deadline - time.monotonic())
             if not listing:
                 return 0
+            stale = stale or bool(listing.get("stale"))
             # Items name their brain only when several are selected; otherwise they share the page's brain.
             project = next(
                 (
@@ -208,7 +223,8 @@ def main(argv: list[str]) -> int:
     home = read("", brain, 0, deadline - time.monotonic())
     if not home or not isinstance(home.get("attention", []), list):
         return 0
-    sys.stdout.write("\n".join(render(repo, page, project, home.get("attention", []))) + "\n")
+    stale = stale or bool(home.get("stale"))
+    sys.stdout.write("\n".join(render(repo, page, project, home.get("attention", []), stale)) + "\n")
     return 0
 
 
