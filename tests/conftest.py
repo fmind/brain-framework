@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +27,21 @@ from bf.storage import Store
 ROOT = Path(__file__).resolve().parents[1]
 # Host terminal settings that change Rich and Typer output: width, color and forced terminal behavior.
 TERMINAL = ("COLUMNS", "LINES", "FORCE_COLOR", "NO_COLOR", "TTY_COMPATIBLE", "TTY_INTERACTIVE", "GITHUB_ACTIONS")
+
+
+def assert_linear_time(operation: Callable[[int], object], size: int) -> None:
+    """Four times the input must cost less than eight times the CPU, versus sixteen for quadratic work."""
+    sizes = (size // 4, size)
+    operation(sizes[0])  # Warm imports, caches and the interpreter before either measurement.
+    samples: dict[int, list[float]] = {n: [] for n in sizes}
+    for _ in range(3):
+        for n in sizes:
+            started = time.process_time()
+            operation(n)
+            samples[n].append(time.process_time() - started)
+    # CPU time excludes runner scheduling delays; minima discard GC and other transient overhead.
+    small, large = (min(samples[n]) for n in sizes)
+    assert large < 8 * small, f"4x input took {large / small:.2f}x CPU time ({small:.6f}s -> {large:.6f}s)"
 
 
 def pytest_configure() -> None:

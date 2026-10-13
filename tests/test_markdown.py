@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from bf.markdown import note, parse
 from bf.models import Error
+from conftest import assert_linear_time
 
 
 def slugs(data: bytes) -> list[str]:
@@ -122,11 +121,11 @@ def test_footnote_continuations_and_labels_follow_github() -> None:
 def test_a_run_of_footnote_openers_parses_in_linear_time() -> None:
     # A citation id holds no `[`, so each scan stops at the next one: before, every `[^` of this 100 KB run scanned to
     # its end, about 20 seconds per parse, and the citation took `[^a` as its id.
-    data = b"# Web\n\n## Decision\n\nShip it.[^[^a] " + b"[^" * 50_000 + b"\n\n## Risks\n\n[^a]: [Review](mail:m1)\n"
-    started = time.perf_counter()
-    assert note("projects/web.md", data).contexts == [("mail:m1", "decision", 9)]
-    # As in test_adversarial_markdown_parses_in_linear_time: another quadratic scan of the run fails too.
-    assert time.perf_counter() - started < 10
+    def parse_run(size: int) -> None:
+        data = b"# Web\n\n## Decision\n\nShip it.[^[^a] " + b"[^" * size + b"\n\n## Risks\n\n[^a]: [Review](mail:m1)\n"
+        assert note("projects/web.md", data).contexts == [("mail:m1", "decision", 9)]
+
+    assert_linear_time(parse_run, 50_000)
 
 
 @pytest.mark.parametrize(

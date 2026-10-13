@@ -8,6 +8,7 @@ Proposed patch release. The brain format (`version: 7`), `bf.yaml`, reply schema
 
 ### Fixed
 
+- Cancellation during sensor or routine startup now kills the newly created process group. Markdown complexity tests compare CPU-time growth, and cancellation tests wait for observed process termination, avoiding fixed-speed assumptions on slow CI runners.
 - Period pages and search scopes place records without `time` by `attributes.observed`, including source counts and ordering across brains. Replies keep observation separate from event time; records with neither timestamp remain outside periods, and `undated` still selects every record without event time.
 - The `weekly-review` example lists projects as plain bullets, with overdue reviews first and earliest deadlines first, and separates the open-task preview from its surrounding paragraphs. Generated reviews no longer create duplicate checkbox tasks; complete work in the owning notes.
 - The session and prompt hooks keep nonempty stale cache results while collection runs, showing “Index refreshing”. They tolerate only the exact stale-cache identity problem; empty generations, malformed metadata and other problems stay silent.

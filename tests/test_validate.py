@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import time
 from typing import cast
 
 import pytest
@@ -16,7 +15,7 @@ from bf.records import path as record_path
 from bf.retrieve import read, search
 from bf.storage import Store
 from bf.validate import validate
-from conftest import records_file
+from conftest import assert_linear_time, records_file
 from test_guarded_write import HELPER
 
 
@@ -226,13 +225,18 @@ def test_indented_conflict_markers_are_literal_examples() -> None:
         note("concepts/git.md", example.replace(b" <<<", b"<<<"))
 
 
-def test_adversarial_markdown_parses_in_linear_time() -> None:
-    started = time.perf_counter()
-    note("concepts/links.md", b"# Links\n\n" + b"[" * 100_000 + b"]\n")
-    note("concepts/links.md", b"# Links\n\n- [ ] " + b"[](" * 30_000 + b"\n")
-    note("concepts/heading.md", b"# Heading\n\n## a" + b" " * 100_000 + b"b\n")
-    # The former backtracking patterns took over a minute on these inputs.
-    assert time.perf_counter() - started < 10
+@pytest.mark.parametrize(
+    ("prefix", "unit", "suffix", "size"),
+    [
+        (b"# Links\n\n", b"[", b"]\n", 100_000),
+        (b"# Links\n\n- [ ] ", b"[](", b"\n", 30_000),
+        (b"# Heading\n\n## a", b" ", b"b\n", 100_000),
+    ],
+    ids=["brackets", "links", "heading"],
+)
+def test_adversarial_markdown_parses_in_linear_time(prefix: bytes, unit: bytes, suffix: bytes, size: int) -> None:
+    # Measure each former backtracking case separately: a slow linear case must not mask a quadratic one.
+    assert_linear_time(lambda n: note("concepts/adversarial.md", prefix + unit * n + suffix), size)
 
 
 def test_images_are_checked_links(brain: Store) -> None:

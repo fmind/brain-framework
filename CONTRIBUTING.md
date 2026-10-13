@@ -55,6 +55,8 @@ Tests belong in `tests/`; runnable brains and their question-to-evidence cases l
 
 For a sensor change, test a valid response and a realistic failure such as an incomplete provider page. Confirm that failure leaves saved evidence intact and diagnostics contain no provider text. Keep the 95% branch-coverage floor and all existing safety checks.
 
+Markdown complexity regressions compare fourfold input growth with an eightfold CPU-time bound, below quadratic growth (sixteenfold). Each adversarial case is measured separately after warmup, using the minimum of three samples at each size; runner scheduling delays do not count. When changing these checks, verify that a temporary quadratic parser variant fails. Process cancellation tests inject signals both during startup and while running, then poll for termination with a bounded deadline; a successful signal call or CLI exit alone does not prove descendants ended.
+
 For onboarding or workflow changes, follow the actual commands in a disposable brain with isolated configuration and state: save a decision, search its reason, read its ref, validate and evaluate. Show the expected result beside the example. Keep the README focused on first use, `docs/` on user contracts and `src/bf/skills/` on agent procedures. Check host discovery separately from installing the skills with `bf skills DIR`.
 
 Update the owning docs, skills and examples with public behavior. An adapter change needs a fake-provider test and an entry in `examples/sensors/README.md`. Regenerate the schemas when configuration models or replies change and the notices when dependencies change. Record user-visible outcomes under `Unreleased` in `CHANGELOG.md`; change versions and tags only for an authorized release.

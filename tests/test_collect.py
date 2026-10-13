@@ -278,25 +278,29 @@ def background(pidfile: Path, output: str = ">/dev/null 2>&1") -> str:
     return f"sleep 30 {output} & echo $! > {shlex.quote(str(pidfile))}; "
 
 
-def ended(pidfile: Path) -> bool:
+def ended(pidfile: Path | int) -> bool:
     """Whether a recorded descendant is gone, a zombie included, within two seconds; one that survived is killed."""
-    pid = int(pidfile.read_text())
+    pid = int(pidfile.read_text()) if isinstance(pidfile, Path) else pidfile
     deadline = time.monotonic() + 2
-    while status := subprocess.run(  # noqa: S603 - inspect only a synthetic program's descendant
-        ["ps", "-o", "stat=", "-p", str(pid)],  # noqa: S607 - POSIX process-boundary check
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=5,
-    ).stdout.strip():
-        if status.startswith("Z"):
-            break
+    while True:
+        result = subprocess.run(  # noqa: S603 - inspect only a synthetic program's descendant
+            ["ps", "-o", "stat=", "-p", str(pid)],  # noqa: S607 - POSIX process-boundary check
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+            env=environment(),  # Process-boundary tests deliberately inject unsafe startup variables.
+        )
+        assert result.returncode in (0, 1), result
+        assert not result.stderr, result
+        status = result.stdout.strip()
+        if not status or status.startswith("Z"):
+            return True
         if time.monotonic() > deadline:
             with suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
             return False
         time.sleep(0.05)
-    return True
 
 
 def test_real_process_boundary(configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -417,6 +421,30 @@ def test_brain_collectors_run_from_the_brain_root(configured: Store, monkeypatch
         run(["sensors/bad.sh"], Sensor(command=["sensors/bad.sh"]), configured, log)
     with pytest.raises(Error):
         run(["sensors/../bf.yaml"], Sensor(command=["x"]), configured, log)
+
+
+def test_program_start_preserves_signal_handlers(configured: Store) -> None:
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous = {signum: signal.getsignal(signum) for signum in signals}
+    try:
+        signal.signal(signal.SIGTERM, signal.default_int_handler)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        expected = {signum: signal.getsignal(signum) for signum in signals}
+        source = Sensor(command=["echo", "[]"])
+        assert run(source.command, source, configured, "sample") == b"[]\n"
+        assert {signum: signal.getsignal(signum) for signum in signals} == expected
+        # Library callers can execute from a worker, where signal.signal() is forbidden.
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            assert executor.submit(run, source.command, source, configured, "sample").result(timeout=5) == b"[]\n"
+        assert {signum: signal.getsignal(signum) for signum in signals} == expected
+        configured.write("sensors/bad.sh", b"#!/nonexistent/interpreter\n")
+        (configured.root / "sensors/bad.sh").chmod(0o700)
+        with pytest.raises(Error, match="interpreter"):
+            run(["sensors/bad.sh"], source, configured, "sample")
+        assert {signum: signal.getsignal(signum) for signum in signals} == expected
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def test_placeholders_are_expanded_once(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -660,8 +688,11 @@ def test_interpreter_startup_injection_is_removed(
         run(["tool"], source, configured, log)
 
 
-@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP], ids=["stop", "hangup"])
-def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_path: Path, signum: int) -> None:
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT], ids=["stop", "hangup", "interrupt"])
+@pytest.mark.parametrize("when", ["running", "starting"])
+def test_cancellation_kills_collector_and_descendants(
+    configured: Store, tmp_path: Path, signum: int, when: str
+) -> None:
     marker = tmp_path / "children"
     # The marker appears complete (renamed into place), so the test never reads a half-written list of ids.
     configured.write(
@@ -678,11 +709,33 @@ def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_pat
             }
         ).encode(),
     )
+    entrypoint = ["-m", "bf"]
+    if when == "starting":
+        # Reproduce the acquisition window: the collector has started, but Popen has not returned to run().
+        entrypoint = [
+            "-c",
+            f"""
+import os, signal, subprocess, time
+from pathlib import Path
+from bf.cli import main
+
+original = subprocess.Popen
+def interrupt_start(*args, **kwargs):
+    child = original(*args, **kwargs)
+    deadline = time.monotonic() + 20
+    while not Path({str(marker)!r}).exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    os.kill(os.getpid(), {int(signum)})
+    return child
+
+subprocess.Popen = interrupt_start
+main()
+""",
+        ]
     child = subprocess.Popen(  # noqa: S603 - exercise the CLI boundary with a temporary, synthetic collector
         [
             sys.executable,
-            "-m",
-            "bf",
+            *entrypoint,
             "collect",
             "sample",
             "--brain",
@@ -704,20 +757,16 @@ def test_cancellation_kills_collector_and_descendants(configured: Store, tmp_pat
         assert marker.exists(), "collector did not start"
         pids = [int(value) for value in marker.read_text().split()]
         assert len(pids) == 2, pids
-        child.send_signal(signum)
+        if when == "running":
+            child.send_signal(signum)
         stdout, stderr = child.communicate(timeout=10)
         assert child.returncode == 130, stderr.decode()
         # Cancellation exits 130 without a message.
         assert (stdout, stderr) == (b"", b"")
+        # wait() reaps the leader, not its descendants: observe termination under the same bounded deadline
+        # as the other process-boundary tests, rather than sampling immediately after the CLI exits.
         for pid in pids:
-            status = subprocess.run(  # noqa: S603 - inspect only process ids from the synthetic collector
-                ["ps", "-o", "stat=", "-p", str(pid)],  # noqa: S607 - POSIX process-boundary check
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
-            ).stdout.strip()
-            assert not status or status.startswith("Z"), f"collector process {pid} survived"
+            assert ended(pid), f"collector process {pid} survived"
         assert records.files(configured, "sample") == []
     finally:
         if pids:

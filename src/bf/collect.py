@@ -10,10 +10,12 @@ import signal
 import stat
 import subprocess
 import time
-from collections.abc import Callable, Mapping
-from contextlib import ExitStack, suppress
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import current_thread, main_thread
+from types import FrameType
 from typing import Annotated, NoReturn, Protocol
 from uuid import uuid4
 
@@ -74,6 +76,36 @@ def enabled[P: Program](programs: Mapping[str, P], kind: str, name: str) -> P:
     return program
 
 
+@contextmanager
+def _starting() -> Iterator[None]:
+    """Defer cancellation until the caller owns the child and can clean up its process group."""
+    if current_thread() is not main_thread():
+        yield
+        return
+    handlers: dict[int, Callable[[int, FrameType | None], object]] = {}
+    pending: tuple[int, FrameType | None] | None = None
+
+    def defer(signum: int, frame: FrameType | None) -> None:
+        nonlocal pending
+        if pending is None:
+            pending = (signum, frame)
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            handler = signal.getsignal(signum)
+            if callable(handler):
+                handlers[signum] = handler
+                signal.signal(signum, defer)
+        # Do not block signals with pthread_sigmask: the program would inherit that mask across exec.
+        yield
+    finally:
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+        if pending is not None:
+            signum, frame = pending
+            handlers[signum](signum, frame)
+
+
 def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes = b"", /) -> bytes:
     """Execute one sensor or routine from the brain root, feeding it `stdin`; returns its stdout.
 
@@ -94,23 +126,7 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
     else:
         executable = found
     started = time.monotonic()
-    try:
-        child = subprocess.Popen(  # noqa: S603
-            # Direct argv from the owner's bf.yaml, plus a `bf run` caller's arguments; no shell interprets them.
-            [executable, *argv[1:]],
-            cwd=store.root,
-            env=env,
-            stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-    except OSError as error:
-        # A log that cannot be written must not hide why the program did not start.
-        with suppress(Error, OSError):
-            append_log(store, name, f"{_now()} could not start {executable}")
-        raise Error("could not start the program; check its executable bit and interpreter") from error
-    stdout, stderr = child.stdout, child.stderr
+    child: subprocess.Popen[bytes] | None = None
     output, errors = bytearray(), bytearray()
     # A log routine's stdout only feeds its log: keep a rolling tail, as for stderr, instead of failing at max_bytes.
     logged = isinstance(sensor, Routine) and sensor.output == "log"
@@ -118,6 +134,24 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
     exited: float | None = None
     outcome = "failed"
     try:
+        with _starting():
+            try:
+                child = subprocess.Popen(  # noqa: S603
+                    # Direct argv from the owner's bf.yaml, plus a `bf run` caller's arguments; no shell interprets them.
+                    [executable, *argv[1:]],
+                    cwd=store.root,
+                    env=env,
+                    stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                # A log that cannot be written must not hide why the program did not start.
+                with suppress(Error, OSError):
+                    append_log(store, name, f"{_now()} could not start {executable}")
+                raise Error("could not start the program; check its executable bit and interpreter") from error
+        stdout, stderr = child.stdout, child.stderr
         if stdout is None or stderr is None:
             raise Error("program pipes were not created")
         with selectors.DefaultSelector() as selector:
@@ -190,19 +224,20 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
         outcome = str(error)
         raise
     finally:
-        # Descendants can keep pipes open after their leader exits; end the whole session.
-        with suppress(ProcessLookupError):
-            os.killpg(child.pid, signal.SIGKILL)
-        child.wait()
-        for pipe in (child.stdin, child.stdout, child.stderr):
-            if pipe is not None and not pipe.closed:
-                pipe.close()
-        shown = bytes(output[-_LOG:]) if logged else b""
-        diagnostics = bytes(errors[-_LOG:])
-        body = shown + (b"-- stderr --\n" + diagnostics if shown and diagnostics else diagnostics)
-        # A log is a diagnostic: failing to write it never changes the run's own outcome.
-        with suppress(Error, OSError):
-            append_log(store, name, f"{_now()} {outcome} after {time.monotonic() - started:.1f}s", body)
+        if child is not None:
+            # Descendants can keep pipes open after their leader exits; end the whole session.
+            with suppress(ProcessLookupError):
+                os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+            for pipe in (child.stdin, child.stdout, child.stderr):
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
+            shown = bytes(output[-_LOG:]) if logged else b""
+            diagnostics = bytes(errors[-_LOG:])
+            body = shown + (b"-- stderr --\n" + diagnostics if shown and diagnostics else diagnostics)
+            # A log is a diagnostic: failing to write it never changes the run's own outcome.
+            with suppress(Error, OSError):
+                append_log(store, name, f"{_now()} {outcome} after {time.monotonic() - started:.1f}s", body)
 
 
 def _window(start: str, end: str) -> tuple[str, str]:
