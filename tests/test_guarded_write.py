@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import io
 import json
 import os
 import subprocess
 import sys
+import threading
+from contextlib import suppress
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -37,6 +41,21 @@ def write(
 
 def leftovers(brain: Store) -> list[Path]:
     return sorted(brain.root.rglob(".write-*"))
+
+
+def module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("guarded_write", HELPER)
+    assert spec is not None
+    assert spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    return helper
+
+
+def locks() -> list[Path]:
+    """The helper's lock files: outside the brain, removed by each write that took one."""
+    folder = Path(os.environ["XDG_STATE_HOME"]) / "bf/guarded-write"
+    return sorted(folder.iterdir()) if folder.exists() else []
 
 
 def test_write_replaces_the_note_that_was_read(brain: Store) -> None:
@@ -159,14 +178,103 @@ def test_write_expands_a_quoted_home(brain: Store) -> None:
     assert (brain.root / NOTE).read_bytes() == written
 
 
+def test_concurrent_writes_of_one_read_keep_exactly_one(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Two sessions read the same digest. Unserialized, both pass the second check before either renames: both report
+    # success and one edit silently disappears. The second check waits here until the other writer reaches its own.
+    helper = module()
+    path = brain.root / NOTE
+    digest = helper.digest(path.read_bytes())
+    snapshot, checks, arrived = helper.snapshot, threading.local(), threading.Barrier(2, timeout=1)
+
+    def paused(directory: int, name: str) -> tuple[bytes, int]:
+        result = snapshot(directory, name)
+        checks.count = getattr(checks, "count", 0) + 1
+        if checks.count == 2:
+            # A writer waiting for the lock never arrives: the barrier then breaks and this one renames.
+            with suppress(threading.BrokenBarrierError):
+                arrived.wait()
+        return result
+
+    monkeypatch.setattr(helper, "snapshot", paused)
+    outcomes: dict[bytes, object] = {}
+
+    def edit(content: bytes) -> None:
+        try:
+            outcomes[content] = helper.write(path, digest, helper.whole(content))
+        except helper.ChangedError as error:
+            outcomes[content] = error
+
+    sessions = [threading.Thread(target=edit, args=(f"# Session {n}\n".encode(),)) for n in (1, 2)]
+    for session in sessions:
+        session.start()
+    for session in sessions:
+        session.join(timeout=60)
+    written = {content: value for content, value in outcomes.items() if isinstance(value, str)}
+    assert len(outcomes) == 2
+    assert len(written) == 1, outcomes
+    [(content, reported)] = written.items()
+    assert path.read_bytes() == content
+    assert helper.digest(content) == reported
+    assert not leftovers(brain)
+    assert not locks()
+
+
+def test_concurrent_helpers_report_the_one_write_that_survives(brain: Store) -> None:
+    digest = str(retrieve.read([brain], NOTE)["sha256"])
+    sessions = [
+        subprocess.Popen(  # noqa: S603 - the bundled helper on a synthetic brain
+            [sys.executable, str(HELPER), NOTE, "--expect-sha256", digest],
+            cwd=brain.root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(6)
+    ]
+    results = [session.communicate(f"# Session {n}\n", timeout=60) for n, session in enumerate(sessions)]
+    written = [json.loads(stdout) for stdout, _ in results if stdout]
+    assert len(written) == 1, results
+    assert written[0]["sha256"] == retrieve.read([brain], NOTE)["sha256"]
+    assert all("changed since it was read" in stderr for stdout, stderr in results if not stdout)
+    assert not leftovers(brain)
+    assert not locks()
+
+
+def test_write_waits_for_a_held_lock_and_refuses_an_unsafe_lock_folder(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = module()
+    path = brain.root / NOTE
+    original = path.read_bytes()
+    digest = helper.digest(original)
+    # Another helper holds this file's lock longer than the wait: nothing changes, and the lock stays its holder's.
+    monkeypatch.setattr(helper, "LOCK_WAIT", 0.2)
+    info = path.stat()
+    folder = Path(os.environ["XDG_STATE_HOME"]) / "bf/guarded-write"
+    folder.mkdir(mode=0o700, parents=True)
+    held = folder / f"{info.st_dev:x}-{info.st_ino:x}.lock"
+    with held.open("w") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        with pytest.raises(helper.LockError):
+            helper.write(path, digest, helper.whole(b"# Blocked\n"))
+    assert path.read_bytes() == original
+    assert locks() == [held]
+    # Once released, the next write takes the lock and removes it.
+    assert helper.write(path, digest, helper.whole(b"# Released\n")) == helper.digest(b"# Released\n")
+    assert not locks()
+    # A lock folder others may write could let them remove a lock: refuse it, through the command too.
+    folder.chmod(0o777)
+    result = write(brain, helper.digest(b"# Released\n"), "# Unsafe\n")
+    assert result.returncode == 1
+    assert "lock folder" in result.stderr
+    assert path.read_bytes() == b"# Released\n"
+
+
 def test_write_checks_again_before_the_rename(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    spec = importlib.util.spec_from_file_location("guarded_write", HELPER)
-    assert spec is not None
-    assert spec.loader is not None
-    helper = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(helper)
+    helper = module()
     path = brain.root / NOTE
     original = path.read_bytes()
     directory = helper.folder(path)

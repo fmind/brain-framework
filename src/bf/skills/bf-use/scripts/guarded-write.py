@@ -8,18 +8,22 @@ one occurrence of a passage.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
 import sys
-from collections.abc import Callable
-from contextlib import suppress
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 # Skills use the host's python3; this helper needs only the Python 3.11 standard library.
 MAX_BYTES = 16 << 20  # bf reads authored files up to 16 MiB.
+# Another helper holds a file's lock for one bounded read, write and rename: seconds, not minutes.
+LOCK_WAIT = 10.0
 
 
 class ChangedError(Exception):
@@ -32,6 +36,10 @@ class EditError(Exception):
 
 class SyncError(Exception):
     """The file was replaced, but its folder could not be synced."""
+
+
+class LockError(Exception):
+    """The private lock folder is unusable, or another helper kept the file's lock too long."""
 
 
 def holds_brain(directory: int) -> bool:
@@ -149,16 +157,110 @@ def replace(directory: int, name: str, expected: str, edit: Callable[[bytes], by
     return digest(result)
 
 
+def locks() -> int:
+    """A descriptor of the private folder holding this helper's locks, outside any brain, as bf keeps its own.
+
+    It lies below XDG_STATE_HOME, or ~/.local/state: links above that folder, such as /home on Fedora Atomic, are
+    followed; none at or below it. Only this user may write it, so nobody else can plant or remove a lock.
+    """
+    try:
+        configured = Path(os.environ.get("XDG_STATE_HOME", "")).expanduser()
+        state = configured if configured.is_absolute() else Path.home() / ".local/state"
+        state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(state.parent.resolve(), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except (OSError, RuntimeError) as error:
+        raise LockError from error
+    try:
+        for part in (state.name, "bf", "guarded-write"):
+            with suppress(FileExistsError):
+                os.mkdir(part, 0o700, dir_fd=fd)
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise LockError
+    except OSError as error:
+        os.close(fd)
+        raise LockError from error
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def take(fd: int, deadline: float) -> None:
+    """An exclusive advisory lock, waiting until the deadline for another helper to finish."""
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError as error:
+            if time.monotonic() >= deadline:
+                raise LockError from error
+            time.sleep(0.02)
+        except OSError as error:
+            raise LockError from error
+
+
+def same(first: os.stat_result, second: os.stat_result) -> bool:
+    return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+
+@contextmanager
+def lock(directory: int, name: str, wait: float) -> Iterator[None]:
+    """Serialize the check, write, second check and rename of one file among cooperating helpers.
+
+    The lock file is named after the file's device and inode, so every path or mount reaching it shares one lock. A
+    rename gives the file a new inode: after locking, the file must still have the inode the lock names, and the lock
+    file must still be the one locked, since its last holder removes it; otherwise lock again. Editors take no such
+    lock: the second digest check still narrows their window to the rename itself.
+    """
+    folder = locks()
+    try:
+        deadline = time.monotonic() + wait
+        while True:
+            target = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            leaf = f"{target.st_dev:x}-{target.st_ino:x}.lock"
+            try:
+                fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=folder)
+            except OSError as error:
+                raise LockError from error
+            try:
+                take(fd, deadline)
+                try:
+                    held = same(os.fstat(fd), os.stat(leaf, dir_fd=folder, follow_symlinks=False))
+                except OSError:
+                    held = False
+                try:
+                    if held and same(target, os.stat(name, dir_fd=directory, follow_symlinks=False)):
+                        yield
+                        return
+                finally:
+                    # Removed while still locked, after the work or once the file was replaced: a waiter on this lock
+                    # file then sees it gone and locks again. A lock file left behind only costs a few bytes.
+                    if held:
+                        with suppress(OSError):
+                            os.unlink(leaf, dir_fd=folder)
+            finally:
+                os.close(fd)
+            if time.monotonic() >= deadline:
+                raise LockError
+    finally:
+        os.close(folder)
+
+
 def sync(directory: int) -> None:
     """Persist the rename itself."""
     os.fsync(directory)
 
 
 def write(path: Path, expected: str, edit: Callable[[bytes], bytes]) -> str:
-    """Replace the file, reached without following a symlink, and persist the rename."""
+    """Replace the file, reached without following a symlink, under its lock, and persist the rename."""
     directory = folder(path)
     try:
-        written = replace(directory, path.name, expected, edit)
+        with lock(directory, path.name, LOCK_WAIT):
+            written = replace(directory, path.name, expected, edit)
         try:
             sync(directory)
         except OSError as error:
@@ -228,6 +330,12 @@ def main() -> int:
         parser.exit(1, f"Not written: {error}; nothing changed.\n")
     except SyncError:
         parser.exit(1, "Written, but its directory could not be synced; check the file system before relying on it.\n")
+    except LockError:
+        parser.exit(
+            1,
+            "Not written: another guarded write of this file is still running, or the private lock folder below "
+            "XDG_STATE_HOME or ~/.local/state is unusable; nothing changed. Read the file again and retry.\n",
+        )
     except OSError:
         parser.exit(
             1,
