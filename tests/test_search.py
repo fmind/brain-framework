@@ -848,6 +848,12 @@ def test_search_names_query_words_that_match_nothing(brain: Store, tmp_path: Pat
     reply = search([brain], Query(text='retreival zzabsent "retrieval offline" retrievl*'))
     assert reply["suggestions"] == {"retreival": ["retrieval"]}
     assert search([brain], Query(text="retrieval"))["items"]
+    # Lowercased with Latin accents folded, as search folds the words it is given: they used to keep their accents.
+    brain.write("concepts/move.md", "# Move\n\nL'Équipe déménage à Zürich.\n".encode())
+    assert search([brain], Query(text="equippe zurrich"))["suggestions"] == {
+        "equippe": ["equipe"],
+        "zurrich": ["zurich"],
+    }
     # A word counts as matched when any selected brain holds it.
     root = tmp_path / "team"
     root.mkdir()

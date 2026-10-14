@@ -1187,10 +1187,10 @@ def suggestions(connection: sqlite3.Connection, term: str) -> list[str]:
 
 
 @lru_cache(maxsize=256)
-def _stem(word: str) -> str:
-    """A word as the search table indexes it, from the same tokenizer."""
+def _stem(word: str, tokenizer: str = _TOKENIZER) -> str:
+    """A word as the search table indexes it, from the same tokenizer; without its stemmer, as search folds it."""
     with closing(sqlite3.connect(":memory:")) as connection:
-        connection.execute(f"CREATE VIRTUAL TABLE t USING fts5(x, tokenize={_TOKENIZER!r})")
+        connection.execute(f"CREATE VIRTUAL TABLE t USING fts5(x, tokenize={tokenizer!r})")
         connection.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, row)")
         connection.execute("INSERT INTO t VALUES(?)", (word,))
         row = connection.execute("SELECT term FROM v LIMIT 1").fetchone()
@@ -1198,12 +1198,13 @@ def _stem(word: str) -> str:
 
 
 def _spelled(connection: sqlite3.Connection, stem: str) -> str:
-    """The first indexed spelling of a stem: a one-token snippet of a passage holding it."""
+    """The first indexed spelling of a stem, lowercased with Latin accents folded as search folds query words: a
+    one-token snippet of a passage holding it."""
     row = connection.execute(
         "SELECT snippet(search,-1,char(1),char(2),'',1) FROM search WHERE search MATCH ? LIMIT 1", (_string(stem),)
     ).fetchone()
     found = re.search("\x01([^\x01\x02]+)\x02", row[0]) if row else None
-    return found[1].lower() if found else ""
+    return _stem(found[1], _TOKENIZER.removeprefix("porter ")) if found else ""
 
 
 def _lexical(connection: sqlite3.Connection, params: dict[str, object]) -> Iterator[dict[str, object]]:
