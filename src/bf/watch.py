@@ -506,9 +506,11 @@ class Job:
                 self.argv.extend(("--kind", kind))
         self.process: subprocess.Popen[bytes] | None = None
         self.reply: IO[bytes] | None = None
+        self.stopping = False
 
     def start(self) -> None:
         self.discard()
+        self.stopping = False
         # BF's own JSON reply, in an unnamed private file: it tells skipped files apart from failed programs.
         self.reply = tempfile.TemporaryFile()  # noqa: SIM115 - kept until the next start or close
         # A cancellation arriving while the child starts waits until close() can find and stop it.
@@ -553,13 +555,17 @@ class Job:
             self.reply = None
 
     def terminate(self) -> None:
-        """Ask a running update to stop without waiting, so several jobs stop together."""
-        if self.process is not None and self.process.poll() is None:
+        """Ask a running update to stop without waiting, so several jobs stop together.
+
+        One request only: a second SIGTERM would interrupt the update while it stops its own programs.
+        """
+        if self.process is not None and self.process.poll() is None and not self.stopping:
+            self.stopping = True
             self.process.terminate()
 
     def close(self) -> None:
         if self.process is not None and self.process.poll() is None:
-            self.process.terminate()
+            self.terminate()
             try:
                 try:
                     self.process.wait(timeout=1)
