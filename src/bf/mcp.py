@@ -177,7 +177,7 @@ def server(stores: list[Store] | Callable[[], list[Store]]) -> MCPServer:
         ] = 0,
     ) -> CallToolResult:
         """Read a page, note, section, record or identity. Follow next_offset for remaining items or text.
-        A note or record above 32 KiB returns its text in pages from offset 0; its first page has the outline and
+        A note or record above 32 KiB returns its text in pages from offset 0; its first page has any outline and the
         backlinks. Backlinks preview 5 items per relation: read the same ref with rel to list them all."""
 
         def run() -> dict[str, object]:

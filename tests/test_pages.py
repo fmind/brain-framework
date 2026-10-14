@@ -223,7 +223,7 @@ def test_large_reads_outline_only_the_sections_inside_them(brain: Store) -> None
     # Only an H1 title spans this note: no section to read instead, so the first page fills the budget.
     brain.write("concepts/plain.md", f"---\ntype: concept\n---\n# Plain title\n\n{body}".encode())
     plain = read([brain], "concepts/plain.md")
-    assert (plain["outline"], plain["next_offset"]) == ([], len(str(plain["text"])))
+    assert ("outline" in plain, plain["next_offset"]) == (False, len(str(plain["text"])))
     assert len(encode(plain["text"])) > retrieve.OPENING
     brain.write("concepts/parts.md", f"# Parts\n\n## One\n\n{body}## Two\n\nend\n".encode())
     whole = read([brain], "concepts/parts.md")
@@ -234,7 +234,7 @@ def test_large_reads_outline_only_the_sections_inside_them(brain: Store) -> None
     assert len(encode(whole["text"])) <= retrieve.OPENING
     # A large section without subsections lists none, never itself.
     one = read([brain], "concepts/parts.md#one")
-    assert one["outline"] == []
+    assert "outline" not in one
     assert len(encode(one["text"])) > retrieve.OPENING
     # Several H1s split a note: each is a section.
     brain.write("concepts/halves.md", f"# First half\n\n{body}# Second half\n\nend\n".encode())

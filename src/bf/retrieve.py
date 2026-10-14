@@ -592,8 +592,9 @@ def _outline(value: dict[str, object], path: str, data: bytes, markdown: Markdow
     entries = [
         {"ref": f"{path}#{h.slug}", "title": h.title, "characters": offsets[end] - offsets[h.line]} for h, end in spans
     ]
+    # A read without sections inside it has no outline: an empty one would only add bytes.
     return {
-        "outline": entries[: pages.LISTING],
+        **({"outline": entries[: pages.LISTING]} if entries else {}),
         **({"outline_truncated": True} if len(entries) > pages.LISTING else {}),
     }
 
