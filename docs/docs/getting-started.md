@@ -39,14 +39,14 @@ The name defaults to the folder name, lowercased with accents removed and each r
 
 </details>
 
-Skip this step if you already created the brain from the README:
+Create the brain and work inside it:
 
 ```bash
 bf init ~/brain
 cd ~/brain
 ```
 
-The new folder holds `bf.yaml` (the brain's configuration), `AGENTS.md` (instructions for agents), `projects/`, `concepts/` with a welcome note, `actions/` and `evals/retrieval.yaml` (saved questions that `bf eval` checks). No global configuration is needed. Run `git init` here if you want Git history.
+Commands use the brain around your working directory, unless your shell exports `BF_BRAIN`, which takes precedence: check with `echo "$BF_BRAIN"`, and `unset BF_BRAIN` if it names another brain. The new folder holds `bf.yaml` (the brain's configuration), `AGENTS.md` (instructions for agents), `projects/`, `concepts/` with a welcome note, `actions/` and `evals/retrieval.yaml` (saved questions that `bf eval` checks). No global configuration is needed. Run `git init` here if you want Git history.
 
 ## Save a decision
 
@@ -103,7 +103,7 @@ The reply's `text` holds the original section:
 }
 ```
 
-Read the evidence before relying on a search excerpt. A reply with `problems` or `stale` is incomplete; see [incomplete answers](search.md#incomplete-answers-and-freshness).
+Read the evidence before relying on a search excerpt. A reply with `problems` or `stale` is incomplete; see [incomplete answers](retrieval.md#incomplete-answers-and-freshness).
 
 ## Check the brain
 
@@ -173,7 +173,7 @@ sensors:
       kind: { value: document }
 ```
 
-`bf.yaml` already has a `fields:` key: it declares four relations, the link meanings `author`, `owner`, `depends-on` and `related-to`. Add `kind` beneath them instead of creating a second `fields:` key:
+`bf.yaml` already has a `fields:` key, which holds the [starter relations](links.md#choose-the-right-relation). Add `kind` beneath them instead of creating a second `fields:` key:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schema/
@@ -253,12 +253,13 @@ Read it with `bf read brief:website-brief`, then revise the decision or keep it:
 
 Before adding more data, choose a recurring question, the sources that answer it and the person who keeps its project note current.
 
-| You want to…          | Continue with…                                                                                |
-| --------------------- | --------------------------------------------------------------------------------------------- |
-| Understand the model  | [Core concepts](concepts.md).                                                                 |
-| Write useful notes    | [Write notes and actions](brain.md).                                                          |
-| Keep answers findable | [Check your brain](checks.md).                                                                |
-| Use an agent          | Install the skills with `bf skills ~/.agents/skills`, then read [Agent workflows](agents.md). |
-| Add external evidence | [Add a sensor](sensors.md), then keep it fresh with [Watch and schedule](schedule.md).        |
-| Share with a team     | [Team setup](team.md).                                                                        |
-| Fix a failed step     | [Troubleshooting](troubleshooting.md).                                                        |
+| You want to…                         | Continue with…                                                                                |
+| ------------------------------------ | --------------------------------------------------------------------------------------------- |
+| Understand the model                 | [Core concepts](concepts.md).                                                                 |
+| Write useful notes                   | [Write notes and actions](brain.md).                                                          |
+| Keep answers findable                | [Check your brain](checks.md).                                                                |
+| Use an agent                         | Install the skills with `bf skills ~/.agents/skills`, then read [Agent workflows](agents.md). |
+| Add external evidence                | [Add a sensor](sensors.md), then keep it fresh with [Watch and schedule](schedule.md).        |
+| Run your agent harness on a schedule | [Run prompts](prompts.md).                                                                    |
+| Share with a team                    | [Team setup](team.md).                                                                        |
+| Fix a failed step                    | [Troubleshooting](troubleshooting.md).                                                        |

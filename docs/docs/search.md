@@ -41,18 +41,7 @@ If a query misses, use the evidence's own words and drop the scope. The sample s
 
 ### Narrow a search
 
-`--scope` takes one scope:
-
-| Scope                                 | Searches                                                               |
-| ------------------------------------- | ---------------------------------------------------------------------- |
-| `projects`, `projects/new-website.md` | A folder or a whole note; read a section instead of scoping it.        |
-| `memories/brief`, `memories/brief/7d` | One source, optionally within a period.                                |
-| `today`, `7d`, `2026-09`              | A period of local time.                                                |
-| `2026-09-21..2026-09-25`              | Local days from the first through the last, inclusive.                 |
-| `repo:github.com/example/new-website` | The identity's owner and the items linking to it.                      |
-| `bf://brain/tags/website`             | Notes carrying that tag; see [tag rules](link-reference.md#tag-rules). |
-
-A page's address, such as `bf://brain/projects` or `bf://brain/7d`, is invalid input: use its brain-relative form, `projects` or `7d`.
+`--scope` takes one scope: a folder or note such as `projects`, a source such as `memories/brief`, a period such as `7d` or `2026-09-21..2026-09-25`, an identity or a tag address. [Scopes](retrieval.md#scopes) lists every form.
 
 ## Read a ref
 
@@ -76,33 +65,13 @@ With several brains selected, each result also names its `brain` and a `uri` suc
 
 ## Pages
 
-Pages are computed views for browsing:
+Pages are computed views for browsing. `bf read` alone opens the home page: projects needing review first, recent work and failing programs. `bf read projects`, `tasks`, `actions`, `7d`, `memories` and `tags` list the rest; [pages](retrieval.md#pages) lists every page and its rules.
 
-| Command                          | Use it to…                                                     |
-| -------------------------------- | -------------------------------------------------------------- |
-| `bf read`                        | See projects needing review, recent work and failing programs. |
-| `bf read projects`               | Find each project's state and first open task.                 |
-| `bf read tasks`                  | List open checkboxes with the section owning each.             |
-| `bf read actions`                | Find a session to resume.                                      |
-| `bf read 7d`                     | Browse the last seven days of dated notes and records.         |
-| `bf read 2026-09-21..2026-09-25` | Browse a range of local days.                                  |
-| `bf read memories`               | See each source's record count, freshness and coverage.        |
-| `bf read tags`                   | List topic labels and their note counts.                       |
+For the New website project, `bf read projects` shows `"next":"Draft the product page."` and `bf read tasks` lists that checkbox with its `ref` and `line`. A project with `"review":true` needs attention: `review_reasons` says why, and `newer` names linked evidence to read first; see [review reminders](brain.md#review-reminders). Pages use saved dates and never fetch anything.
 
-For the New website project, `bf read projects` shows `"next":"Draft the product page."` and `bf read tasks` lists that checkbox with its `ref` and `line`. A project with `"review":true` needs attention: `review_reasons` says why, and `newer` names linked evidence to read first; see [review reminders](brain.md#review-reminders). The home page lists as many projects as fit, those needing review first; when `projects_total` counts more, read `projects` for the rest. Pages use saved dates and never fetch anything. The [page reference](retrieval.md#pages) lists every page and its rules.
+## Check that a reply is complete
 
-## Incomplete answers and freshness
-
-Check the reply before concluding that evidence is absent:
-
-| Signal                       | What to do                                                                       |
-| ---------------------------- | -------------------------------------------------------------------------------- |
-| `problems`                   | Repair the named files or brains, then repeat the request.                       |
-| `stale`                      | Another command is updating the cache; retry in a moment for the newest results. |
-| `sources`, `sources_omitted` | Check that the sources you need collected the period you ask about.              |
-| `next_offset`                | Repeat the same request with `--offset` for the rest.                            |
-
-No match for today's meeting can mean the meeting was never collected. `bf read memories` and `bf status` show local coverage without contacting providers. If the cache is damaged, `bf build` rebuilds it from the files. [What BF does not do](concepts.md#what-bf-does-not-do) lists the limits these signals guard.
+Before concluding that evidence is absent, look for `problems`, `stale`, sources that failed or are late, and `next_offset`: [incomplete answers](retrieval.md#incomplete-answers-and-freshness) says what each means and what to do. No match for today's meeting can mean the meeting was never collected.
 
 ## Continue a listing
 

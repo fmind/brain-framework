@@ -5,7 +5,7 @@ description: Run or observe due sensors, routines and prompts, set watch prefere
 
 # Watch and schedule updates
 
-Keep reviewed sensors, routines and [prompts](prompts.md) current with their `enabled` and `refresh` settings in `bf.yaml`. A program is due when it is enabled, has a nonzero `refresh` and has not succeeded within it. Start inside your brain.
+Keep reviewed sensors, routines and [prompts](prompts.md) current with their `enabled` and `refresh` settings in `bf.yaml`; [timing and health](#timing-and-health) says when each one is due and how failures retry. Start inside your brain.
 
 | You want to…                              | Use                                                                       |
 | ----------------------------------------- | ------------------------------------------------------------------------- |
@@ -23,7 +23,7 @@ bf update              # run due sensors, then routines, then prompts
 bf status --check
 ```
 
-The dry run lists due programs with their windows, and names under `manual` the enabled programs with `refresh: 0` that updates skip. A healthy `bf status --check` exits 0. Set `enabled: false` to stop a program, or `refresh: 0` to keep it manual. Keep CI for offline `bf validate` and `bf eval`; for a shared source, designate one [collecting laptop](team.md#collect-on-a-laptop).
+The dry run lists due programs with their windows, and names under `manual` the enabled programs with `refresh: 0` that updates skip. A healthy `bf status --check` exits 0. Set `enabled: false` to stop a program, or `refresh: 0` to keep it manual, as sensors and routines are by default. Keep CI for offline `bf validate` and `bf eval`; for a shared source, designate one [collecting laptop](team.md#collect-on-a-laptop).
 
 ## Watch collection
 
@@ -31,7 +31,7 @@ The dry run lists due programs with their windows, and names under `manual` the 
 bf watch
 ```
 
-Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. Due [prompts](prompts.md#schedule-and-overlap) run in a second process beside that cycle, so a long agent run never delays collection; the dashboard marks them with `@`. It can contact providers. A failed program retries after 1 minute, then waits twice as long per consecutive failure, up to its `refresh`. Closing watch stops its collection.
+Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. Due [prompts](prompts.md#schedule-and-overlap) run in a second process beside that cycle, so a long agent run never delays collection; the dashboard marks them with `@`. It can contact providers. A failed program retries after the [failure backoff](#timing-and-health). Closing watch stops its collection.
 
 The dashboard shows each program's state, last success, next due time, returned items and record changes. `never` means no success on this machine, such as a sensor that only backfilled older windows; `failed` means the last attempt failed. Items counts the records the last completed collection returned, even a backfill, not the stored total. Manual and disabled programs stay visible without running. Use `bf status --check` for full health.
 
@@ -140,6 +140,10 @@ Use one execution owner per program. A second interactive `bf watch` on the same
 Updates of one brain run one at a time. A second update waits up to 10 minutes, then computes its own due list, or fails with `another update is still active`. `bf collect` keeps its own lock per sensor. Removing a systemd or launchd job with the returned commands also stops an active update; removing a cron line stops future runs only.
 
 ## Timing and health
+
+A program is **due** when it is enabled, has a nonzero `refresh` and has not succeeded on this machine within that many seconds. `refresh` defaults to `0` for sensors and routines, which keeps them manual: only `bf collect` or `bf run` starts them. **Prompts default to `refresh: 1800`**: `bf watch`, `bf update` and schedules run a prompt every 30 minutes unless you set `refresh: 0`.
+
+A failure lets the other programs continue and makes `bf update` exit 1. The failed program retries 1 minute later, then after 2, 4, 8… minutes per consecutive failure, never waiting longer than its `refresh`; a success resets the delay. `bf collect` and `bf run` always run at once, and a direct prompt run [leaves the schedule unchanged](prompts.md#schedule-and-overlap). Each run appends to the program's log, `logs/NAME.log` in the brain, as [processes and logs](limits.md#processes-and-logs) describes.
 
 A scheduled program is `fresh` when it succeeded on this machine within twice its `refresh`, `overdue` when it has succeeded but not within that time, and `never` when it has no local success. A sensor succeeds only with a collection reaching the moment it runs: one that only [backfilled](sensors.md#backfills-and-coverage) older windows stays `never`. A program with `refresh: 0` is `manual`; a disabled program or historical source is `unknown`. `bf status --check` exits 1 for an enabled scheduled program that is `overdue`, `never` succeeded or last failed. Run it on the collecting machine: run history is local, even when records are shared.
 

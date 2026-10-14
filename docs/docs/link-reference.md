@@ -95,7 +95,7 @@ Relative links start from the containing file. In a project or concept note, a l
 
 ## Relation links
 
-Declare a relation under `fields:` in `bf.yaml` before writing a typed link. New brains declare `owner`:
+Declare a relation under `fields:` in `bf.yaml` before writing a typed link, as `bf init` does for the [starter relations](links.md#choose-the-right-relation), such as `owner`:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schema/

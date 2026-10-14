@@ -12,21 +12,17 @@ A prompt runs your agent harness, such as Antigravity or Claude Code, over your 
 | When due | `refresh` with `bf watch`, `bf update` or a schedule | Review mail, chat and open actions every 30 min. |
 | Now      | `bf run PROMPT [--stdin]`                            | Answer a message from a chat channel.            |
 
-## Declare a prompt
+**A prompt's `refresh` defaults to 1800 seconds**, while sensors and routines default to manual: a prompt you add while `bf watch` runs starts at watch's next check, then every 30 minutes. Write `refresh: 0` to run it only with `bf run`.
 
-Add the prompt under `prompts:` in `bf.yaml`:
+## Try a prompt offline
 
-```yaml
-# https://fmind.github.io/brain-framework/docs/prompts/
-prompts:
-  assistant:
-    prompt: prompts/assistant.md
-    command: [agy, --model, gemini-3.8-flash-high, --output-format, json, --print-timeout, 14m, "-p={{prompt}}"]
-    text: /response
-    timeout: 900
+Check a prompt before any model sees it: `cat` stands in for the harness and prints the prompt it receives. Inside your brain, create the prompt folder, which `bf init` does not create:
+
+```bash
+mkdir -p prompts
 ```
 
-Then write `prompts/assistant.md`:
+Save `prompts/assistant.md`:
 
 ```markdown
 # Brain assistant
@@ -38,7 +34,18 @@ Owner message: {{input}}
 Reply with what needs the owner's attention, or say that nothing is new.
 ```
 
-Check the configuration, ask once, and read the run:
+Add the prompt under `prompts:` in `bf.yaml`:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/prompts/
+prompts:
+  assistant:
+    prompt: prompts/assistant.md
+    command: [cat]
+    refresh: 0
+```
+
+Check the configuration, ask once and read the run:
 
 ```bash
 bf validate
@@ -46,7 +53,30 @@ echo "What is on today?" | bf run assistant --stdin
 bf read memories/assistant
 ```
 
-The reply names the record the run wrote and its text: `{"dry_run":false,"ok":true,"prompts":[{"prompt":"assistant","record":"assistant:20261013T143000Z-1a2b3c4d","status":"ran","text":"Two replies are owed…"}]}`. A channel program, such as a chat listener, pipes a message in and posts `text` back.
+The run names the record it wrote and its reply: `{"dry_run":false,"ok":true,"prompts":[{"prompt":"assistant","record":"assistant:20261013T143000Z-1a2b3c4d","status":"ran","text":"# Brain assistant\n\nReview what changed in the brain at /home/you/brain between …"}]}`. With `cat`, the reply is the expanded prompt: your brain's path, a window ending now and `Owner message: What is on today?`. The source page lists the run's record, titled `Brain assistant`. A channel program, such as a chat listener, pipes a message in the same way and posts `text` back. The [offline prompt example](https://github.com/fmind/brain-framework/tree/main/examples/prompts) runs these steps on a disposable fictional brain.
+
+## Connect your harness
+
+Replace `cat` with your harness, point `text` at its reply and choose how often it runs. For Claude Code:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/prompts/
+prompts:
+  assistant:
+    prompt: prompts/assistant.md
+    command: [claude, --print, --output-format, json, --allowedTools, "Bash(bf read *),Bash(bf search *)"]
+    text: /result
+    refresh: 1800
+```
+
+Ask again with `echo "What is on today?" | bf run assistant --stdin`: `text` now holds the harness's answer. The `cat` runs stay in the source; delete `memories/assistant/` first if you do not want to keep them. Two harnesses as examples:
+
+| Harness     | `command`                                                                                                                             | `text`      |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| Antigravity | `[agy, --model, gemini-3.8-flash-high, --output-format, json, --print-timeout, 14m, "-p={{prompt}}"]`                                 | `/response` |
+| Claude Code | `[claude, --print, --output-format, json, --allowedTools, "Bash(bf read *),Bash(bf search *)"]`, reading the prompt on standard input | `/result`   |
+
+A harness running without a terminal cannot ask you to approve a tool call: allow the read-only commands the prompt needs, in its command, such as Claude Code's `--allowedTools`, or in its permission settings. Otherwise the agent answers without reading the brain. Pass the harness's own time limit below `timeout`, such as `--print-timeout 14m` for Antigravity: BF ends a run at its `timeout` and records nothing.
 
 ## Pass the prompt to the harness
 
@@ -60,16 +90,9 @@ BF expands these placeholders in the prompt file once, so a placeholder in your 
 | `{{end}}`   | Now.                                                                                    |
 | `{{input}}` | The text `bf run PROMPT --stdin` received, such as a message; empty on a scheduled run. |
 
-The expanded prompt replaces `{{prompt}}` in `command`, also inside an argument such as `-p={{prompt}}`. Quote such an argument in YAML, as in `"-p={{prompt}}"`: unquoted inside `[...]`, a brace opens a mapping and `bf.yaml` fails to load. A command without `{{prompt}}` receives it on standard input instead. Linux bounds one argument at 128 KiB, so an expanded prompt holds at most 120,000 bytes. The command's other arguments take `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`, as a routine's do.
+The expanded prompt replaces `{{prompt}}` in `command`, also inside an argument such as `-p={{prompt}}`. Quote such an argument in YAML, as in `"-p={{prompt}}"`: unquoted inside `[...]`, a brace opens a mapping and `bf.yaml` fails to load. A command without `{{prompt}}` receives it on standard input instead. Either way, the prompt file and the expanded prompt must fit the [prompt size limit](limits.md#size-bounds), set below Linux's bound on one argument: keep long evidence out of the input and let the harness read it with `bf read`. The command's other arguments take `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`, as a routine's do.
 
-`text` is a JSON Pointer to the reply in the command's JSON output; its other members, such as token usage and a conversation id, become the record's `output` attribute. Without `text`, all of stdout is the reply. Two harnesses as examples:
-
-| Harness     | `command`                                                                        | `text`      |
-| ----------- | -------------------------------------------------------------------------------- | ----------- |
-| Antigravity | `[agy, --model, gemini-3.8-flash-high, --output-format, json, "-p={{prompt}}"]`  | `/response` |
-| Claude Code | `[claude, --print, --output-format, json]`, reading the prompt on standard input | `/result`   |
-
-Pass the harness's own time limit below `timeout`, such as `--print-timeout 14m` for Antigravity: BF ends a run at its `timeout` and records nothing.
+`text` is a JSON Pointer to the reply in the command's JSON output; its other members, such as token usage and a conversation id, become the record's `output` attribute. Without `text`, all of stdout is the reply.
 
 ## What a run records
 
@@ -83,30 +106,30 @@ Each successful run writes one record in `memories/NAME/`, a source like a senso
 | `time`       | When the run started.                                                                                                              |
 | `attributes` | `observed`, `trigger` (`schedule` or `run`), `window` (`start`, `end`), `elapsed_seconds`, and `input` and `output` when nonempty. |
 
-A run that exits nonzero, times out, prints more than `max_bytes`, prints no JSON object while `text` is set, or lacks a text string at `text` writes no record. Its stderr goes to `logs/NAME.log`. A failed scheduled run backs off as a sensor's does; a failed direct run is only logged, so it never moves the schedule or its attention.
+A failed run writes no record; its stderr goes to `logs/NAME.log`, and [a prompt fails](troubleshooting.md#a-prompt-fails) explains each error. A failed scheduled run retries after the [failure backoff](schedule.md#timing-and-health); a failed direct run is only logged, so it never moves the schedule or its attention.
 
 ## Schedule and overlap
 
-A prompt is due when it is enabled, has a nonzero `refresh` (30 minutes by default) and its last scheduled run did not succeed within it. Only scheduled runs move the schedule: answering a message with `bf run` never postpones the next review, and neither its success nor its failure changes the schedule's history.
+Only scheduled runs move the schedule: answering a message with `bf run` never postpones the next review, and neither its success nor its failure changes the schedule's history. [Timing and health](schedule.md#timing-and-health) gives the due rule.
 
-`bf update` runs due prompts after its sensors and routines, outside the update lock other cycles wait for. `bf watch` runs them in a separate process beside collection, as `bf update --kind prompt`, so a long agent run never delays a sensor. A scheduled run that is still active elsewhere makes the next one skip and keep its window, and a scheduled run checks again, once it holds the prompt's lock, that no other process ran it meanwhile. A direct `bf run` never waits for a scheduled run, so a message is answered while a review continues.
+`bf update` runs due prompts after its sensors and routines, outside the update lock other cycles wait for. `bf watch` runs them in a separate process beside collection, as `bf update --kind prompt`, so a long agent run never delays a sensor. A scheduled run that is still active elsewhere makes the next one report `"status":"skipped"` and keep its window, and a scheduled run checks again, once it holds the prompt's lock, that no other process ran it meanwhile. A direct `bf run` never waits for a scheduled run, so a message is answered while a review continues.
 
-`bf status` reports each prompt under `prompts` with its `state`, `freshness`, `runs` (successful runs, scheduled or direct), `last_success` and `last_run` (`at`, `elapsed_seconds` and `output_bytes` of the latest scheduled run, omitted after its failure), the latest `record` of any run, and `failed`, `error`, `failures` and `log` after a failure; its `attention` lists failing or overdue prompts. The watch dashboard marks prompts with `@` and shows their runs.
+`bf status` lists each prompt under `prompts`, with its successful `runs`, scheduled or direct, and the `record` of its latest run, beside the [health fields](commands.md#status-sources-and-routines) of every program. The watch dashboard marks prompts with `@`.
 
 ## Prompt settings
 
-| Setting     | Default  | Meaning                                                                                  |
-| ----------- | -------- | ---------------------------------------------------------------------------------------- |
-| `prompt`    | required | A normalized Markdown file in `prompts/`.                                                |
-| `command`   | required | A program on PATH or in `sensors/` or `routines/`, then up to 127 arguments.             |
-| `text`      | none     | JSON Pointer to the reply in JSON output; omitted, all of stdout is the reply.           |
-| `enabled`   | `true`   | A disabled prompt never runs.                                                            |
-| `refresh`   | `1800`   | Seconds between scheduled runs, up to 365 days; zero keeps the prompt for `bf run` only. |
-| `lookback`  | `86400`  | Seconds `{{start}}` reaches back before the first scheduled run.                         |
-| `timeout`   | `900`    | Maximum runtime in seconds, from 1 to 3,600.                                             |
-| `max_bytes` | 1 MiB    | Maximum stdout, up to 4 MiB, the size of a record's text.                                |
+| Setting     | Default  | Meaning                                                                        |
+| ----------- | -------- | ------------------------------------------------------------------------------ |
+| `prompt`    | required | A normalized Markdown path in `prompts/`, such as `prompts/assistant.md`.      |
+| `command`   | required | A program on PATH or in `sensors/` or `routines/`, then its arguments.         |
+| `text`      | none     | JSON Pointer to the reply in JSON output; omitted, all of stdout is the reply. |
+| `enabled`   | `true`   | A disabled prompt never runs.                                                  |
+| `refresh`   | `1800`   | Seconds between scheduled runs; `0` keeps the prompt for `bf run` only.        |
+| `lookback`  | `86400`  | Seconds `{{start}}` reaches back before the first scheduled run.               |
+| `timeout`   | `900`    | Maximum runtime in seconds.                                                    |
+| `max_bytes` | 1 MiB    | Maximum stdout; a longer reply fails the run.                                  |
 
-Names follow sensor names and must differ from every sensor and routine: a prompt's name is the source of its records, and programs share logs and locks by name.
+[Limits](limits.md#size-bounds) gives each setting's range, and [program names](schema.md#program-names) the naming rules: a prompt's name is also the source of its records.
 
 ## Keep prompts safe
 

@@ -13,7 +13,7 @@ A routine is any deterministic program your brain runs: a validation, a backup, 
 | On an event | `bf run --hook EVENT`                                | Validate the brain before each Git commit. |
 | When due    | `refresh` with `bf update`, `bf watch` or a schedule | A review every seven days.                 |
 
-A routine's `output` decides what its stdout becomes. `log`, the default, keeps it in `logs/NAME.log`. `action` turns nonempty Markdown into a dated action for you or your agent to work through.
+A routine's `output` decides what its stdout becomes. `log`, the default, keeps it in the routine's [log](limits.md#processes-and-logs), `logs/NAME.log`. `action` turns nonempty Markdown into a dated action for you or your agent to work through.
 
 ## Run routines from hooks
 
@@ -42,20 +42,21 @@ The hook, like a routine's nested `bf` call, runs the first `bf` on `PATH`. In a
 
 ## Prepare a weekly review
 
-The reviewed [weekly review](https://github.com/fmind/brain-framework/blob/main/examples/routines/weekly-review.py) reads your projects and recent activity and prints an action with a review list. Copy it from the release tag matching `bf --version`, then review it:
+The reviewed [weekly review](https://github.com/fmind/brain-framework/blob/main/examples/routines/weekly-review.py) reads your projects, recent activity and program health and prints an action with a review list. Copy it from the release tag matching `bf --version`, make it executable, since a download loses that bit, then review it:
 
 ```bash
 mkdir -p routines
 curl -fsSLo routines/weekly-review.py "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/routines/weekly-review.py"
+chmod +x routines/weekly-review.py
 ```
 
-Add it under `routines:` in `bf.yaml`:
+Add it under `routines:` in `bf.yaml`; like the example sensors, it needs Python 3.11 or later as `python3`, or uv in front of its command, as [sensor settings](sensors.md#sensor-settings) shows:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/routines/
 routines:
   weekly-review:
-    command: [uv, run, --no-project, --python, "3.14", routines/weekly-review.py, "{{brain}}", "{{end}}"]
+    command: [routines/weekly-review.py, "{{brain}}", "{{end}}"]
     refresh: 604800
     output: action
 ```
@@ -66,7 +67,7 @@ bf read actions
 bf validate
 ```
 
-When projects need review, tasks are open or items fall in the last seven days, the reply names the new `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, with a random 8-character suffix. The action lists projects as plain bullets, overdue reviews first and earliest deadline first, then open-task counts, up to ten open tasks with their sections, and recent activity by source. The list creates no duplicate checkbox tasks; complete work in the owning notes. Empty output creates nothing. With `refresh: 604800`, `bf update` and `bf watch` also run it weekly.
+When projects need review, tasks are open, items fall in the last seven days or scheduled programs failed or are late, the reply names the new `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, with a random 8-character suffix. The action lists those programs first, then projects as plain bullets, overdue reviews first and earliest deadline first, then open-task counts, up to ten open tasks with their sections, recent activity by source and the coming week. While a sensor needs attention, an empty period or coming week says that it may have missed evidence. The list creates no duplicate checkbox tasks; complete work in the owning notes. Empty output creates nothing. With `refresh: 604800`, `bf update` and `bf watch` also run it weekly.
 
 An action routine writes at most one action per day in a brain: a second run that day reports `"status":"skipped"` and keeps the existing action, even one another clone wrote. Only a folder holding an `ACTION.md` counts as today's action, not one left with a killed write's temporary file or an editor's lock. BF validates the Markdown's OKF metadata, declared relations and relative links, including headings, before writing; invalid or excessive output, or a failure, creates nothing. `bf validate` also checks its `bf://` targets and cited records.
 
@@ -74,22 +75,22 @@ Preview with `bf run weekly-review --dry-run`: it runs the routine but writes no
 
 ## Routine settings
 
-| Setting     | Default  | Meaning                                                                                                               |
-| ----------- | -------- | --------------------------------------------------------------------------------------------------------------------- |
-| `command`   | required | A program on PATH or in `routines/`, then up to 127 arguments.                                                        |
-| `output`    | `log`    | `log` keeps stdout in `logs/NAME.log`; `action` writes nonempty Markdown as an action.                                |
-| `hooks`     | `[]`     | Up to 16 events, such as `pre-commit`, that `bf run --hook EVENT` runs.                                               |
-| `enabled`   | `true`   | A disabled routine never runs: `bf run` names it and runs nothing.                                                    |
-| `refresh`   | `0`      | Seconds between due runs, up to 365 days; zero leaves it out of updates.                                              |
-| `lookback`  | `86400`  | Seconds covered by the first run.                                                                                     |
-| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                                                                          |
-| `max_bytes` | 1 MiB    | Maximum stdout of an `action` routine, up to 4 MiB; a `log` routine's log keeps the last 256 KiB of each run instead. |
+| Setting     | Default  | Meaning                                                                                |
+| ----------- | -------- | -------------------------------------------------------------------------------------- |
+| `command`   | required | A program on PATH or in `routines/`, then its arguments.                               |
+| `output`    | `log`    | `log` keeps stdout in `logs/NAME.log`; `action` writes nonempty Markdown as an action. |
+| `hooks`     | `[]`     | Events, such as `pre-commit`, that `bf run --hook EVENT` runs.                         |
+| `enabled`   | `true`   | A disabled routine never runs: `bf run` names it and runs nothing.                     |
+| `refresh`   | `0`      | Seconds between due runs; `0` leaves the routine out of updates.                       |
+| `lookback`  | `86400`  | Seconds covered by the first run.                                                      |
+| `timeout`   | `300`    | Maximum runtime in seconds.                                                            |
+| `max_bytes` | 1 MiB    | Maximum stdout of an `action` routine; a `log` routine's stdout only feeds its log.    |
 
-Names start with a lowercase letter and use lowercase letters and digits joined by single hyphens; sensor and routine names must differ. Arguments support `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. `start` is the end of the last reviewed window, or `lookback` before the first run; `end` is now.
+[Limits](limits.md#size-bounds) gives each setting's range, and [program names](schema.md#program-names) the naming rules: a routine's name also names the action folders it writes. Arguments support `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. `start` is the end of the last reviewed window, or `lookback` before the first run; `end` is now.
 
 ## Run a routine now
 
-`bf run ROUTINE ARGS...` appends the arguments to the routine's command; put `--` before arguments that start with a dash. `--stdin` passes piped input to the routine, up to 1 MiB, and a pipe must close within 10 seconds:
+`bf run ROUTINE ARGS...` appends the arguments to the routine's command; put `--` before arguments that start with a dash. `--stdin` passes piped input to the routine, within the [input limit](limits.md#size-bounds):
 
 ```bash
 echo "release notes" | bf run summarize --stdin -- --verbose
@@ -97,11 +98,7 @@ echo "release notes" | bf run summarize --stdin -- --verbose
 
 Without `--stdin`, a direct run passes no input, so a shell that holds its standard input open, as some agent hosts do, never delays it. `bf run --hook EVENT` passes what Git pipes, such as the refs of a push, to the routines listing the hook, and reads nothing when none does.
 
-The reply lists each routine with its `status`: `ran`, `skipped` or `failed` with an `error` naming its log. One failure never stops the other routines of a hook. `--dry-run` runs the routines but writes no action and records no run; logs still grow. `bf run` acts on one brain, like `bf update`.
-
-## Logs
-
-Each program appends to `logs/NAME.log` in the brain, newest entry last, and keeps the latest 1 MiB. An entry starts with a `== TIME OUTCOME ==` line, followed by the last 256 KiB of a log routine's stdout and of any stderr. Status and errors name these brain-relative paths. `bf init` ignores `/logs/` in Git, and search never reads logs. Logs can hold provider output: keep them private and never paste them into a public issue.
+The reply lists each routine with its `status`: `ran`, `skipped` or `failed` with an `error` naming its log. One failure never stops the other routines of a hook. `bf run` acts on one brain, like `bf update`, and [`--dry-run`](commands.md#preview-an-update-or-a-collection) runs the routines without writing an action or recording the run.
 
 ## Write a routine
 
@@ -123,4 +120,4 @@ summary: Review the New website project before the next work session.
 - [ ] Check whether the product page now explains the product before signup.
 ```
 
-Relative links resolve from the new `ACTION.md`, two folders below the brain root. Test the script with a fake `bf`; it runs with the same [process safeguards](limits.md#processes-and-logs) as a sensor. A failed routine retries with the sensors' [failure backoff](sensors.md#collect-and-update). `bf status` reports each routine's `state`, `freshness`, `last_success`, latest `action`, and `failed`, `error`, `failures` and `log` after a failure; see [status fields](commands.md#status-sources-and-routines).
+Relative links resolve from the new `ACTION.md`, two folders below the brain root. Test the script with a fake `bf`; it runs with the same [process safeguards](limits.md#processes-and-logs) as a sensor. A failed routine retries after the [failure backoff](schedule.md#timing-and-health), and `bf status` reports its health and latest `action` among the [status fields](commands.md#status-sources-and-routines).

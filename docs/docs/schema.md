@@ -17,7 +17,18 @@ name: brain
 
 `version` is the brain format of `bf.yaml`, `evals/*.yaml`, record files and the `memories/` layout; it is independent of the package version. A missing or different version fails before any other field, naming the supported one: `bf.yaml declares version 6; this release reads version: 7`. The changelog lists the upgrade steps of each format.
 
-Add `fields`, [sensors](sensors.md#sensor-settings), [routines](routines.md#routine-settings), [prompts](prompts.md#prompt-settings), related `brains` and [watch preferences](schedule.md#watch-preferences) only as needed. `bf init` writes the version, the name and four starter relations. A program's `command` starts with a bare command name found on PATH, or a normalized path below `sensors/` or `routines/`; absolute paths, other folders, `..` and placeholders there are errors.
+Add `fields`, [sensors](sensors.md#sensor-settings), [routines](routines.md#routine-settings), [prompts](prompts.md#prompt-settings), related `brains` and [watch preferences](schedule.md#watch-preferences) only as needed. `bf init` writes the version, the name and the [starter relations](links.md#choose-the-right-relation). A program's `command` starts with a bare command name found on PATH, or a normalized path below `sensors/` or `routines/`; absolute paths, other folders, `..` and placeholders there are errors.
+
+## Program names
+
+Sensors, routines and prompts are named by their keys in `bf.yaml`, and each name is unique across all three: programs share logs and locks by name, and a sensor's or prompt's name is also the source of its records, as in `brief:website-brief`. A clash fails naming both entries, such as `sensors.mail and prompts.mail: program names must be distinct`.
+
+| Program        | Name                                                                                                                                         |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sensor, prompt | A lowercase letter, then lowercase letters, digits or hyphens.                                                                               |
+| Routine        | Lowercase letters and digits in words joined by single hyphens, starting with a letter; it also names the action folders the routine writes. |
+
+Never name a sensor or prompt `bf`: refs starting with `bf:` read as [BF addresses](link-reference.md#bf-links), so its records could not be read by ref. [Limits](limits.md#size-bounds) gives the length bound.
 
 ## Editor schemas
 
@@ -163,18 +174,18 @@ Each sensor's `fields` maps a declared field to exactly one `path` or literal `v
 
 Escape `/` in a key as `~1` and `~` as `~0`. Missing members are absent; traversing a scalar fails. There are no wildcards, expressions or implicit conversions. Every record a sensor prints follows the fixed format below; a sensor cannot supply `fields` itself.
 
-| Record key   | Rule                                                                                                                                                                                                                                            |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`         | 1 to 4,096 characters without control characters; at most 7,988 once percent-encoded, so it fits a BF address.                                                                                                                                  |
-| `title`      | 1 to 4,096 characters without control characters.                                                                                                                                                                                               |
-| `text`       | Optional; at most 4,194,304 characters.                                                                                                                                                                                                         |
-| `time`       | Optional ISO 8601 timestamp with a timezone.                                                                                                                                                                                                    |
-| `url`        | Optional; at most 8,192 characters without control characters.                                                                                                                                                                                  |
-| `links`      | At most 1,000 identities or URLs of at most 8,192 characters. Other text is stored and searchable but connects only to a note whose path it spells exactly, such as `projects/x.md`; `bf validate` [warns](checks.md#warnings) once per source. |
-| `aliases`    | At most 1,000 namespaced identities, never display names, following the [identity rules](link-reference.md#identity-rules).                                                                                                                     |
-| `attributes` | JSON values; `updated`, `observed` and `partial` are [reserved](#record-revisions-and-provenance).                                                                                                                                              |
+| Record key   | Rule                                                                                                                                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`         | Required, without control characters; it must still fit a BF address once percent-encoded.                                                                                                            |
+| `title`      | Required, without control characters.                                                                                                                                                                 |
+| `text`       | Optional.                                                                                                                                                                                             |
+| `time`       | Optional ISO 8601 timestamp with a timezone.                                                                                                                                                          |
+| `url`        | Optional, without control characters.                                                                                                                                                                 |
+| `links`      | Identities or URLs. Other text is stored and searchable but connects only to a note whose path it spells exactly, such as `projects/x.md`; `bf validate` [warns](checks.md#warnings) once per source. |
+| `aliases`    | Namespaced identities, never display names, following the [identity rules](link-reference.md#identity-rules).                                                                                         |
+| `attributes` | JSON values; `updated`, `observed` and `partial` are [reserved](#record-revisions-and-provenance).                                                                                                    |
 
-Fields other than `text`, including the mapped `fields` and the `observed` time BF adds, must fit 2 MiB. Text must be valid Unicode: a lone surrogate, as from a non-UTF-8 file name, is rejected with its field named. One invalid record fails the whole collection before anything is saved, and the error names the first one, such as `1.id: Field required`. Only mapped fields apply to a sensor, and `bf validate` checks stored fields against the current declarations, including sources no longer configured.
+[Limits](limits.md#size-bounds) bounds each key's length and count, and the size of the fields other than `text`, including the mapped `fields` and the `observed` time BF adds. Text must be valid Unicode: a lone surrogate, as from a non-UTF-8 file name, is rejected with its field named. One invalid record fails the whole collection before anything is saved, and the error names the first one, such as `1.id: Field required`. Only mapped fields apply to a sensor, and `bf validate` checks stored fields against the current declarations, including sources no longer configured.
 
 ## Graph and evidence
 

@@ -21,7 +21,7 @@ nav = [
   { "Overview" = "docs/index.md" },
   { "Start here" = [
     { "Getting started" = "docs/getting-started.md" },
-    { "Connect context across tools" = "docs/context-hub.md" },
+    { "Four-tool walkthrough" = "docs/context-hub.md" },
     { "Core concepts" = "docs/concepts.md" },
     { "Install and update" = "docs/upgrades.md" },
   ] },

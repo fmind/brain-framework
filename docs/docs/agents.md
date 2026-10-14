@@ -19,7 +19,7 @@ Ask an agent, “Why did we choose a single product page?” It should find the 
 
 CLI and MCP are alternative retrieval routes. Skills explain the workflow; hooks automate one narrow step. None of them grants permission to collect, edit or publish. Start your terminal agent inside `~/brain` and ask: “Use `bf search` to find why we chose a single product page, then `bf read` the matching ref and cite it.” No skill is needed for this first check.
 
-Agents can also read this documentation as Markdown: [llms.txt](https://fmind.github.io/brain-framework/llms.txt) indexes every guide, [llms-full.txt](https://fmind.github.io/brain-framework/llms-full.txt) holds their full text, and each page's Markdown sits at its URL followed by `index.md`, such as [the MCP guide](https://fmind.github.io/brain-framework/docs/mcp/index.md).
+Agents can also read this documentation as Markdown: [llms.txt](https://fmind.github.io/brain-framework/llms.txt) indexes every guide, [llms-full.txt](https://fmind.github.io/brain-framework/llms-full.txt) holds their full text, and each page's Markdown sits at its URL followed by `index.md`, such as [the MCP guide](https://fmind.github.io/brain-framework/docs/mcp/index.md). In a clone, the same guides are the Markdown files in `docs/docs/`.
 
 Claude Code 2.1.277+ loads the brain's `AGENTS.md` when no `CLAUDE.md` sits in the brain or a folder above it; do not add one, because it would replace `AGENTS.md`. On an older version, or a session that [cannot load `AGENTS.md`](https://code.claude.com/docs/en/memory#when-agents-md-support-is-unavailable), give the brain a `CLAUDE.md` holding only `@AGENTS.md`, which imports it.
 

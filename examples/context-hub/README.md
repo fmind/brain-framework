@@ -1,8 +1,8 @@
-# One context across four tools
+# Four-tool walkthrough
 
 A fictional Google Workspace brief, Jira review, GitHub pull request and Gcloud deployment describe the same New website project with different field names. Collect them into one brain, record whether the site can launch, then watch BF flag that conclusion when the Jira review moves to Done.
 
-Follow the walkthrough in [Connect context across tools](../../docs/docs/context-hub.md). `tests/test_context_hub.py` runs its commands on a disposable copy of this folder.
+Follow the [four-tool walkthrough](../../docs/docs/context-hub.md) page. `tests/test_context_hub.py` runs its commands on a disposable copy of this folder.
 
 | File                               | Purpose                                                                                          |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------ |

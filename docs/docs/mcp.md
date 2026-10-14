@@ -82,13 +82,13 @@ The answer should cite the ref. A configured entry does not prove the server run
 
 ## If the connection fails
 
-| Symptom                     | Check                                                                                          |
-| --------------------------- | ---------------------------------------------------------------------------------------------- |
-| Executable not found        | Use the absolute `bf` path, and confirm the host's account can run it.                         |
-| Brain unavailable           | Read the decision in your terminal with the same absolute brain path.                          |
-| No tools, or old behavior   | Restart the host after changing its configuration or updating BF.                              |
-| Empty or incomplete results | Inspect `problems`, `stale` and [source coverage](search.md#incomplete-answers-and-freshness). |
-| Cache write access error    | Make the brain's `.bf/` folder writable for the host's account, or serve a writable copy.      |
+| Symptom                     | Check                                                                                     |
+| --------------------------- | ----------------------------------------------------------------------------------------- |
+| Executable not found        | Use the absolute `bf` path, and confirm the host's account can run it.                    |
+| Brain unavailable           | Read the decision in your terminal with the same absolute brain path.                     |
+| No tools, or old behavior   | Restart the host after changing its configuration or updating BF.                         |
+| Empty or incomplete results | Inspect `problems`, `stale` and [source coverage](retrieval.md#source-coverage).          |
+| Cache write access error    | Make the brain's `.bf/` folder writable for the host's account, or serve a writable copy. |
 
 ## What the host can read
 

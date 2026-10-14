@@ -140,12 +140,6 @@ Hosts without hooks can run the session script from their session instructions. 
 
 For an existing action, the `bf-action` skill's [handoff guide](../../src/bf/skills/bf-action/references/handoff.md) adds a size checker and an optional Claude Code check after compaction or resume. It reports Context and Resume refs and counts without inserting their text; refresh the action through the agent before a planned compaction.
 
-## Contract
+## What the hooks guarantee
 
-`tests/test_adapters_hooks.py` checks every example with fake `git` and `bf` executables.
-
-- Python 3.11+ standard library only, `#!/usr/bin/env python3`, executable bit set, no shell.
-- Read-only and offline: `git remote get-url origin`, `bf read` and `bf search` with literal argv, bounded time and output. The prompt hook passes plain words after `--`, so a prompt never becomes an option or search syntax.
-- Never block a session or a prompt: any failure, malformed event, unusable reply (including the project and home pages) or unknown repository prints nothing and exits 0. The session hook's repository read, project pages and home page share one 20-second budget, with at most 100 project pages; an invalid continuation also prints nothing. Project metadata matches by both brain and ref, so identical filenames in different brains never share context. The prompt hook reads at most 4 MiB of event JSON and allows its one search 5 seconds.
-- Stale replies are usable only when `problems` is absent, empty, or contains only `identity resolution used a stale cache`, with a nonempty `stale` marker for that problem. Both hooks add an Index refreshing note; empty generations and every other problem remain silent.
-- A few hundred bytes of context: authored-note titles and refs only, in code spans no backtick can close; with several brains, both hooks print each note's `bf://` address, and the session hook always names an owning note outside `projects/` by its address. The session hook suggests reads that work whichever brains are selected: the owning project by the `uri` or ref its listing returns, any other owner by the repository identity. Collected records are counted, never quoted: when a record owns the repository, the session hook says so without printing its ref. Excerpts and field values are never printed. The agent reads refs explicitly when it needs them.
+Both hooks are read-only and offline: they run only `git remote get-url origin`, `bf read` and `bf search`, each within a time limit. They never block a session or a prompt: any failure, malformed event, unusable reply or unknown repository prints nothing. Their context is a few hundred bytes of authored-note titles and refs; collected records are counted, never quoted, so your agent reads a ref explicitly when it needs the evidence.

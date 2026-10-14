@@ -37,6 +37,18 @@ def export() -> str:
                 "- New website — Next actions (`projects/new-website.md#next-actions`)",
             ],
         ),
+        (
+            "prompts",
+            0,
+            [
+                '"valid":true',
+                '"manual":["assistant"]',
+                '"status":"ran"',
+                '"record":"assistant:',
+                "Owner message: What changed in the launch?",
+                '"title":"Brain assistant"',
+            ],
+        ),
         ("routines", 0, ['"status":"ran"', "weekly-review-", '"valid":true']),
         (
             "routines",

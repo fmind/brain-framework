@@ -15,7 +15,7 @@ A second brain for you, your team and your AI agents, on your own computer. Gath
 
 [![CI](https://github.com/fmind/brain-framework/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fmind/brain-framework/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/brain-framework?color=174EA6)](https://pypi.org/project/brain-framework/) [![Python](https://img.shields.io/pypi/pyversions/brain-framework)](https://pypi.org/project/brain-framework/) [![License: MIT](https://img.shields.io/badge/license-MIT-174EA6)](https://github.com/fmind/brain-framework/blob/main/LICENSE)
 
-[Why](https://github.com/fmind/brain-framework#why-a-second-brain) · [How it works](https://github.com/fmind/brain-framework#how-it-works) · [Try it](https://github.com/fmind/brain-framework#try-it) · [Agents](https://github.com/fmind/brain-framework#open-your-agent-in-your-brain) · [Good to know](https://github.com/fmind/brain-framework#good-to-know) · [Four-tool demo](https://fmind.github.io/brain-framework/docs/context-hub/) · [Documentation](https://fmind.github.io/brain-framework/)
+[Why](https://github.com/fmind/brain-framework#why-a-second-brain) · [How it works](https://github.com/fmind/brain-framework#how-it-works) · [Try it](https://github.com/fmind/brain-framework#try-it) · [Agents](https://github.com/fmind/brain-framework#open-your-agent-in-your-brain) · [Good to know](https://github.com/fmind/brain-framework#good-to-know) · [Four-tool walkthrough](https://fmind.github.io/brain-framework/docs/context-hub/) · [Documentation](https://fmind.github.io/brain-framework/)
 
 <a href="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg">
   <img
@@ -94,10 +94,10 @@ A brain gives your work the structure of a detective's case file, in plain files
 | `concepts/` | Knowledge you will reuse elsewhere, with its evidence and limits.            | “Explain the product before asking for signup.”                      |
 | `actions/`  | One work session: objective, inputs, outputs, outcome and next step.         | `actions/2026-09-27_website-review/ACTION.md`, resumed the next day. |
 | `routines/` | Deterministic programs you review, run on demand, on a schedule or from Git. | A weekly review that drafts an action listing projects to revisit.   |
-| `prompts/`  | Markdown prompts your agent harness runs on a schedule or on demand.         | An assistant that reviews new mail and chat every half hour.         |
+| `prompts/`  | Markdown prompts your agent harness runs; each run's reply is a record.      | An assistant that reviews new mail and chat every half hour.         |
 | `evals/`    | Saved questions with the evidence that search or read must return.           | “Why one page?” must return the project's Decision section.          |
 
-Notes are Markdown with YAML metadata, records are JSON, and `bf validate` checks both. The SQLite search cache in `.bf/` is disposable and rebuilds itself from the files. See the [file conventions](https://fmind.github.io/brain-framework/docs/brain/#directory-reference).
+Notes are Markdown with YAML metadata, records are JSON, and `bf validate` checks both. `bf init --full` creates `sensors/` and `routines/`; create `prompts/` when you add a [prompt](https://fmind.github.io/brain-framework/docs/prompts/). A prompt's records hold model output, so search weighs them at half, like a low-priority source. The SQLite search cache in `.bf/` is disposable and rebuilds itself from the files. See the [file conventions](https://fmind.github.io/brain-framework/docs/brain/#directory-reference).
 
 ### `bf.yaml`, the coordination hub
 
@@ -154,22 +154,7 @@ Reading files gives you one document at a time, and grep finds words, not connec
 bf read project:new-website
 ```
 
-The reply holds the project note and its backlinks, grouped by relation: four records from four tools, side by side, in the shared vocabulary (trimmed here to refs, kinds and statuses):
-
-```json
-{
-  "relation": "project",
-  "total": 4,
-  "items": [
-    { "ref": "gcloud:deployment", "fields": { "kind": "deployment", "status": "healthy" } },
-    { "ref": "github:implementation", "fields": { "kind": "pull-request", "status": "merged" } },
-    { "ref": "jira:review", "fields": { "kind": "issue", "status": "In review" } },
-    { "ref": "workspace:brief", "fields": { "kind": "brief", "status": "approved" } }
-  ]
-}
-```
-
-From there, follow typed [relations](https://fmind.github.io/brain-framework/docs/links/#name-a-relation) such as `author`, `owner`, `depends-on` or your own. Each claim keeps the note section or record that asserted it, so an answer can always cite its evidence. `bf export` prints the whole graph as JSON Lines for DuckDB or networkx.
+The reply holds the project note and its backlinks, grouped by relation: under `project`, four records from four tools side by side in the shared vocabulary, the Jira review `In review`, the GitHub pull request `merged`, the Gcloud deployment `healthy` and the Workspace brief `approved`. The [four-tool walkthrough](https://fmind.github.io/brain-framework/docs/context-hub/#collect-four-tools) shows the reply. From there, follow typed [relations](https://fmind.github.io/brain-framework/docs/links/#name-a-relation) such as `author`, `owner`, `depends-on` or your own. Each claim keeps the note section or record that asserted it, so an answer can always cite its evidence. `bf export` prints the whole graph as JSON Lines for DuckDB or networkx.
 
 ### Act, then learn
 
@@ -183,64 +168,22 @@ Retrieval assembles the context; people and agents do the work, through the CLIs
   >
 </a>
 
-The graph keeps conclusions current. Each project knows the evidence it links to: when a linked record changes after the note's last edit, `bf read` flags the project for review and names the record to read first, so a decision does not silently outlive its linked evidence. Try it in the [four-tool demo](https://fmind.github.io/brain-framework/docs/context-hub/#follow-a-change). [Routines](https://fmind.github.io/brain-framework/docs/routines/) run deterministic reviews and checks, such as a weekly review action or `bf validate` before each Git commit, and retrieval cases in `evals/` confirm that the questions you rely on still find their evidence as the brain grows.
+The graph keeps conclusions current. Each project knows the evidence it links to: when a linked record changes after the note's last edit, `bf read` flags the project for review and names the record to read first, so a decision does not silently outlive its linked evidence. Try it in the [four-tool walkthrough](https://fmind.github.io/brain-framework/docs/context-hub/#follow-a-change). [Routines](https://fmind.github.io/brain-framework/docs/routines/) run deterministic reviews and checks, such as a weekly review action or `bf validate` before each Git commit, and retrieval cases in `evals/` confirm that the questions you rely on still find their evidence as the brain grows.
 
 ## Try it
 
-Start with one decision you can find again. You need Linux or macOS and [uv](https://docs.astral.sh/uv/getting-started/installation/), which installs the tested Python 3.14 if needed ([install details](https://fmind.github.io/brain-framework/docs/upgrades/#install)). No model or provider account is required.
+You need Linux or macOS and [uv](https://docs.astral.sh/uv/getting-started/installation/), which installs the tested Python 3.14 if needed ([install details](https://fmind.github.io/brain-framework/docs/upgrades/#install)). No model or provider account is required.
 
 ```bash
 uv tool install --python 3.14 brain-framework
 bf --version
 ```
 
-If your shell cannot find `bf`, run `uv tool update-shell` and open a new shell. Then create your brain:
-
-```bash
-bf init ~/brain
-cd ~/brain
-```
-
-Create `projects/new-website.md` in your editor, or ask your agent to save this fictional decision. Use today's date for `updated`:
-
-```markdown
----
-type: project
-status: draft
-updated: 2026-09-27
-summary: Launch a product website that helps visitors understand the product.
----
-
-# New website
-
-## Decision
-
-Start with a single product page because visitors need a clear explanation before signing up.
-
-## Next actions
-
-- [ ] Draft the product page.
-```
-
-Find the reason, read its source and check the brain:
-
-```bash
-bf search "visitors clear explanation"
-bf read projects/new-website.md#decision
-bf validate
-```
-
-Search returns this match in `items` (other fields omitted):
-
-```json
-{ "ref": "projects/new-website.md#decision", "title": "New website — Decision" }
-```
-
-`read` returns the original Decision section with its note's status and date, and validation reports `"valid":true`. Edit the note and search again: BF notices changes on its own. The [getting-started guide](https://fmind.github.io/brain-framework/docs/getting-started/) continues with a first collected source and a link from the decision to its evidence, and the [four-tool demo](https://fmind.github.io/brain-framework/docs/context-hub/) runs the whole loop offline on fictional Workspace, Jira, GitHub and Gcloud records.
+Then follow [Getting started](https://fmind.github.io/brain-framework/docs/getting-started/): create a brain, save a decision, find its reason and link it to a first collected source. The [four-tool walkthrough](https://fmind.github.io/brain-framework/docs/context-hub/) then runs the whole loop offline on fictional Workspace, Jira, GitHub and Gcloud records.
 
 ## Open your agent in your brain
 
-Use the same brain with [Claude Code](https://code.claude.com/docs/en/overview), [Codex](https://openai.com/codex/), [GitHub Copilot](https://github.com/features/copilot) or any agent host that can run a command. Start your terminal agent in `~/brain` and give it this prompt:
+Use the same brain with [Claude Code](https://code.claude.com/docs/en/overview), [Codex](https://openai.com/codex/), [GitHub Copilot](https://github.com/features/copilot) or any agent host that can run a command. After Getting started, start your terminal agent in `~/brain` and give it this prompt:
 
 > Use the bf CLI. Find why we chose a single product page. Read the source, cite its ref and tell me the project's next action.
 
@@ -259,9 +202,7 @@ Each host reads its own folder: for Claude Code, use `~/.claude/skills` instead.
 | `bf-setup`    | Install BF, create a brain, connect the agent and choose sources worth adding.  |
 | `bf-maintain` | Run sensors, routines and prompts, check the brain and upgrade it safely.       |
 
-Working in a code repository instead? The [example session hook](https://github.com/fmind/brain-framework/tree/main/examples/hooks) prints the project that declares the repository, its next task and linked evidence when the session starts. During collection, a usable cached reply carries an “Index refreshing” note. Hosts that prefer tools can call `search` and `read` through [MCP](https://fmind.github.io/brain-framework/docs/mcp/). See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/).
-
-Agents can read this documentation as Markdown: [llms.txt](https://fmind.github.io/brain-framework/llms.txt) indexes every guide with a summary, [llms-full.txt](https://fmind.github.io/brain-framework/llms-full.txt) holds their full text, and each guide's Markdown sits at its URL followed by `index.md`.
+Working in a code repository instead? The [example session hook](https://github.com/fmind/brain-framework/tree/main/examples/hooks) prints the project that declares the repository, its next task and linked evidence when the session starts. During collection, a usable cached reply carries an “Index refreshing” note. Hosts that prefer tools can call `search` and `read` through [MCP](https://fmind.github.io/brain-framework/docs/mcp/). See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/), which also points agents to this documentation as Markdown.
 
 ## Bring your tools
 

@@ -107,7 +107,18 @@ Items carry `ref`, `kind`, `title`, `excerpt`, a note's `date`, `type` and `stat
 
 ### Scopes
 
-A search takes one scope: a folder or a whole note, a period, `memories/SOURCE` with an optional period or `undated`, a record file, an exact identity or a tag address. Other segments below `memories/SOURCE` are invalid (exit 2), and so is a section, such as `projects/new-website.md#decision`, or a page's `#fragment`: scope the whole note, then read the section. A source that no selected brain configures or indexes fails like its page; a folder or identity that names nothing returns no items.
+A search takes one scope:
+
+| Scope                                                           | Searches                                                                  |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `projects`, `projects/new-website.md`                           | A folder or a whole note.                                                 |
+| `memories/brief`, `memories/brief/7d`, `memories/brief/undated` | One source, optionally within a period or among its records without time. |
+| `memories/brief/FILE`                                           | One record file, as its source page maps it.                              |
+| `today`, `7d`, `2026-09`, `2026-09-21..2026-09-25`              | A period of local time; a range spans its first through its last day.     |
+| `repo:github.com/example/new-website`                           | The identity's owner and the items linking to it.                         |
+| `bf://brain/tags/website`                                       | Notes carrying that tag; see [tag rules](link-reference.md#tag-rules).    |
+
+Other segments below `memories/SOURCE` are invalid (exit 2), and so is a section, such as `projects/new-website.md#decision`, or a page's `#fragment`: scope the whole note, then read the section. A page's address, such as `bf://brain/projects` or `bf://brain/7d`, is invalid too: use its brain-relative form, `projects` or `7d`. A source that no selected brain configures or indexes fails like its page; a folder or identity that names nothing returns no items.
 
 ### Identity matching
 
@@ -172,14 +183,14 @@ After [Connect two notes](links.md#connect-two-notes), the first returns `"page"
 
 ## Continuations
 
-| Rule                  | Action                                                                                                   |
-| --------------------- | -------------------------------------------------------------------------------------------------------- |
-| `next_offset` present | Repeat the same request with that offset until it is absent; listings also report `total`.               |
-| Same request          | Keep the query or ref, scope, limit and brain selection unchanged.                                       |
-| Changed files         | Restart after edits, or when a moving period such as `7d` reorders items.                                |
-| Offsets               | Zero-based, combined across brains, at most 2^53−1; a larger offset is invalid input (exit 2).           |
-| Page sizes            | Folders and tags: 200; `memories/SOURCE`: 20; tasks, periods, relation pages and other source pages: 50. |
-| Large items           | A page ends early when its items would exceed 32 KiB; `next_offset` continues after the last one.        |
+| Rule                  | Action                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------- |
+| `next_offset` present | Repeat the same request with that offset until it is absent; listings also report `total`.        |
+| Same request          | Keep the query or ref, scope, limit and brain selection unchanged.                                |
+| Changed files         | Restart after edits, or when a moving period such as `7d` reorders items.                         |
+| Offsets               | Zero-based, combined across brains, at most 2^53−1; a larger offset is invalid input (exit 2).    |
+| Page sizes            | Each page's item count is in [limits](limits.md#size-bounds).                                     |
+| Large items           | A page ends early when its items would exceed 32 KiB; `next_offset` continues after the last one. |
 
 The last page still needs the [completeness checks](#incomplete-answers-and-freshness).
 
@@ -202,13 +213,14 @@ A reply that fits returns whole and rejects a non-zero offset.
 
 ## Incomplete answers and freshness
 
-| Signal                                 | Meaning and action                                                                                                                                                                |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `problems`                             | Objects with `error` and, when known, `brain` and `file`: skipped files (200 per brain, then a count; each error cut to 1 KiB with `…`), identities or brains. Repair and repeat. |
-| `stale`                                | Brains answered from a cache or record that a writer was changing. Retry after it finishes.                                                                                       |
-| Source `failed`, `freshness`, `window` | Collection health and local coverage; inspect `bf status` and the source page.                                                                                                    |
-| Damaged cache                          | BF discards and rebuilds it once; run `bf build` if the problem persists.                                                                                                         |
-| Cache write access                     | Search and read refresh `.bf/`; a read-only brain fails naming it. Grant write access or use a copy.                                                                              |
+| Signal                       | Meaning and action                                                                                                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `problems`                   | Objects with `error` and, when known, `brain` and `file`: skipped files (up to a [listed limit](limits.md#size-bounds), then a count), identities or brains. Repair and repeat. |
+| `stale`                      | Brains answered from a cache or record that a writer was changing. Retry after it finishes.                                                                                     |
+| `sources`, `sources_omitted` | [Source coverage](#source-coverage): check that the sources you need collected the period you ask about and did not fail; `bf read memories` and `bf status` show it offline.   |
+| `next_offset`                | More items follow: repeat the same request with that offset, as [continuations](#continuations) describe.                                                                       |
+| Damaged cache                | BF discards and rebuilds it once; run `bf build` if the problem persists.                                                                                                       |
+| Cache write access           | Search and read refresh `.bf/`; a read-only brain fails naming it. Grant write access or use a copy.                                                                            |
 
 Malformed files, links and special files are skipped and reported while healthy brains still answer. While a selected brain is unavailable, an exact read returns what the others hold with a `problems` entry naming it, and a ref they do not hold fails as incomplete instead of not found, since it could exist there. Read a brain-qualified address, such as a search result's `uri` (`bf://NAME/...`), or repair that brain, for example with `bf build`. [What BF does not do](concepts.md#what-bf-does-not-do) states what an incomplete reply cannot prove.
 

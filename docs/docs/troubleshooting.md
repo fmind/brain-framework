@@ -33,8 +33,9 @@ Read the file, field or program the diagnostic names before retrying. Diagnostic
 | Search misses a known answer                | The exact note or record ref, and `unmatched`.                             | Use words from that evidence without a scope; see [search](search.md#search).                                                           |
 | A reply has `problems` or `stale`           | Skipped files, references or a busy writer.                                | Resolve them, or retry after the writer finishes.                                                                                       |
 | `reference exists in several brains`        | Several selected brains hold that ref.                                     | Read the result's `uri`, a `bf://NAME/...` address.                                                                                     |
-| A program fails                             | `bf status` and its `logs/NAME.log`.                                       | See [a program fails](#a-program-fails).                                                                                                |
+| A program fails                             | `bf status` and its `logs/NAME.log`.                                       | See [a program fails](#a-program-fails), or [a prompt fails](#a-prompt-fails).                                                          |
 | A program never runs automatically          | `enabled`, `refresh` and selectors.                                        | See [updates do not run](#updates-do-not-run).                                                                                          |
+| A prompt runs every 30 minutes on its own   | Its `refresh`, 1800 seconds by default.                                    | Set `refresh: 0` to run it only with `bf run`; see [timing and health](schedule.md#timing-and-health).                                  |
 | `state directory … is inaccessible`         | The named directory and `XDG_STATE_HOME`.                                  | Make it yours and writable, or set `XDG_STATE_HOME`; see [local state](configuration.md#local-state).                                   |
 | `state directory may not contain symlinks`  | Whether `~/.local/state`, `XDG_STATE_HOME` or its `bf/` folder is a link.  | Replace the link with a real folder, or set `XDG_STATE_HOME` to one; see [local state](configuration.md#local-state).                   |
 | `the search cache needs SQLite 3.35.0 …`    | The SQLite version the message names.                                      | Reinstall BF on a uv-managed Python: `uv tool install --reinstall --managed-python --python 3.14 brain-framework`.                      |
@@ -48,6 +49,23 @@ Failed collection leaves saved records intact. `bf status` marks the program `"f
 
 A snapshot fails with `snapshot would remove N of M records` when it would empty its source, or remove more than half of it and more than 10 records. Check the account, folder and provider response; do not delete stored records to make collection pass. When the removal is intended, accept it once with `bf collect SENSOR --allow-removal`.
 
+## A prompt fails
+
+A failed prompt run writes no record, and its log holds the harness's stderr. To see what the harness receives, set its `command` to `[cat]` for a moment and run `bf run NAME --dry-run`: the reply's `text` is the expanded prompt, and nothing is recorded.
+
+| Error or reply                                                  | Cause and fix                                                                                                                                                                                                          |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt command must print one JSON object when text is set`    | With `text` set, stdout must be one JSON object. Ask the harness for a single JSON result, such as `--output-format json`, not text or a stream of JSON lines; or remove `text` to keep all of stdout as the reply.    |
+| `prompt reply has no text string at /…`                         | The pointer names no string. Run the harness once by hand with the same output option, list the members of its JSON, then point `text` at the reply, such as `/result` for Claude Code or `/response` for Antigravity. |
+| `the expanded prompt exceeds 120,000 bytes; shorten …`          | The [prompt size limit](limits.md#size-bounds) applies on standard input too, not only to `{{prompt}}` in an argument. Shorten the prompt file or the piped input, and let the harness read evidence with `bf read`.   |
+| `the argument holding {{prompt}} exceeds Linux's 128 KiB limit` | The rest of that argument pushed it over Linux's bound. Shorten it, or drop `{{prompt}}` so the prompt arrives on standard input, if the harness reads it there.                                                       |
+| `"status":"skipped"` in a `bf update` reply                     | Its `skipped` says why: another process, such as watch's prompt process, just ran this prompt or still runs it, or the prompt waits to retry a failure. Its window carries over; nothing is lost.                      |
+| `program exited with status …`, a sign-in error in the log      | The harness is not signed in for the account and environment running BF. Sign in as that user; a native schedule copies `PATH` but no credentials or other variables.                                                  |
+| The reply says the agent could not run `bf read` or `bf search` | The harness cannot ask for approval without a terminal. Allow those read-only commands in its command, such as Claude Code's `--allowedTools 'Bash(bf read *),Bash(bf search *)'`, or in its permission settings.      |
+| `program timed out after …s`                                    | Give the harness its own time limit below `timeout`, such as Antigravity's `--print-timeout`, and keep the prompt's task small.                                                                                        |
+
+A failed scheduled run retries after the [failure backoff](schedule.md#timing-and-health); a failed `bf run` is only logged. See [Run prompts](prompts.md) for the settings.
+
 ## Updates do not run
 
 ```bash
@@ -55,7 +73,7 @@ bf update --dry-run
 bf status
 ```
 
-A program runs automatically only when it is enabled, has a nonzero `refresh`, is due and matches the selectors. The dry run's `manual` list names enabled programs with `refresh: 0`. Watch must stay open, or the native scheduler must be active on a running machine; see [timing and health](schedule.md#timing-and-health). Check health on the collecting machine: a teammate's clone shares the records, not the run history.
+A program runs automatically only when it is enabled, has a nonzero `refresh`, is due and matches the selectors; [timing and health](schedule.md#timing-and-health) gives the rule. The dry run's `manual` list names enabled programs with `refresh: 0`. Watch must stay open, or the native scheduler must be active on a running machine; see [timing and health](schedule.md#timing-and-health). Check health on the collecting machine: a teammate's clone shares the records, not the run history.
 
 ## Recover the cache or an interrupted write
 

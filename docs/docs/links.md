@@ -42,14 +42,14 @@ A relation says what a connection means. For example, a website review action de
 [Website decision](bf://brain/projects/new-website.md?rel=depends-on#decision)
 ```
 
-A `bf://` address names a brain by the `name` in its `bf.yaml`, so it works in every clone. `?rel=` names the relation; only `bf://` links take it. Create the [example action](brain.md#actions), put that link in its Objective section, then read both notes:
+A `bf://` address names a brain by the `name` in its `bf.yaml`, so it works in every clone. `?rel=` names the relation; only `bf://` links take it. Create the [example action](brain.md#actions), put that link in its Context section, then read both notes:
 
 ```bash
 bf read projects/new-website.md
 bf read actions/2026-09-27_website-review/ACTION.md
 ```
 
-The project groups the action under `depends-on`. The action's `claims` show the same link with its origin, the Objective section, and name the project as `target_ref` with its `target_title`. The claim records your assertion; it does not prove the dependency.
+The project groups the action under `depends-on`. The action's `claims` show the same link with its origin, the Context section, and name the project as `target_ref` with its `target_title`. The claim records your assertion; it does not prove the dependency.
 
 ### Choose the right relation
 

@@ -2,16 +2,16 @@
 
 Standalone sensors for common providers. Copy the ones you need into a brain's `sensors/`, declare them in `bf.yaml`, and adapt and test them there; they then belong to the brain. The Python package neither bundles nor installs them.
 
-| Sensor                                         | Arguments                                                     | Saves                                                                                  |
-| ---------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `git-history.py`                               | `ROOT START END [--skip RELATIVE_REPO]...`                    | Commits on branches, tags and remote branches, with author and repository identities.  |
-| [`github-history.py`](github-history.md)       | `OWNER/REPO commits\|issues\|pulls START END [--branch NAME]` | GitHub branch commits and all-age issues/PRs, with incremental refresh.                |
-| `local-documents.py`                           | `LABEL ROOT [--exclude GLOB]...`                              | A snapshot of supported documents in the chosen folder.                                |
-| `highlights.py`                                | `LABEL EXPORT.json`                                           | Selected passages, annotations and precise source locations.                           |
-| `google-calendar.py`                           | `CALENDAR START END [--agenda-days N]`                        | Calendar events, organizer/invitee identities and an optional agenda.                  |
-| `google-drive-folders.py`                      | `[START END]`                                                 | My Drive and shared-with-me folders with parent links; shared drives are excluded.     |
-| `gmail-headers.py`                             | `START END [--query=SEARCH]`                                  | Gmail senders, recipients, subjects and dates with thread links; never message bodies. |
-| [Context demo](../context-hub/sensors/demo.py) | `workspace`, `jira`, `github` or `gcloud`                     | Fictional adapter records for the four-tool walkthrough; no provider access.           |
+| Sensor                                           | Arguments                                                             | Saves                                                                                  |
+| ------------------------------------------------ | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `git-history.py`                                 | `ROOT START END [--skip RELATIVE_REPO]...`                            | Commits on branches, tags and remote branches, with author and repository identities.  |
+| [`github-history.py`](github-history.md)         | `OWNER/REPO commits\|issues\|pulls START END [--branch NAME]`         | GitHub branch commits and all-age issues/PRs, with incremental refresh.                |
+| `local-documents.py`                             | `LABEL ROOT [--exclude GLOB]...`                                      | A snapshot of supported documents in the chosen folder.                                |
+| `highlights.py`                                  | `LABEL EXPORT.json`                                                   | Selected passages, annotations and precise source locations.                           |
+| `google-calendar.py`                             | `CALENDAR START END [--agenda-days N]`                                | Calendar events, organizer/invitee identities and an optional agenda.                  |
+| `google-drive-folders.py`                        | `[START END]`                                                         | My Drive and shared-with-me folders with parent links; shared drives are excluded.     |
+| `gmail-headers.py`                               | `START END [--query=SEARCH]`                                          | Gmail senders, recipients, subjects and dates with thread links; never message bodies. |
+| [Four-tool demo](../context-hub/sensors/demo.py) | `TOOL END`, where `TOOL` is `workspace`, `jira`, `github` or `gcloud` | Fictional adapter records for the four-tool walkthrough; no provider access.           |
 
 Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). For other sources, copy the selected script from the release tag matching `bf --version` and make it executable, since the configuration below runs each script as a command and a download does not keep the executable bit:
 
@@ -23,7 +23,7 @@ chmod +x sensors/git-history.py
 
 Then merge its configuration below into `bf.yaml`. Review paths and account scope first; do not copy all sources unless you intend to run them.
 
-The [four-tool example](../context-hub/README.md) shows how differently named fields become one shared project relation during collection. Its fixtures are not live integrations. Use `gh`, `gws`, `acli` or `gcloud` to implement selected provider access in a brain-owned script, following the contract below; the [integration table](../../docs/docs/context-hub.md#use-it-on-your-work) distinguishes reviewed examples from adapters you write.
+The [four-tool walkthrough](../context-hub/README.md) shows how differently named fields become one shared project relation during collection. Its fixtures are not live integrations. Use `gh`, `gws`, `acli` or `gcloud` to implement selected provider access in a brain-owned script, as [adapt a sensor](#adapt-a-sensor) describes; the [integration table](../../docs/docs/context-hub.md#use-it-on-your-work) distinguishes reviewed examples from adapters you write.
 
 ```yaml
 # https://fmind.github.io/brain-framework/
@@ -173,14 +173,8 @@ Preview it with `bf collect gmail --since 1d --dry-run`. Expected result: each s
 
 `LABEL` is a stable, lowercase scope label of up to 64 characters, starting with a letter; it prefixes every record id, as in `highlights:reading/brief-clarity`. These fields are supplied provenance, not verified facts. Unknown fields and duplicate keys fail. As a snapshot, a new export replaces the whole source: supply the complete selection.
 
-## Contract
+## Adapt a sensor
 
-Each script uses the Python 3.11+ standard library, has an executable `#!/usr/bin/env python3` entry point and invokes provider CLIs with argument arrays, without a shell. Provider CLIs own credentials; sensors do not read credential files.
-
-Stdout is one JSON array in the [record envelope](../../docs/docs/schema.md#mapping-rules). Each record has a stable `id`, meaningful `title`, searchable `text` and optional time, URL, identities and structured attributes. Keep raw provider payloads out of text and attributes: map selected fields explicitly. BF computes `fields` from `bf.yaml`; a sensor that prints them fails with `sensors must supply mapped output, not precomputed fields`. `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/schema.md#record-revisions-and-provenance); for example, Drive's `modifiedTime` maps to `updated`. `{{start}}` and `{{end}}` are timezone-aware timestamps for a half-open window.
-
-One invalid record fails a whole collection, so the Git, document, Calendar and Drive sensors keep each record within BF's bounds: titles become one line of at most 4,096 characters, URLs and links with control characters or over 8,192 characters are dropped, a record keeps at most 1,000 links, aliases are namespaced `scheme:value` identities with percent-encoded paths, and ids stay within 7,988 characters once percent-encoded. Highlights instead refuses an export that breaks them.
-
-Provider output, time and pagination are bounded. Failure, overflow or incomplete pagination stops the child and exits nonzero with no stdout and one stderr line: a content-free reason written by the sensor, such as the limit reached or a document's root-relative path, or a generic sentence for provider errors. Calendar and Drive reject malformed continuation tokens; Calendar also rejects malformed event lists and duplicate event identities, so a partial catalog cannot masquerade as a complete replacement. `tests/test_adapters_*.py` checks these boundaries and preservation of saved records with fake providers.
+Each script needs only Python 3.11 or later and calls its provider CLI, which owns the credentials, without a shell. It prints one JSON array in the [record format](../../docs/docs/schema.md#mapping-rules), keeping each record within BF's limits, or, when anything fails or a page is missing, exits nonzero with nothing on stdout and one content-free line on stderr, so BF keeps the saved records. Keep both behaviors when you adapt a script, and test them with fake provider output. `{{start}}` and `{{end}}` are timezone-aware bounds of a half-open window. A sensor never prints `fields`: BF computes them from your mappings, and `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/schema.md#record-revisions-and-provenance), such as Drive's `modifiedTime` mapped to `updated`.
 
 For typed relations, map Git's `/attributes/author_refs` and `/attributes/repository_refs`, or Calendar's `/attributes/organizer_refs`, `/attributes/attendee_refs` and `/attributes/participant_refs`. Declare each target field with `type: identity`, `cardinality: many` and `relation: true`; see the [field mappings](../../docs/docs/schema.md#shared-fields-and-sensor-mappings).

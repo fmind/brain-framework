@@ -28,26 +28,30 @@ mise run all
 
 `install` syncs locked dependencies and installs Git hooks. Run `format` deliberately after editing; it rewrites source files, so preserve unrelated work and inspect its diff. `all` checks, tests (including runnable examples) and builds distributions without rewriting source files. Formatting drift fails the gate; fix it with `format`, then rerun the failed check. Tasks use `uv run --locked`, so an outdated `uv.lock` fails instead of being rewritten; run `uv lock` deliberately. Validation still writes ignored caches, coverage, documentation and build output.
 
-Use `uv run --locked bf --brain BRAIN` from the checkout, or `uv run --locked --project CHECKOUT bf` inside a brain, to exercise checkout code on a disposable brain. `mise run test:watch` reruns tests after edits; `mise run docs:watch` serves the documentation.
+Exercise checkout code on a disposable brain with `uv run --locked bf COMMAND --brain BRAIN` from the checkout, such as `uv run --locked bf validate --brain /tmp/demo`, or `uv run --locked --project CHECKOUT bf COMMAND` inside the brain. `mise run test:watch` reruns tests after edits; `mise run docs:watch` serves the documentation.
 
 Use a focused check while editing, then run the full gate:
 
-| Changed area                   | Focused check                                                                            | What to verify                                                                                      |
-| ------------------------------ | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Search                         | `uv run --locked pytest -q tests/test_search.py`                                         | Results and realistic failure cases.                                                                |
-| Markdown parsing               | `uv run --locked pytest -q tests/test_markdown.py`                                       | Heading slugs and anchors, claim footnotes, note leads and located link errors.                     |
-| Search cache                   | `uv run --locked pytest -q tests/test_cache.py tests/test_cache_version.py`              | Refreshes match a full build; new cache output bumps [`index.SCHEMA`](#version-the-search-cache).   |
-| Limits and usage               | `uv run --locked pytest -q tests/test_bounds.py tests/test_usage.py`                     | Documented limits hold at their edges; usage rotation stays within 1 MiB.                           |
-| Retrieval quality              | [Run the retrieval example's test](examples/retrieval/README.md#run-the-test)            | Questions still find the expected source, rank and answer fragment.                                 |
-| Documentation                  | `mise run check:docs` and `mise run check:links`                                         | Strict build, rendered anchors and local repository links.                                          |
-| Getting started, first sensor  | `uv run --locked pytest -q tests/test_guides.py`                                         | Commands return the documented replies; the test applies each other block as its prose says.        |
-| Walkthroughs and examples      | `uv run --locked pytest -q tests/test_example_walkthroughs.py tests/test_context_hub.py` | README walkthroughs and the four-tool page run on disposable copies and print their stated results. |
-| Configuration model or reply   | `mise run generate:schema`                                                               | Generated `docs/*.schema.json` match their loaders and replies; test valid and invalid inputs.      |
-| Watch dashboard                | `mise run generate:screenshot`                                                           | `docs/assets/watch.svg` shows the current dashboard; regenerate after dashboard or Rich changes.    |
-| Dependencies                   | `mise run generate:notices`                                                              | `THIRD_PARTY_NOTICES.md` and the site's license copies match the synced environment.                |
-| Indexing, retrieval or storage | `mise run benchmark` before and after                                                    | Comparable timings with valid, complete results.                                                    |
+| Changed area                   | Focused check                                                                            | What to verify                                                                                          |
+| ------------------------------ | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Search                         | `uv run --locked pytest -q tests/test_search.py`                                         | Results and realistic failure cases.                                                                    |
+| Markdown parsing               | `uv run --locked pytest -q tests/test_markdown.py`                                       | Heading slugs and anchors, claim footnotes, note leads and located link errors.                         |
+| Search cache                   | `uv run --locked pytest -q tests/test_cache.py tests/test_cache_version.py`              | Refreshes match a full build; new cache output bumps [`index.SCHEMA`](#version-the-search-cache).       |
+| Limits and usage               | `uv run --locked pytest -q tests/test_bounds.py tests/test_usage.py`                     | Documented limits hold at their edges; usage rotation stays within 1 MiB.                               |
+| Retrieval quality              | `uv run --locked pytest -q tests/test_retrieval_example.py`                              | Questions still find the expected source, rank and answer fragment; see [cases](#add-a-retrieval-case). |
+| Documentation                  | `mise run check:docs` and `mise run check:links`                                         | Strict build, rendered anchors and local repository links.                                              |
+| Getting started, first sensor  | `uv run --locked pytest -q tests/test_guides.py`                                         | Commands return the documented replies; the test applies each other block as its prose says.            |
+| Walkthroughs and examples      | `uv run --locked pytest -q tests/test_example_walkthroughs.py tests/test_context_hub.py` | README walkthroughs and the four-tool page run on disposable copies and print their stated results.     |
+| Configuration model or reply   | `mise run generate:schema`                                                               | Generated `docs/*.schema.json` match their loaders and replies; test valid and invalid inputs.          |
+| Watch dashboard                | `mise run generate:screenshot`                                                           | `docs/assets/watch.svg` shows the current dashboard; regenerate after dashboard or Rich changes.        |
+| Dependencies                   | `mise run generate:notices`                                                              | `THIRD_PARTY_NOTICES.md` and the site's license copies match the synced environment.                    |
+| Indexing, retrieval or storage | `mise run benchmark` before and after                                                    | Comparable timings with valid, complete results.                                                        |
 
-For example, if a query finds the wrong project's budget, add that question and both competing project notes to the [retrieval example](examples/retrieval/README.md). Reproduce the miss before changing ranking and rerun its test after the fix; keep the expected answer tied to its source. A passing retrieval case checks that case, not source truth or arbitrary answer quality. Evaluating a real brain requires authorization; work on a copy and report only aggregate results.
+### Add a retrieval case
+
+For example, if a query finds the wrong project's budget, add that question and both competing project notes to the [retrieval example](examples/retrieval/README.md), with synthetic evidence. Preserve the question's useful difficulty, such as competing answers, a scope, an expected rank or missing evidence; add a short expected answer fragment with its exact source ref and keep the distractors. Reproduce the miss with the retrieval test before changing ranking and rerun it after the fix. Update the documented and tested case count and `mrr` with each new case, and never change an expectation merely to make a regression pass. A passing retrieval case checks that case, not source truth or arbitrary answer quality. Evaluating a real brain requires authorization; work on a copy and report only aggregate results.
+
+Keep parser errors, process cancellation, pagination mechanics and evaluator failure handling in `tests/`, and curated question-to-evidence cases beside their runnable example. Do not add model grading, another evaluator or a new suite format: the [suite reference](docs/docs/checks.md#suite-reference) owns the fields.
 
 ## Test outcomes and failures
 
@@ -60,6 +64,16 @@ Markdown complexity regressions compare fourfold input growth with an eightfold 
 For onboarding or workflow changes, follow the actual commands in a disposable brain with isolated configuration and state: save a decision, search its reason, read its ref, validate and evaluate. Show the expected result beside the example. Keep the README focused on first use, `docs/` on user contracts and `src/bf/skills/` on agent procedures. Check host discovery separately from installing the skills with `bf skills DIR`.
 
 Update the owning docs, skills and examples with public behavior. An adapter change needs a fake-provider test and an entry in `examples/sensors/README.md`. Regenerate the schemas when configuration models or replies change and the notices when dependencies change. Record user-visible outcomes under `Unreleased` in `CHANGELOG.md`; change versions and tags only for an authorized release.
+
+### Change an example program
+
+`examples/sensors/`, `examples/routines/` and `examples/hooks/` hold scripts users copy into their brains. `tests/test_adapters_*.py` runs each one as a process with fake providers and fake `bf` and `git` executables. Their READMEs tell users what each script collects or prints and its limits; these rules keep the scripts safe to copy:
+
+- **Portable**: Python 3.11+ standard library only (`tests/test_adapters_compatibility.py`), an executable `#!/usr/bin/env python3` entry point, and provider CLIs, `git` and `bf` called with literal argv, never a shell. Provider CLIs own credentials; scripts never read credential files.
+- **Bounded and closed on failure**: bound provider output, time and pagination. A failure, overflow or incomplete page exits nonzero with nothing on stdout and one content-free stderr line, such as the limit reached, a root-relative path or a generic sentence for provider errors. Reject malformed continuation tokens and duplicate identities, so a partial catalog never passes as a complete snapshot.
+- **Within BF's record bounds**: a sensor maps selected provider fields explicitly, keeps raw payloads out of text and attributes and never prints `fields`. It normalizes what BF would reject, such as multi-line titles, invalid URLs and links, too many links or unencoded identity paths, so one item never fails a whole collection; highlights instead refuses an export that breaks them.
+- **Deterministic routines**: read the brain only through `bf read` and `bf search`, print one OKF action or nothing, follow every `next_offset` and fail before writing on `problems`, `stale` or a stalled continuation. Never edit notes, link from the action or create checkbox tasks; name items by `uri` or ref in code spans no backtick can close.
+- **Silent hooks**: read-only and offline, within one time budget per event. Any failure, malformed event, unusable reply or unknown repository prints nothing and exits 0. Print a few hundred bytes of authored-note titles and refs; count records, never quote them; accept a stale reply only when its sole problem is a stale identity cache, and then say the index is refreshing.
 
 ### Keep the contract
 

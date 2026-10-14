@@ -17,9 +17,10 @@ Complete [Getting started](getting-started.md), including its [collection exerci
 mkdir -p inputs/website-demo
 mv inputs/brief.txt inputs/website-demo/brief.txt
 curl -fsSLo sensors/local-documents.py "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors/local-documents.py"
+chmod +x sensors/local-documents.py
 ```
 
-Review the script, with your agent if you like, before running it. The package installs no example sensors.
+A download loses the executable bit, which BF needs to run the script as a command. Review the script, with your agent if you like, before running it. The package installs no example sensors.
 
 ## Configure a sensor
 
@@ -29,22 +30,14 @@ In `bf.yaml`, replace the `brief` entry under `sensors:` with this one. Keep `ve
 # https://fmind.github.io/brain-framework/docs/sensors/
 sensors:
   local-documents:
-    command:
-      - uv
-      - run
-      - --no-project
-      - --python
-      - "3.14"
-      - sensors/local-documents.py
-      - website-demo
-      - "{{brain}}/inputs/website-demo"
+    command: [sensors/local-documents.py, website-demo, "{{brain}}/inputs/website-demo"]
     mode: snapshot
     refresh: 0
     fields:
       kind: { value: document }
 ```
 
-`website-demo` is the stable label used in record ids, and the last argument selects exactly the demo folder. `uv` supplies the interpreter, independently of the host's `python3`. Collection runs with your account's permissions.
+`website-demo` is the stable label used in record ids, and the last argument selects exactly the demo folder. The script runs with Python 3.11 or later as `python3`; with an older one, start the command with uv, as [sensor settings](#sensor-settings) shows. Collection runs with your account's permissions.
 
 ## Collect and read
 
@@ -92,6 +85,7 @@ The reviewed [highlights sensor](https://github.com/fmind/brain-framework/blob/m
 examples="https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors"
 curl -fsSLo sensors/highlights.py "$examples/highlights.py"
 curl -fsSLo inputs/highlights.json "$examples/highlights.json"
+chmod +x sensors/highlights.py
 ```
 
 Add a `highlights` entry under `sensors:` and a `source-document` relation under `fields:`, keeping the existing entries:
@@ -100,16 +94,7 @@ Add a `highlights` entry under `sensors:` and a `source-document` relation under
 # https://fmind.github.io/brain-framework/docs/sensors/
 sensors:
   highlights:
-    command: [
-      uv,
-      run,
-      --no-project,
-      --python,
-      "3.14",
-      sensors/highlights.py,
-      reading,
-      "{{brain}}/inputs/highlights.json",
-    ]
+    command: [sensors/highlights.py, reading, "{{brain}}/inputs/highlights.json"]
     mode: snapshot
     refresh: 0
     fields:
@@ -131,21 +116,25 @@ The read returns the selection as `record.text`, the document as `record.url` an
 
 ## Sensor settings
 
-The command is a program on PATH or in `sensors/`, followed by its arguments, run without a shell. The placeholders `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}` are replaced once. A script run directly needs an executable bit and a suitable interpreter; `bf validate` checks the bit. Behind a command on PATH, such as `uv` or `python3`, it checks that the first `sensors/` path among the arguments exists.
+The command is a program on PATH or in `sensors/`, followed by its arguments, run without a shell. The placeholders `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}` are replaced once. A script run directly, such as `[sensors/local-documents.py, ...]`, needs its executable bit and its interpreter: the reviewed examples need Python 3.11 or later as `python3`; `bf validate` checks the bit. Where `python3` is older, as on a Mac without a newer Python, put uv in front, as in `[uv, run, --no-project, --python, "3.14", sensors/local-documents.py, ...]`; behind a command on PATH, `bf validate` checks that the first `sensors/` path among the arguments exists.
 
-| Setting     | Default  | Meaning                                                                                                 |
-| ----------- | -------- | ------------------------------------------------------------------------------------------------------- |
-| `command`   | required | The program and up to 127 arguments of at most 16,384 characters each.                                  |
-| `fields`    | `{}`     | [Field mappings](schema.md#shared-fields-and-sensor-mappings).                                          |
-| `enabled`   | `true`   | A disabled sensor never runs; its records stay searchable.                                              |
-| `mode`      | `window` | `window` updates returned records; `snapshot` replaces the complete list.                               |
-| `refresh`   | `0`      | Seconds between automatic runs, up to 365 days; zero keeps the sensor manual.                           |
-| `lookback`  | `86400`  | Seconds covered by the first run, each snapshot run and `bf collect` without `--since`; up to 365 days. |
-| `overlap`   | `300`    | Seconds re-read before the previous window's end.                                                       |
-| `reconcile` | none     | An occasional wider window; see [reconciliation](#frequent-updates-and-periodic-reconciliation).        |
-| `timeout`   | `300`    | Maximum runtime in seconds, from 1 to 3,600.                                                            |
-| `max_bytes` | 64 MiB   | Maximum output; configurable up to 256 MiB.                                                             |
-| `priority`  | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                       |
+The sensor's name is the source of its records, as in `local-documents:website-demo/brief.txt`. Never name a sensor `bf`: its refs, `bf:ID`, would read as BF addresses. [Program names](schema.md#program-names) gives the other rules.
+
+| Setting     | Default  | Meaning                                                                                          |
+| ----------- | -------- | ------------------------------------------------------------------------------------------------ |
+| `command`   | required | The program, then its arguments.                                                                 |
+| `fields`    | `{}`     | [Field mappings](schema.md#shared-fields-and-sensor-mappings).                                   |
+| `enabled`   | `true`   | A disabled sensor never runs; its records stay searchable.                                       |
+| `mode`      | `window` | `window` updates returned records; `snapshot` replaces the complete list.                        |
+| `refresh`   | `0`      | Seconds between automatic runs; `0` keeps the sensor manual.                                     |
+| `lookback`  | `86400`  | Seconds covered by the first run, each snapshot run and `bf collect` without `--since`.          |
+| `overlap`   | `300`    | Seconds re-read before the previous window's end.                                                |
+| `reconcile` | none     | An occasional wider window; see [reconciliation](#frequent-updates-and-periodic-reconciliation). |
+| `timeout`   | `300`    | Maximum runtime in seconds.                                                                      |
+| `max_bytes` | 64 MiB   | Maximum output.                                                                                  |
+| `priority`  | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                |
+
+[Limits](limits.md#size-bounds) gives each setting's range.
 
 ## Quiet a high-volume source
 
@@ -181,13 +170,13 @@ Finish every source page before printing the array, and fail if one is missing. 
 
 ## From meeting notes to GitHub issues
 
-The [Google Calendar sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) uses [`gws`](https://github.com/googleworkspace/cli) to collect events, including notes in their descriptions. Save the reviewed script as `sensors/google-calendar.py` and add:
+The [Google Calendar sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) uses [`gws`](https://github.com/googleworkspace/cli) to collect events, including notes in their descriptions. Save the reviewed script as `sensors/google-calendar.py`, make it executable with `chmod +x`, and add:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
 sensors:
   calendar:
-    command: [python3, sensors/google-calendar.py, primary, "{{start}}", "{{end}}"]
+    command: [sensors/google-calendar.py, primary, "{{start}}", "{{end}}"]
     refresh: 3600 # hourly with bf watch
 ```
 
@@ -202,9 +191,7 @@ Expect `issues.md` to hold drafts grounded in the collected notes, each citing i
 
 ## Collect and update
 
-`bf collect SENSOR` runs one sensor now. `bf update`, `bf watch` and schedules run the sensors that are due: enabled, with a nonzero `refresh`, and without a [fresh collection](#backfills-and-coverage) within it. They act on one [selected brain](configuration.md#select-a-brain) and never on referenced brains.
-
-A failure lets other programs continue and makes `bf update` exit 1. The failed sensor retries 1 minute later, then after 2, 4, 8… minutes per consecutive failure, never waiting longer than its `refresh`; a success resets the delay. `bf collect` always runs at once. Each run appends its stderr and a summary to `logs/SENSOR.log` in the brain; status and errors name that log.
+`bf collect SENSOR` runs one sensor now. `bf update`, `bf watch` and schedules run the sensors that are due, in one [selected brain](configuration.md#select-a-brain) and never in referenced brains; [timing and health](schedule.md#timing-and-health) gives the due rule and the failure backoff. Each run appends its stderr and a summary to `logs/SENSOR.log` in the brain; status and errors name that log.
 
 Window sensors resume from their previous window minus `overlap`, catching up at most 30 days. Run history stays in this machine's [state directory](configuration.md#local-state); without it, the next run uses `lookback`.
 
@@ -235,7 +222,7 @@ The backfill saves that month's records but is not a fresh collection: only a wi
 
 A window that joins the recorded coverage extends it, and updates resume from the coverage's end. A backfill that ends before the coverage leaves that resume point unchanged, and so does a later window separated by a gap, so the next update still fills the gap, up to 30 days back. A manual sensor has no update to fill gaps: backfill them yourself. The [GitHub history walkthrough](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) backfills a year in adjacent windows.
 
-Only one run of a sensor can collect at a time: a second run of the same sensor fails at once with `SENSOR is already running for this brain; retry later`. Different sensors may run at the same time. See [process safeguards](limits.md#processes-and-logs) for timeouts and cancellation.
+Only one run of a sensor can collect at a time: a second `bf collect` of the same sensor fails at once with `SENSOR is already running for this brain; retry later`, while `bf update` reports it `skipped`, since the other run covers the cycle. Different sensors may run at the same time. See [process safeguards](limits.md#processes-and-logs) for timeouts and cancellation.
 
 ## Define the scope before adding a sensor
 
@@ -262,6 +249,6 @@ The dry run reports the `removed` count and `"removal_refused": true` when the g
 - Use the event time for `time`, the upstream modification time for `attributes.updated` and `attributes.partial: true` for deliberately incomplete text. BF sets `attributes.observed`. Map provider fields to these reserved keys explicitly, such as Drive's `modifiedTime` to `updated`.
 - Expect review flags from those times: a `time` or `updated` after the last edit of a project, or of a note with `stale_after`, flags that note when it links to the record or the record links to it. `observed` never flags: collecting an older item for the first time is not new evidence.
 - Emit only exact namespaced identities in `links` and `aliases`, such as lowercase `person:email/` addresses. `bf validate` warns, once per source, when `links` or `url` hold other text.
-- Respect the [record limits](schema.md#mapping-rules), and skip noise such as trash, bots and test runs.
+- Respect the [record format](schema.md#mapping-rules) and its [limits](limits.md#size-bounds), and skip noise such as trash, bots and test runs.
 
 To run sensors regularly, see [Watch and schedule updates](schedule.md). To prepare reviews from collected evidence, see [Routines](routines.md).

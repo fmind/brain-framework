@@ -30,17 +30,7 @@ Expect validation to return `"valid":true`, with 15 notes and nine records, and 
 
 `bf.yaml`, `projects/`, `concepts/`, `actions/` and `memories/` form the brain; `evals/retrieval.yaml` holds its questions and expected results. The records are checked in: a disabled `catalog` sensor entry only sets that source's `priority: low`, and nothing is collected. There are no routines or related brains. The example pins UTC and uses fixed dates. Retrieval may refresh the disposable `.bf/` cache; it does not collect or count evaluation reads as user usage.
 
-## Run the test
-
-The normal test suite validates and evaluates a disposable copy of this same example. Run it alone with:
-
-```bash
-TZ=UTC uv run pytest -q tests/test_retrieval_example.py
-```
-
 For your own brain, adapt its starter `evals/retrieval.yaml` to the questions you need answered; see [Check your brain](../../docs/docs/checks.md). The [workflow example](../brain/README.md) demonstrates collection and actions as well as retrieval.
-
-From the checkout, `uv run bf schema --kind eval` prints the suite's editor schema with `title: Suite`. It rejects a case with both `query` and `read`, or an empty assertion such as `text: [""]`. `bf eval` applies the same structural checks before retrieval, checks each ref as `bf read` does and each query as `bf search` does, and rejects duplicate case names: a `forbid: [tasks#x]` fails with `pages have no sections` instead of passing unnoticed.
 
 ## What a case proves
 
@@ -93,8 +83,4 @@ The three fictional `feed` records cover an event time, observation alone, and n
 
 Both period pages list `feed:observed` before `feed:dated`, with `"total":2`; the scoped search finds both. The first record keeps `observed` and has no `time`: the period uses when it was observed without inventing a publication date. The dated record stays on September 22 even though it was observed on September 23. The record with neither timestamp appears only in `undated`, alongside `feed:observed`, because both lack event time. The three corresponding evaluation cases keep this behavior reproducible.
 
-## Add a useful case
-
-Capture a real retrieval miss using synthetic evidence. Preserve the question's useful difficulty: competing answers, scope, expected rank or missing evidence. Add a short expected answer fragment and its exact source ref; keep distractors. Run the focused pytest command before changing ranking, then again after the fix. Update the documented and tested case count and `mrr` when adding a case. Never change expectations merely to make a regression pass.
-
-Keep parser errors, process cancellation, pagination mechanics and evaluator failure handling in `tests/`. Keep curated question-to-evidence cases alongside their runnable example. Do not add model grading, another evaluator or a new suite format; [the existing contract](../../docs/docs/checks.md#suite-reference) owns the fields. Personal brains keep their own `evals/` suites, run with `bf eval` inside the brain.
+To add a case from a real retrieval miss, see [contributing](../../CONTRIBUTING.md#add-a-retrieval-case).

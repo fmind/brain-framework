@@ -38,7 +38,7 @@ bf update --dry-run
 bf collect local-documents --dry-run
 ```
 
-`update --dry-run` lists due programs with their windows, names enabled manual programs under `manual`, and runs nothing. `collect --dry-run` **runs** the sensor and returns up to three sample records without saving them or its run, and `run --dry-run PROMPT` runs the harness without recording the run; it can contact providers and still appends to the sensor's log. Likewise, `run --dry-run` **runs** its routines but writes no action and records no run. The second example needs the [local-documents sensor](sensors.md#your-first-sensor).
+`update --dry-run` lists due programs with their windows, names enabled manual programs under `manual`, and runs nothing. `collect --dry-run` **runs** the sensor and returns up to three sample records without saving them or its run. `run --dry-run` **runs** its routines or prompt but writes no action or record and records no run; a prompt's reply still returns as `text`. Both can contact providers and still append to the program's log. The second example needs the [local-documents sensor](sensors.md#your-first-sensor).
 
 Without time options, `collect` covers the sensor's `lookback` through now. `--since` and `--until` accept `now`, `today`, `yesterday`, `12h`, `7d`, `2w`, `YYYY-MM-DD` and ISO 8601 timestamps with a timezone. A snapshot sensor still returns its whole list, and `--allow-removal` accepts [a large removal](sensors.md#define-the-scope-before-adding-a-sensor) once.
 
@@ -108,9 +108,9 @@ Invalid input exits 2 with one line naming the argument, the reason and the help
 bf: invalid input: --limit: 0 is not in the range 1<=x<=50 (see bf search -h)
 ```
 
-Other examples: `bf search "!!!"` (no word to search), `bf read 2026-13` (no such month), `bf read projects/../bf.yaml`, `bf read tasks#next` (pages have no sections), `bf read projects --rel cites` (a page lists no relation), `bf read projects/new-website.md --rel nope`, which lists the valid relations, and an empty value choosing where or on what a command acts, such as `--brain ""`, `bf init ""`, `bf collect ""`, `run --hook ""`, `--sensor ""`, `collect SENSOR --since ""`, `build --reproject ""` or `schedule --output ""`. An option that takes one value may appear once: `bf search launch --scope projects --scope concepts` is invalid instead of searching only the last scope. Only `--sensor` and `--routine` repeat, to select several programs.
+Other examples: `bf search "!!!"` (no word to search), `bf read 2026-13` (no such month), `bf read projects/../bf.yaml`, `bf read tasks#next` (pages have no sections), `bf read projects --rel cites` (a page lists no relation), `bf read projects/new-website.md --rel nope`, which lists the valid relations, and an empty value choosing where or on what a command acts, such as `--brain ""`, `bf init ""`, `bf collect ""`, `run --hook ""`, `--sensor ""`, `collect SENSOR --since ""`, `build --reproject ""` or `schedule --output ""`. An option that takes one value may appear once: `bf search launch --scope projects --scope concepts` is invalid instead of searching only the last scope. Only the program selectors repeat: `--sensor`, `--routine`, `--prompt` and `update --kind`.
 
-A well-formed ref that names nothing exits 1 and suggests what exists: a close page, note, sensor or routine name (`did you mean projects?`), or the note's sections for a missing `#section`. `collect` and `run` suggest only enabled programs and fail on a disabled one with `sensor NAME is disabled in bf.yaml; set enabled: true to run it`.
+A well-formed ref that names nothing exits 1 and suggests what exists: a close page, note, sensor, routine or prompt name (`did you mean projects?`), or the note's sections for a missing `#section`. `collect` and `run` suggest only enabled programs and fail on a disabled one with `sensor NAME is disabled in bf.yaml; set enabled: true to run it`.
 
 `update` and `run` exit 1 when a program fails, and `update` and `build` when the refreshed cache skipped files; successful programs keep their results. `status --check` exits 1 on problems, unavailable brains or references, or scheduled programs that failed, are `overdue` or `never` succeeded. `validate` exits 1 on problems, never on warnings. `skills` exits 1 when it keeps a folder holding your edits, foreign files or a newer bf's copy, and `--check` unless every skill is current; see [skills](agents.md#install-the-skills).
 
@@ -120,26 +120,26 @@ Every reply states times with your local offset, and dates and field values as t
 
 An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors`, `routines` and, when the brain declares any, `prompts` it ran or found due, `manual` for skipped manual programs, and the refreshed `index`. A `run` reply has `ok`, `dry_run`, any `hook` and its `routines`, each with a `status` of `ran`, `skipped` or `failed`; a prompt's has `prompts`: one entry with its `status` (`ran` or `failed`), the `record` it wrote (none on a dry run) and the reply `text`, or an `error`.
 
-### Status sources and routines
+### Program and source status {#status-sources-and-routines}
 
 `bf status` groups results under `brains`. Each brain has its `cache`, `notes`, `problems`, `attention`, `sources`, `routines`, [`prompts`](prompts.md#schedule-and-overlap), `coverage` totals and `usage`. `healthy` is false when any brain has a problem, an `attention` entry, an unavailable cache or cannot load. A brain that cannot load appears with only `brain`, `error` and, when known, `path`.
 
-| Field                                | Meaning                                                                                                                                                                               |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cache`                              | `ready`, or `busy` while a writer updates it. `stale` (the last cache) or `missing` (none) while an interrupted write awaits recovery, unlike the `stale` of search and read replies. |
-| `pending_transaction`                | `true` when `memories/.pending` holds an interrupted write; a problem names the command to recover it.                                                                                |
-| `attention`                          | Scheduled programs this machine runs that `failed` or are `overdue` or `never` succeeded, such as `{"sensor":"mail","freshness":"never","failed":true}`, as on the home page.         |
-| `state`                              | As in [source coverage](retrieval.md#source-coverage); a routine is `active` or `disabled`.                                                                                           |
-| `freshness`                          | `fresh`, `overdue`, `never`, `manual` or `unknown`; see [timing and health](schedule.md#timing-and-health).                                                                           |
-| `records`, `bytes`, `latest`         | Indexed records of the source, their size on disk and the newest event time.                                                                                                          |
-| `mode`, `window`                     | Sensor mode and, for window sensors, the contiguous collected interval `{since, until}`.                                                                                              |
-| `last_collected`                     | The last collection that brought the source up to date, which freshness counts from; a [backfill](sensors.md#backfills-and-coverage) never does. Routines report `last_success`.      |
-| `last_run`                           | Counters of the last committed run: `records`, `added`, `updated`, `unchanged`, `removed`, `requested_start`, `requested_end`, `reconcile`, `elapsed_seconds`, `output_bytes`.        |
-| `reconciled`                         | The last scheduled [reconciliation](sensors.md#frequent-updates-and-periodic-reconciliation).                                                                                         |
-| `action`                             | A routine's latest action.                                                                                                                                                            |
-| `runs`, `record`                     | A prompt's successful runs and the record its latest run wrote; its `last_run` holds `at`, `elapsed_seconds` and `output_bytes`.                                                      |
-| `failed`, `error`, `failures`, `log` | The last attempt failed: its diagnostic, consecutive failures and `logs/NAME.log`.                                                                                                    |
-| `usage`                              | `7d` and `30d` counts of `search`, `empty` (searches without results) and `read`; `since`, the oldest event counted, when [rotation](limits.md#processes-and-logs) cut that window.   |
+| Field                                | Meaning                                                                                                                                                                                      |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cache`                              | `ready`, or `busy` while a writer updates it. `stale` (the last cache) or `missing` (none) while an interrupted write awaits recovery, unlike the `stale` of search and read replies.        |
+| `pending_transaction`                | `true` when `memories/.pending` holds an interrupted write; a problem names the command to recover it.                                                                                       |
+| `attention`                          | Scheduled programs this machine runs that `failed` or are `overdue` or `never` succeeded, such as `{"sensor":"mail","freshness":"never","failed":true}`, as on the home page.                |
+| `state`                              | As in [source coverage](retrieval.md#source-coverage); a routine or prompt is `active` or `disabled`.                                                                                        |
+| `freshness`                          | `fresh`, `overdue`, `never`, `manual` or `unknown`; see [timing and health](schedule.md#timing-and-health).                                                                                  |
+| `records`, `bytes`, `latest`         | Indexed records of the source, their size on disk and the newest event time.                                                                                                                 |
+| `mode`, `window`                     | Sensor mode and, for window sensors, the contiguous collected interval `{since, until}`.                                                                                                     |
+| `last_collected`                     | The last collection that brought the source up to date, which freshness counts from; a [backfill](sensors.md#backfills-and-coverage) never does. Routines and prompts report `last_success`. |
+| `last_run`                           | Counters of the last committed run: `records`, `added`, `updated`, `unchanged`, `removed`, `requested_start`, `requested_end`, `reconcile`, `elapsed_seconds`, `output_bytes`.               |
+| `reconciled`                         | The last scheduled [reconciliation](sensors.md#frequent-updates-and-periodic-reconciliation).                                                                                                |
+| `action`                             | A routine's latest action.                                                                                                                                                                   |
+| `runs`, `record`                     | A prompt's successful runs and the record its latest run wrote; the `last_run` of its latest scheduled run holds `at`, `elapsed_seconds` and `output_bytes`.                                 |
+| `failed`, `error`, `failures`, `log` | The last attempt failed: its diagnostic, consecutive failures and `logs/NAME.log`.                                                                                                           |
+| `usage`                              | `7d` and `30d` counts of `search`, `empty` (searches without results) and `read`; `since`, the oldest event counted, when [rotation](limits.md#processes-and-logs) cut that window.          |
 
 For example, an hourly `mail` sensor that collected one message reports:
 

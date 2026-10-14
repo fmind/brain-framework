@@ -137,13 +137,19 @@ sources:
 
 # Website review
 
-## Objective
-
 Review the product page for the [New website project](../../projects/new-website.md#decision).
 
-## Tasks
+## Context
+
+The project chose a single product page because visitors need a clear explanation before signing up. No draft has been reviewed yet.
+
+## TODO
 
 - [ ] Check whether visitors can explain the product before signing up.
+
+## Decision
+
+None yet: record each decision here with its date, reason and evidence ref.
 
 ## Resume
 
@@ -172,7 +178,7 @@ The draft describes the product but does not name its intended audience. We have
 Next: describe who the product helps, then test the explanation with a visitor.
 ```
 
-Keep session evidence in the action's `inputs/` and deliverables in `outputs/`; both are searchable, so keep them within the brain's audience. Reading the action folder returns `ACTION.md`, its files, linked projects and backlinks. Objective, Tasks, Resume and Outcome are useful headings, not required ones. The [action template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/templates/action.md) adds context and decision sections for longer sessions.
+Keep session evidence in the action's `inputs/` and deliverables in `outputs/`; both are searchable, so keep them within the brain's audience. Reading the action folder returns `ACTION.md`, its files, linked projects and backlinks. Context, TODO, Decision, Resume and Outcome follow the `bf-action` skill's [action template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/templates/action.md); they are conventions, not required headings.
 
 ## Records
 
@@ -194,7 +200,7 @@ BF stores each record as one JSON file in `memories/SOURCE/`, named by the SHA-2
 
 ## Directory reference
 
-`bf init PATH` creates `bf.yaml`, `AGENTS.md`, `.gitignore`, `projects/`, `concepts/`, `actions/` and `evals/retrieval.yaml`. `--full` also creates `memories/`, `assets/`, `sensors/`, `routines/` and `skills/`. Create other folders as you need them:
+`bf init PATH` creates `bf.yaml`, `AGENTS.md`, `.gitignore`, `projects/`, `concepts/`, `actions/` and `evals/retrieval.yaml`. `--full` also creates `memories/`, `assets/`, `sensors/`, `routines/` and `skills/`. Create other folders, such as `prompts/`, as you need them:
 
 ```text
 bf.yaml                                  # name, fields, sensors, routines, prompts and watch preferences
@@ -202,7 +208,7 @@ AGENTS.md                                # instructions for agents working in th
 projects/<project>.md                    # one OKF note per project
 concepts/index.md, concepts/<concept>.md # reusable OKF knowledge
 actions/YYYY-MM-DD_topic/ACTION.md       # one work session, with its inputs/ and outputs/
-memories/<source>/<sha256-id>.json       # collected records
+memories/<source>/<sha256-id>.json       # collected records, and prompt runs' replies
 evals/*.yaml                             # retrieval cases for bf eval
 sensors/, routines/, prompts/            # programs and prompt files declared in bf.yaml
 hooks/                                   # agent host hooks copied from the examples
@@ -213,7 +219,7 @@ inputs/, originals/                      # imports to process and retained origi
 .bf/                                     # disposable search cache; ignored by Git
 ```
 
-Search covers Markdown under `projects/`, `concepts/` and `actions/`, and records under `memories/`. Everything else is configuration, programs and media. New brains also ignore `memories/` in Git; [Team setup](team.md#collect-on-a-laptop) shows how to share a reviewed source. Back up `memories/`, `inputs/` and `originals/`: ignored does not mean disposable. `.bf/` and `logs/` are safe to delete while BF is idle.
+Search covers Markdown under `projects/`, `concepts/` and `actions/`, and records under `memories/`; a [prompt's](prompts.md#what-a-run-records) records hold model output, so they rank like a low-priority source. Everything else is configuration, programs and media. New brains also ignore `memories/` in Git; [Team setup](team.md#collect-on-a-laptop) shows how to share a reviewed source. Back up `memories/`, `inputs/` and `originals/`: ignored does not mean disposable. `.bf/` and `logs/` are safe to delete while BF is idle.
 
 ## Personal and team brains
 
