@@ -506,66 +506,40 @@ def _drop(connection: sqlite3.Connection, path: str) -> None:
     connection.execute("DELETE FROM files WHERE path=?", (path,))
 
 
-class _Rows:
-    """One file's rows, numbered up front so each table takes a single batched insert."""
-
-    def __init__(self, connection: sqlite3.Connection) -> None:
-        self.item, self.passage = connection.execute(
-            "SELECT (SELECT coalesce(max(id),0)+1 FROM items),(SELECT coalesce(max(id),0)+1 FROM passages)"
-        ).fetchone()
-        self.items: list[dict[str, str | int]] = []
-        self.passages: list[tuple[int, int, str, str, str]] = []
-        self.search: list[tuple[int, str, str, str, str]] = []
-        self.names: list[tuple[str, int]] = []
-        self.links: list[tuple[int, str]] = []
-        self.edges: dict[tuple[int, str, str, str, str], None] = {}
-
-    def add(
-        self,
-        values: dict[str, str | int],
-        passages: list[tuple[str, str, str, str, str, str]],
-        names: list[str],
-        links: list[str],
-        edges: Sequence[bf_links.Claim] = (),
-    ) -> None:
-        item = self.item
-        self.item += 1
-        self.items.append(
-            {
-                "id": item,
-                "tasks_open": 0,
-                "tasks_done": 0,
-                "next": "",
-                "weight": 1,
-                "stale_after": "",
-                "fields": "",
-                **values,
-            }
+def _insert(
+    connection: sqlite3.Connection,
+    values: dict[str, str | int],
+    passages: list[tuple[str, str, str, str, str, str]],
+    names: list[str],
+    links: list[str],
+    edges: Sequence[bf_links.Claim],
+) -> int:
+    """Insert one file's item with its passages, names, links and claims; SQLite numbers the item and each passage
+    after the existing ones. Returns the item's number."""
+    defaults: dict[str, str | int] = {"tasks_open": 0, "tasks_done": 0, "next": "", "weight": 1, "stale_after": ""}
+    item = connection.execute(
+        "INSERT INTO items(ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,tasks_open,"
+        "tasks_done,next,weight,stale_after,fields) VALUES(:ref,:path,:kind,:source,:title,:time,:type,:status,:lead,"
+        ":url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,:stale_after,:fields)",
+        {**defaults, **values},
+    ).lastrowid
+    # `heading` is what ranks; `title` is what readers see, such as "Note — Section".
+    for fragment, title, heading, text, identity, context in passages:
+        folded = fold(text)
+        passage = connection.execute(
+            "INSERT INTO passages(item,fragment,title,original) VALUES(?,?,?,?)",
+            (item, fragment, title, "" if folded == text else text),
+        ).lastrowid
+        connection.execute(
+            "INSERT INTO search(rowid,title,text,names,context) VALUES(?,?,?,?,?)",
+            (passage, fold(heading), folded, fold(identity), fold(context)),
         )
-        # `heading` is what ranks; `title` is what readers see, such as "Note — Section".
-        for fragment, title, heading, text, identity, context in passages:
-            folded = fold(text)
-            self.passages.append((self.passage, item, fragment, title, "" if folded == text else text))
-            self.search.append((self.passage, fold(heading), folded, fold(identity), fold(context)))
-            self.passage += 1
-        self.names.extend((name, item) for name in names)
-        self.links.extend((item, link) for link in links)
-        # Two identical claims from one file are one edge; support from other files stays separate.
-        self.edges.update(dict.fromkeys((item, e.subject, e.relation, e.target, e.origin) for e in edges))
-
-    def write(self, connection: sqlite3.Connection) -> None:
-        connection.executemany(
-            "INSERT INTO items(id,ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-            "tasks_open,tasks_done,next,weight,stale_after,fields) VALUES(:id,:ref,:path,:kind,:source,:title,"
-            ":time,:type,:status,:lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,"
-            ":stale_after,:fields)",
-            self.items,
-        )
-        connection.executemany("INSERT INTO passages(id,item,fragment,title,original) VALUES(?,?,?,?,?)", self.passages)
-        connection.executemany("INSERT INTO search(rowid,title,text,names,context) VALUES(?,?,?,?,?)", self.search)
-        connection.executemany("INSERT OR IGNORE INTO names VALUES(?,?)", self.names)
-        connection.executemany("INSERT OR IGNORE INTO links VALUES(?,?)", self.links)
-        connection.executemany("INSERT INTO edges VALUES(?,?,?,?,?)", self.edges)
+    connection.executemany("INSERT OR IGNORE INTO names VALUES(?,?)", [(name, item) for name in names])
+    connection.executemany("INSERT OR IGNORE INTO links VALUES(?,?)", [(item, link) for link in links])
+    # Two identical claims from one file are one edge; support from other files stays separate.
+    claims = dict.fromkeys((item, e.subject, e.relation, e.target, e.origin) for e in edges)
+    connection.executemany("INSERT INTO edges VALUES(?,?,?,?,?)", claims)
+    return cast("int", item)
 
 
 def _facts(values: Mapping[str, JsonValue], config: Config) -> str:
@@ -609,8 +583,8 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
             str(v) for value in knowledge.fields.values() for v in (value if isinstance(value, list) else [value])
         ]
         metadata = " ".join([knowledge.type, *knowledge.aliases, *projection.links, *values])
-        rows = _Rows(connection)
-        rows.add(
+        item = _insert(
+            connection,
             {
                 "ref": path,
                 "path": path,
@@ -654,14 +628,13 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
             sorted({*projection.links, *(e.target for e in edges)}),
             edges,
         )
-        rows.write(connection)
         connection.executemany(
-            "INSERT INTO tasks SELECT id,?,?,?,? FROM items WHERE ref=?",
-            [(task.line, task.fragment, task.text, int(task.done), path) for task in projection.tasks],
+            "INSERT INTO tasks VALUES(?,?,?,?,?)",
+            [(item, task.line, task.fragment, task.text, int(task.done)) for task in projection.tasks],
         )
         connection.executemany(
-            "INSERT INTO tags(item,target) SELECT id,? FROM items WHERE ref=?",
-            [(ontology.qualify(config, f"tags/{tag}"), path) for tag in knowledge.tags],
+            "INSERT INTO tags(item,target) VALUES(?,?)",
+            [(item, ontology.qualify(config, f"tags/{tag}")) for tag in knowledge.tags],
         )
         return
     source = records.source_of(path)
@@ -671,8 +644,8 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
     # Field values are searchable words; their JSON keys and punctuation would match every record.
     values = [v for value in record.fields.values() for v in (value if isinstance(value, list) else [value])]
     identity = " ".join([source, *record.aliases, *record.links, record.url, *map(str, values)])
-    rows = _Rows(connection)
-    rows.add(
+    _insert(
+        connection,
         {
             "ref": ref,
             "path": path,
@@ -694,7 +667,6 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
         sorted({*(bf_links.target(v) for v in record.links), *(e.target for e in edges)}),
         edges,
     )
-    rows.write(connection)
 
 
 def lead(record: Record) -> str:
@@ -1118,11 +1090,27 @@ _FIELDS = (
     "i.fields"
 )
 _ROW = f"{_FIELDS},'' AS fragment,i.title,i.lead AS excerpt,i.tasks_open,i.tasks_done,i.next"
+
+
+def within(column: str, note: str) -> str:
+    """Fixed SQL: whether `column` names a section of `note`, a note path or BF address, as `note#fragment` does.
+
+    A range over the column's index: `$` follows `#`, so every `note#...` sorts between them.
+    """
+    return f"{column}>{note}||'#' AND {column}<{note}||'$'"
+
+
+# Fixed SQL: each name of the JSON array :names that exactly one item holds, with that item. A name that several
+# items claim identifies none of them.
+OWNED = (
+    "SELECT name,min(item) AS item FROM names WHERE name IN (SELECT value FROM json_each(:names)) "
+    "GROUP BY name HAVING count(*)=1"
+)
 # An item links to a target when it names it exactly, or names a section of a target note.
 # Two index lookups: exact targets, then the sections of targets. One OR across both would scan every link,
 # and CROSS JOIN keeps the few section prefixes as the outer loop of each range search.
-_LINKING = """SELECT l.item FROM links l WHERE l.target IN (SELECT value FROM json_each(:targets))
-  UNION SELECT l.item FROM json_each(:sections) s CROSS JOIN links l ON l.target>s.value||'#' AND l.target<s.value||'$'"""
+_LINKING = f"""SELECT l.item FROM links l WHERE l.target IN (SELECT value FROM json_each(:targets))
+  UNION SELECT l.item FROM json_each(:sections) s CROSS JOIN links l ON {within("l.target", "s.value")}"""  # noqa: S608 - fixed SQL
 _FILTERS = f"""((:since='' AND :until='') OR ({PERIOD_TIME})!='')
   AND (:since='' OR ({PERIOD_TIME})>=:since) AND (:until='' OR ({PERIOD_TIME})<:until)
   AND (NOT :undated OR i.time='') AND (:prefix='' OR i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')
@@ -1309,6 +1297,14 @@ def _verbatim(snippet: str, original: str) -> str:
     return head + "".join(kept) + tail
 
 
+# An identity search's candidates and their owner rank: the item whose ref is :text, the items holding one of
+# :identities as a name, then the items linking to one of them or to a section of one.
+_CANDIDATES = f"""SELECT id AS item,2e6 AS score FROM items WHERE ref=:text
+  UNION ALL SELECT item,1e6 FROM names WHERE name IN (SELECT value FROM json_each(:identities))
+  UNION ALL SELECT item,1e3 FROM links WHERE target IN (SELECT value FROM json_each(:identities))
+  UNION ALL SELECT l.item,1e3 FROM json_each(:identity_sections) s CROSS JOIN links l ON {within("l.target", "s.value")}"""  # noqa: S608 - fixed SQL
+
+
 def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> Iterator[dict[str, object]]:
     if bf_links.tag(str(params["text"])) is not None:
         return (
@@ -1321,12 +1317,7 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> Iter
             )
         )
     rows = connection.execute(
-        f"""WITH candidates AS (
-              SELECT id AS item,2e6 AS score FROM items WHERE ref=:text
-              UNION ALL SELECT item,1e6 FROM names WHERE name IN (SELECT value FROM json_each(:identities))
-              UNION ALL SELECT item,1e3 FROM links WHERE target IN (SELECT value FROM json_each(:identities))
-              UNION ALL SELECT l.item,1e3 FROM json_each(:identity_sections) s
-                CROSS JOIN links l ON l.target>s.value||'#' AND l.target<s.value||'$'),
+        f"""WITH candidates AS ({_CANDIDATES}),
               owners AS (SELECT item,max(score) AS score FROM candidates GROUP BY item)
            SELECT {_FIELDS},'' AS fragment,i.title,c.score,i.lead AS excerpt FROM owners c
            JOIN items i ON i.id=c.item WHERE {_FILTERS}
@@ -1336,19 +1327,28 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> Iter
     return (dict(row) for row in rows)
 
 
-def known(connection: sqlite3.Connection, identities: set[str]) -> bool:
-    """Whether an item is, names or links to one of these identities, whatever the query's scope."""
-    values = {"values": json.dumps(sorted(identities)), "sections": json.dumps(sections(identities))}
-    return bool(
-        connection.execute(
-            """SELECT EXISTS (SELECT 1 FROM items WHERE ref IN (SELECT value FROM json_each(:values)))
-               OR EXISTS (SELECT 1 FROM names WHERE name IN (SELECT value FROM json_each(:values)))
-               OR EXISTS (SELECT 1 FROM links WHERE target IN (SELECT value FROM json_each(:values)))
-               OR EXISTS (SELECT 1 FROM json_each(:sections) s
-                          CROSS JOIN links l ON l.target>s.value||'#' AND l.target<s.value||'$')""",
-            values,
-        ).fetchone()[0]
+def known(connection: sqlite3.Connection, text: str, identities: set[str]) -> bool:
+    """Whether an identity search finds an owner or link of `text`, expanded to `identities`, whatever its scope."""
+    query = f"SELECT EXISTS (SELECT 1 FROM ({_CANDIDATES}))"  # noqa: S608 - fixed SQL
+    return bool(connection.execute(query, _identities(text, identities)).fetchone()[0])
+
+
+def _identities(text: str, identities: set[str]) -> dict[str, object]:
+    """The parameters of _CANDIDATES: an identity search's text and its expanded identities."""
+    expanded = identities or {text}
+    return {
+        "text": text,
+        "identities": json.dumps(sorted(expanded)),
+        "identity_sections": json.dumps(sections(expanded)),
+    }
+
+
+def holders(connection: sqlite3.Connection, name: str) -> list[str]:
+    """The refs of the items holding a name, at most two: one owns it, while two make it ambiguous."""
+    rows = connection.execute(
+        "SELECT i.ref FROM names n JOIN items i ON i.id=n.item WHERE n.name=? ORDER BY i.ref LIMIT 2", (name,)
     )
+    return [row[0] for row in rows]
 
 
 def search(
@@ -1377,9 +1377,7 @@ def search(
         **_parameters(targets),
         "tag_scope": bf_links.tag(query.target) is not None,
         "limit": limit,
-        "text": text,
-        "identities": json.dumps(sorted(identities or {text})),
-        "identity_sections": json.dumps(sections(identities or {text})),
+        **_identities(text, identities),
     }
     if exact:
         return ({**_clean(dict(row)), "_rank": row["score"]} for row in _identity(connection, params))
@@ -1438,7 +1436,7 @@ def listing(
 _INCOMING = f"""WITH typed AS (
     SELECT e.item,e.relation FROM edges e WHERE e.relation!='' AND e.target IN (SELECT value FROM json_each(:targets))
     UNION SELECT e.item,e.relation FROM json_each(:sections) s
-      CROSS JOIN edges e ON e.target>s.value||'#' AND e.target<s.value||'$' WHERE e.relation!=''),
+      CROSS JOIN edges e ON {within("e.target", "s.value")} WHERE e.relation!=''),
   plain AS (SELECT item,'' AS relation FROM ({_LINKING}) WHERE item NOT IN (SELECT item FROM typed)),
   linked AS (SELECT * FROM typed UNION ALL SELECT * FROM plain)"""  # noqa: S608 - fixed SQL fragments
 # A read previews the backlinks of at most this many relation groups, untyped links last; it counts the others, which
@@ -1520,8 +1518,7 @@ _NEWER = f"""WITH reviewed(note,after) AS MATERIALIZED (
     SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]'),json_extract(value,'$[2]') FROM json_each(:names)),
   linked(note,item) AS (
     SELECT m.note,l.item FROM named m CROSS JOIN links l ON l.target=m.name
-    UNION SELECT m.note,l.item FROM named m CROSS JOIN links l
-      ON m.sections AND l.target>m.name||'#' AND l.target<m.name||'$'
+    UNION SELECT m.note,l.item FROM named m CROSS JOIN links l ON m.sections AND {within("l.target", "m.name")}
     UNION SELECT r.note,i.id FROM reviewed r CROSS JOIN links l ON l.item=r.note
       CROSS JOIN items i ON i.ref=l.target WHERE i.kind='record'
     UNION SELECT r.note,n.item FROM reviewed r CROSS JOIN links l ON l.item=r.note

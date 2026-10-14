@@ -12,7 +12,7 @@ from itertools import accumulate, islice, zip_longest
 from typing import NoReturn, cast
 
 from bf import graph, index, links, pages, records, usage
-from bf.config import brain_name, load, related
+from bf.config import load, related
 from bf.health import source_health
 from bf.markdown import Markdown, authored, lines, parse, section, split_ref
 from bf.models import (
@@ -82,7 +82,7 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
     def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
         local_targets = graph.local_refs(connection, targets, name)
         local_identities = graph.local_refs(connection, identities, name)
-        exact = shaped and (links.tag(text) is not None or index.known(connection, local_identities | {text}))
+        exact = shaped and (links.tag(text) is not None or index.known(connection, text, local_identities))
         rows = index.search(
             connection,
             query,
@@ -93,8 +93,7 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
             low=pages.low(store),
         )
         # Counting sources reads every record row: only a search that can return records needs them.
-        config = load(store) if collected else None
-        known = set(index.sources(connection)) | set(config.sensors) | set(config.prompts) if config else set()
+        known = set(pages.sources(store, connection)) if collected else set()
         return {
             "store": store,
             "connection": connection,
@@ -219,8 +218,7 @@ def _configured(stores: list[Store], problems: list[dict[str, object]]) -> list[
             load(store)
         except (Error, OSError, UnicodeError) as error:
             # Like search and status, an Error names its cause, such as the invalid key; others stay without paths.
-            message = str(error) if isinstance(error, Error) else "bf.yaml is invalid or inaccessible; run bf validate"
-            problems.append({"brain": brain_name(store), "error": message.replace(str(store.root), "<brain>")})
+            problems.append(graph.problem(store, "", error, "bf.yaml is invalid or inaccessible; run bf validate"))
             continue
         result.append(store)
     return result
@@ -431,8 +429,7 @@ def _holders(
             found.append((store, value))
     if failed and not found:
         raise failed[0][1]
-    for store, error in failed:
-        problems.append({"brain": load(store).name, "error": failure(error).replace(str(store.root), "<brain>")})
+    problems.extend(graph.problem(store, load(store).name, error, failure(error)) for store, error in failed)
     return found
 
 
@@ -662,13 +659,10 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
             value = _record(store, name, parsed.path, source, record_id, complete=complete)
         else:
             with index.database(store) as (connection, _state):
-                owners = connection.execute(
-                    "SELECT i.ref FROM names n JOIN items i ON n.item=i.id WHERE n.name=? LIMIT 2",
-                    (links.address(name, parsed.path),),
-                ).fetchall()
+                owners = index.holders(connection, links.address(name, parsed.path))
             if len(owners) > 1:
                 raise Error("ambiguous identity; read an exact file ref")
-            value = _read(store, owners[0][0]) if owners else None
+            value = _read(store, owners[0]) if owners else None
         if value and parsed.fragment:
             if "text" not in value:
                 raise Error("fragments select Markdown sections, not record fields")
@@ -702,10 +696,7 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
     source, separator, record_id = ref.partition(":")
     try:
         with index.database(store) as (connection, state):
-            aliases = connection.execute(
-                "SELECT i.ref FROM names n JOIN items i ON i.id=n.item WHERE n.name=? ORDER BY i.ref LIMIT 2",
-                (ref,),
-            ).fetchall()
+            aliases = index.holders(connection, ref)
             complete = _complete(connection, state, source)
     except (Error, OSError, sqlite3.DatabaseError) as error:
         # An exact source:id still has a file recovery path when its disposable cache is unavailable.
@@ -729,4 +720,4 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
     if len(aliases) > 1:
         raise Error("ambiguous identity; use bf search and read an exact ref")
     # One hop: two records naming each other, both removed since the cache was built, never recurse.
-    return _read(store, aliases[0]["ref"], alias=False) if alias and aliases and aliases[0]["ref"] != ref else None
+    return _read(store, aliases[0], alias=False) if alias and aliases and aliases[0] != ref else None

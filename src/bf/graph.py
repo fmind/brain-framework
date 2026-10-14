@@ -27,13 +27,21 @@ def local_refs(connection: sqlite3.Connection, identities: set[str], brain: str)
     """
     qualified = [value for value in identities if (parsed := links.parse(value)) and parsed.brain == brain]
     rows = connection.execute(
-        "SELECT DISTINCT i.ref FROM items i JOIN (SELECT name,min(item) AS item FROM names "
-        "WHERE name IN (SELECT value FROM json_each(?)) GROUP BY name HAVING count(*)=1) o ON o.item=i.id LIMIT 1002",
-        (json.dumps(qualified),),
+        f"SELECT DISTINCT i.ref FROM items i JOIN ({index.OWNED}) o ON o.item=i.id",  # noqa: S608 - fixed SQL
+        {"names": json.dumps(qualified)},
     ).fetchall()
-    if len(rows) > 1001:
-        raise Error("local identity expansion exceeds 1001 owners")
     return identities | {row[0] for row in rows}
+
+
+# Why a selected brain answered nothing, when its failure is no Error naming its own cause.
+UNAVAILABLE = "inaccessible brain or cache; run bf status"
+
+
+def problem(store: Store, brain: str, error: BaseException, fallback: str = UNAVAILABLE) -> dict[str, object]:
+    """A selected brain's failure as a reply problem, without the brain's path: an Error's own reason, otherwise
+    `fallback`. `brain` names the brain, or its folder does when its bf.yaml did not load."""
+    message = str(error) if isinstance(error, Error) else fallback
+    return {"brain": brain or brain_name(store), "error": message.replace(str(store.root), "<brain>")}
 
 
 def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, object]]]:
@@ -78,8 +86,7 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
                     matches.append((store, item, names, ref if kind == "record" else ""))
         except (Error, OSError, sqlite3.DatabaseError) as error:
             # Named and worded as the page reports the same brain, so a reply lists an unloadable brain once.
-            message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; run bf status"
-            problems.append({"brain": name or brain_name(store), "error": message.replace(str(store.root), "<brain>")})
+            problems.append(problem(store, name, error))
             failed.add(store.root)
     if len(matches) > 1:
         problems.append(
@@ -114,8 +121,7 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
                     )
                 }
         except (Error, OSError, sqlite3.DatabaseError) as error:
-            message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; run bf status"
-            problems.append({"brain": labels[store.root], "error": message.replace(str(store.root), "<brain>")})
+            problems.append(problem(store, labels[store.root], error))
             bare = ""
             continue
         if bare in found:
@@ -137,10 +143,10 @@ def explanations(connection: sqlite3.Connection, ref: str, targets: set[str]) ->
         return [], False
     # An untyped link beside a typed one from the same origin to the same target repeats it: backlinks list it once.
     rows = connection.execute(
-        "SELECT subject,relation,target,origin FROM (SELECT subject,relation,target,origin,"
+        "SELECT subject,relation,target,origin FROM (SELECT subject,relation,target,origin,"  # noqa: S608 - fixed SQL
         "max(relation!='') OVER (PARTITION BY target,origin) AS typed FROM edges WHERE item=? "
         "AND (target IN (SELECT value FROM json_each(?)) OR EXISTS (SELECT 1 FROM json_each(?) s "
-        "WHERE target>s.value||'#' AND target<s.value||'$'))) "
+        f"WHERE {index.within('target', 's.value')}))) "
         "WHERE relation!='' OR NOT typed ORDER BY relation,target,origin,subject LIMIT ?",
         (row[0], json.dumps(sorted(targets)), json.dumps(index.sections(targets)), CLAIMS + 1),
     ).fetchall()
@@ -180,11 +186,9 @@ def _owners(connection: sqlite3.Connection, targets: set[str]) -> dict[str, tupl
     """The one local item each target names, by its ref or a name no other item claims, so a reader can follow a
     claim without searching; a target several items claim names none."""
     rows = connection.execute(
-        """SELECT i.ref AS target,i.ref,i.title FROM items i WHERE i.ref IN (SELECT value FROM json_each(:targets))
-           UNION ALL SELECT o.name,i.ref,i.title FROM (SELECT name,min(item) AS item FROM names
-             WHERE name IN (SELECT value FROM json_each(:targets)) GROUP BY name HAVING count(*)=1) o
-           JOIN items i ON i.id=o.item""",
-        {"targets": json.dumps(sorted(targets))},
+        f"""SELECT i.ref AS target,i.ref,i.title FROM items i WHERE i.ref IN (SELECT value FROM json_each(:names))
+           UNION ALL SELECT o.name,i.ref,i.title FROM ({index.OWNED}) o JOIN items i ON i.id=o.item""",  # noqa: S608
+        {"names": json.dumps(sorted(targets))},
     ).fetchall()
     return {row["target"]: (row["ref"], row["title"]) for row in rows}
 

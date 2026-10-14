@@ -17,7 +17,7 @@ from typing import Literal, TypedDict, cast
 from pydantic import ValidationError
 
 from bf import graph, index, links, usage
-from bf.config import brain_name, load
+from bf.config import load
 from bf.health import attention, source_health
 from bf.markdown import Markdown, action_note, authored, editor_lock, entry_note, note, reference, split_ref
 from bf.models import (
@@ -241,6 +241,12 @@ def _request(argument: str, **values: object) -> Query:
         raise InputError("; ".join(reasons), argument) from None
 
 
+def sources(store: Store, connection: sqlite3.Connection) -> dict[str, dict[str, object]]:
+    """Each source a brain indexes or configures, as a sensor or a prompt, with its indexed record count."""
+    config = load(store)
+    return {**{name: {"records": 0} for name in (*config.sensors, *config.prompts)}, **index.sources(connection)}
+
+
 def low(store: Store) -> list[str]:
     """Sensors configured with `priority: low`, and every prompt, read at query time so a change needs no rebuild.
 
@@ -354,8 +360,7 @@ def brains(
                 if isinstance(error, sqlite3.DatabaseError):
                     raise Error(CACHE) from error
                 raise
-            message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; run bf status"
-            problems.append({"brain": name or brain_name(store), "error": message.replace(str(store.root), "<brain>")})
+            problems.append(graph.problem(store, name, error))
             continue
         answered = True
         problems.extend({"brain": name, **problem} for problem in skipped)
@@ -778,11 +783,7 @@ def memories(
 
     def known(store: Store, connection: sqlite3.Connection) -> dict[str, object] | None:
         """The source's record count in a brain that indexes or configures it."""
-        counts = index.sources(connection)
-        config = load(store)
-        if source not in counts and source not in config.sensors and source not in config.prompts:
-            return None
-        return counts.get(source, {"records": 0})
+        return sources(store, connection).get(source)
 
     if len(parts) == 2:
 
@@ -1258,9 +1259,8 @@ def _action(
     with index.database(store) as (connection, _state):
         linked = _rows(
             connection,
-            "i.ref IN (SELECT value FROM json_each(:refs)) OR (substr(i.ref,1,9)='projects/' AND i.kind='note' AND "
-            "i.id IN (SELECT min(item) FROM names WHERE name IN (SELECT value FROM json_each(:names)) "
-            "GROUP BY name HAVING count(*)=1))",
+            "i.ref IN (SELECT value FROM json_each(:refs)) OR (substr(i.ref,1,9)='projects/' AND i.kind='note' AND "  # noqa: S608 - fixed SQL
+            f"i.id IN (SELECT item FROM ({index.OWNED})))",
             {"refs": json.dumps(sorted(projects)), "names": json.dumps(sorted(names))},
             "i.ref",
             SECTION,
