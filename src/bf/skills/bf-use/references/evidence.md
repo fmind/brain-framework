@@ -4,22 +4,18 @@ Use when a consequential decision must stay explainable after its sources change
 
 ## Triage a selected passage
 
-Read the exact highlight record, its source URL and page or section before promoting it into a project or concept. In the highlights sensor, `text` is the selected passage, `attributes.annotation` is a separate interpretation, `time` is the supplied capture time and `attributes.source_date` is the source's stated date. Neither collection nor an annotation establishes truth or authority. Check enough surrounding context to support the intended claim; if the original is unavailable, keep that limitation.
-
-Choose one outcome: link the passage from an existing decision or lesson; keep it as unreviewed evidence with its open question; or exclude it from the selected export during an authorized cleanup. Keep the conclusion in the owning note, cite the highlight ref and separate quotation from interpretation. Before a replacement or cleanup removes a revision supporting a decision, retain it as below. Do not copy a whole document to triage one passage.
+Read the exact highlight record and its source URL before promoting it: `text` is the selected passage, `attributes.annotation` a separate interpretation, `time` the capture time and `attributes.source_date` the source's stated date. Neither establishes truth: check enough surrounding context, or keep that limitation. Link the passage from an existing decision or lesson, keep it as unreviewed evidence with its open question, or exclude it during an authorized cleanup after retaining any revision a decision relies on, separating quotation from interpretation.
 
 ## Retain a revision
 
-Read the exact note section or record with `bf read`. Record its original ref, when it became known, when the claim applies (if stated) and any dispute in a dated decision note: in an existing action's `outputs/` when that action owns the work, otherwise under `projects/`, linked from the owning project. Never create an action only to retain evidence. Keep the capture where the evidence's own Git policy puts it:
+Read the exact note section or record with `bf read`. In a dated decision note, in the owning action's `outputs/` or otherwise under `projects/`, record its original ref, when it became known, when the claim applies and any dispute; never create an action only to retain evidence. Store the capture where the evidence's Git policy puts it:
 
-- For a record of a source that Git ignores, as `bf init` does for all of `memories/`, use the brain's `originals/` folder, which Git ignores too. Cite the capture's path in a code span, not a Markdown link: other clones lack the file, and a link to it fails `bf validate` there.
-- For an authored note, or a record of a team source re-included with `!/memories/SOURCE/`, which Git already versions, use the owning action's `inputs/`, otherwise `assets/`.
+- A record of a source Git ignores, as `bf init` ignores `memories/`, goes in the ignored `originals/` folder; cite its path in a code span, since a link fails `bf validate` in clones that lack the file.
+- An authored note, or a record Git versions, goes in the owning action's `inputs/`, otherwise in `assets/`.
 
-The capture time is when this local copy was made, not necessarily when the underlying event happened.
+The [evidence helper](../scripts/evidence.py) never contacts a network. `read REF --brain PATH` prints the whole exact reply of the offline `bf read`. `capture` keeps one exact read's text or record, source metadata, local capture time and a content digest, and refuses listing pages, lone text pages and incomplete or `stale` reads: a local observation, not proof of truth or live provider state.
 
-The standard-library [evidence helper](../scripts/evidence.py) never contacts a network. `read REF --brain PATH` runs the offline `bf read` and prints the whole reply: above 32 KiB it follows each `next_offset`, checks that every page names the same file `sha256` (and, for a whole note, that the joined text has it) and joins the pages, up to 4 MiB. `capture` and `compare` read only stdin. `capture` keeps one exact read's text or record, its source metadata, a local capture time and a content digest; it drops backlinks and other context and refuses listing pages, lone text pages and incomplete or `stale` reads. Partial or not-fresh records keep explicit limitations. A capture is a local observation, not proof of authorship, truth or live provider state.
-
-In the commands below, `$brain_path` is the brain directory and `$evidence_ref` the exact ref; with several selected brains, use the returned `uri` (`bf://NAME/...`), since a plain ref present in two brains fails. `$new_capture` is an unused `.json` path where the capture belongs, as above, and `$saved_capture` an earlier capture. This subshell creates an owner-only capture, and any missing folder, at an unused path, never replaces an earlier one and removes only a capture it failed to write:
+Below, `$evidence_ref` is the exact ref (with several brains, its `uri`), `$new_capture` an unused `.json` path and `$saved_capture` an earlier capture. This subshell writes an owner-only capture, never replaces an earlier one and removes only a capture it failed to write:
 
 ```bash
 (
@@ -32,7 +28,7 @@ In the commands below, `$brain_path` is the brain directory and `$evidence_ref` 
 )
 ```
 
-Captures may contain private or external text: give them the original's audience and backup protection. A `bf init` brain keeps `originals/` out of Git but not action inputs or assets; inspect the brain's ignore rules before committing. Capture JSON is not indexed, but anyone with file access can read it; use an approved private location when a shared brain's audience is too broad. Cite the original ref and the capture's relative path from the decision note when both belong in that brain. A later record update or deletion cannot reconstruct a revision nobody captured.
+Captures may hold private or external text: give them the original's audience, and check the brain's ignore rules before committing action inputs or assets.
 
 To compare, supply the saved capture followed by a new exact read:
 
@@ -46,16 +42,20 @@ To compare, supply the saved capture followed by a new exact read:
 )
 ```
 
-Only the compact comparison reaches the model. `state` is `changed`, `unchanged` or `unknown`; `content_changed` compares stored content even when freshness is unknown. A new `observed` time alone is not a change; every other record field is. A partial baseline, a partial record, an incomplete read or a source that is not both `active` and `fresh` (including `overdue`, `never`, `manual`, disabled and historical sources) makes the state `unknown`. A missing read fails; it never means unchanged. For a record, `unchanged` means no newer local revision: a window sensor re-reads only recent windows, so an older item can change upstream unseen, while a snapshot sensor re-reads its whole catalog each run. The digest detects accidental alteration of the capture; it is not a signature. The helper caps stdin at 9 MiB and prints fixed errors without private excerpts; rerun a read that changed while it was assembled.
+Only this compact comparison reaches the model. `state` is `changed`, `unchanged` or `unknown`; `content_changed` compares stored content even when freshness is unknown.
+
+- A new `observed` time alone is not a change; every other record field is.
+- A partial baseline or record, an incomplete read or a source that is not both `active` and `fresh` makes the state `unknown`. A missing read fails; it never means unchanged.
+- For a record, `unchanged` means no newer local revision: an older item can change upstream unseen by a window sensor.
 
 ## Revise a belief
 
-Keep the current conclusion in the owning project or concept. When the old claim matters, keep its decision note and capture, then write a successor decision note linking what it supersedes and why. A decision note under `outputs/` is an ordinary action attachment (see the `bf-action` skill). Use `status: deprecated` for an authored note intentionally retired, and say "disputed" in the text when evidence conflicts: disputed is not a status. Distinguish disagreement from supersession and a fact from a proposal; more recent evidence is not automatically more authoritative.
+Keep the current conclusion in the owning project or concept. When the old claim matters, keep its decision note and capture and write a successor decision note linking what it supersedes and why. Retire a note with `status: deprecated`; say "disputed" in the text when evidence conflicts, since newer evidence is not automatically more authoritative.
 
-Declare only the relations you use, such as `supersedes`, under `fields:` in `bf.yaml` (see [links](links.md)). Then write `[evidence](bf://NAME/concepts/policy.md?rel=depends-on#retention)` and `[previous decision](bf://NAME/actions/YYYY-MM-DD_topic/outputs/decision.md?rel=supersedes)`. Generic links establish neither dependency nor supersession. State when a claim holds as prose unless the brain declares fields for it. BF resolves these links; it never infers temporal truth or chooses the winning claim.
+Declare the relations you use in `bf.yaml` ([links](links.md)), then write `[evidence](bf://NAME/concepts/policy.md?rel=depends-on#retention)` or `[previous decision](bf://NAME/actions/YYYY-MM-DD_topic/outputs/decision.md?rel=supersedes)`: generic links establish neither dependency nor supersession, and BF never chooses the winning claim.
 
 ## Review impact lightly
 
-When selected evidence changes, list its dependents with `bf read 'REF' --rel depends-on` on the whole note, record or identity (a section has no relation page), following `next_offset`: a whole read's backlink group previews only 5. For each dependent, read it and check its `depends-on` `claims`: `target` tells a dependency on the changed section from one on another section, and `origin` names the section making the claim. `bf search 'IDENTITY'` gives the same `relations` for every linking item at once. A project, or a note with `stale_after`, linking to evidence that happened or changed upstream after its last edit also lists that evidence under `newer`. Review direct dependents first, then at most one more layer: **two hops, ten distinct dependents, one visit per qualified ref**, which also stops cycles. Equal relation names in different brains need their declared meanings checked before you follow them.
+When selected evidence changes, list its dependents with `bf read 'REF' --rel depends-on`, following `next_offset`, and read each one's `depends-on` `claims`: `target` tells whether it depends on the changed section, `origin` which section makes the claim. Review at most **two hops, ten distinct dependents, one visit per qualified ref**, which also stops cycles, and check the declared meaning of equal relation names across brains.
 
-For each affected conclusion, report the dependency path and whether it needs review, remains justified after inspection or lacks evidence. Change alone never proves falsity, and generic or `supersedes` links do not propagate impact. An unfollowed `next_offset`, truncated claims, a missing brain or an exhausted limit makes the review explicitly incomplete; never silently clear the remaining dependents. Reuse a previous review when both the evidence digest and the conclusion are unchanged. This is an agent review over graph reads, not an automatic invalidation engine.
+For each affected conclusion, report the dependency path and whether it needs review, remains justified or lacks evidence. Change alone never proves falsity, and generic or `supersedes` links propagate no impact. An unfollowed `next_offset`, truncated claims, a missing brain or an exhausted limit makes the review explicitly incomplete. Reuse a previous review while the evidence digest and conclusion are unchanged.
