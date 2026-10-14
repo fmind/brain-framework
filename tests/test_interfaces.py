@@ -173,6 +173,7 @@ def test_console_errors_are_private_and_on_stderr(
         (["read", "projects", "--rel", "links"], 2),
         # A section, an authored folder page and a source's period are invalid input too, not failed reads.
         (["read", "projects/offline.md#decision", "--rel", "links"], 2),
+        (["read", "projects/offline.md#"], 2),
         (["read", "concepts/", "--rel", "links"], 2),
         (["read", "projects/archive/", "--rel", "links"], 2),
         (["read", "memories/meetings/2026-13"], 2),

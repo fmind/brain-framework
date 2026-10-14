@@ -977,13 +977,18 @@ def _syntax(ref: str) -> tuple[str, bool]:
             return parsed.path, True
     path = parsed.path if parsed else value
     note, fragment = split_ref(path)
+    # A trailing `#` names no section: like a scope, a read rejects it instead of echoing it as part of the ref.
+    # A BF address decodes its empty fragment to the whole note, and a record id may itself end in `#`.
+    bare = parsed is None and note != path and not fragment
     # A page, such as tasks or 7d, has no sections; a folder below a root may hold `#` in its name.
-    if fragment and links.reserved(note.rstrip("/")):
+    if (fragment or bare) and links.reserved(note.rstrip("/")):
         raise Error(_SECTIONLESS)
     target = route(path)
     if target.kind == "tag":
         _label(target.name.removeprefix("tags/"))
     elif target.kind == "note":
+        if bare:
+            raise Error("a ref ending in # names no section; read the whole note without it, or add the section")
         # A note's section fragment is free text; only its path must be normalized.
         relative(note)
         return path, bool(fragment)

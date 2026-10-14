@@ -774,10 +774,23 @@ def test_relation_pages_list_every_link_of_one_relation(brain: Store, monkeypatc
         with pytest.raises(Error, match=message):
             read([brain], ref, rel="links")
     # A page has no sections: the ref is invalid input, not a missing reference.
-    for ref in ("tasks#open", "#top", "7d#x", "projects#x", "bf://fixture/tasks#open", "bf://fixture/#top"):
+    for ref in (
+        "tasks#open",
+        "#top",
+        "7d#x",
+        "projects#x",
+        "bf://fixture/tasks#open",
+        "bf://fixture/#top",
+        "tasks#",
+        "#",
+    ):
         with pytest.raises(InputError, match="pages have no sections"):
             pages.readable(ref)
     assert pages.readable("projects/sub#x") == "projects/sub#x"
+    # A BF address decodes an empty fragment to the whole note, and a record id may end in `#`.
+    whole = read([brain], "bf://fixture/projects/offline.md#")
+    assert (whole["ref"], whole["text"]) == ("projects/offline.md", read([brain], "projects/offline.md")["text"])
+    assert pages.readable("meetings:x#") == "meetings:x#"
     for ref in ("repo:example/nothing", "projects/absent.md"):
         with pytest.raises(NotFoundError):
             read([brain], ref, rel="links")

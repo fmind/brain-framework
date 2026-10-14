@@ -135,6 +135,7 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
             ("read", {"ref": "2026-13"}, "invalid input: ref: invalid period: 2026-13"),
             ("read", {"ref": "projects/../bf.yaml"}, "invalid input: ref: expected a normalized"),
             ("read", {"ref": "bf://"}, "invalid input: ref: invalid BF link"),
+            ("read", {"ref": "projects/offline.md#"}, "invalid input: ref: a ref ending in # names no section"),
             ("read", {"ref": "projects/", "rel": "links"}, "invalid input: rel: rel lists the links to a note"),
             ("read", {"ref": "projects/offline.md", "rel": "owner"}, "invalid input: rel: undeclared relation; use"),
         ]:

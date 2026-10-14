@@ -491,6 +491,9 @@ def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
         # An existing folder is a page only in its brain: the read finds it, then rejects the relation page.
         (lambda: retrieve.read([brain], "projects/archive", rel="links"), "rel", "not a page"),
         (lambda: retrieve.read([brain], "projects/offline.md#decision", rel="links"), "rel", "without its #section"),
+        # A trailing # names no section: it used to read the whole note under a ref no backlink or reminder matched.
+        (lambda: retrieve.read([brain], "projects/offline.md#"), "ref", "a ref ending in # names no section"),
+        (lambda: retrieve.read([brain], "projects/offline.md#", rel="links"), "ref", "ending in # names no"),
         (lambda: retrieve.read([brain], "projects/offline.md", rel="owner"), "rel", "undeclared relation"),
         (lambda: pages.query("!!!"), "query", "give words or an identity"),
         (lambda: pages.query("bf://Me/x"), "query", "invalid BF link"),
