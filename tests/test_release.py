@@ -152,6 +152,34 @@ def test_release_notes_print_exactly_one_section(tmp_path: Path) -> None:
     assert "no section for v9.9.9" in notes("v9.9.9").stderr
 
 
+def test_release_checklist_reads_the_workflows_mise_pin(tmp_path: Path) -> None:
+    # The checklist downloads the mise release the workflows pin: an inline comment after the pin once left the
+    # version empty, and the download URL silently pointed at no release.
+    lines = (ROOT / ".agents/skills/bf-contribute/references/release.md").read_text().splitlines()
+    start = next(index for index, line in enumerate(lines) if line.startswith("version=$("))
+    script = "\n".join([*lines[start : start + 2], 'printf %s "$version"'])
+    workflow = (ROOT / ".github/workflows/verify.yml").read_text()
+    pinned = next(line.split()[1] for line in workflow.splitlines() if line.strip().startswith("version: 20"))
+
+    def read(root: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603 - the checklist's own commands
+            ["bash", "--noprofile", "--norc", "-euc", script],  # noqa: S607
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    found = read(ROOT)
+    assert (found.returncode, found.stdout) == (0, pinned)
+    (tmp_path / ".github/workflows").mkdir(parents=True)
+    (tmp_path / ".github/workflows/verify.yml").write_text("      version: latest\n")
+    missing = read(tmp_path)
+    assert missing.returncode != 0
+    assert "no mise version pin" in missing.stderr
+
+
 WHEEL = f"brain_framework-{__version__}-py3-none-any.whl"
 SDIST = f"brain_framework-{__version__}.tar.gz"
 # Fakes for verify-release: gh describes the release from FAKE_* variables and downloads two small assets, curl

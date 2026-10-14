@@ -44,7 +44,8 @@ Committing in the worktree moves `main` under the primary checkout, whose index 
 The workflows pin mise beside `jdx/mise-action` in `.github/workflows/verify.yml`. A newer global configuration can break that version, so parse the tasks with the pinned binary and an empty configuration (Linux x64 shown; pick the archive matching your platform):
 
 ```bash
-version=$(sed -n 's/^ *version: \(20[0-9.]*\)$/\1/p' .github/workflows/verify.yml | head -n 1)
+version=$(sed -nE 's/^ *version: (20[0-9.]+)( *#.*)?$/\1/p' .github/workflows/verify.yml | head -n 1)
+: "${version:?no mise version pin found in .github/workflows/verify.yml}"
 pinned=~/.cache/mise-$version
 mkdir -p "$pinned/empty"
 curl -fsSL "https://github.com/jdx/mise/releases/download/v$version/mise-v$version-linux-x64.tar.gz" | tar -xz -C "$pinned"
