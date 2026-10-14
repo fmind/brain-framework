@@ -68,12 +68,12 @@ Sensors, routines and prompts run from the brain folder with direct arguments, w
 
 BF removes environment variables that could load code **before your program starts**, such as `BASH_ENV` or `PYTHONPATH`:
 
-| Removed                                                                     | Reason                                                 |
-| --------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `LD_*`, `DYLD_*`, `GCONV_PATH`                                              | Can inject loader libraries or conversion modules.     |
-| `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `ZDOTDIR` | Can supply shell startup code, options or functions.   |
-| `PYTHON*`, Java, Node, Ruby, Perl and PHP startup options, `LUA_INIT*`      | Can alter interpreter startup or module loading.       |
-| Relative or empty `PATH` entries                                            | Could run an unexpected program from the brain folder. |
+| Removed                                                                                                                   | Reason                                                 |
+| ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `LD_*`, `DYLD_*`, `GCONV_PATH`                                                                                            | Can inject loader libraries or conversion modules.     |
+| `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `ZDOTDIR`                                               | Can supply shell startup code, options or functions.   |
+| `PYTHON*`, Java, Node, Ruby, Perl, PHP and .NET startup options, `R_PROFILE_USER`, `LUA_INIT*`, `LUA_PATH*`, `LUA_CPATH*` | Can alter interpreter startup or module loading.       |
+| Relative or empty `PATH` entries                                                                                          | Could run an unexpected program from the brain folder. |
 
 Other variables, including provider credentials and absolute `PATH` entries, remain. The list is best effort, not a sandbox. When a program needs dependencies, use an explicit runtime such as `uv run --no-project sensors/example.py`.
 

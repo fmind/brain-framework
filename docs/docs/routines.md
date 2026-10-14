@@ -103,7 +103,7 @@ routines:
     keep: 2
 ```
 
-After writing a new action, the routine removes its older actions beyond the newest two, but only those still holding exactly the `ACTION.md` it wrote on this machine: an action you edited, one holding other files, and one written before you set `keep` or by another clone stay. The run's reply counts them as `removed`. Remove older actions by hand once when you first set `keep`.
+After writing a new action, the routine removes its older actions beyond the newest two, but only folders whose only entry is the unchanged `ACTION.md` it wrote on this machine: an action you edited, one holding other files, and one written before you set `keep` or by another clone stay. The run's reply counts them as `removed`. Remove older actions by hand once when you first set `keep`.
 
 ## Run a routine now
 
