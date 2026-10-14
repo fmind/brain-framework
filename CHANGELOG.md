@@ -4,6 +4,30 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+### Added
+
+- A sensor's `silent_after` (seconds) reports a scheduled source that keeps succeeding without a new or changed record: `bf status` marks it `"silent": true`, and `attention`, the home page and `bf status --check` list it. Freshness proves a successful run, not new evidence: a filter or account drift used to look healthy. `bf status` and the `memories` page give each source's `changed`, the newest time this brain gained a new or changed record of it.
+- `keep` bounds generated output. An action routine's `keep: N` removes its actions older than the newest N while they still hold only the `ACTION.md` this machine wrote: an edited report, a folder holding another file and an action written before `keep` stay. A prompt's `keep: N` removes its oldest run records after each run. Replies count them as `removed`.
+- `bf status` names each brain's `runtime`: the `installed` bf version and, read as data from the brain's `uv.lock`, the `pinned` one. Agents compare their major versions instead of parsing the lock.
+- `bf validate` reports an enabled prompt file above the 120,000-byte limit, which every run would reject.
+
+### Changed
+
+- A program another process is running, such as a manual `bf collect` during `bf watch`, is `skipped` in `bf update` instead of failed: watch no longer alerts a failure that run history never records.
+- `bf run` suggests close prompt names too: `unknown routine or prompt asistant; … did you mean assistant?`.
+- A scheduled prompt that is not due when it takes its lock, because another process ran it or it waits to retry a failure, says so instead of claiming another run just succeeded.
+
+### Fixed
+
+- `bf watch` stops a collection whose start a cancellation interrupted, and signals its collection and prompt workers together, so quitting takes one stop bound instead of two.
+- `bf update` dates its due list once it holds the cycle lock: waiting for another update no longer leaves newly due programs for the next cycle.
+- A prompt answering a message and a scheduled run of the same prompt no longer overwrite each other's log entries.
+- A prompt file above the limit reports `file exceeds 120000 bytes` instead of 120001.
+- `bf build --reproject --dry-run` counts changes without holding every reprojected record, and keeps only the failures its reply shows.
+- Programs no longer inherit `DOTNET_STARTUP_HOOKS`, `R_PROFILE_USER`, `LUA_PATH` or `LUA_CPATH`, which load code before the program starts.
+- The contract check accepts a configuration value that stops listing its allowed values, which widens what files accept, as a minor change.
+- Tests give cold interpreter starts the documented 120-second deadline and cap parallel workers at eight, so a loaded machine no longer fails the gate.
+
 ## [v18.4.0](https://github.com/fmind/brain-framework/releases/tag/v18.4.0) - 2026-10-13
 
 A feature release. The brain format (`version: 7`) and the search cache format are unchanged; `bf.yaml` gains an optional `prompts:` section, which an older `bf` rejects, and the reply schemas only gain optional fields. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), run `bf skills DIR` to update `bf-maintain`, which now covers prompts, and the retrieval guide, and copy the updated example hooks and `weekly-review` routine into your brain, preserving local adaptations.
