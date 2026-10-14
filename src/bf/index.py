@@ -209,8 +209,8 @@ def inputs(
         if directory == "memories":
             scanned = store.scan(directory, skipped=skipped, split=True, counts=tally, reuse=listing)
             # A source folder's entries are its files and skipped entries, unless it holds another folder.
-            for name in (*scanned, *skipped):
-                held[_tree(name)] = held.get(_tree(name), 0) + 1
+            for tree in map(_tree, (*scanned, *skipped)):
+                held[tree] = held.get(tree, 0) + 1
             # A source folder that cannot be opened is skipped whole, never listed.
             unlisted = skipped
             found.update({name: info for name, info in scanned.items() if records.stored(name)})
