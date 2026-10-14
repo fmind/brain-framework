@@ -501,6 +501,13 @@ def test_a_record_edited_in_place_waits_for_bf_build_but_a_skipped_one_is_read_a
     assert refs(brain, "iridium") == ["meetings:broken"]
     index.refresh(brain, full=True)
     assert refs(brain, "osmium") == ["meetings:lunch"]
+    # A skipped link changes only by being replaced, which changes its folder: the folder stays trusted until then.
+    link = brain.root / "memories/meetings/link.json"
+    link.symlink_to(lunch)
+    age(brain)
+    assert listed(brain) == set()
+    link.unlink()
+    assert listed(brain) == {"memories/meetings"}
 
 
 @pytest.mark.usefixtures("settled")
