@@ -121,7 +121,7 @@ EOF
 bf read
 ```
 
-The home page lists the project under `changed`, with its new `next` task. It is not flagged for review: no linked evidence is newer than the edit.
+The home page lists the project under `projects`, with its new `next` task; `changed` names other notes changed this week. It is not flagged for review: no linked evidence is newer than the edit.
 
 ## Follow a change
 

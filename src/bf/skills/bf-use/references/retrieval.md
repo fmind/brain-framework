@@ -6,7 +6,7 @@ Use when a reply is paged, a graph claim matters or an answer must be complete; 
 
 Keep the query or ref, scope, limit and brain selection unchanged and pass each `next_offset` to `--offset` until it is absent; restart when evidence or the selected brains change meanwhile. A page or preview is never the complete result.
 
-An exact read above 32 KiB returns its text in pages; the first carries the backlinks, claims and `outline`. To assemble the whole text, run `python3 "$SKILL_DIR/scripts/evidence.py" read REF --brain PATH`: it follows every page, checks that each names the same file `sha256` and keeps every page's `problems` and `stale`.
+An exact read above 32 KiB returns its text in pages; the first carries the backlinks, claims and, when headings divide the read, an `outline`. To assemble the whole text, run `python3 "$SKILL_DIR/scripts/evidence.py" read REF --brain PATH`: it follows every page, checks that each names the same file `sha256` and keeps every page's `problems` and `stale`.
 
 ## Write refs exactly
 
