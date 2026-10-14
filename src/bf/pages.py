@@ -790,7 +790,7 @@ def memories(
         def coverage(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
             if (count := known(store, connection)) is None:
                 return None
-            return {"sources": [{"source": source, **count, **source_health(store, [source], now=now)[source]}]}
+            return {"sources": [{"source": source, **count, **source_health(store, {source: count}, now=now)[source]}]}
 
         # A record's time is its stored instant: ordering by the column walks items_kind_source_time.
         reply, found = _listing(

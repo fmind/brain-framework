@@ -329,17 +329,27 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
     return counts
 
 
-def prune(store: Store, source: str, keep: int) -> int:
-    """Remove a source's oldest records beyond the newest `keep`, ordered by time then id, in one transaction.
+def prune(store: Store, source: str, keep: int, ids: re.Pattern[str]) -> int:
+    """Remove a source's oldest records whose id `ids` matches beyond the newest `keep`, in one transaction.
 
-    The caller holds the writer lock, as for `upsert`; it returns how many records were removed.
+    Records are ordered by time, then id. A file that does not load, or a record with another id, is left alone and
+    not counted. The caller holds the writer lock, as for `upsert`; it returns how many records were removed.
     """
     recover(store)
     names = files(store, source)
     if len(names) <= keep:
         return 0
-    ordered = sorted(names, key=lambda name: ((record := load(store, name)).time or record.observed, record.id))
-    doomed = ordered[: len(ordered) - keep]
+    loaded = []
+    for name in names:
+        try:
+            record = load(store, name)
+        except Error:
+            continue
+        if ids.fullmatch(record.id):
+            loaded.append((record.time or record.observed, record.id, name))
+    doomed = [name for *_, name in sorted(loaded)[: max(0, len(loaded) - keep)]]
+    if not doomed:
+        return 0
     _commit(store, source, dict.fromkeys(doomed))
     return len(doomed)
 

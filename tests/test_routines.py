@@ -601,3 +601,19 @@ def test_run_suggests_prompt_names_too(brain: Store) -> None:
     assert "unknown routine or prompt asistant; check names in bf.yaml; did you mean assistant?" in str(
         result.exception
     )
+
+
+def test_keep_spares_a_report_folder_holding_anything_else(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 7\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+    )
+    report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
+    first = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)
+    folder = Path(brain.root / str(first["action"])).parent
+    # An empty inputs/ folder the owner created makes the report theirs.
+    (folder / "inputs").mkdir()
+    later = NOW + timedelta(days=1)
+    second = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: later)
+    assert second["removed"] == 0
+    assert (folder / "ACTION.md").read_bytes() == report

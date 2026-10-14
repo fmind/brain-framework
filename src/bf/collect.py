@@ -61,6 +61,8 @@ LIMIT = 200
 _EXISTS = "an action for this routine already exists today"
 # The whole argument holding an expanded prompt stays below Linux's 128 KiB bound (MAX_ARG_STRLEN, NUL included).
 MAX_ARGUMENT = (128 << 10) - 1
+# A prompt run's record id: its UTC start and a random suffix. Only these records are a prompt's to prune.
+RUN_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
 _TEMPLATE = re.compile(r"\{\{(brain|home|start|end|input)\}\}")
 # A record title shows the reply's first line, shortened.
 _TITLE = 120
@@ -545,19 +547,19 @@ def _prune_reports(store: Store, name: str, keep: int, written: dict[str, str]) 
     removed = 0
     for path in actions[: max(0, len(actions) - keep)]:
         folder = path.removesuffix("/ACTION.md")
-        alone = [file for file in found if file.startswith(f"{folder}/")] == [path]
         try:
-            unchanged = alone and reports.get(path) == digest(store.read(path, MAX_NOTE))
+            # Exactly one entry: an empty inputs/ folder or another file makes it the owner's.
+            data = store.read(path, MAX_NOTE) if store.entries(folder) == ["ACTION.md"] else b""
         except Error, OSError:
-            unchanged = False
-        if unchanged:
+            data = b""
+        if data and reports.get(path) == digest(data):
+            store.delete(path)
             try:
-                store.delete(path)
                 store.rmdir(folder)
                 removed += 1
             except Error, OSError:
-                # A file appeared meanwhile: the folder is no longer a disposable report.
-                pass
+                # An entry appeared meanwhile: put the report back rather than leave a folder without it.
+                store.write(path, data)
         reports.pop(path, None)
     return {path: value for path, value in reports.items() if path in actions}, removed
 
@@ -772,8 +774,6 @@ def prompt(
                 records.recover(store)
                 records.upsert(store, name, [record], snapshot=False)
                 committed = True
-                if program.keep is not None:
-                    result["removed"] = records.prune(store, name, program.keep)
                 runs = int(str(state(store, PROMPTS).get(name, {}).get("runs", 0))) + 1
                 # Only the schedule's own runs move it: answering a message leaves the next review, its retry
                 # backoff and any failure it reported as they were.
@@ -789,6 +789,14 @@ def prompt(
                     "output_bytes": len(raw),
                 }
                 remember(store, name, PROMPTS, runs=runs, record=ref, **(scheduling if scheduled else {}))
+                if program.keep is not None:
+                    try:
+                        result["removed"] = records.prune(store, name, program.keep, RUN_ID)
+                    except (Error, OSError, UnicodeError) as error:
+                        # The run is recorded: a file that cannot be pruned must never make it run again.
+                        result["removed"] = 0
+                        with suppress(Error, OSError):
+                            append_log(store, name, f"{_now()} kept older runs: {error}")
         except (Error, OSError, UnicodeError, ValidationError) as error:
             message = (
                 str(error)

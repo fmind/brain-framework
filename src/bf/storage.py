@@ -228,6 +228,11 @@ class Store:
             if error.errno not in {errno.ENOENT, errno.ELOOP, errno.ENOTDIR}:
                 raise
 
+    def entries(self, name: str) -> list[str]:
+        """The sorted names directly inside a directory, reached without following links."""
+        with self._directory(name) as descriptor, os.scandir(descriptor) as found:
+            return sorted(entry.name for entry in found)
+
     def rmdir(self, name: str) -> None:
         """Remove an empty directory without following links."""
         with self.parent(name) as (parent, leaf):

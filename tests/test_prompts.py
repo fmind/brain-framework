@@ -19,7 +19,7 @@ from bf.cli import app
 from bf.collect import Runner, due_prompts, prompt
 from bf.health import attention, report
 from bf.history import PROMPTS, log_path, state
-from bf.models import Config, Error, Program, Prompt, local, present
+from bf.models import Config, Error, Program, Prompt, Record, local, present
 from bf.retrieve import read
 from bf.storage import Store, collecting
 from bf.update import run_prompt, update
@@ -508,3 +508,35 @@ def test_failed_prompts_report_without_recording(configured: Store) -> None:
 def test_an_empty_reply_gets_a_neutral_title(configured: Store) -> None:
     prompt(configured, "piped", start=START, end=END, runner=replying(b"\n\n"), clock=lambda: NOW)
     assert stored(configured, "piped")[0]["title"] == "piped run without a reply"
+
+
+def test_keep_never_fails_a_recorded_run_or_touches_other_files(
+    configured: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured.write("bf.yaml", CONFIG.replace(b"    text: /response\n", b"    text: /response\n    keep: 1\n"))
+    # A stray file and a record of another kind in the prompt's folder are not its runs.
+    configured.write("memories/assistant/stray.json", b"not a record")
+    records.upsert(configured, "assistant", [Record(id="legacy", title="Kept")], snapshot=False)
+    suffixes = iter(range(1, 10))
+    monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=next(suffixes)))
+    reply = json.dumps(REPLY).encode()
+    for minutes in range(3):
+        result = prompt(
+            configured,
+            "assistant",
+            start=START,
+            end=END,
+            scheduled=True,
+            runner=replying(reply),
+            clock=lambda minutes=minutes: NOW + timedelta(minutes=31 * minutes),
+        )
+        assert "skipped" not in result
+    history = state(configured, PROMPTS)["assistant"]
+    assert (history["runs"], history.get("failures", 0)) == (3, 0)
+    kept = sorted(
+        records.load(configured, file).id
+        for file in records.files(configured, "assistant")
+        if not file.endswith("/stray.json")
+    )
+    assert kept == ["20260925T090200Z-00000003", "legacy"]
+    assert configured.read("memories/assistant/stray.json") == b"not a record"
