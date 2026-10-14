@@ -69,6 +69,12 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "keep": {
+          "anyOf": [{ "maximum": 50000, "minimum": 1, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Keep this many newest run records in memories/NAME/; older ones are removed after a run. Unset keeps every run.",
+          "title": "Keep"
+        },
         "lookback": {
           "default": 86400,
           "description": "Seconds {{start}} reaches back when no scheduled run has finished yet.",
@@ -180,6 +186,12 @@
           "maxItems": 16,
           "title": "Hooks",
           "type": "array"
+        },
+        "keep": {
+          "anyOf": [{ "maximum": 10000, "minimum": 1, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Keep this many newest actions of an action routine; older ones are removed while they still hold only the ACTION.md this machine wrote. Unset keeps every action.",
+          "title": "Keep"
         },
         "lookback": {
           "default": 86400,
@@ -392,6 +404,12 @@
           "minimum": 0,
           "title": "Refresh",
           "type": "integer"
+        },
+        "silent_after": {
+          "anyOf": [{ "maximum": 31536000, "minimum": 1, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Seconds without a new or changed record after which a scheduled source is reported silent in status and attention; unset never reports silence.",
+          "title": "Silent After"
         },
         "timeout": {
           "default": 300,

@@ -34,6 +34,7 @@ _HEALTH: dict[str, object] = {
         "additionalProperties": False,
     },
     "failed": {"const": True},
+    "silent": {"const": True},
 }
 
 # An item's fields; a whole note read and a section read repeat some of them about the note.
@@ -163,6 +164,7 @@ _DEFS: dict[str, object] = {
             **_HEALTH,
             "records": _COUNT,
             "latest": _INSTANT,
+            "changed": _INSTANT,
             "page": _STRING,
         },
         "additionalProperties": False,

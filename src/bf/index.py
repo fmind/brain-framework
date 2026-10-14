@@ -1428,11 +1428,20 @@ def problems(connection: sqlite3.Connection) -> list[dict[str, object]]:
 
 
 def sources(connection: sqlite3.Connection) -> dict[str, dict[str, object]]:
-    """Indexed record totals and latest event time per source; a source without dated records has no `latest`."""
+    """Indexed record totals, latest event time and latest change per source.
+
+    `changed` is the newest `observed`: when this brain last gained a new or changed record of the source, whatever
+    its event time. A source without dated records has no `latest`.
+    """
     return {
-        row["source"]: {"records": row["records"], **({"latest": row["latest"]} if row["latest"] else {})}
+        row["source"]: {
+            "records": row["records"],
+            **({"latest": row["latest"]} if row["latest"] else {}),
+            **({"changed": row["changed"]} if row["changed"] else {}),
+        }
         for row in connection.execute(
-            "SELECT source,count(*) AS records,max(time) AS latest FROM items WHERE kind='record' GROUP BY source"
+            "SELECT source,count(*) AS records,max(time) AS latest,max(observed) AS changed FROM items "
+            "WHERE kind='record' GROUP BY source"
         )
     }
 

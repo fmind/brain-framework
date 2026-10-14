@@ -49,6 +49,7 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
         "last_collected",
         "window",
         "records",
+        "changed",
         "bytes",
         "last_run",
         "reconciled",
@@ -278,3 +279,69 @@ def test_status_reports_the_bytes_each_source_holds(brain: Store) -> None:
     sizes = [(brain.root / records.path("meetings", key)).stat().st_size for key in ("decision-1", "lunch")]
     entry = cast("dict", report([brain]))["brains"][0]
     assert entry["sources"]["meetings"]["bytes"] == sum(sizes)
+
+
+def test_a_source_that_succeeds_without_new_evidence_falls_silent(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 7\nname: fixture\nsensors:\n"
+        b"  papers:\n    command: [echo]\n    refresh: 86400\n    silent_after: 345600\n"
+        b"  quiet:\n    command: [echo]\n    refresh: 86400\n",
+    )
+    first = datetime(2026, 9, 20, 13, tzinfo=UTC)
+    one = b'[{"id":"one","title":"One","time":"2026-09-10T00:00:00Z"}]'
+    for sensor in ("papers", "quiet"):
+        collect(
+            brain,
+            sensor,
+            start="2026-09-19T13:00:00Z",
+            end="2026-09-20T13:00:00Z",
+            runner=lambda *_: one,
+            clock=lambda: first,
+        )
+    # Daily runs keep succeeding with the same record: fresh, but nothing new for five days.
+    later = datetime(2026, 9, 25, 13, tzinfo=UTC)
+    for sensor in ("papers", "quiet"):
+        collect(
+            brain,
+            sensor,
+            start="2026-09-20T13:00:00Z",
+            end="2026-09-25T13:00:00Z",
+            runner=lambda *_: one,
+            clock=lambda: later,
+        )
+    index.refresh(brain)
+    full = cast("dict", report([brain], now=later))
+    status = full["brains"][0]
+    papers = status["sources"]["papers"]
+    # The event time is old, the change is when this brain first saw the record.
+    assert (papers["freshness"], papers["silent"], papers["changed"]) == ("fresh", True, "2026-09-20T13:00:00.000000Z")
+    assert "silent" not in status["sources"]["quiet"]
+    assert status["attention"] == [{"sensor": "papers", "freshness": "fresh", "silent": True}]
+    assert full["healthy"] is False
+    # A changed record ends the silence.
+    two = b'[{"id":"one","title":"One, revised","time":"2026-09-10T00:00:00Z"}]'
+    collect(
+        brain,
+        "papers",
+        start="2026-09-20T13:00:00Z",
+        end="2026-09-25T13:00:00Z",
+        runner=lambda *_: two,
+        clock=lambda: later,
+    )
+    index.refresh(brain)
+    assert cast("dict", report([brain], now=later))["brains"][0]["attention"] == []
+
+
+def test_status_names_the_installed_and_pinned_runtime(brain: Store) -> None:
+    status = cast("dict", report([brain]))["brains"][0]
+    assert set(status["runtime"]) == {"installed"}
+    brain.write(
+        "uv.lock",
+        b'version = 1\n\n[[package]]\nname = "brain-framework"\nversion = "17.2.0"\n\n'
+        b'[[package]]\nname = "other"\nversion = "1.0"\n',
+    )
+    assert cast("dict", report([brain]))["brains"][0]["runtime"]["pinned"] == "17.2.0"
+    # A lock that does not parse pins nothing: status never fails on it.
+    brain.write("uv.lock", b"[[package\n")
+    assert "pinned" not in cast("dict", report([brain]))["brains"][0]["runtime"]

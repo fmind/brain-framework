@@ -25,6 +25,8 @@ MAX_REPLY = 4 << 20
 MAX_FIELDS = 2 << 20
 # Authored Markdown, including routine output, is read whole: one note is at most 4 MiB.
 MAX_NOTE = 4 << 20
+# An expanded prompt, read from a file or piped in, stays below Linux's 128 KiB bound on one argument.
+MAX_PROMPT = 120_000
 MAX_FILES = 100_000
 # Continuation offsets stay integers every JSON client represents exactly.
 MAX_OFFSET = 2**53 - 1
@@ -807,6 +809,12 @@ class Sensor(Program):
         description="Low ranks this source's records at half weight in word search and lists them only by count "
         "on period and home pages.",
     )
+    # Freshness proves a successful run, not new evidence: a filter or account drift succeeds with nothing.
+    silent_after: Annotated[int, Field(ge=1, le=31_536_000)] | None = Field(
+        default=None,
+        description="Seconds without a new or changed record after which a scheduled source is reported silent in "
+        "status and attention; unset never reports silence.",
+    )
 
     _empty = field_validator("fields", mode="before")(empty)
 
@@ -834,6 +842,11 @@ class Routine(Program):
         default="log",
         description="log keeps stdout in logs/NAME.log; action turns non-empty Markdown into a dated action.",
     )
+    keep: Annotated[int, Field(ge=1, le=10_000)] | None = Field(
+        default=None,
+        description="Keep this many newest actions of an action routine; older ones are removed while they still "
+        "hold only the ACTION.md this machine wrote. Unset keeps every action.",
+    )
 
     @field_validator("hooks")
     @classmethod
@@ -841,6 +854,12 @@ class Routine(Program):
         if len(set(values)) != len(values):
             raise ValueError("hooks must be distinct")
         return values
+
+    @model_validator(mode="after")
+    def kept_actions(self) -> Routine:
+        if self.keep is not None and self.output != "action":
+            raise ValueError("keep applies to output: action; a log routine's log is already bounded")
+        return self
 
 
 class Prompt(Program):
@@ -868,6 +887,11 @@ class Prompt(Program):
         default=None,
         description="JSON Pointer to the reply text in the command's JSON stdout, such as /response; the other "
         "members become the record's output attribute. Omitted, all of stdout is the reply.",
+    )
+    keep: Annotated[int, Field(ge=1, le=MAX_FILES // 2)] | None = Field(
+        default=None,
+        description="Keep this many newest run records in memories/NAME/; older ones are removed after a run. Unset "
+        "keeps every run.",
     )
 
     @field_validator("prompt")

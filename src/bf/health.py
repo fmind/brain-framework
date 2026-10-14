@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
+import tomllib
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
-from bf import index, usage
+from bf import __version__, index, usage
 from bf.config import Selection, brain_name, load, related
 from bf.history import PROMPTS, ROUTINES, log_path, state
-from bf.models import CACHE, Config, Error, Program
+from bf.models import CACHE, Config, Error, Program, Sensor
 from bf.storage import Store
 
 # Counters of the last successful collection, reported apart from indexed totals.
@@ -42,11 +43,32 @@ def _freshness(program: Program, success: str, now: datetime) -> str:
     return "fresh" if timedelta(0) <= elapsed <= timedelta(seconds=2 * program.refresh) else "overdue"
 
 
+def _silent(sensor: Sensor | None, success: str, changed: str, now: datetime) -> bool:
+    """Whether a scheduled source that still succeeds has gained no new or changed record within `silent_after`.
+
+    A source with no record yet is never silent: its zero count already shows it.
+    """
+    if sensor is None or not sensor.enabled or not sensor.refresh or sensor.silent_after is None:
+        return False
+    if not success or not changed:
+        return False
+    return now - datetime.fromisoformat(changed) > timedelta(seconds=sensor.silent_after)
+
+
 def source_health(
     store: Store, names: Iterable[str] = (), *, now: datetime | None = None
 ) -> dict[str, dict[str, object]]:
-    """Describe active, disabled and historical sources without running them or exposing logs."""
+    """Describe active, disabled and historical sources without running them or exposing logs.
+
+    `names` may be the indexed counts per source, whose `changed` then reports a source silent past its
+    `silent_after`.
+    """
     now = now or datetime.now(UTC)
+    changed = (
+        {name: str(count.get("changed", "")) for name, count in names.items() if isinstance(count, Mapping)}
+        if isinstance(names, Mapping)
+        else {}
+    )
     config, history, asked = load(store), state(store), state(store, PROMPTS)
     result: dict[str, dict[str, object]] = {}
     for name in sorted({*config.sensors, *config.prompts, *names}):
@@ -82,6 +104,8 @@ def source_health(
             item["failed"] = True
         if settings is not None and settings.enabled:
             item["freshness"] = _freshness(settings, success, now)
+        if _silent(settings, success, changed.get(name, ""), now):
+            item["silent"] = True
         result[name] = item
     return result
 
@@ -151,7 +175,7 @@ def _attention(
     routines: dict[str, dict[str, object]],
     prompts: dict[str, dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
-    """Scheduled programs this machine runs that failed or have not succeeded recently: only those are late."""
+    """Scheduled programs this machine runs that failed, have not succeeded recently or, for a source, fell silent."""
     result: list[dict[str, object]] = []
     for kind, healths, programs in (
         ("sensor", {name: health for name, health in sources.items() if name not in config.prompts}, config.sensors),
@@ -160,17 +184,53 @@ def _attention(
     ):
         for name, health in healths.items():
             settings, failed = programs.get(name), health.get("failed")
-            if settings and settings.enabled and settings.refresh and (failed or health["freshness"] in _LATE):
-                result.append({kind: name, "freshness": health["freshness"], **({"failed": True} if failed else {})})
+            silent = health.get("silent")
+            if (
+                settings
+                and settings.enabled
+                and settings.refresh
+                and (failed or silent or health["freshness"] in _LATE)
+            ):
+                result.append(
+                    {
+                        kind: name,
+                        "freshness": health["freshness"],
+                        **({"failed": True} if failed else {}),
+                        **({"silent": True} if silent else {}),
+                    }
+                )
     return result
 
 
 def attention(store: Store, now: datetime | None = None) -> list[dict[str, object]]:
-    """Scheduled sensors, routines and prompts this machine runs that failed or have not succeeded recently."""
+    """Scheduled sensors, routines and prompts this machine runs that failed, are late or fell silent."""
     now = now or datetime.now(UTC)
+    try:
+        with index.database(store) as (connection, _):
+            counts = index.sources(connection)
+    except Error, OSError, sqlite3.DatabaseError:
+        # Silence needs the cache; failures and lateness come from run history alone.
+        counts = {}
     return _attention(
-        load(store), source_health(store, now=now), routine_health(store, now=now), prompt_health(store, now=now)
+        load(store),
+        source_health(store, counts, now=now),
+        routine_health(store, now=now),
+        prompt_health(store, now=now),
     )
+
+
+def _pinned(store: Store) -> str:
+    """The brain-framework version a brain's uv.lock pins, read as data and never run; empty without one."""
+    try:
+        lock = tomllib.loads(store.read("uv.lock").decode("utf-8"))
+    except Error, OSError, UnicodeError, tomllib.TOMLDecodeError:
+        return ""
+    packages = lock.get("package")
+    for package in packages if isinstance(packages, list) else ():
+        if isinstance(package, dict) and package.get("name") == "brain-framework":
+            version = package.get("version")
+            return version if isinstance(version, str) else ""
+    return ""
 
 
 def report(stores: list[Store], now: datetime | None = None) -> dict[str, object]:
@@ -216,6 +276,8 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             {
                 "brain": config.name,
                 "path": str(store.root),
+                # Agents compare the pinned major version with the installed one before trusting either.
+                "runtime": {"installed": __version__, **({"pinned": pinned} if (pinned := _pinned(store)) else {})},
                 **summary,
                 "attention": alerts,
                 "sources": sources,
