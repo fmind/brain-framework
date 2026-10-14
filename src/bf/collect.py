@@ -27,6 +27,8 @@ from bf.history import PROMPTS, ROUTINES, SENSORS, append_log, environment, log_
 from bf.markdown import note, parse, validate_okf
 from bf.models import (
     _CONTROL,
+    MAX_NOTE,
+    MAX_PROMPT,
     RECORD_KEYS,
     Config,
     Error,
@@ -35,6 +37,7 @@ from bf.models import (
     Routine,
     Sensor,
     decode,
+    digest,
     explain,
     local,
     suggest,
@@ -56,9 +59,7 @@ SHRINK_FLOOR = 10
 REPROJECT = 1000
 LIMIT = 200
 _EXISTS = "an action for this routine already exists today"
-# Linux bounds one argument at 128 KiB (MAX_ARG_STRLEN, its NUL included): an expanded prompt passed as {{prompt}}
-# stays below it, and so must the whole argument holding it.
-MAX_PROMPT = 120_000
+# The whole argument holding an expanded prompt stays below Linux's 128 KiB bound (MAX_ARG_STRLEN, NUL included).
 MAX_ARGUMENT = (128 << 10) - 1
 _TEMPLATE = re.compile(r"\{\{(brain|home|start|end|input)\}\}")
 # A record title shows the reply's first line, shortened.
@@ -85,7 +86,7 @@ def enabled[P: Program](programs: Mapping[str, P], kind: str, name: str) -> P:
 
 
 @contextmanager
-def _starting() -> Iterator[None]:
+def starting() -> Iterator[None]:
     """Defer cancellation until the caller owns the child and can clean up its process group."""
     if current_thread() is not main_thread():
         yield
@@ -142,7 +143,7 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
     exited: float | None = None
     outcome = "failed"
     try:
-        with _starting():
+        with starting():
             try:
                 child = subprocess.Popen(  # noqa: S603
                     # Direct argv from the owner's bf.yaml, plus a `bf run` caller's arguments; no shell interprets them.
@@ -474,14 +475,19 @@ def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, ob
                 projected = ontology.reproject(stored, sensor, config)
             except Error as error:
                 counts["failed"] += 1
-                problems.append({"file": file, "error": str(error).removeprefix(f"{file}: ")})
+                # Count every failure, but keep only what the reply shows.
+                if len(problems) <= LIMIT:
+                    problems.append({"file": file, "error": str(error).removeprefix(f"{file}: ")})
                 continue
             if projected.fields == stored.fields:
                 counts["unchanged"] += 1
                 continue
             counts["changed"] += 1
+            if dry_run:
+                # A preview counts changes without holding the reprojected corpus.
+                continue
             changed.append(projected)
-            if not dry_run and len(changed) >= REPROJECT:
+            if len(changed) >= REPROJECT:
                 records.upsert(store, name, changed, snapshot=False)
                 changed = []
         if changed and not dry_run:
@@ -520,6 +526,40 @@ def _written(store: Store, prefix: str) -> bool:
         raise Error("actions: expected a directory; symlinks and special files are forbidden")
     today = re.compile(re.escape(f"actions/{prefix}") + r"[0-9a-f]{8}(?:/ACTION\.md)?")
     return any(today.fullmatch(name) for name in (*found, *skipped))
+
+
+def _prune_reports(store: Store, name: str, keep: int, written: dict[str, str]) -> tuple[dict[str, str], int]:
+    """Remove the routine's actions older than its newest `keep` that still hold only the ACTION.md BF wrote.
+
+    `written` maps each action this machine wrote to the SHA-256 of its bytes; it returns the entries still worth
+    checking and how many folders were removed. An edited action, one holding other files and one written before
+    `keep` was set or on another machine stay: they are a person's work, not a disposable report.
+    """
+    reports = {**cast(dict[str, str], state(store, ROUTINES).get(name, {}).get("reports", {})), **written}
+    pattern = re.compile(rf"actions/\d{{4}}-\d{{2}}-\d{{2}}_{re.escape(name)}-[0-9a-f]{{8}}/ACTION\.md")
+    try:
+        found = store.files("actions")
+    except Error, OSError:
+        return reports, 0
+    actions = sorted(file for file in found if pattern.fullmatch(file))
+    removed = 0
+    for path in actions[: max(0, len(actions) - keep)]:
+        folder = path.removesuffix("/ACTION.md")
+        alone = [file for file in found if file.startswith(f"{folder}/")] == [path]
+        try:
+            unchanged = alone and reports.get(path) == digest(store.read(path, MAX_NOTE))
+        except Error, OSError:
+            unchanged = False
+        if unchanged:
+            try:
+                store.delete(path)
+                store.rmdir(folder)
+                removed += 1
+            except Error, OSError:
+                # A file appeared meanwhile: the folder is no longer a disposable report.
+                pass
+        reports.pop(path, None)
+    return {path: value for path, value in reports.items() if path in actions}, removed
 
 
 def routine(
@@ -580,6 +620,8 @@ def routine(
                     store.write(path, raw)
                     written = True
                     result["action"] = path
+                    if program.keep is not None:
+                        reports, result["removed"] = _prune_reports(store, name, program.keep, {path: digest(raw)})
                 # A skipped review keeps its window open, so the next written action covers it.
                 reviewed = {} if "skipped" in result else {"start": start, "end": end}
                 at = timestamp(started.isoformat())
@@ -593,6 +635,7 @@ def routine(
                     error="",
                     failures=0,
                     **({"action": path} if "action" in result else {}),
+                    **({"reports": reports} if "removed" in result else {}),
                 )
             outcome = f"wrote {path}" if "action" in result else str(result.get("skipped", "succeeded"))
             with suppress(Error, OSError):
@@ -678,16 +721,16 @@ def prompt(
             # A success after this run's own clock, within one refresh, is another process's run that started later,
             # such as watch's prompt process during a long update; a larger gap is a clock correction, which runs.
             recent = success is not None and timedelta(0) < success - started < timedelta(seconds=program.refresh)
-            if recent or not _due(program, last, started):
+            if recent:
                 return {"prompt": name, "skipped": "another run of this prompt just succeeded"}
+            if not _due(program, last, started):
+                return {"prompt": name, "skipped": "not due: another process ran it or it waits to retry a failure"}
             start, end = window(store, name, started)
         observed = timestamp(started.isoformat())
         measured = time.monotonic()
         committed = False
         try:
-            template = store.read(program.prompt, MAX_PROMPT + 1)
-            if len(template) > MAX_PROMPT:
-                raise Error(f"{program.prompt} exceeds {MAX_PROMPT:,} bytes")
+            template = store.read(program.prompt, MAX_PROMPT)
             values = {"brain": str(store.root), "home": str(Path.home()), "start": start, "end": end, "input": text}
             try:
                 expanded = _TEMPLATE.sub(lambda match: values[match[1]], template.decode("utf-8"))
@@ -729,6 +772,8 @@ def prompt(
                 records.recover(store)
                 records.upsert(store, name, [record], snapshot=False)
                 committed = True
+                if program.keep is not None:
+                    result["removed"] = records.prune(store, name, program.keep)
                 runs = int(str(state(store, PROMPTS).get(name, {}).get("runs", 0))) + 1
                 # Only the schedule's own runs move it: answering a message leaves the next review, its retry
                 # backoff and any failure it reported as they were.
@@ -806,24 +851,23 @@ def _due(program: Program, last: dict[str, object], now: datetime) -> bool:
     return (due_at := next_due(program, last, now)) is not None and due_at <= now
 
 
-def due_routines(store: Store, now: datetime) -> list[tuple[str, str, str]]:
-    """Due routines; each covers the time since the end of its last reviewed window."""
-    config, history = load(store), state(store, ROUTINES)
+def _due_windows(store: Store, programs: Mapping[str, Program], file: str, now: datetime) -> list[tuple[str, str, str]]:
+    history = state(store, file)
     return [
         (name, *window(store, name, now))
-        for name, program in sorted(config.routines.items())
+        for name, program in sorted(programs.items())
         if _due(program, history.get(name, {}), now)
     ]
+
+
+def due_routines(store: Store, now: datetime) -> list[tuple[str, str, str]]:
+    """Due routines; each covers the time since the end of its last reviewed window."""
+    return _due_windows(store, load(store).routines, ROUTINES, now)
 
 
 def due_prompts(store: Store, now: datetime) -> list[tuple[str, str, str]]:
     """Due prompts; each covers the time since the end of its last scheduled window."""
-    config, history = load(store), state(store, PROMPTS)
-    return [
-        (name, *window(store, name, now))
-        for name, program in sorted(config.prompts.items())
-        if _due(program, history.get(name, {}), now)
-    ]
+    return _due_windows(store, load(store).prompts, PROMPTS, now)
 
 
 def due(store: Store, now: datetime) -> list[tuple[str, str, str, bool]]:

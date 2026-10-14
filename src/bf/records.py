@@ -329,6 +329,21 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
     return counts
 
 
+def prune(store: Store, source: str, keep: int) -> int:
+    """Remove a source's oldest records beyond the newest `keep`, ordered by time then id, in one transaction.
+
+    The caller holds the writer lock, as for `upsert`; it returns how many records were removed.
+    """
+    recover(store)
+    names = files(store, source)
+    if len(names) <= keep:
+        return 0
+    ordered = sorted(names, key=lambda name: ((record := load(store, name)).time or record.observed, record.id))
+    doomed = ordered[: len(ordered) - keep]
+    _commit(store, source, dict.fromkeys(doomed))
+    return len(doomed)
+
+
 def plan(
     store: Store, source: str, incoming: list[Record], *, snapshot: bool
 ) -> tuple[dict[str, int], dict[str, bytes | None]]:

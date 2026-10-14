@@ -13,7 +13,7 @@ from pathlib import Path
 from pydantic import Field, ValidationError, field_validator
 
 from bf.models import NAME, Error, Model, decode, encode, explain, timestamp
-from bf.storage import Store, state_store
+from bf.storage import Store, appending, state_store
 
 SENSORS = "sensors.json"
 ROUTINES = "routines.json"
@@ -25,6 +25,7 @@ _STARTUP = (
     "BASHOPTS",
     "ENV",
     "GCONV_PATH",
+    "DOTNET_STARTUP_HOOKS",
     "JAVA_TOOL_OPTIONS",
     "JDK_JAVA_OPTIONS",
     "_JAVA_OPTIONS",
@@ -38,10 +39,11 @@ _STARTUP = (
     "PHP_INI_SCAN_DIR",
     "PHPRC",
     "PS4",
+    "R_PROFILE_USER",
     "SHELLOPTS",
     "ZDOTDIR",
 )
-_PREFIXES = ("LD_", "DYLD_", "BASH_FUNC_", "PYTHON", "LUA_INIT")
+_PREFIXES = ("LD_", "DYLD_", "BASH_FUNC_", "PYTHON", "LUA_INIT", "LUA_PATH", "LUA_CPATH")
 
 
 class _Run(Model):
@@ -66,6 +68,8 @@ class _Run(Model):
     # A prompt's successful runs since its history began, and the record its latest run wrote.
     runs: int = Field(default=0, ge=0)
     record: str = ""
+    # An action routine with `keep`: the SHA-256 of each action it wrote that may still be removed unchanged.
+    reports: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("run", "success", "start", "end", "requested_start", "requested_end", "reconciled")
     @classmethod
@@ -130,13 +134,14 @@ def append_log(store: Store, name: str, heading: str, body: bytes = b"") -> None
     A log is a diagnostic: when it cannot be read, such as after a hand edit made it too large, it starts again.
     """
     path = log_path(name)
-    try:
-        previous = store.read(path, LOG_LIMIT)
-    except Error, OSError:
-        previous = b""
     entry = f"== {heading} ==\n".encode() + body + (b"" if not body or body.endswith(b"\n") else b"\n")
-    data = previous + entry
-    if len(data) > LOG_LIMIT:
-        cut = data.find(_ENTRY, len(data) - LOG_LIMIT)
-        data = data[cut + 1 :] if cut >= 0 else entry[-LOG_LIMIT:]
-    store.write(path, data, durable=False)
+    with appending(store, name):
+        try:
+            previous = store.read(path, LOG_LIMIT)
+        except Error, OSError:
+            previous = b""
+        data = previous + entry
+        if len(data) > LOG_LIMIT:
+            cut = data.find(_ENTRY, len(data) - LOG_LIMIT)
+            data = data[cut + 1 :] if cut >= 0 else entry[-LOG_LIMIT:]
+        store.write(path, data, durable=False)

@@ -25,9 +25,9 @@ from bf.cli import app
 from bf.collect import Runner, due_routines, routine
 from bf.health import attention, routine_health
 from bf.history import ROUTINES, log_path, state
-from bf.models import Config, Error, Program
+from bf.models import Config, Error, Program, Routine
 from bf.retrieve import read
-from bf.storage import Store
+from bf.storage import Store, collecting
 from bf.update import update
 from bf.validate import validate
 from conftest import plain
@@ -513,7 +513,7 @@ def test_a_direct_run_never_waits_for_input_an_agent_shell_holds_open(hooked: St
     [
         ([], 2, "name a routine or prompt, or pass --hook EVENT"),
         (["--hook", "Pre Push"], 2, "hook names are lowercase words"),
-        (["missing"], 1, "unknown routine missing"),
+        (["missing"], 1, "unknown routine or prompt missing"),
         (["paused"], 1, "routine paused is disabled in bf.yaml; set enabled: true to run it"),
     ],
 )
@@ -559,3 +559,45 @@ def test_update_names_the_manual_programs_it_skipped(hooked: Store) -> None:
     report = cast("Any", update(hooked, now=NOW, runner=printing(b"")))
     assert report["ok"]
     assert (report["sensors"], report["routines"], report["manual"]) == ([], [], ["check", "guard"])
+
+
+def test_keep_removes_older_unchanged_reports_and_spares_edited_ones(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 7\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 2\n",
+    )
+    report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
+    written = []
+    for day in range(1, 5):
+        at = datetime(2026, 9, day, 12, tzinfo=UTC)
+        result = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda at=at: at)
+        written.append(str(result["action"]))
+        if day == 2:
+            # The owner annotated this report: it is now their note, never a disposable one.
+            brain.write(written[-1], report + b"\nKeep this.\n")
+    remaining = sorted(name for name in brain.files("actions") if name.endswith("/ACTION.md"))
+    assert remaining == written[1:]
+    assert not (brain.root / written[0]).parent.exists()
+    assert result["removed"] == 0
+    with pytest.raises(ValidationError, match="keep applies to output: action"):
+        Routine.model_validate({"command": ["x"], "keep": 2})
+
+
+def test_update_skips_a_program_another_process_is_running(configured: Store) -> None:
+    with collecting(configured, "digest"):
+        result = update(configured, now=NOW, runner=printing(b""), routines=("digest",))
+    assert result["ok"] is True
+    [skipped] = cast("list[dict[str, object]]", result["routines"])
+    assert (skipped["status"], skipped["skipped"]) == ("skipped", "another run of this routine is still active")
+
+
+def test_run_suggests_prompt_names_too(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 7\nname: fixture\nprompts:\n  assistant:\n    prompt: prompts/a.md\n    command: [agent]\n",
+    )
+    result = CliRunner().invoke(app, ["run", "asistant", "--brain", str(brain.root)])
+    assert result.exit_code == 1
+    assert "unknown routine or prompt asistant; check names in bf.yaml; did you mean assistant?" in str(
+        result.exception
+    )

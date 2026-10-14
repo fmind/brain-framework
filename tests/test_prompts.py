@@ -274,7 +274,10 @@ def test_a_scheduled_run_rechecks_that_it_is_due_once_it_holds_the_lock(configur
         runner=replying(reply, calls),
         clock=lambda: later,
     )
-    assert result == {"prompt": "assistant", "skipped": "another run of this prompt just succeeded"}
+    assert result == {
+        "prompt": "assistant",
+        "skipped": "not due: another process ran it or it waits to retry a failure",
+    }
     assert calls == []
     assert state(configured, PROMPTS)["assistant"]["success"] == END
     # A cycle dated before that run, such as a long update, skips too instead of moving the history back.
@@ -287,7 +290,7 @@ def test_a_scheduled_run_rechecks_that_it_is_due_once_it_holds_the_lock(configur
         runner=replying(reply, calls),
         clock=lambda: NOW - timedelta(minutes=5),
     )
-    assert "skipped" in earlier
+    assert earlier["skipped"] == "another run of this prompt just succeeded"
     assert calls == []
     # When due, the run covers the time since the last scheduled one, whatever window the caller computed.
     due = NOW + timedelta(minutes=31)
@@ -323,7 +326,7 @@ def test_failures_write_no_record_and_back_off(configured: Store, monkeypatch: p
     with pytest.raises(Error, match="unknown prompt absent"):
         prompt(configured, "absent", start=START, end=END, runner=failing)
     monkeypatch.setattr(collector, "MAX_PROMPT", 64)
-    with pytest.raises(Error, match="file exceeds 65 bytes"):
+    with pytest.raises(Error, match="file exceeds 64 bytes"):
         prompt(configured, "assistant", start=START, end=END, runner=failing)
     configured.root.joinpath("prompts/assistant.md").unlink()
     with pytest.raises(Error, match="no record was written"):
@@ -450,3 +453,58 @@ def test_watch_lists_prompts_and_runs_them_in_their_own_job(configured: Store) -
     lane = Job(configured, (), (), ("assistant",), kinds=frozenset({"prompt"}))
     assert lane.argv[-4:] == ["--prompt", "assistant", "--kind", "prompt"]
     assert "--kind" not in Job(configured, (), ()).argv
+
+
+def test_keep_removes_the_oldest_runs_after_recording(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    configured.write("bf.yaml", CONFIG.replace(b"    text: /response\n", b"    text: /response\n    keep: 2\n"))
+    suffixes = iter(range(1, 10))
+    monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=next(suffixes)))
+    reply = json.dumps(REPLY).encode()
+    removed = [
+        prompt(
+            configured,
+            "assistant",
+            start=START,
+            end=END,
+            runner=replying(reply),
+            clock=lambda minutes=minutes: NOW + timedelta(minutes=minutes),
+        )["removed"]
+        for minutes in range(3)
+    ]
+    assert removed == [0, 0, 1]
+    assert sorted(str(record["id"]) for record in stored(configured)) == [
+        "20260925T080100Z-00000002",
+        "20260925T080200Z-00000003",
+    ]
+
+
+@pytest.mark.usefixtures("agent")
+def test_failed_prompts_report_without_recording(configured: Store) -> None:
+    # A scheduled prompt failing inside update fails the cycle and names it.
+    result = update(configured, now=NOW, runner=failing, kinds=frozenset({"prompt"}))
+    assert result["ok"] is False
+    assert cast("list[dict[str, object]]", result["prompts"])[0]["status"] == "failed"
+    # Input that is not UTF-8 and a run whose expansion exceeds the limit fail before the harness runs.
+    binary = CliRunner().invoke(app, ["run", "piped", "--stdin", "--brain", str(configured.root)], input=b"\xff")
+    assert binary.exit_code == 1
+    assert "prompt input must be UTF-8 text" in str(binary.exception)
+    with pytest.raises(Error, match="the expanded prompt exceeds"):
+        prompt(configured, "piped", start=START, end=END, text="x" * 120_000, runner=failing)
+    configured.write("prompts/assistant.md", b"\xff\xfe")
+    with pytest.raises(Error, match="must be UTF-8 Markdown"):
+        prompt(configured, "piped", start=START, end=END, runner=failing)
+    configured.write("prompts/assistant.md", TEMPLATE)
+    # A failed direct run exits 1 with ok false.
+    configured.write(
+        "bf.yaml", CONFIG.replace(b"command: [agent]\n    refresh: 0", b'command: ["false"]\n    refresh: 0')
+    )
+    failed = CliRunner().invoke(app, ["run", "piped", "--brain", str(configured.root)])
+    assert failed.exit_code == 1
+    assert json.loads(failed.stdout)["prompts"][0]["status"] == "failed"
+    assert stored(configured) == []
+    assert stored(configured, "piped") == []
+
+
+def test_an_empty_reply_gets_a_neutral_title(configured: Store) -> None:
+    prompt(configured, "piped", start=START, end=END, runner=replying(b"\n\n"), clock=lambda: NOW)
+    assert stored(configured, "piped")[0]["title"] == "piped run without a reply"
