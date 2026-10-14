@@ -36,6 +36,7 @@ from bf.watch import (
     Sort,
     State,
     _loop,
+    _stop,
     clean,
     duration,
     keyboard,
@@ -1079,3 +1080,20 @@ def test_a_check_interval_slower_than_a_refresh_is_flagged(
     with pytest.raises(StopIteration):
         watch(brain, interval=60, json_output=True)
     assert not capsys.readouterr().err
+
+
+def test_stopping_signals_every_update_before_waiting_for_any() -> None:
+    events: list[str] = []
+
+    class Recorder:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def terminate(self) -> None:
+            events.append(f"terminate {self.name}")
+
+        def close(self) -> None:
+            events.append(f"close {self.name}")
+
+    _stop(*cast("list[Job]", [Recorder("collection"), Recorder("prompts")]))
+    assert events == ["terminate collection", "terminate prompts", "close collection", "close prompts"]

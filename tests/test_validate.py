@@ -10,7 +10,7 @@ import pytest
 
 from bf import markdown
 from bf.markdown import note, parse, reference, section, validate_okf
-from bf.models import Error, Query, Record, encode
+from bf.models import MAX_PROMPT, Error, Query, Record, encode
 from bf.records import path as record_path
 from bf.retrieve import read, search
 from bf.storage import Store
@@ -764,3 +764,16 @@ def test_validation_parses_each_note_once(brain: Store, monkeypatch: pytest.Monk
     monkeypatch.setattr("bf.validate.parse", counted)
     assert validate(brain)["valid"]
     assert sorted(parsed) == ["concepts/evidence.md", "concepts/log.md", "projects/offline.md"]
+
+
+def test_validate_reports_a_prompt_file_every_run_would_reject(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 7\nname: fixture\nprompts:\n  assistant:\n    prompt: prompts/a.md\n    command: [agent]\n",
+    )
+    brain.write("prompts/a.md", b"x" * (MAX_PROMPT + 1))
+    problems = cast("list[dict[str, str]]", validate(brain)["problems"])
+    assert {
+        "file": "bf.yaml",
+        "error": f"prompts.assistant.prompt: prompts/a.md exceeds {MAX_PROMPT} bytes",
+    } in problems

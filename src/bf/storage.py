@@ -567,6 +567,14 @@ def generation(store: Store, *, shared: bool, wait: float) -> Iterator[None]:
 
 
 @contextmanager
+def appending(store: Store, name: str, wait: float = 10) -> Iterator[None]:
+    """Serialize writers of one program's log: a direct prompt run takes no program lock."""
+    relative(name)
+    with _lock(store, f"log-{name}.lock", wait, busy=f"another run of {name} is writing its log"):
+        yield
+
+
+@contextmanager
 def collecting(store: Store, sensor: str, wait: float = 0) -> Iterator[None]:
     """Order runs of one sensor without blocking offline reads while its provider is running."""
     relative(sensor)

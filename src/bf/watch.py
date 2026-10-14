@@ -26,7 +26,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from bf.collect import next_due
+from bf.collect import next_due, starting
 from bf.config import load
 from bf.history import PROMPTS, ROUTINES, SENSORS, environment, log_path, state
 from bf.models import Error, WatchSettings, decode, local, present, printable, terminal, timestamp
@@ -511,14 +511,16 @@ class Job:
         self.discard()
         # BF's own JSON reply, in an unnamed private file: it tells skipped files apart from failed programs.
         self.reply = tempfile.TemporaryFile()  # noqa: SIM115 - kept until the next start or close
-        self.process = subprocess.Popen(  # noqa: S603 - fixed BF entry point, literal validated selection
-            self.argv,
-            stdin=subprocess.DEVNULL,
-            stdout=self.reply,
-            stderr=subprocess.DEVNULL,
-            env=environment(),
-            start_new_session=True,
-        )
+        # A cancellation arriving while the child starts waits until close() can find and stop it.
+        with starting():
+            self.process = subprocess.Popen(  # noqa: S603 - fixed BF entry point, literal validated selection
+                self.argv,
+                stdin=subprocess.DEVNULL,
+                stdout=self.reply,
+                stderr=subprocess.DEVNULL,
+                env=environment(),
+                start_new_session=True,
+            )
 
     def poll(self) -> int | None:
         return self.process.poll() if self.process is not None else None
@@ -549,6 +551,11 @@ class Job:
         if self.reply is not None:
             self.reply.close()
             self.reply = None
+
+    def terminate(self) -> None:
+        """Ask a running update to stop without waiting, so several jobs stop together."""
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
 
     def close(self) -> None:
         if self.process is not None and self.process.poll() is None:
@@ -638,8 +645,7 @@ def watch(
                     raise Error("another watcher owns this brain; open bf watch in a terminal to observe it") from None
                 dashboard.observe = True
                 dashboard.message = "Observing an active watcher; its selection and settings control collection"
-        stack.callback(job.close)
-        stack.callback(agent.close)
+        stack.callback(_stop, job, agent)
         if json_output:
             _loop(store, dashboard, job, *selected, agent=agent)
         else:
@@ -651,6 +657,14 @@ def watch(
                 ) as live,
             ):
                 _loop(store, dashboard, job, *selected, agent=agent, live=live, descriptor=descriptor)
+
+
+def _stop(*jobs: Job) -> None:
+    """Signal every running update first, then wait for each: they stop together within one STOP bound."""
+    for job in jobs:
+        job.terminate()
+    for job in jobs:
+        job.close()
 
 
 def _prompt_due(rows: list[Row], now: datetime) -> bool:

@@ -13,7 +13,7 @@ from functools import cache
 from bf import links, ontology, pages, records
 from bf.config import load
 from bf.markdown import Note, authored, broken, editor_lock, note, okf, parse, resolve, scheme, validate_okf
-from bf.models import AUTHORED, IDENTITY, MAX_NOTE, Config, Error, Knowledge
+from bf.models import AUTHORED, IDENTITY, MAX_NOTE, MAX_PROMPT, Config, Error, Knowledge
 from bf.storage import UNNAMED, Store, relative, temporary, unnamed
 
 _ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -149,10 +149,14 @@ def _programs(store: Store, config: Config) -> list[dict[str, str]]:
     for name, prompt in sorted(config.prompts.items()):
         try:
             readable = prompt.enabled and stat.S_ISREG(store.mode(prompt.prompt))
+            size = store.lstat(prompt.prompt).st_size if readable else 0
         except Error, OSError:
-            readable = False
+            readable, size = False, 0
         if prompt.enabled and not readable:
             problems.append(_problem("bf.yaml", f"prompts.{name}.prompt: {prompt.prompt} is not a regular file"))
+        elif size > MAX_PROMPT:
+            # Every run would fail on it: say so before the schedule does.
+            problems.append(_problem("bf.yaml", f"prompts.{name}.prompt: {prompt.prompt} exceeds {MAX_PROMPT} bytes"))
     for kind, programs in (("sensors", config.sensors), ("routines", config.routines), ("prompts", config.prompts)):
         for name, program in sorted(programs.items()):
             # Program.command already requires a normalized path when the brain's own script runs directly.

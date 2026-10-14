@@ -110,7 +110,6 @@ def _update(
     while a scheduled run of it is still active.
     """
     given = now
-    now = now or datetime.now(UTC)
     config = load(store)
     selected_sensors, selected_routines, selected_prompts = selection(config, sensors, routines, prompts, kinds)
     failed = False
@@ -118,6 +117,8 @@ def _update(
     ran: list[dict[str, object]] = []
     collecting_programs = not dry_run and bool(selected_sensors or selected_routines)
     with _cycle(store, wait) if collecting_programs else nullcontext():
+        # Dated once the cycle lock is held: waiting for another update must not leave due work for the next one.
+        now = given or datetime.now(UTC)
         windows = [item for item in due(store, now) if item[0] in selected_sensors]
         routine_windows = [item for item in due_routines(store, now) if item[0] in selected_routines]
         for sensor, start, end, reconcile in windows:
@@ -130,6 +131,9 @@ def _update(
                     collect(store, sensor, start=start, end=end, reconcile=reconcile, runner=runner, clock=lambda: now)
                 )
                 result["status"] = "collected"
+            except BusyError:
+                # Another process, such as a manual bf collect, is running it: its run covers this cycle.
+                result.update(status="skipped", skipped="another run of this sensor is still active")
             except (Error, OSError, UnicodeError) as error:
                 result.update(status="failed", error=_failure(error))
                 failed = True
@@ -142,6 +146,8 @@ def _update(
             try:
                 result.update(routine(store, program, start=start, end=end, runner=runner, clock=lambda: now))
                 result["status"] = "skipped" if "skipped" in result else "ran"
+            except BusyError:
+                result.update(status="skipped", skipped="another run of this routine is still active")
             except (Error, OSError, UnicodeError) as error:
                 result.update(status="failed", error=_failure(error))
                 failed = True
@@ -238,6 +244,11 @@ def run_routines(
     now = datetime.now(UTC)
     config = load(store)
     for name in names:
+        if name not in config.routines and name not in config.prompts:
+            runnable = [
+                known for known, program in (*config.routines.items(), *config.prompts.items()) if program.enabled
+            ]
+            raise Error(f"unknown routine or prompt {name}; check names in bf.yaml{suggest(name, runnable)}")
         enabled(config.routines, "routine", name)
     selected = list(names) if names else hooked(config, hook)
     results: list[dict[str, object]] = []
