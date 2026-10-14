@@ -64,6 +64,8 @@ _LOUD = "i.source NOT IN (SELECT value FROM json_each(:low))"
 
 
 Build = Callable[[Store, str, sqlite3.Connection], dict[str, object] | None]
+# A paged page's build: its brain's ordered rows from `skip` on, at most `count` of them.
+Window = Callable[[Store, str, sqlite3.Connection, int, int], dict[str, object] | None]
 Parts = list[tuple[str, dict[str, object]]]
 
 
@@ -425,7 +427,7 @@ def _rows(
 
 def _paged(
     stores: list[Store],
-    build: Build,
+    build: Window,
     key: Callable[[dict[str, object]], tuple[object, ...]],
     limit: int,
     offset: int,
@@ -436,20 +438,23 @@ def _paged(
 ) -> tuple[dict[str, object], Parts]:
     """Merge each part's ordered `rows` into one page of the global order, retaining only that page in memory.
 
-    Each part gives its brain's `total`; its other fields, such as a summary, stay in the returned parts.
+    Each part gives its brain's `total`; its other fields, such as a summary, stay in the returned parts. One brain's
+    rows skip the offset in SQL; with several, each gives its first offset + limit rows, which no brain can exceed in
+    the merged window, and the merge skips the offset.
     """
     connections: dict[str, sqlite3.Connection] = {}
+    skip = offset if len(stores) == 1 else 0
 
     def opened(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
         connections[name] = connection
-        return build(store, name, connection)
+        return build(store, name, connection, skip, offset + limit - skip)
 
     with ExitStack() as stack:
         parts, extra = brains(stores, opened, counted=counted, stack=stack)
         streams = [cast("Iterator[dict[str, object]]", part.pop("rows")) for _, part in parts]
         try:
             merged = heapq.merge(*streams, key=key, reverse=reverse)
-            items = list(islice(islice(merged, offset, None), limit))
+            items = list(islice(islice(merged, offset - skip, None), limit))
             if review:
                 for name, _ in parts:
                     if selected := [item for item in items if item["brain"] == name]:
@@ -485,11 +490,13 @@ def _listing(
 ) -> tuple[dict[str, object], Parts]:
     """Items matching fixed SQL in every brain; `summary` adds a brain's page context, or skips it with None."""
 
-    def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
+    def build(
+        store: Store, name: str, connection: sqlite3.Connection, skip: int, count: int
+    ) -> dict[str, object] | None:
         extra = summary(store, name, connection) if summary else {}
         if extra is None:
             return None
-        rows, total = index.listing(connection, where, params, order)
+        rows, total = index.listing(connection, where, params, order, count, skip)
         return {**extra, "rows": (label(name, row) for row in rows), "total": total}
 
     return _paged(stores, build, key, limit, offset, counted=counted, reverse=reverse, review=review)
@@ -671,7 +678,7 @@ def timeline(
     Low-priority sources, such as a news feed, appear only in `sources`: their records would crowd out the rest.
     """
 
-    def build(store: Store, brain: str, connection: sqlite3.Connection) -> dict[str, object]:
+    def build(store: Store, brain: str, connection: sqlite3.Connection, skip: int, count: int) -> dict[str, object]:
         params = {"since": found.since, "until": found.until, "low": json.dumps(low(store))}
         changed = _rows(
             connection,
@@ -682,7 +689,12 @@ def timeline(
         )
         sources = _counts(store, index.activity(connection, found.since, found.until), name)
         rows, total = index.listing(
-            connection, f"{index.PERIOD_WITHIN} AND {_LOUD}", params, f"({index.PERIOD_TIME}) DESC,i.ref DESC"
+            connection,
+            f"{index.PERIOD_WITHIN} AND {_LOUD}",
+            params,
+            f"({index.PERIOD_TIME}) DESC,i.ref DESC",
+            count,
+            skip,
         )
         return {"changed": changed, "sources": sources, "rows": (label(brain, row) for row in rows), "total": total}
 
@@ -779,11 +791,12 @@ def memories(
                 return None
             return {"sources": [{"source": source, **count, **source_health(store, [source], now=now)[source]}]}
 
+        # A record's time is its stored instant: ordering by the column walks items_kind_source_time.
         reply, found = _listing(
             stores,
             "i.kind='record' AND i.source=:source",
             {"source": source},
-            "time DESC,i.ref DESC",
+            "i.time DESC,i.ref DESC",
             _time_key,
             SECTION,
             offset,
@@ -813,7 +826,7 @@ def memories(
         stores,
         where,
         params,
-        f"({index.PERIOD_TIME}) DESC,i.ref DESC" if window else "time DESC,i.ref DESC",
+        f"({index.PERIOD_TIME}) DESC,i.ref DESC" if window else "i.time DESC,i.ref DESC",
         _period_key if window else _time_key,
         PAGE,
         offset,
@@ -838,14 +851,15 @@ def tasks(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict
     # Working attachments can quote source checkboxes: only authored entry notes join the task queue.
     eligible = f"{index.ENTRY} AND i.status!='deprecated'"
 
-    def build(_store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+    def build(_store: Store, name: str, connection: sqlite3.Connection, skip: int, count: int) -> dict[str, object]:
         summary = connection.execute(
             "SELECT coalesce(sum(t.done=0),0),coalesce(sum(t.done=1),0),count(DISTINCT t.item) "  # noqa: S608 - fixed SQL
             f"FROM tasks t JOIN items i ON i.id=t.item WHERE {eligible}"
         ).fetchone()
         rows = connection.execute(
             "SELECT i.ref,i.title,t.line,t.fragment,t.text FROM tasks t JOIN items i ON i.id=t.item "  # noqa: S608 - fixed SQL
-            f"WHERE t.done=0 AND {eligible} ORDER BY i.ref,t.line"
+            f"WHERE t.done=0 AND {eligible} ORDER BY i.ref,t.line LIMIT ? OFFSET ?",
+            (count, skip),
         )
 
         def items() -> Iterator[dict[str, object]]:
@@ -881,8 +895,10 @@ def tasks(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict
 def tags(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict[str, object]:
     """Enumerate local tag identities, with exact note counts and bounded cross-brain pagination."""
 
-    def build(_store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
-        rows = connection.execute("SELECT target,count(*) AS total FROM tags GROUP BY target ORDER BY target")
+    def build(_store: Store, name: str, connection: sqlite3.Connection, skip: int, count: int) -> dict[str, object]:
+        rows = connection.execute(
+            "SELECT target,count(*) AS total FROM tags GROUP BY target ORDER BY target LIMIT ? OFFSET ?", (count, skip)
+        )
 
         def items() -> Iterator[dict[str, object]]:
             for target, total in rows:
@@ -1092,10 +1108,11 @@ def relation_page(
     from the requested one.
     """
 
-    def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+    def build(store: Store, name: str, connection: sqlite3.Connection, skip: int, count: int) -> dict[str, object]:
         exclude = ref if owner is not None and store.root == owner.root else ""
         relations = [relation, *load(store).narrower(relation)]
-        rows, total = index.linking(connection, graph.local_refs(connection, targets, name), relations, exclude=exclude)
+        local = graph.local_refs(connection, targets, name)
+        rows, total = index.linking(connection, local, relations, exclude=exclude, limit=count, offset=skip)
         items = (label(name, row) for row in rows)
         return {
             "rows": ({k: v for k, v in item.items() if (k, v) != ("relation", relation)} for item in items),

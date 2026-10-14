@@ -1406,9 +1406,15 @@ def search(
 
 
 def listing(
-    connection: sqlite3.Connection, where: str, params: Mapping[str, object], order: str, limit: int = -1
+    connection: sqlite3.Connection,
+    where: str,
+    params: Mapping[str, object],
+    order: str,
+    limit: int = -1,
+    offset: int = 0,
 ) -> tuple[Iterator[dict[str, object]], int]:
-    """Stream items matching fixed SQL written by the page builders, with the total before the limit."""
+    """Stream items matching fixed SQL written by the page builders from `offset` on, at most `limit` of them, with
+    the total before both."""
     values = {
         "since": "",
         "until": "",
@@ -1418,10 +1424,14 @@ def listing(
         **_parameters(set()),
         **params,
         "limit": limit,
+        "offset": offset,
     }
     # `where` and `order` are fixed SQL written by the page builders; values stay bound parameters.
     total = connection.execute(f"SELECT count(*) FROM items i WHERE {where}", values).fetchone()[0]  # noqa: S608
-    rows = connection.execute(f"SELECT {_ROW} FROM items i WHERE {where} ORDER BY {order} LIMIT :limit", values)  # noqa: S608
+    rows = connection.execute(
+        f"SELECT {_ROW} FROM items i WHERE {where} ORDER BY {order} LIMIT :limit OFFSET :offset",  # noqa: S608
+        values,
+    )
     return (_clean(dict(row)) for row in rows), total
 
 
@@ -1441,7 +1451,7 @@ _GROUP = f"""{_INCOMING} SELECT {_ROW} FROM linked k JOIN items i ON i.id=k.item
 _RELATION = "k.relation IN (SELECT value FROM json_each(:relations)) AND i.ref!=:exclude"
 _RELATION_TOTAL = f"{_INCOMING} SELECT count(*) FROM linked k JOIN items i ON i.id=k.item WHERE {_RELATION}"  # noqa: S608
 _RELATION_ROWS = f"""{_INCOMING} SELECT {_ROW},k.relation FROM linked k JOIN items i ON i.id=k.item
-  WHERE {_RELATION} ORDER BY time DESC,i.ref DESC,k.relation"""  # noqa: S608
+  WHERE {_RELATION} ORDER BY time DESC,i.ref DESC,k.relation LIMIT :limit OFFSET :offset"""  # noqa: S608
 
 
 def incoming(
@@ -1461,9 +1471,16 @@ def incoming(
 
 
 def linking(
-    connection: sqlite3.Connection, targets: set[str], relations: list[str], *, exclude: str = ""
+    connection: sqlite3.Connection,
+    targets: set[str],
+    relations: list[str],
+    *,
+    exclude: str = "",
+    limit: int = -1,
+    offset: int = 0,
 ) -> tuple[Iterator[dict[str, object]], int]:
-    """Stream the items linking to any target through these relations, newest first, with their total.
+    """Stream the items linking to any target through these relations, newest first, from `offset` on and at most
+    `limit` of them, with their total.
 
     Each row names its `relation`, LINKS for an untyped link; an item linking through two of the relations
     appears once per relation.
@@ -1472,6 +1489,8 @@ def linking(
         **_parameters(targets),
         "exclude": exclude,
         "relations": json.dumps(["" if relation == LINKS else relation for relation in relations]),
+        "limit": limit,
+        "offset": offset,
     }
     total = connection.execute(_RELATION_TOTAL, values).fetchone()[0]
     rows = connection.execute(_RELATION_ROWS, values)

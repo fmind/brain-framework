@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -481,6 +482,58 @@ def test_note_reads_carry_backlinks_grouped_by_relation(brain: Store) -> None:
     # A record read also shows what cites it.
     record = read([brain], "meetings:decision-1")
     assert refs(cast("list[dict[str, object]]", record["backlinks"])[0]) == ["projects/offline.md"]
+
+
+def test_deep_listing_pages_skip_their_offset_in_sql_and_keep_their_order(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    times = ["2026-09-02T09:00:00Z", "2026-09-01T09:00:00Z", ""]
+    mail = [
+        Record(id=f"m{n:02}", title=f"Mail {n}", **({"time": times[n % 3]} if n % 3 < 2 else {})) for n in range(30)
+    ]
+    records_file(brain, "mail", mail)
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write("bf.yaml", b"version: 7\nname: team\n")
+    records_file(team, "mail", mail[:10])
+    monkeypatch.setattr(pages, "SECTION", 7)
+    statements: list[str] = []
+    connect = index._connect  # noqa: SLF001 - trace the listing queries each read runs
+
+    def traced(path: Path | str) -> sqlite3.Connection:
+        connection = connect(path)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(index, "_connect", traced)
+
+    def walk(stores: list[Store]) -> list[tuple[str, str]]:
+        seen: list[tuple[str, str]] = []
+        offset = 0
+        while True:
+            reply = read(stores, "memories/mail", offset=offset)
+            items = cast("list[dict[str, object]]", reply["items"])
+            seen.extend((str(item.get("brain", "")), str(item["ref"])) for item in items)
+            if "next_offset" not in reply:
+                assert reply["total"] == len(seen)
+                return seen
+            assert reply["next_offset"] == offset + len(items) == len(seen)
+            offset = cast("int", reply["next_offset"])
+
+    def ordered(*sources: tuple[str, list[Record]]) -> list[tuple[str, str]]:
+        # Newest first, then by ref, as the source page always ordered; undated records come last, and equal keys
+        # keep the order of the selected brains.
+        rows = [(record.time, f"mail:{record.id}", brain) for brain, records in sources for record in records]
+        return [(brain, ref) for _, ref, brain in sorted(rows, key=lambda row: row[:2], reverse=True)]
+
+    assert walk([brain]) == ordered(("", mail))
+    # One brain skips the offset in SQL instead of building every skipped row.
+    assert any("LIMIT 7 OFFSET 14" in statement for statement in statements)
+    statements.clear()
+    assert walk([brain, team]) == ordered(("fixture", mail), ("team", mail[:10]))
+    # Several brains each give their first offset + limit rows, which the merge skips.
+    assert any("LIMIT 21 OFFSET 0" in statement for statement in statements)
 
 
 def test_backlinks_preview_64_relation_groups_and_count_the_others(brain: Store, tmp_path: Path) -> None:
