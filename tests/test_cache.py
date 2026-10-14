@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import stat
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 from pathlib import Path
@@ -20,7 +21,7 @@ from typer.testing import CliRunner
 
 from bf import index, records, retrieve, storage
 from bf.cli import app
-from bf.models import Config, Error, Query, Record
+from bf.models import Config, Error, Query, Record, encode
 from bf.retrieve import read, search
 from bf.storage import BusyError, Store, building, writer
 from bf.validate import validate
@@ -134,7 +135,8 @@ def rows(store: Store) -> dict[str, object]:
         columns = "ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,tasks_open,tasks_done"
         return {
             "signature": connection.execute("SELECT signature FROM ontology").fetchall(),
-            "files": sorted(connection.execute("SELECT path,error FROM files")),
+            "files": sorted(connection.execute("SELECT path,tree,error FROM files")),
+            "trees": sorted(connection.execute("SELECT path,entries FROM trees")),
             "items": sorted(connection.execute(f"SELECT {columns},next,weight,stale_after,fields FROM items")),  # noqa: S608 - fixed columns
             "passages": sorted(
                 (passage[key], title, original)
@@ -168,9 +170,14 @@ def snapshot(store: Store) -> dict[str, object]:
     return {**answers, **rows(store)}
 
 
+@pytest.mark.parametrize("trusted", [False, True], ids=["listed", "trusted"])
 def test_incremental_refreshes_match_a_full_rebuild(
-    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, trusted: bool
 ) -> None:
+    if trusted:
+        # Each listed source folder is trusted at once, and each check ends by ageing them: only the folders the next
+        # step changes are listed again.
+        monkeypatch.setattr(index, "_SETTLE", -(1 << 62))
     index.refresh(brain)
     fills: list[tuple[bool, int, int]] = []
     filling = index._fill  # noqa: SLF001 - observe what each refresh indexes
@@ -181,7 +188,7 @@ def test_incremental_refreshes_match_a_full_rebuild(
         config: Config,
         *,
         new: bool,
-        compared: tuple[index.Fingerprints, index.Fingerprints] | None = None,
+        compared: index.Scan | None = None,
     ) -> dict[str, object]:
         result = filling(store, connection, config, new=new, compared=compared)
         if store.root == brain.root:
@@ -195,6 +202,8 @@ def test_incremental_refreshes_match_a_full_rebuild(
         fills.clear()
         incremental = snapshot(brain)
         assert fills == list(refreshes), step
+        if trusted:
+            age(brain)
         copy = tmp_path / f"rebuilt {step}"
         expected = snapshot(Store(shutil.copytree(brain.root, copy, ignore=shutil.ignore_patterns(".bf"))))
         assert incremental.keys() == expected.keys()
@@ -338,9 +347,11 @@ def test_a_search_or_status_scans_the_brain_once_even_when_it_refreshes(
     scans: list[Path] = []
     scanning = index.inputs
 
-    def counted(store: Store, counts: dict[str, int] | None = None) -> index.Fingerprints:
+    def counted(
+        store: Store, counts: dict[str, int] | None = None, reuse: Callable[[str, Any], bool] | None = None
+    ) -> tuple[index.Fingerprints, dict[str, index.Tree]]:
         scans.append(store.root)
-        return scanning(store, counts)
+        return scanning(store, counts, reuse)
 
     monkeypatch.setattr(index, "inputs", counted)
     brain.write("concepts/late.md", b"# Late\n\nOsmium evidence.\n")
@@ -359,17 +370,151 @@ def test_a_search_or_status_scans_the_brain_once_even_when_it_refreshes(
 
 def test_a_scan_compared_before_another_refresh_committed_is_scanned_again(brain: Store) -> None:
     index.refresh(brain)
-    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
-        known = index._known(connection)  # noqa: SLF001 - the files table a freshness check compared
     brain.write("concepts/evidence.md", b"---\ntype: concept\n---\n# Durable evidence\n\nEdited.\n")
-    scanned = index.inputs(brain)
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
+        compared = index._scan(brain, connection)  # noqa: SLF001 - what a freshness check compared
     # Before that check's refresh takes the writer lock, another one, as by bf update, indexes a newer note.
     brain.write("concepts/newer.md", b"# Newer\n\nOsmium.\n")
     assert index.refresh(brain)["changed"] == 2
     # The cache no longer holds what the check compared: reusing its scan would drop the newer note as removed.
-    assert index.refresh(brain, compared=(known, scanned)) == {"files": 5, "changed": 0, "removed": 0, "skipped": 0}
+    assert index.refresh(brain, compared=compared) == {"files": 5, "changed": 0, "removed": 0, "skipped": 0}
     with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
         assert connection.execute("SELECT count(*) FROM items WHERE ref='concepts/newer.md'").fetchone() == (1,)
+
+
+@pytest.fixture
+def settled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trust each listed source folder at once, as some seconds after collection: only folder fingerprints decide."""
+    monkeypatch.setattr(index, "_SETTLE", -(1 << 62))
+
+
+def age(store: Store) -> None:
+    """Give every source folder an old modification time, then let a check record it: any later change of a folder
+    gives it the current time, so a test never depends on how often the filesystem clock ticks."""
+    for folder in (store.root / "memories").iterdir():
+        os.utime(folder, ns=(1, 1))
+    assert index.fresh(store) == "ready"
+
+
+def listed(store: Store) -> set[str]:
+    """The source folders a freshness check lists now: changed, untrusted or vanished ones."""
+    with closing(sqlite3.connect(store.root / index.CACHE)) as connection:
+        scan = index._scan(store, connection)  # noqa: SLF001 - what a freshness check would compare
+    return {tree for tree in scan.scope if tree.startswith("memories/")}
+
+
+def frozen(at: int) -> Callable[[os.stat_result], tuple[int, int, int, int]]:
+    """Fingerprints from a filesystem whose clock stands still: a folder keeps its size and times, a file its times."""
+
+    def fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
+        return (0 if stat.S_ISDIR(info.st_mode) else info.st_size), at, at, info.st_ino
+
+    return fingerprint
+
+
+@pytest.mark.usefixtures("settled")
+def test_checks_list_only_changed_sources_and_see_every_record_collection_writes(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records_file(brain, "tickets", [Record(id="T-1", title="Osmium plan")])
+    age(brain)
+    assert listed(brain) == set()
+    assert refs(brain, "osmium") == ["tickets:T-1"]
+    # Collection's own writes rename records into place, which changes their folder: add, replace, then remove.
+    with writer(brain):
+        records.upsert(brain, "tickets", [Record(id="T-2", title="Iridium plan")], snapshot=False)
+    assert listed(brain) == {"memories/tickets"}
+    assert refs(brain, "iridium") == ["tickets:T-2"]
+    age(brain)
+    with writer(brain):
+        records.upsert(brain, "tickets", [Record(id="T-2", title="Rhodium plan")], snapshot=False)
+    assert refs(brain, "rhodium") == ["tickets:T-2"]
+    assert refs(brain, "iridium") == []
+    age(brain)
+    with writer(brain):
+        records.upsert(brain, "tickets", [Record(id="T-2", title="Rhodium plan")], snapshot=True)
+    assert refs(brain, "osmium") == []
+    assert listed(brain) == set()
+    # An unlisted source still counts its entries for the scan-limit warning.
+    monkeypatch.setattr(index, "CROWDED", 1)
+    warned = cast("list[dict[str, object]]", index.status(brain)["warnings"])
+    assert {(warning["directory"], warning["entries"]) for warning in warned} >= {("memories/meetings", 2)}
+
+
+@pytest.mark.usefixtures("settled")
+def test_a_source_folder_added_or_removed_is_seen(brain: Store) -> None:
+    age(brain)
+    records_file(brain, "tickets", [Record(id="T-1", title="Osmium plan")])
+    assert refs(brain, "osmium") == ["tickets:T-1"]
+    shutil.rmtree(brain.root / "memories/meetings")
+    assert listed(brain) == {"memories/meetings"}
+    assert refs(brain, "lunch") == []
+    assert listed(brain) == set()
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
+        assert connection.execute("SELECT path FROM trees").fetchall() == [("memories/tickets",)]
+
+
+def test_a_coarse_clock_cannot_hide_a_record_written_within_one_tick(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every time reads as now, as on a filesystem whose clock ticks slower than these writes: a folder changed twice
+    # keeps its times. Changed within _SETTLE of its listing, it is listed again instead of trusted.
+    monkeypatch.setattr(storage, "_fingerprint", frozen(time.time_ns()))
+    assert refs(brain, "lunch") == ["meetings:lunch"]
+    records_file(brain, "meetings", [Record(id="late", title="Osmium review")])
+    assert refs(brain, "osmium") == ["meetings:late"]
+    records_file(brain, "meetings", [Record(id="late", title="Iridium review")])
+    assert refs(brain, "iridium") == ["meetings:late"]
+    brain.delete(records.path("meetings", "lunch"))
+    assert refs(brain, "lunch") == []
+    assert listed(brain) == {"memories/meetings"}
+
+
+def test_a_filesystem_clock_lagging_beyond_the_settle_time_hides_changes_in_a_source_until_bf_build(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every time reads as an hour ago, as from a coarse network share whose clock lags this machine's: a folder
+    # changed now looks settled and keeps its times. Only this documented case leaves a collected change unseen.
+    monkeypatch.setattr(storage, "_fingerprint", frozen(time.time_ns() - 3600 * 10**9))
+    assert refs(brain, "lunch") == ["meetings:lunch"]
+    records_file(brain, "meetings", [Record(id="late", title="Osmium review")])
+    assert refs(brain, "osmium") == []
+    # A source folder added or removed still shows in the listing of memories/ itself.
+    records_file(brain, "tickets", [Record(id="T-1", title="Iridium plan")])
+    assert refs(brain, "iridium") == ["tickets:T-1"]
+    # bf build lists every folder.
+    index.refresh(brain, full=True)
+    assert refs(brain, "osmium") == ["meetings:late"]
+
+
+@pytest.mark.usefixtures("settled")
+def test_a_record_edited_in_place_waits_for_bf_build_but_a_skipped_one_is_read_again(brain: Store) -> None:
+    lunch = brain.root / records.path("meetings", "lunch")
+    brain.write(records.path("meetings", "broken"), b"{broken")
+    age(brain)
+    # Collection renames records into place; an edit in place, which only a person could make, keeps the folder.
+    lunch.write_bytes(lunch.read_bytes().replace(b"Lunch plans", b"Osmium plans"))
+    assert refs(brain, "osmium") == []
+    # A skipped file is stated at each check: fixing it in place, or restoring its permissions, is seen.
+    broken = brain.root / records.path("meetings", "broken")
+    broken.write_bytes(encode(Record(id="broken", title="Iridium repaired").model_dump(exclude_defaults=True)))
+    assert refs(brain, "iridium") == ["meetings:broken"]
+    index.refresh(brain, full=True)
+    assert refs(brain, "osmium") == ["meetings:lunch"]
+
+
+@pytest.mark.usefixtures("settled")
+def test_a_source_holding_a_folder_is_listed_at_every_check(brain: Store) -> None:
+    # A change below a nested folder leaves the source folder's own times unchanged.
+    brain.write("memories/meetings/nested/stray.json", b"{}")
+    age(brain)
+    assert listed(brain) == {"memories/meetings"}
+    brain.write("memories/meetings/nested/other.json", b"{}")
+    problems = cast("list[dict[str, str]]", search([brain], Query(text="lunch"), counted=False)["problems"])
+    assert {problem["file"] for problem in problems} == {
+        "memories/meetings/nested/stray.json",
+        "memories/meetings/nested/other.json",
+    }
 
 
 def test_reads_remove_the_file_a_killed_build_left_once_no_build_holds_it(brain: Store) -> None:

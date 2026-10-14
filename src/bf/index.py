@@ -10,9 +10,10 @@ import re
 import sqlite3
 import stat
 import time
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager, suppress
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import cache, lru_cache
 from pathlib import Path
 from typing import cast
@@ -40,7 +41,7 @@ from bf.models import (
 )
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, writer
 
-SCHEMA = 34
+SCHEMA = 35
 CACHE = ".bf/index.sqlite"
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
@@ -62,6 +63,12 @@ _PROBE = (
 )
 # Size, modification and change times in nanoseconds, and inode, of each brain-relative path.
 Fingerprints = dict[str, tuple[int, int, int, int]]
+# A listed source folder of memories/: its fingerprint, its entries and whether that fingerprint is trusted (1 or 0).
+Tree = tuple[int, int, int, int, int, int]
+# Nanoseconds a source folder must stay unchanged before its fingerprint is trusted. Records are renamed into place,
+# so adding, replacing or removing one changes its folder's times; but a filesystem with a coarse clock, such as FAT's
+# 2-second times, keeps them for a second change within one tick. A folder changed this recently is listed again.
+_SETTLE = 5_000_000_000
 # `file` binds a generation to the database file bf created: a cache copied, cloned or extracted from
 # elsewhere has another inode, so it is rebuilt from the brain's files instead of trusted.
 _TOKENIZER = "porter unicode61 remove_diacritics 2"
@@ -70,8 +77,13 @@ CREATE TABLE ontology(signature TEXT NOT NULL, file TEXT NOT NULL);
 -- A rowid table: secondary indexes of a WITHOUT ROWID table would copy its whole composite key.
 CREATE TABLE edges(item INTEGER NOT NULL, subject TEXT NOT NULL, relation TEXT NOT NULL, target TEXT NOT NULL,
                    origin TEXT NOT NULL);
-CREATE TABLE files(path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, ctime INTEGER, inode INTEGER,
-                   error TEXT NOT NULL DEFAULT '');
+-- `tree` names the scanned tree holding a file: its authored folder, memories/ itself or one source folder below it.
+CREATE TABLE files(path TEXT PRIMARY KEY, tree TEXT NOT NULL, size INTEGER, mtime INTEGER, ctime INTEGER,
+                   inode INTEGER, error TEXT NOT NULL DEFAULT '');
+-- Each listed source folder of memories/: its fingerprint, stated before its listing, its entries and whether an
+-- unchanged fingerprint proves its listing unchanged, so a freshness check need not list it again.
+CREATE TABLE trees(path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER NOT NULL, ctime INTEGER NOT NULL,
+                   inode INTEGER NOT NULL, entries INTEGER NOT NULL, trusted INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT NOT NULL, kind TEXT NOT NULL,
                    source TEXT NOT NULL, title TEXT NOT NULL, time TEXT NOT NULL, type TEXT NOT NULL,
                    status TEXT NOT NULL, lead TEXT NOT NULL, url TEXT NOT NULL,
@@ -110,6 +122,8 @@ _INDEXES = (
     "CREATE INDEX tags_target ON tags(target)",
     # Every reply looks for skipped files, usually none: only their rows are indexed.
     "CREATE INDEX files_problems ON files(path) WHERE error!=''",
+    # A freshness check compares the files of the trees it lists, never those of an unchanged source folder.
+    "CREATE INDEX files_tree ON files(tree)",
 )
 # Only English and French function words are dropped: a subject such as "resume", "active" or "comment" stays
 # literal. English words that stem to one of them, such as "one" to "on", drop too: they would match nearly every text.
@@ -160,25 +174,148 @@ ENTRY = (
 )
 
 
-def inputs(store: Store, counts: dict[str, int] | None = None) -> Fingerprints:
-    """Authored notes and record files with their file fingerprints.
+def inputs(
+    store: Store,
+    counts: dict[str, int] | None = None,
+    reuse: Callable[[str, tuple[int, int, int, int]], bool] | None = None,
+) -> tuple[Fingerprints, dict[str, Tree]]:
+    """Authored notes and record files with their file fingerprints, and each listed source folder of memories/.
 
     Every symlink, special entry or unaddressable name stays an input so its exclusion is reported. A link can
     hide a whole directory regardless of its filename; never inspect its target to guess its contents. Editor
     locks beside authored files are neither: an open editor must not fail updates. The scan limit bounds each
     authored folder and each source of memories/ on its own; `counts` receives their entries.
+
+    A source folder that `reuse` accepts by its fingerprint is not listed: the cache answers for its files and
+    entries. Each listed one comes with its fingerprint, stated before its listing, and its entries. It is trusted
+    when it holds no folder, whose own changes would leave it unchanged, and had been unchanged for _SETTLE: any
+    later change then gives it other times.
     """
+    started = time.time_ns()
     found: Fingerprints = {}
+    tally: dict[str, int] = {}
+    folders: dict[str, tuple[int, int, int, int]] = {}
+
+    def listing(tree: str, stamp: tuple[int, int, int, int]) -> bool:
+        if reuse is not None and reuse(tree, stamp):
+            return True
+        folders[tree] = stamp
+        return False
+
+    held: dict[str, int] = {}
+    unlisted: Fingerprints = {}
     for directory in (*AUTHORED, "memories"):
         skipped: Fingerprints = {}
-        scanned = store.scan(directory, skipped=skipped, split=directory == "memories", counts=counts)
         if directory == "memories":
+            scanned = store.scan(directory, skipped=skipped, split=True, counts=tally, reuse=listing)
+            # A source folder's entries are its files and skipped entries, unless it holds another folder.
+            for name in (*scanned, *skipped):
+                held[_tree(name)] = held.get(_tree(name), 0) + 1
+            # A source folder that cannot be opened is skipped whole, never listed.
+            unlisted = skipped
             found.update({name: info for name, info in scanned.items() if records.stored(name)})
             found.update(skipped)
             continue
+        scanned = store.scan(directory, skipped=skipped, counts=tally)
         found.update({name: info for name, info in scanned.items() if authored(name) and not editor_lock(name)})
         found.update({name: info for name, info in skipped.items() if not editor_lock(name)})
+    if counts is not None:
+        counts.update(tally)
+    trees: dict[str, Tree] = {}
+    for tree, stamp in folders.items():
+        if tree not in unlisted:
+            entries = tally.get(tree, 0)
+            settled = max(stamp[1], stamp[2]) < started - _SETTLE
+            trees[tree] = (*stamp, entries, int(settled and entries == held.get(tree, 0)))
+    return found, trees
+
+
+def _tree(path: str) -> str:
+    """The scanned tree holding a path: its authored folder, memories/ itself or one source folder below it."""
+    parts = path.split("/", 2)
+    return f"memories/{parts[1]}" if parts[0] == "memories" and len(parts) == 3 else parts[0]
+
+
+@dataclass(frozen=True)
+class Scan:
+    """One comparison of a brain's files with a cache generation.
+
+    `scope` names the trees whose files were compared: the authored folders, memories/ itself and each source folder
+    that was listed or has vanished. `known` and `current` hold the cache's and the brain's fingerprints of their
+    files; `stored` holds every source folder row the cache had, and `trees` the rows of the listed ones.
+    """
+
+    scope: frozenset[str]
+    stored: dict[str, Tree]
+    known: Fingerprints
+    current: Fingerprints
+    trees: dict[str, Tree]
+
+    def matches(self) -> bool:
+        """Whether every compared file matches the cache, which then answers as it is."""
+        return self.known == self.current
+
+    def unchanged(self) -> bool:
+        """Whether the cache needs no write: its files and its rows of the listed folders match."""
+        return self.matches() and self.trees == {tree: row for tree, row in self.stored.items() if tree in self.scope}
+
+
+def _scan(store: Store, connection: sqlite3.Connection | None, counts: dict[str, int] | None = None) -> Scan:
+    """Compare the brain's files with a generation, listing only the source folders that may have changed.
+
+    A source folder is not listed while its fingerprint matches its trusted row and none of its skipped files
+    changed in place; `counts` then receives its entries from that row. Without a connection, as for a new
+    generation, every folder is listed.
+    """
+    stored = _trees(connection) if connection is not None else {}
+    dirty = _dirty(store, connection, stored) if connection is not None else set()
+    reused: set[str] = set()
+
+    def reuse(tree: str, stamp: tuple[int, int, int, int]) -> bool:
+        row = stored.get(tree)
+        if row is None or not row[5] or row[:4] != stamp or tree in dirty:
+            return False
+        reused.add(tree)
+        return True
+
+    tally: dict[str, int] = {}
+    current, trees = inputs(store, tally, reuse)
+    if counts is not None:
+        counts.update(tally)
+        counts.update({tree: stored[tree][4] for tree in reused if stored[tree][4]})
+    scope = frozenset({*AUTHORED, "memories", *trees, *(stored.keys() - reused)})
+    known = _known(connection, scope) if connection is not None else {}
+    return Scan(scope, stored, known, current, trees)
+
+
+def _dirty(store: Store, connection: sqlite3.Connection, stored: Mapping[str, Tree]) -> set[str]:
+    """Trusted source folders holding a skipped file changed in place, as when its permissions are restored.
+
+    Such a change leaves its folder's fingerprint as it was. A link or special file changes only by being replaced,
+    which changes its folder, and an unaddressable name cannot be stated.
+    """
+    found: set[str] = set()
+    cursor = connection.cursor()
+    cursor.row_factory = None
+    for path, *stamp in cursor.execute("SELECT path,size,mtime,ctime,inode FROM files WHERE error!=''"):
+        tree = _tree(path)
+        if tree in found or tree not in stored or not stored[tree][5]:
+            continue
+        try:
+            same = store.fingerprint(path) == tuple(stamp)
+        except Error:
+            continue
+        except OSError:
+            same = False
+        if not same:
+            found.add(tree)
     return found
+
+
+def _trees(connection: sqlite3.Connection) -> dict[str, Tree]:
+    cursor = connection.cursor()
+    cursor.row_factory = None
+    return {row[0]: row[1:] for row in cursor.execute("SELECT path,size,mtime,ctime,inode,entries,trusted FROM trees")}
 
 
 @contextmanager
@@ -339,11 +476,23 @@ def _create(store: Store, config: Config) -> sqlite3.Connection:
     return connection
 
 
-def _known(connection: sqlite3.Connection) -> Fingerprints:
+def _known(connection: sqlite3.Connection, scope: Collection[str]) -> Fingerprints:
+    """The fingerprints of the files of these trees, as a generation holds them."""
     cursor = connection.cursor()
-    # Plain tuples: every reply's freshness check reads the fingerprint of every indexed file.
+    # Plain tuples: a freshness check reads the fingerprint of every file it compares.
     cursor.row_factory = None
-    return {row[0]: row[1:] for row in cursor.execute("SELECT path,size,mtime,ctime,inode FROM files")}
+    return {
+        row[0]: row[1:]
+        for row in cursor.execute(
+            "SELECT path,size,mtime,ctime,inode FROM files WHERE tree IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(scope)),),
+        )
+    }
+
+
+def _holds(connection: sqlite3.Connection, scan: Scan) -> bool:
+    """Whether a generation still holds what a scan compared, so no other refresh has committed since."""
+    return _trees(connection) == scan.stored and _known(connection, scan.scope) == scan.known
 
 
 def _drop(connection: sqlite3.Connection, path: str) -> None:
@@ -567,15 +716,15 @@ def refresh(
     full: bool = False,
     wait: float = 30,
     recover: bool = False,
-    compared: tuple[Fingerprints, Fingerprints] | None = None,
+    compared: Scan | None = None,
 ) -> dict[str, object]:
     """Re-index only changed files; a file that fails to parse is skipped and reported, not fatal.
 
-    `full`, or a cache that is missing or incompatible, builds a new generation. `full` and `recover` first roll
-    back an interrupted record transaction, as build and update do; reads refuse to apply its journal instead.
-    `recover` also checks every page of the live generation: a damaged one is discarded and built again.
-    `compared` holds the cache's fingerprints and the brain's that a freshness check just compared: while the
-    cache still holds the former, the refresh indexes from that scan instead of scanning the brain again.
+    `full`, or a cache that is missing or incompatible, builds a new generation, listing every folder. `full` and
+    `recover` first roll back an interrupted record transaction, as build and update do; reads refuse to apply its
+    journal instead. `recover` also checks every page of the live generation: a damaged one is discarded and built
+    again. `compared` is the scan a freshness check just made: while the cache still holds what it compared, the
+    refresh indexes from that scan instead of scanning the brain again.
     """
     try:
         try:
@@ -627,9 +776,7 @@ def _discard(store: Store, wait: float) -> None:
         _remove(store, CACHE)
 
 
-def _refresh(
-    store: Store, *, full: bool, wait: float, recover: bool, compared: tuple[Fingerprints, Fingerprints] | None
-) -> dict[str, object]:
+def _refresh(store: Store, *, full: bool, wait: float, recover: bool, compared: Scan | None) -> dict[str, object]:
     if not full and (result := _incremental(store, wait=wait, recover=recover, compared=compared)) is not None:
         return result
     with building(store, wait):
@@ -642,9 +789,7 @@ def _refresh(
         return _build(store, wait)
 
 
-def _incremental(
-    store: Store, *, wait: float, recover: bool, compared: tuple[Fingerprints, Fingerprints] | None
-) -> dict[str, object] | None:
+def _incremental(store: Store, *, wait: float, recover: bool, compared: Scan | None) -> dict[str, object] | None:
     """Update the live generation in place; None when there is no compatible one."""
     with writer(store, wait):
         if recover:
@@ -724,7 +869,7 @@ def _fill(
     config: Config,
     *,
     new: bool,
-    compared: tuple[Fingerprints, Fingerprints] | None = None,
+    compared: Scan | None = None,
 ) -> dict[str, object]:
     """Index changed files in one transaction; a new generation has nothing to drop and then gains its indexes.
 
@@ -733,14 +878,21 @@ def _fill(
     """
     # Keep the index B-trees being written in memory: up to 64 MiB, released when the refresh closes.
     connection.execute("PRAGMA cache_size=-65536")
-    known = _known(connection)
-    # A freshness check's scan still applies while the cache holds the fingerprints it was compared with, so no
-    # other refresh has committed since; as during a build, a file changed after the scan no longer matches.
-    current = compared[1] if compared is not None and compared[0] == known else inputs(store)
+    # A freshness check's scan still applies while the cache holds what it compared, so no other refresh has
+    # committed since; as during a build, a file or folder changed after the scan no longer matches.
+    if compared is None or new or not _holds(connection, compared):
+        compared = _scan(store, None if new else connection)
+    known, current = compared.known, compared.current
     # A file's problem depends on its own bytes and the configuration signature: an unchanged
     # fingerprint keeps its result.
     changed = sorted(path for path, info in current.items() if known.get(path) != info)
     removed = sorted(known.keys() - current.keys())
+    vanished = sorted((compared.stored.keys() & compared.scope) - compared.trees.keys())
+    # The files of the source folders the scan did not list, which keep their rows.
+    kept = connection.execute(
+        "SELECT count(*) FROM files WHERE tree NOT IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(compared.scope)),),
+    ).fetchone()[0]
     with connection:
         connection.execute("BEGIN")
         for path in () if new else (removed + changed):
@@ -771,18 +923,23 @@ def _fill(
                 connection.execute("ROLLBACK TO file")
                 connection.execute("RELEASE file")
                 connection.execute(
-                    "INSERT INTO files VALUES(?,?,?,?,?,?)",
-                    (path, -1, -1, -1, -1, "unreadable file; retried next time"),
+                    "INSERT INTO files VALUES(?,?,?,?,?,?,?)",
+                    (path, _tree(path), -1, -1, -1, -1, "unreadable file; retried next time"),
                 )
                 continue
             connection.execute("RELEASE file")
-            connection.execute("INSERT INTO files VALUES(?,?,?,?,?,?)", (path, *current[path], error))
+            connection.execute("INSERT INTO files VALUES(?,?,?,?,?,?,?)", (path, _tree(path), *current[path], error))
+        connection.executemany("DELETE FROM trees WHERE path=?", [(tree,) for tree in vanished])
+        connection.executemany(
+            "INSERT OR REPLACE INTO trees VALUES(?,?,?,?,?,?,?)",
+            [(tree, *row) for tree, row in sorted(compared.trees.items()) if compared.stored.get(tree) != row],
+        )
         for statement in _INDEXES if new else ():
             connection.execute(statement)
         # PRAGMA has no bound-parameter form; SCHEMA is an internal integer constant.
         connection.execute(f"PRAGMA user_version={SCHEMA}")
     skipped = connection.execute("SELECT count(*) FROM files WHERE error!=''").fetchone()[0]
-    return {"files": len(current), "changed": len(changed), "removed": len(removed), "skipped": skipped}
+    return {"files": len(current) + kept, "changed": len(changed), "removed": len(removed), "skipped": skipped}
 
 
 def _capped(text: str) -> str:
@@ -809,12 +966,16 @@ def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
 
     `counts` receives the entries of each scanned tree, as from `inputs`, when the check scans the brain.
     Never call it while holding the generation lock: its refresh may publish a rebuilt generation.
+
+    The check lists the authored folders and memories/ itself, but only the source folders whose fingerprint
+    changed or is not trusted yet: records are renamed into place, so collection always changes their folder. A
+    record file edited in place, which collection never does, therefore waits for bf build.
     """
     # The cache folder's own checks come first: they name the problem more precisely than a lock would.
     _path(store)
     _sweep(store)
     connection = None
-    compared: tuple[Fingerprints, Fingerprints] | None = None
+    compared: Scan | None = None
     try:
         with generation(store, shared=True, wait=_PUBLISH):
             connection = _open(store)
@@ -825,8 +986,8 @@ def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
                     if connection is not None:
                         if counts is not None:
                             counts.clear()
-                        compared = (_known(connection), inputs(store, counts))
-                        if compared[0] == compared[1]:
+                        compared = _scan(store, connection, counts)
+                        if compared.unchanged():
                             return "ready"
             finally:
                 if connection is not None:
@@ -838,12 +999,13 @@ def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
         if not _damaged(error):
             raise
         # Nothing to serve: the refresh below discards the damaged generation and builds another.
-        connection = None
+        connection, compared = None, None
     try:
         # Without any usable generation there is nothing to serve, so wait for the other writer or build.
         refresh(store, wait=0 if connection is not None else 120, compared=compared)
     except BusyError:
-        return "busy"
+        # A check whose files all matched only had folder rows to update: the cache answers as it is.
+        return "ready" if compared is not None and compared.matches() else "busy"
     return "ready"
 
 

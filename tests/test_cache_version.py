@@ -13,7 +13,7 @@ from bf.models import digest, encode
 from bf.storage import Store
 
 # The digest of the layout and rows a full build of BRAIN stores, recorded with the index.SCHEMA that stores them.
-PROJECTION = (34, "a2fcc0d6de161736d06bb55341df9e728c4b758849f7809aecf83224273fc34e")
+PROJECTION = (35, "92d63ac28b616b5b680a77aeeac273e1566d4ae6b0cd28641baa2a19652c3a4f")
 # Fixed input covering what indexing projects: notes, sections, tasks, links, claims, facts, records and problems.
 BRAIN = {
     "bf.yaml": """version: 7
@@ -108,7 +108,7 @@ RECORDS = {
 
 def projection(path: Path) -> str:
     """Every table and index as created and every stored row, naming items and passages by ref instead of row
-    number, without file fingerprints."""
+    number, without file and folder fingerprints."""
     with closing(sqlite3.connect(path)) as connection:
         # A new column or index changes a cache like a new row. FTS5 creates its own shadow tables, and root pages
         # follow the build's write order.
@@ -130,7 +130,8 @@ def projection(path: Path) -> str:
             rows = []
             for values in cursor:
                 row = dict(zip(columns, values, strict=True))
-                for volatile in ("id", "mtime", "ctime", "inode"):
+                # A folder's size depends on its filesystem, and its trust on how long ago the build changed it.
+                for volatile in ("id", "mtime", "ctime", "inode", *(("size", "trusted") if name == "trees" else ())):
                     row.pop(volatile, None)
                 if "item" in row:
                     row["item"] = refs[row["item"]]

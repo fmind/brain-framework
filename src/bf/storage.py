@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path, PurePosixPath
 
@@ -249,6 +249,7 @@ class Store:
         split: bool = False,
         counts: dict[str, int] | None = None,
         fingerprints: bool = True,
+        reuse: Callable[[str, tuple[int, int, int, int]], bool] | None = None,
     ) -> dict[str, tuple[int, int, int, int]]:
         """Regular files below a directory, fingerprinted by the traversal's own no-follow stats.
 
@@ -260,6 +261,8 @@ class Store:
         directory, or with `split`, its own listing and each subdirectory's tree, such as one source of memories/.
         `counts` receives the entries of each tree. Without `fingerprints`, the directory listing alone types regular
         files and folders, without a stat each, and their fingerprints are zero.
+        With `split`, `reuse` receives each subdirectory tree's path and its folder's fingerprint, stated before it
+        is listed; a tree it accepts is neither listed nor counted, so the caller answers for its files.
         """
         relative(directory)
         result: dict[str, tuple[int, int, int, int]] = {}
@@ -285,6 +288,8 @@ class Store:
                             mode, stamp = info.st_mode, _fingerprint(info)
                         # An unaddressable folder is reported whole, like a linked one: its entries have no ref.
                         opened = stat.S_ISDIR(mode) and shown is None
+                        if opened and split and prefix == directory and reuse is not None and reuse(path, stamp):
+                            continue
                         child = os.open(entry.name, _DIR, dir_fd=fd) if opened else None
                     except FileNotFoundError:
                         # Removed after listing, as by an editor's atomic save; later refreshes compare again.
