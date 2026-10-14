@@ -13,6 +13,8 @@ REPLY_BYTES = 4 << 20
 TIMEOUT = 120
 MAX_PROJECT_PAGES = 100
 TASK_PREVIEW = 10
+# How the home page's attention entries describe a scheduled program's freshness on this machine.
+STATES = {"never": "never succeeded on this machine", "overdue": "overdue"}
 
 
 def page(brain: str, ref: str = "", offset: int = 0) -> dict:
@@ -106,7 +108,29 @@ def mention(item: dict) -> str:
     return f"{plain(item.get('title', item['ref']))} ({code(ref)})"
 
 
+def attention(home: dict) -> list[str]:
+    """One line per scheduled program that the home page says failed or is late on this machine.
+
+    Program names come from bf.yaml; code spans keep them inert.
+    """
+    lines = []
+    for entry in home.get("attention", []):
+        kind = next((kind for kind in ("sensor", "routine", "prompt") if entry.get(kind)), "")
+        if not kind:
+            continue
+        where = f" in brain {code(entry['brain'])}" if entry.get("brain") else ""
+        state = [STATES[entry["freshness"]]] if entry.get("freshness") in STATES else []
+        state += ["last attempt failed"] if entry.get("failed") else []
+        lines.append(f"- {kind.capitalize()} {code(entry[kind])}{where}: {'; '.join(state) or 'needs attention'}.")
+    return lines
+
+
 def render(day: str, home: dict, week: dict) -> Iterator[str]:
+    """The review action: an empty section says so when a late or failing sensor may explain it."""
+    late = attention(home)
+    # Only sensors collect the evidence that the period and the coming week count.
+    gap = any(entry.get("sensor") for entry in home.get("attention", []))
+    qualifier = ", and a sensor needing attention may have missed some" if gap else ""
     review = sorted(
         (project for project in home.get("projects", []) if project.get("review")),
         key=lambda project: ("due" not in project.get("review_reasons", []), project.get("review_due", "")),
@@ -126,6 +150,13 @@ def render(day: str, home: dict, week: dict) -> Iterator[str]:
         "Update the owning notes and check off completed tasks there. "
         "Set `status: stable` when this review is ready to rely on. This action changes nothing by itself."
     )
+    if late:
+        yield ""
+        yield "## Programs needing attention"
+        yield ""
+        yield from late
+        yield ""
+        yield "Check `bf status` and each program's log; a sensor that did not collect leaves its evidence out below."
     yield ""
     yield "## Projects to review"
     yield ""
@@ -158,7 +189,12 @@ def render(day: str, home: dict, week: dict) -> Iterator[str]:
     yield "## Last seven days"
     yield ""
     sources = ", ".join(f"{plain(s['source'])} {s['records']}" for s in week.get("sources", []))
-    yield f"- {week.get('total', 0)} items in the period" + (f"; records by source: {sources}" if sources else "")
+    period = f"- {week.get('total', 0)} items in the period"
+    if sources:
+        period += f"; records by source: {sources}"
+    elif not week.get("total"):
+        period += qualifier
+    yield period
     for key, label in (("changed", "Notes changed"), ("actions", "Recent actions")):
         if home.get(key):
             yield f"- {label}: " + ", ".join(mention(item) for item in home[key])
@@ -168,11 +204,14 @@ def render(day: str, home: dict, week: dict) -> Iterator[str]:
     for item in home.get("upcoming", []):
         yield f"- {when(item)}: {mention(item)}"
     if not home.get("upcoming"):
-        yield "Nothing is scheduled."
+        yield f"No upcoming item was collected{qualifier}."
     yield ""
     yield "## Resume"
     yield ""
-    yield "Review the listed projects and open tasks in their owning notes; record decisions there with evidence refs."
+    resume = (
+        "Review the listed projects and open tasks in their owning notes; record decisions there with evidence refs."
+    )
+    yield f"Repair the programs needing attention first. {resume}" if late else resume
 
 
 def main(argv: list[str]) -> int:
@@ -193,6 +232,7 @@ def main(argv: list[str]) -> int:
         not any(p.get("review") for p in home.get("projects", []))
         and not week.get("total")
         and not home["tasks"]["total"]
+        and not attention(home)
     ):
         return 0  # Nothing to review: no output, so no action is written.
     sys.stdout.write("\n".join(render(day, home, week)) + "\n")

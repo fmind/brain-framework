@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import importlib.util
 from datetime import datetime
+from pathlib import Path
+from types import ModuleType
 
 from bf.markdown import note, validate_okf
 from conftest import Provider
 
+ROOT = Path(__file__).parents[1]
 END = "2026-09-25T08:00:00.000000Z"
 PROJECT = {
     "brain": "brain",
@@ -255,3 +259,51 @@ def test_weekly_review_lists_overdue_projects_first(provider: Provider) -> None:
         result.stdout.index("- Due first") < result.stdout.index("- Due later") < result.stdout.index("- New evidence")
     )
     assert note("actions/2026-09-25_weekly-review/ACTION.md", result.stdout.encode()).tasks == []
+
+
+def weekly_review() -> ModuleType:
+    """The routine as a module: its rendering is a pure function of the pages it read."""
+    spec = importlib.util.spec_from_file_location("weekly_review", ROOT / "examples/routines/weekly-review.py")
+    assert spec
+    assert spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_weekly_review_qualifies_empty_sections_while_a_sensor_needs_attention() -> None:
+    # A calendar that never collected leaves the coming week empty: "Nothing is scheduled" would be a false claim.
+    attention = [
+        {"sensor": "calendar", "freshness": "never", "failed": True},
+        {"routine": "backup", "freshness": "overdue"},
+        {"brain": "team", "prompt": "assistant", "freshness": "fresh", "failed": True},
+    ]
+    home = {"projects": [], "tasks": EMPTY_TASKS, "upcoming": [], "attention": attention}
+    text = "\n".join(weekly_review().render("2026-09-25", home, {"total": 0}))
+    lines = text.splitlines()
+    assert lines.index("## Programs needing attention") < lines.index("## Projects to review")
+    assert "- Sensor `calendar`: never succeeded on this machine; last attempt failed." in lines
+    assert "- Routine `backup`: overdue." in lines
+    assert "- Prompt `assistant` in brain `team`: last attempt failed." in lines
+    assert "- 0 items in the period, and a sensor needing attention may have missed some" in lines
+    assert "No upcoming item was collected, and a sensor needing attention may have missed some." in lines
+    assert lines[-1].startswith("Repair the programs needing attention first.")
+    validate_okf("actions/2026-09-25_weekly-review/ACTION.md", text.encode())
+
+
+def test_weekly_review_states_empty_sections_plainly_when_every_sensor_is_current() -> None:
+    # A late routine collects no evidence: the empty sections need no qualification.
+    home = {"projects": [], "tasks": EMPTY_TASKS, "attention": [{"routine": "backup", "freshness": "overdue"}]}
+    lines = list(weekly_review().render("2026-09-25", home, {"total": 0}))
+    assert "- 0 items in the period" in lines
+    assert "No upcoming item was collected." in lines
+
+
+def test_weekly_review_reports_programs_needing_attention_alone(provider: Provider) -> None:
+    # Nothing else to review is no reason to stay silent about a failing sensor.
+    home = {"page": "", "projects": [], "attention": [{"sensor": "mail", "freshness": "overdue"}]}
+    pages(provider, home, {"page": "7d", "total": 0})
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert result.returncode == 0, result.stderr
+    assert "- Sensor `mail`: overdue." in result.stdout.splitlines()
+    validate_okf("actions/2026-09-25_weekly-review/ACTION.md", result.stdout.encode())
