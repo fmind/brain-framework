@@ -19,6 +19,8 @@ JSON: TypeAlias = "bool | int | float | str | list[JSON] | dict[str, JSON] | Non
 
 MAX_REPLY = 4 << 20  # UTF-8 bytes of one bf reply, and characters of one assembled text.
 PAGING = ("offset", "next_offset", "total_characters", "outline", "outline_truncated")
+# Any page can report an incomplete read: the assembled reply keeps every page's, once each.
+LIMITS = ("problems", "stale")
 MAX_INPUT = 9 << 20  # Two bounded bf replies, plus the small capture envelope.
 # The set bf replies escape: DEL and C1 controls, which JSON leaves raw and some terminals obey, such as U+009B CSI,
 # and every Unicode format character (category Cf), such as bidi controls and zero-width and tag characters.
@@ -98,6 +100,7 @@ def exact(ref: str, brain: str) -> dict[str, JSON]:
     """Follow next_offset through an exact read's text pages; every page names the same file digest."""
     first: dict[str, JSON] = {}
     pieces: list[str] = []
+    limits: dict[str, list[JSON]] = {key: [] for key in LIMITS}
     offset = 0
     while True:
         # bf reads offline and never runs sensors. Its diagnostics may contain private paths: discard them.
@@ -124,6 +127,11 @@ def exact(ref: str, brain: str) -> dict[str, JSON]:
                 raise ValueError("unexpected page")
         elif (reply.get("total_characters"), reply.get("sha256")) != (first["total_characters"], first["sha256"]):
             raise ValueError("the reply changed while reading")
+        for key, kept in limits.items():
+            found = reply.get(key, [])
+            if not isinstance(found, list):
+                raise ValueError("unexpected page")
+            kept.extend(value for value in found if value not in kept)
         piece = text_of(reply)
         pieces.append(piece)
         offset += len(piece)
@@ -132,7 +140,8 @@ def exact(ref: str, brain: str) -> dict[str, JSON]:
         if reply["next_offset"] != offset or not piece or offset >= cast("int", first["total_characters"]):
             raise ValueError("unexpected continuation")
     text = "".join(pieces)
-    whole = {key: value for key, value in first.items() if key not in PAGING}
+    whole = {key: value for key, value in first.items() if key not in (*PAGING, *LIMITS)}
+    whole.update({key: kept for key, kept in limits.items() if kept})
     if offset != first["total_characters"]:
         raise ValueError("the reply changed while reading")
     if "record" in whole:

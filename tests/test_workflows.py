@@ -294,6 +294,31 @@ def test_read_rejects_changed_or_incomplete_pages(brain: Store, provider: Provid
     ]
 
 
+@pytest.mark.parametrize("page", [0, 1, -1], ids=["first", "second", "last"])
+def test_read_keeps_the_limitations_of_every_page(brain: Store, provider: Provider, page: int) -> None:
+    # A writer can start between two pages: a later page's stale cache or skipped file makes the whole read incomplete.
+    brain.write("projects/large.md", ("# Large\n\n" + LARGE).encode())
+    ref = "projects/large.md"
+    replies = paged(brain, ref)
+    assert len(replies) > 2
+    problem = {"brain": "fixture", "file": "projects/other.md", "error": "unreadable"}
+    replies[page] = {**replies[page], "stale": ["fixture"], "problems": [problem]}
+    # The same limitation on two pages is reported once.
+    replies[-2] = {**replies[-2], "stale": ["fixture"]}
+    provider.install("bf", [{"match": ["read"], "stdout": reply} for reply in replies])
+    result = provider.run(
+        "evidence.py", "read", ref, "--brain", "/brains/selected", folder="../src/bf/skills/bf-use/scripts"
+    )
+    assert result.returncode == 0, result.stderr
+    whole = json.loads(result.stdout)
+    assert (whole["stale"], whole["problems"]) == (["fixture"], [problem])
+    assert whole["text"] == "# Large\n\n" + LARGE
+    assert execute("capture", whole).returncode == 1
+    saved = run("capture", {key: value for key, value in whole.items() if key not in {"stale", "problems"}})
+    compared = run("compare", saved, whole)
+    assert (compared["state"], compared["limitations"]) == ("unknown", ["incomplete read"])
+
+
 def test_output_escapes_terminal_controls_and_keeps_capture_digests(provider: Provider) -> None:
     # bf escapes DEL and C1 controls, such as U+009B CSI, and bidi or invisible format characters in its replies; the
     # helper never re-emits them raw.
