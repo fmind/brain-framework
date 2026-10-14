@@ -746,7 +746,7 @@ def memories(
     now = now or datetime.now(UTC)
     if len(parts) == 1:
         if offset:
-            raise Error("offset applies to a source's records; read memories/SOURCE")
+            raise InputError("offset applies to a source's records; read memories/SOURCE", "offset")
 
         def overview(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
             counts = index.sources(connection)
@@ -931,10 +931,15 @@ def page(
     counted: bool = True,
     single: bool = False,
 ) -> dict[str, object] | None:
-    """The page a ref names, or None when it names a note, a record or an identity; `single` as for `home`."""
+    """The page a ref names, or None when it names a note, a record or an identity; `single` as for `home`.
+
+    An offset on a page that is never paged is invalid input, decided by the ref alone.
+    """
     if not path:
         if offset:
-            raise Error("offset applies to listing pages; follow a home page's projects, actions or period link")
+            raise InputError(
+                "offset applies to listing pages; follow a home page's projects, actions or period link", "offset"
+            )
         return home(stores, now, counted=counted, single=single)
     target = route(path, now)
     match target.kind:

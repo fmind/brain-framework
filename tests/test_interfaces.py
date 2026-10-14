@@ -164,6 +164,8 @@ def test_console_errors_are_private_and_on_stderr(
         (["search", "x", "--offset", "-1"], 2),
         (["search", "   "], 2),
         (["read", "projects", "--offset", "-1"], 2),
+        (["read", "memories", "--offset", "1"], 2),
+        (["read", "--offset", "1"], 2),
         (["search", "x", "--scope", "soon"], 2),
         (["read", "bf://"], 2),
         (["read", "2026-13"], 2),

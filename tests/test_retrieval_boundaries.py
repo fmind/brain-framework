@@ -193,10 +193,16 @@ def test_cli_and_mcp_accept_continuations(brain: Store, tmp_path: Path) -> None:
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("ref", ["", "memories", "repo:example/project", "projects/offline.md#decision"])
-def test_summary_pages_do_not_silently_ignore_offsets(brain: Store, ref: str) -> None:
-    with pytest.raises(Error, match="offset"):
+@pytest.mark.parametrize(
+    ("ref", "invalid"),
+    [("", True), ("memories", True), ("repo:example/project", False), ("projects/offline.md#decision", False)],
+)
+def test_summary_pages_do_not_silently_ignore_offsets(brain: Store, ref: str, *, invalid: bool) -> None:
+    # The home page and the sources overview are never paged: their ref alone makes an offset invalid input.
+    with pytest.raises(Error, match="offset") as raised:
         retrieve.read([brain], ref, offset=1)
+    assert isinstance(raised.value, InputError) is invalid
+    assert getattr(raised.value, "argument", "offset") == "offset"
 
 
 @pytest.mark.parametrize("ref", ["topic:missing", "projects/absent.md", "gmail:absent"])
