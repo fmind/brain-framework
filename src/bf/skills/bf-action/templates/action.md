@@ -34,4 +34,4 @@ Last verified state, blockers and the exact next action, within the Resume budge
 
 ## Outcome
 
-What was delivered, where it lives in `outputs/`, and what changed in the owning notes. Compare any expected outcome with observed evidence: met, missed or unknown, including changed circumstances and a reusable lesson. Fill it when the action is done; unfinished impact reviews stay in the project.
+What was delivered, where it lives in `outputs/`, and what changed in the owning notes. Compare any expected outcome with observed evidence: met, missed or unknown, including changed circumstances and a reusable lesson. Fill it when closing the action, once no open box remains in TODO: a filled Outcome and no open task mark the action done. Unfinished impact reviews stay in the project.
