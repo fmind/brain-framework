@@ -389,6 +389,7 @@ class _Validation:
 
     def note_links(self) -> None:
         config, ids, owners = self.config, self.ids, self.owners
+        # Every note's identities first, as retrieval resolves them: a link may name an alias a later note declares.
         for item in self.parsed:
             named = item.path not in self.unnamed
             for alias in [
@@ -399,6 +400,7 @@ class _Validation:
                 # A path holding a control character or backslash has no BF address: note_claims reported it.
                 with suppress(Error):
                     owners.setdefault(links.target(alias), {})[item.path] = item.path
+        for item in self.parsed:
             self.problems.extend(_problem(item.path, message) for message in broken(item, self._exists, self.slugs))
             for target in item.targets:
                 source = scheme(item.path, target)

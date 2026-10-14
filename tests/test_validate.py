@@ -306,6 +306,19 @@ def test_okf_sources_are_checked_explicit_relations(brain: Store, path: str) -> 
     assert f"{path}: missing record meetings:absent" in located(validate(brain))
 
 
+def test_a_link_to_an_alias_a_later_note_declares_is_no_missing_record(brain: Store) -> None:
+    # Notes are checked in path order: the alias used to be registered only after the earlier note's links failed.
+    brain.write(
+        "projects/a-plan.md", b"---\ntype: project\nstatus: draft\n---\n# Plan\n\nSee [review](meetings:review).\n"
+    )
+    brain.write(
+        "projects/z-review.md", b'---\ntype: project\nstatus: draft\naliases: ["meetings:review"]\n---\n# Review\n'
+    )
+    assert validate(brain)["problems"] == []
+    # Exact retrieval resolves the alias the same way.
+    assert read([brain], "meetings:review")["ref"] == "projects/z-review.md"
+
+
 @pytest.mark.parametrize("path", ["projects/new.md", "concepts/new.md", "actions/2026-09-27_new/ACTION.md"])
 def test_okf_source_relationships_must_be_declared(brain: Store, path: str) -> None:
     brain.write(
