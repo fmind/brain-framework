@@ -303,10 +303,26 @@ def test_claim_preview_keeps_every_relation_and_reports_truncation(brain: Store)
     assert reply["claims_truncated"] is True
 
 
-def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(brain: Store) -> None:
+def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
     data = b"# Mid\n\n## Part one\n\n" + b"evidence\n" * 4_000 + b"### Detail\n\nfact\n\n## Part two\n\nend\n"
     brain.write("projects/mid.md", data)
+    brain.write("concepts/linking.md", b"# Linking\n\nSee [mid](../projects/mid.md).\n")
+    contexts: list[int] = []
+    building = pages.context
+
+    def counted(stores: list[Store], owner: Store, name: str, reply: dict[str, object]) -> dict[str, object]:
+        contexts.append(1)
+        return building(stores, owner, name, reply)
+
+    monkeypatch.setattr(pages, "context", counted)
     first = retrieve.read([brain], "projects/mid.md", counted=False)
+    assert [item["ref"] for item in cast("list[dict]", first["backlinks"])[0]["items"]] == ["concepts/linking.md"]
+    # Later pages carry only their text: they no longer build the graph context the first page returns.
+    later = retrieve.read([brain], "projects/mid.md", offset=cast("int", first["next_offset"]), counted=False)
+    assert set(later) <= {*retrieve._TEXT, "text", "offset", "next_offset", "total_characters"}  # noqa: SLF001
+    assert len(contexts) == 1
     assert (first["offset"], first["total_characters"], first["sha256"]) == (0, len(data), digest(data))
     # The outline lists the sections inside the read: not the H1 title spanning the note, nor a read section.
     assert first["outline"] == [

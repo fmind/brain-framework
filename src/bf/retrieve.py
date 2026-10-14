@@ -394,7 +394,10 @@ def _lookup(
     if len(found) > 1:
         raise Error("reference exists in several brains; use a brain-qualified bf:// address")
     store, value = found[0]
-    extra = pages.context(stores, store, str(value["brain"]), value)
+    # A later page carries only its text slice. A text past the page budget on its own is paged whatever its graph
+    # context adds, so that page does not build the context the first page returns.
+    later = offset and len(encode({k: v for k, v in value.items() if k != "_source"})) > pages.BUDGET
+    extra = {} if later else pages.context(stores, store, str(value["brain"]), value)
     stale = [*cast("list[str]", value.get("stale", [])), *cast("list[str]", extra.get("stale", []))]
     marked = {"stale": list(dict.fromkeys(stale))} if stale else {}
     reply = _exact_reply({**value, **extra, **marked, "notice": NOTICE, **_problems(problems, extra)}, offset)
