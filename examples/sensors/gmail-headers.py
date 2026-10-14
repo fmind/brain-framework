@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import os
 import re
 import selectors
@@ -10,7 +11,7 @@ import subprocess
 import sys
 import time
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import getaddresses
 from urllib.parse import quote
 
@@ -100,8 +101,13 @@ def gws(method: str, params: dict[str, object], limit: int) -> dict:
 
 
 def listed(start: datetime, end: datetime, query: str) -> list[str]:
-    """Every message id in [start, end): Gmail's after/before take seconds since the epoch."""
-    search = f"after:{int(start.timestamp())} before:{int(end.timestamp())}" + (f" {query}" if query else "")
+    """Every message id received in [start, end), and possibly a few around it, which record() drops.
+
+    Gmail's after: and before: take whole seconds, and after: excludes its own second: widen the search to whole
+    seconds outward, so a narrow window or a message near a bound is never missed, then filter exactly.
+    """
+    search = f"after:{math.floor(start.timestamp()) - 1} before:{math.ceil(end.timestamp())}"
+    search += f" {query}" if query else ""
     ids: list[str] = []
     token, seen = "", set()
     for _ in range(MAX_PAGES):
@@ -134,7 +140,7 @@ def listed(start: datetime, end: datetime, query: str) -> list[str]:
 
 
 def record(message_id: str, start: datetime, end: datetime) -> dict[str, object] | None:
-    """One message's headers as a record; None when its date falls outside the window, as `after:` rounds."""
+    """One message's headers as a record; None when it was received outside the window the search widened."""
     params: dict[str, object] = {
         "userId": "me",
         "id": message_id,
@@ -159,7 +165,8 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
         or not received.isdigit()
     ):
         raise InvalidError("gws returned invalid message metadata")
-    when = datetime.fromtimestamp(int(received) / 1000, UTC)
+    # Integer milliseconds: a float division could round a message across a window bound.
+    when = datetime.fromtimestamp(int(received) // 1000, UTC) + timedelta(milliseconds=int(received) % 1000)
     if not start <= when < end:
         return None
     # Header names are case-insensitive; the first occurrence of each counts.

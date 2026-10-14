@@ -79,6 +79,32 @@ def test_gmail_headers_collect_participants_threads_and_message_ids(provider: Pr
     assert {params["format"] for params in gets} == {"metadata"}
 
 
+def test_gmail_headers_widen_whole_second_bounds_and_filter_exactly(provider: Provider) -> None:
+    # Gmail's after: and before: take whole seconds and after: excludes its own second. Truncating both bounds asked
+    # for after:1788220800 before:1788256800 and missed messages in the window's first and last fractions of a second.
+    start, end = "2026-09-01T00:00:00.500000+00:00", "2026-09-01T10:00:00.250000+00:00"
+    received = {"a1": 1788220800499, "b2": 1788220800500, "c3": 1788256800249, "d4": 1788256800250}
+    provider.install(
+        "gws",
+        [
+            {
+                "match": ["list", "after:1788220799 before:1788256801"],
+                "stdout": {"messages": [{"id": i} for i in received]},
+            },
+            *(
+                {"match": ["get", f'"id": "{identifier}"'], "stdout": message(identifier, "f1", millis, {})}
+                for identifier, millis in received.items()
+            ),
+        ],
+    )
+    records = provider.records("gmail-headers.py", start, end)
+    # The window is half-open: a message received at START counts, one at END belongs to the next window.
+    assert [(record.id, record.time) for record in records] == [
+        ("b2", "2026-09-01T00:00:00.500000Z"),
+        ("c3", "2026-09-01T10:00:00.249000Z"),
+    ]
+
+
 @pytest.mark.parametrize("problem", ["failing", "repeated"])
 def test_gmail_headers_save_nothing_from_an_incomplete_listing(provider: Provider, problem: str) -> None:
     install(provider, failing=problem == "failing", repeated=problem == "repeated")
