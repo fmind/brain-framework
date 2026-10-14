@@ -114,6 +114,8 @@ Only scheduled runs move the schedule: answering a message with `bf run` never p
 
 `bf update` runs due prompts after its sensors and routines, outside the update lock other cycles wait for. `bf watch` runs them in a separate process beside collection, as `bf update --kind prompt`, so a long agent run never delays a sensor. A scheduled run that is still active elsewhere makes the next one report `"status":"skipped"` and keep its window, and a scheduled run checks again, once it holds the prompt's lock, that no other process ran it meanwhile. A direct `bf run` never waits for a scheduled run, so a message is answered while a review continues.
 
+A prompt every 30 minutes writes about 17,500 records a year. Its records are model output, so set `keep`, such as `keep: 2000` for about six weeks, unless you want every run: the newest records are kept, ordered by run time, and a run's reply counts the removed ones as `removed`.
+
 `bf status` lists each prompt under `prompts`, with its successful `runs`, scheduled or direct, and the `record` of its latest run, beside the [health fields](commands.md#status-sources-and-routines) of every program. The watch dashboard marks prompts with `@`.
 
 ## Prompt settings
@@ -128,6 +130,7 @@ Only scheduled runs move the schedule: answering a message with `bf run` never p
 | `lookback`  | `86400`  | Seconds `{{start}}` reaches back before the first scheduled run.               |
 | `timeout`   | `900`    | Maximum runtime in seconds.                                                    |
 | `max_bytes` | 1 MiB    | Maximum stdout; a longer reply fails the run.                                  |
+| `keep`      | none     | Keep the newest `keep` run records; older ones are removed after each run.     |
 
 [Limits](limits.md#size-bounds) gives each setting's range, and [program names](schema.md#program-names) the naming rules: a prompt's name is also the source of its records.
 

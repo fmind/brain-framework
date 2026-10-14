@@ -75,18 +75,35 @@ Preview with `bf run weekly-review --dry-run`: it runs the routine but writes no
 
 ## Routine settings
 
-| Setting     | Default  | Meaning                                                                                |
-| ----------- | -------- | -------------------------------------------------------------------------------------- |
-| `command`   | required | A program on PATH or in `routines/`, then its arguments.                               |
-| `output`    | `log`    | `log` keeps stdout in `logs/NAME.log`; `action` writes nonempty Markdown as an action. |
-| `hooks`     | `[]`     | Events, such as `pre-commit`, that `bf run --hook EVENT` runs.                         |
-| `enabled`   | `true`   | A disabled routine never runs: `bf run` names it and runs nothing.                     |
-| `refresh`   | `0`      | Seconds between due runs; `0` leaves the routine out of updates.                       |
-| `lookback`  | `86400`  | Seconds covered by the first run.                                                      |
-| `timeout`   | `300`    | Maximum runtime in seconds.                                                            |
-| `max_bytes` | 1 MiB    | Maximum stdout of an `action` routine; a `log` routine's stdout only feeds its log.    |
+| Setting     | Default  | Meaning                                                                                               |
+| ----------- | -------- | ----------------------------------------------------------------------------------------------------- |
+| `command`   | required | A program on PATH or in `routines/`, then its arguments.                                              |
+| `output`    | `log`    | `log` keeps stdout in `logs/NAME.log`; `action` writes nonempty Markdown as an action.                |
+| `hooks`     | `[]`     | Events, such as `pre-commit`, that `bf run --hook EVENT` runs.                                        |
+| `enabled`   | `true`   | A disabled routine never runs: `bf run` names it and runs nothing.                                    |
+| `refresh`   | `0`      | Seconds between due runs; `0` leaves the routine out of updates.                                      |
+| `lookback`  | `86400`  | Seconds covered by the first run.                                                                     |
+| `timeout`   | `300`    | Maximum runtime in seconds.                                                                           |
+| `max_bytes` | 1 MiB    | Maximum stdout of an `action` routine; a `log` routine's stdout only feeds its log.                   |
+| `keep`      | none     | An `action` routine keeps its newest `keep` actions; see [keep recent reports](#keep-recent-reports). |
 
 [Limits](limits.md#size-bounds) gives each setting's range, and [program names](schema.md#program-names) the naming rules: a routine's name also names the action folders it writes. Arguments support `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. `start` is the end of the last reviewed window, or `lookback` before the first run; `end` is now.
+
+## Keep recent reports
+
+A report routine writes one action a day or a week, and its old ones crowd `bf read actions`. Set `keep` to the number of newest actions to retain:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/routines/
+routines:
+  weekly-review:
+    command: [routines/weekly-review.py, "{{brain}}", "{{end}}"]
+    refresh: 604800
+    output: action
+    keep: 2
+```
+
+After writing a new action, the routine removes its older actions beyond the newest two, but only those still holding exactly the `ACTION.md` it wrote on this machine: an action you edited, one holding other files, and one written before you set `keep` or by another clone stay. The run's reply counts them as `removed`. Remove older actions by hand once when you first set `keep`.
 
 ## Run a routine now
 

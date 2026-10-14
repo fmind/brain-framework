@@ -120,19 +120,20 @@ The command is a program on PATH or in `sensors/`, followed by its arguments, ru
 
 The sensor's name is the source of its records, as in `local-documents:website-demo/brief.txt`. Never name a sensor `bf`: its refs, `bf:ID`, would read as BF addresses. [Program names](schema.md#program-names) gives the other rules.
 
-| Setting     | Default  | Meaning                                                                                          |
-| ----------- | -------- | ------------------------------------------------------------------------------------------------ |
-| `command`   | required | The program, then its arguments.                                                                 |
-| `fields`    | `{}`     | [Field mappings](schema.md#shared-fields-and-sensor-mappings).                                   |
-| `enabled`   | `true`   | A disabled sensor never runs; its records stay searchable.                                       |
-| `mode`      | `window` | `window` updates returned records; `snapshot` replaces the complete list.                        |
-| `refresh`   | `0`      | Seconds between automatic runs; `0` keeps the sensor manual.                                     |
-| `lookback`  | `86400`  | Seconds covered by the first run, each snapshot run and `bf collect` without `--since`.          |
-| `overlap`   | `300`    | Seconds re-read before the previous window's end.                                                |
-| `reconcile` | none     | An occasional wider window; see [reconciliation](#frequent-updates-and-periodic-reconciliation). |
-| `timeout`   | `300`    | Maximum runtime in seconds.                                                                      |
-| `max_bytes` | 64 MiB   | Maximum output.                                                                                  |
-| `priority`  | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                |
+| Setting        | Default  | Meaning                                                                                                            |
+| -------------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
+| `command`      | required | The program, then its arguments.                                                                                   |
+| `fields`       | `{}`     | [Field mappings](schema.md#shared-fields-and-sensor-mappings).                                                     |
+| `enabled`      | `true`   | A disabled sensor never runs; its records stay searchable.                                                         |
+| `mode`         | `window` | `window` updates returned records; `snapshot` replaces the complete list.                                          |
+| `refresh`      | `0`      | Seconds between automatic runs; `0` keeps the sensor manual.                                                       |
+| `lookback`     | `86400`  | Seconds covered by the first run, each snapshot run and `bf collect` without `--since`.                            |
+| `overlap`      | `300`    | Seconds re-read before the previous window's end.                                                                  |
+| `reconcile`    | none     | An occasional wider window; see [reconciliation](#frequent-updates-and-periodic-reconciliation).                   |
+| `timeout`      | `300`    | Maximum runtime in seconds.                                                                                        |
+| `max_bytes`    | 64 MiB   | Maximum output.                                                                                                    |
+| `priority`     | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                                  |
+| `silent_after` | none     | Seconds without a new or changed record after which a scheduled source [falls silent](schedule.md#silent-sources). |
 
 [Limits](limits.md#size-bounds) gives each setting's range.
 
