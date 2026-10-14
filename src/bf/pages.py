@@ -1158,8 +1158,10 @@ def _summary(reply: Mapping[str, object]) -> dict[str, object]:
 
 def _related(parts: Parts) -> dict[str, object]:
     claims = [claim for _, part in parts for claim in cast("list[dict[str, object]]", part["claims"])]
+    groups = _merge(parts)
     return {
-        "backlinks": _merge(parts),
+        "backlinks": groups[: index.GROUPS],
+        **({"backlinks_omitted": len(groups) - index.GROUPS} if len(groups) > index.GROUPS else {}),
         **({"claims": claims} if claims else {}),
         **({"claims_truncated": True} if any(part["claims_truncated"] for _, part in parts) else {}),
     }

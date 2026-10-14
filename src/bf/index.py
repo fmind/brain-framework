@@ -1430,8 +1430,11 @@ _INCOMING = f"""WITH typed AS (
       CROSS JOIN edges e ON e.target>s.value||'#' AND e.target<s.value||'$' WHERE e.relation!=''),
   plain AS (SELECT item,'' AS relation FROM ({_LINKING}) WHERE item NOT IN (SELECT item FROM typed)),
   linked AS (SELECT * FROM typed UNION ALL SELECT * FROM plain)"""  # noqa: S608 - fixed SQL fragments
+# A read previews the backlinks of at most this many relation groups, untyped links last; it counts the others, which
+# their relation pages list.
+GROUPS = 64
 _GROUPS = f"""{_INCOMING} SELECT k.relation,count(*) AS total FROM linked k JOIN items i ON i.id=k.item
-  WHERE i.ref!=:exclude GROUP BY k.relation ORDER BY k.relation='',k.relation LIMIT 64"""  # noqa: S608
+  WHERE i.ref!=:exclude GROUP BY k.relation ORDER BY k.relation='',k.relation"""  # noqa: S608
 _GROUP = f"""{_INCOMING} SELECT {_ROW} FROM linked k JOIN items i ON i.id=k.item
   WHERE k.relation=:relation AND i.ref!=:exclude ORDER BY time DESC,i.ref DESC LIMIT :limit"""  # noqa: S608
 _RELATION = "k.relation IN (SELECT value FROM json_each(:relations)) AND i.ref!=:exclude"
@@ -1443,11 +1446,15 @@ _RELATION_ROWS = f"""{_INCOMING} SELECT {_ROW},k.relation FROM linked k JOIN ite
 def incoming(
     connection: sqlite3.Connection, targets: set[str], *, exclude: str = "", limit: int = 20
 ) -> list[dict[str, object]]:
-    """Items linking to any target, grouped by explicit relation; links without one come last as LINKS."""
+    """Items linking to any target, grouped by explicit relation; links without one come last as LINKS.
+
+    Every group is counted, but only the first GROUPS read their newest items: in this order, those are all that a
+    merge of several brains' groups can preview.
+    """
     values = {**_parameters(targets), "exclude": exclude, "limit": limit}
     groups = []
-    for relation, total in connection.execute(_GROUPS, values).fetchall():
-        rows = connection.execute(_GROUP, {**values, "relation": relation}).fetchall()
+    for number, (relation, total) in enumerate(connection.execute(_GROUPS, values).fetchall()):
+        rows = connection.execute(_GROUP, {**values, "relation": relation}).fetchall() if number < GROUPS else []
         groups.append({"relation": relation or LINKS, "total": total, "items": [_clean(dict(row)) for row in rows]})
     return groups
 

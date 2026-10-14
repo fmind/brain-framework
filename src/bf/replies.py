@@ -243,7 +243,13 @@ _EXACT = {
     "total_characters": _COUNT,
     "outline": {"type": "array", "items": {"$ref": "#/$defs/OutlineEntry"}},
     "outline_truncated": {"const": True},
-    "backlinks": {"type": "array", "items": {"$ref": "#/$defs/Backlinks"}},
+    "backlinks": {"type": "array", "items": {"$ref": "#/$defs/Backlinks"}, "maxItems": 64},
+    "backlinks_omitted": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Relation groups beyond the 64 that backlinks preview, untyped links last; read the same ref "
+        "with rel to list one.",
+    },
     "claims": {
         "type": "array",
         "items": {"$ref": "#/$defs/Claim"},
@@ -441,6 +447,7 @@ READ: dict[str, object] = {
             {
                 "page": _STRING,
                 "backlinks": _EXACT["backlinks"],
+                "backlinks_omitted": _EXACT["backlinks_omitted"],
                 "claims": _EXACT["claims"],
                 "claims_truncated": {"const": True},
             },

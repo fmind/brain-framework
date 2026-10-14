@@ -483,6 +483,35 @@ def test_note_reads_carry_backlinks_grouped_by_relation(brain: Store) -> None:
     assert refs(cast("list[dict[str, object]]", record["backlinks"])[0]) == ["projects/offline.md"]
 
 
+def test_backlinks_preview_64_relation_groups_and_count_the_others(brain: Store, tmp_path: Path) -> None:
+    declared = "".join(
+        f"  r{n:02}:\n    description: Relation {n}.\n    type: identity\n    relation: true\n" for n in range(66)
+    )
+    brain.write("bf.yaml", f"version: 7\nname: fixture\nfields:\n{declared}".encode())
+    links = "\n".join(f"- [hub](bf://fixture/projects/hub.md?rel=r{n:02})" for n in range(65))
+    brain.write("projects/hub.md", b"---\ntype: project\n---\n# Hub\n")
+    brain.write("projects/spokes.md", f"---\ntype: project\n---\n# Spokes\n\n{links}\n".encode())
+    brain.write("concepts/plain.md", b"# Plain\n\n[hub](../projects/hub.md)\n")
+    # A second brain links through a relation the first lacks: groups merge by name before the cut.
+    root = tmp_path / "team"
+    root.mkdir()
+    team = Store(root)
+    team.write(
+        "bf.yaml", f"version: 7\nname: team\nbrains: {{fixture: {{path: {brain.root}}}}}\nfields:\n{declared}".encode()
+    )
+    team.write("concepts/far.md", b"# Far\n\n[hub](bf://fixture/projects/hub.md?rel=r65)\n")
+    reply = read([brain], "projects/hub.md")
+    groups = cast("list[dict[str, object]]", reply["backlinks"])
+    # 65 relations and untyped links used to show 64 groups silently: the count names what a relation page lists.
+    assert [group["relation"] for group in groups] == [f"r{n:02}" for n in range(64)]
+    assert reply["backlinks_omitted"] == 2
+    assert refs(read([brain], "projects/hub.md", rel="r64")) == ["projects/spokes.md"]
+    merged = read([brain, team], "bf://fixture/projects/hub.md")
+    assert len(cast("list", merged["backlinks"])) == 64
+    assert merged["backlinks_omitted"] == 3
+    assert "backlinks_omitted" not in read([brain], "projects/spokes.md")
+
+
 def test_pages_combine_selected_brains_and_count_reads(brain: Store, tmp_path: Path) -> None:
     root = tmp_path / "team"
     root.mkdir()
