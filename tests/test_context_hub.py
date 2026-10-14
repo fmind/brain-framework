@@ -60,7 +60,12 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
 
     # The written conclusion is dated today and needs no review; the Jira change then flags it.
     before, after = [reply for reply in replies if reply.get("page") == ""]
-    assert [item["ref"] for item in before["changed"]] == ["projects/new-website.md"]
+    # A project lists its change under projects, with its new next task; changed names other notes.
+    assert before["changed"] == []
+    assert (before["projects"][0]["ref"], before["projects"][0]["next"]) == (
+        "projects/new-website.md",
+        "Run the keyboard navigation check.",
+    )
     assert "review" not in before["projects"][0]
     flagged = after["projects"][0]
     assert {key: flagged[key] for key in ("review", "review_reasons", "new_links", "newer")} == {

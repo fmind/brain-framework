@@ -347,7 +347,7 @@ def _resolve(stores: list[Store], ref: str, *, rel: str, offset: int, counted: b
     reply = (
         _related(stores, ref, parsed, _relation(stores, rel), problems, offset=offset, counted=counted)
         if rel
-        else _lookup(stores, ref, parsed, problems, offset=offset, counted=counted)
+        else _lookup(stores, ref, parsed, problems, offset=offset, counted=counted, single=single)
     )
     if parsed and parsed.relation and parsed.relation not in _declared(stores):
         # A read follows a link's target whatever its relation; an undeclared one is the link's problem, not the read's.
@@ -365,6 +365,7 @@ def _lookup(
     *,
     offset: int,
     counted: bool,
+    single: bool,
 ) -> dict[str, object]:
     # A qualified address resolves in its brain; backlinks and identities still span the whole selection.
     selected = stores
@@ -373,7 +374,7 @@ def _lookup(
     path = parsed.path if parsed else ref
     if not (parsed and parsed.fragment):
         try:
-            view = pages.page(selected, path, offset=offset, counted=counted)
+            view = pages.page(selected, path, offset=offset, counted=counted, single=single)
         except NotFoundError as error:
             if problems:
                 raise Error("read is incomplete; run bf status before concluding a reference is absent") from error

@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from bf import index, pages, retrieve, usage
 from bf.config import register
 from bf.markdown import Task, note
-from bf.models import Config, Error, InputError, NotFoundError, Query, Record, encode
+from bf.models import Config, Error, InputError, NotFoundError, Query, Record, encode, present
 from bf.retrieve import read, search
 from bf.storage import Store, writer
 from conftest import records_file
@@ -79,13 +79,8 @@ def test_home_lists_what_needs_attention(brain: Store) -> None:
     assert fresh["uri"] == "bf://fixture/projects/fresh.md"
     # A deprecated note no longer applies: it leaves every section.
     assert refs(home, "actions") == ["actions/2026-09-24_second/ACTION.md", "actions/2026-09-20_first/ACTION.md"]
-    assert refs(home, "changed") == ["projects/fresh.md"]
-    # A note carries the same signals in each section listing it.
-    changed = cast("list[dict[str, object]]", home["changed"])[0]
-    assert {key: changed[key] for key in ("review_due", "review_source")} == {
-        "review_due": fresh["review_due"],
-        "review_source": "modified",
-    }
+    # A project lists its own change and signals under projects: changed names the other notes.
+    assert refs(home, "changed") == []
     assert home["activity"] == [{"brain": "fixture", "source": "mail", "records": 1, "page": "memories/mail/24h"}]
     assert refs(home, "upcoming") == ["mail:tomorrow"]
     assert home["attention"] == [{"brain": "fixture", "sensor": "mail", "freshness": "never"}]
@@ -98,8 +93,9 @@ def test_home_keeps_future_notes_out_of_recent_changes(brain: Store) -> None:
     populate(brain)
     brain.write("concepts/planned.md", b"---\nupdated: 2026-09-26\n---\n# Planned review\n")
     brain.write("concepts/cancelled.md", b"---\nstatus: deprecated\nupdated: 2026-09-27\n---\n# Cancelled review\n")
+    brain.write("concepts/recent.md", b"---\nupdated: 2026-09-24\n---\n# Recent review\n")
     home = pages.home([brain], NOW)
-    assert refs(home, "changed") == ["projects/fresh.md"]
+    assert refs(home, "changed") == ["concepts/recent.md"]
     assert refs(home, "upcoming") == ["concepts/planned.md", "mail:tomorrow"]
 
 
@@ -111,9 +107,22 @@ def test_home_flags_any_listed_note_past_its_deadline(brain: Store) -> None:
     for path in ("actions/2026-09-20_audit/ACTION.md", "concepts/policy.md"):
         os.utime(brain.root / path, (edited, edited))
     home = pages.home([brain], NOW)
-    for key, ref in (("actions", "actions/2026-09-20_audit/ACTION.md"), ("changed", "concepts/policy.md")):
-        item = next(item for item in cast("list[dict[str, object]]", home[key]) if item["ref"] == ref)
-        assert (item["review"], item["review_reasons"], item["review_source"]) == (True, ["due"], "stale_after")
+    action = cast("list[dict[str, object]]", home["actions"])[0]
+    assert (action["review"], action["review_reasons"], action["review_source"]) == (True, ["due"], "stale_after")
+    # A changed note is named in brief: when it changed and that it needs review; its read gives the reasons.
+    assert home["changed"] == [
+        {
+            "brain": "fixture",
+            "ref": "concepts/policy.md",
+            "uri": "bf://fixture/concepts/policy.md",
+            "kind": "note",
+            "title": "Policy",
+            "time": "2026-09-23T00:00:00.000000Z",
+            "date": "2026-09-23",
+            "modified": "2026-09-23T00:00:00.000000Z",
+            "review": True,
+        }
+    ]
 
 
 def test_home_reviews_every_project_within_the_page_budget(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,8 +142,35 @@ def test_home_reviews_every_project_within_the_page_budget(brain: Store, monkeyp
     assert (listed[0]["ref"], listed[0]["review_reasons"]) == ("projects/offline.md", ["due", "newer_evidence"])
     # Like any page, the list ends near the budget; the total shows what `bf read projects` holds.
     assert 1 < len(listed) < 13 == home["projects_total"]
-    assert len(encode(home)) <= pages.BUDGET + max(len(encode(item)) for item in listed)
+    printed = present(pages.addressed(home))
+    assert len(encode(printed)) <= pages.BUDGET + max(len(encode(present(item))) for item in listed)
     assert [item["ref"] for item in listed[1:]] == [f"projects/p{n:02}.md" for n in range(11, 12 - len(listed), -1)]
+
+
+def test_home_fits_projects_in_the_budget_of_the_reply_as_printed(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    today = datetime.now(UTC).date().isoformat()
+    edited = (datetime.now(UTC) - timedelta(days=30)).timestamp()
+    for n in range(18):
+        path = f"projects/p{n:02}.md"
+        brain.write(
+            path, f"---\ntype: project\nupdated: {today}\n---\n# Project {n}\n\n- [ ] Ship part {n}.\n".encode()
+        )
+        if n % 6:
+            os.utime(brain.root / path, (edited, edited))
+    brain.write("concepts/recent.md", f"---\ntype: concept\nupdated: {today}\n---\n# Recent\n".encode())
+    whole = read([brain])
+    listed = cast("list[dict[str, object]]", whole["projects"])
+    # Changed projects used to repeat their review signals in `changed`, where they filled half the page.
+    assert refs(whole, "changed") == ["concepts/recent.md"]
+    assert len(listed) == whole["projects_total"] == 19
+    assert [bool(item.get("review")) for item in listed] == [True] * 15 + [False] * 4
+    # Measured as printed, with one brain's entries unnamed, a budget the whole reply fills lists every project;
+    # measured before printing, as for several brains, it lists fewer.
+    monkeypatch.setattr(pages, "BUDGET", len(encode(present(whole))))
+    assert len(cast("list", read([brain])["projects"])) == 19
+    assert len(cast("list", pages.home([brain])["projects"])) < 19
 
 
 def test_exact_reads_summarize_their_note(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -31,6 +31,7 @@ from bf.models import (
     Query,
     addressable,
     encode,
+    present,
     tag_name,
     timestamp,
 )
@@ -277,20 +278,21 @@ def local(reply: dict[str, object]) -> dict[str, object]:
 
     Only the reply's lists of entries and their backlink groups change: an exact read's own fields stay.
     """
-
-    def plain(entry: object) -> object:
-        if not isinstance(entry, dict):
-            return entry
-        entry = {k: v for k, v in cast("dict[str, object]", entry).items() if k not in {"brain", "uri"}}
-        if isinstance(items := entry.get("items"), list):
-            # A backlink group's previews.
-            entry["items"] = [plain(item) for item in items]
-        return entry
-
     return {
-        key: [plain(entry) for entry in value] if key != "problems" and isinstance(value, list) else value
+        key: [_plain(entry) for entry in value] if key != "problems" and isinstance(value, list) else value
         for key, value in reply.items()
     }
+
+
+def _plain(entry: object) -> object:
+    """One entry as local() returns it."""
+    if not isinstance(entry, dict):
+        return entry
+    entry = {k: v for k, v in cast("dict[str, object]", entry).items() if k not in {"brain", "uri"}}
+    if isinstance(items := entry.get("items"), list):
+        # A backlink group's previews.
+        entry["items"] = [_plain(item) for item in items]
+    return entry
 
 
 def addressed(reply: dict[str, object]) -> dict[str, object]:
@@ -380,14 +382,17 @@ def unique(problems: list[dict[str, object]]) -> list[dict[str, object]]:
     return list({encode(problem): problem for problem in problems}.values())
 
 
-def fitting(items: list[dict[str, object]], budget: int = BUDGET) -> list[dict[str, object]]:
+def fitting(
+    items: list[dict[str, object]], budget: int = BUDGET, shape: Callable[[object], object] = _named
+) -> list[dict[str, object]]:
     """The leading items within the reply budget; at least one, so a continuation always advances.
 
-    Each item counts as addressed() shapes it for several selected brains; with one brain, the reply is smaller.
+    Each item counts as `shape` returns it: by default as addressed() shapes it for several selected brains, so the
+    reply of one brain is smaller.
     """
     size = 0
     for count, item in enumerate(items):
-        size += len(encode(_named(item)))
+        size += len(encode(shape(item)))
         if count and size > budget:
             return items[:count]
     return items
@@ -567,27 +572,35 @@ def _brief(item: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in item.items() if key != "excerpt"}
 
 
-def home(stores: list[Store], now: datetime | None = None, *, counted: bool = True) -> dict[str, object]:
+# A recently changed note on the home page: which note, when, and whether it needs review; its read holds the rest.
+_CHANGED = ("brain", "ref", "uri", "kind", "title", "time", "date", "modified", "review")
+
+
+def home(
+    stores: list[Store], now: datetime | None = None, *, counted: bool = True, single: bool = False
+) -> dict[str, object]:
     """What needs attention now: projects needing review first, recent actions and notes, activity and the coming week.
 
     Every current project is reviewed; those that fit the page budget are listed, and `projects_total` counts all.
-    A deprecated note no longer applies, so it leaves every section.
+    `changed` names the other notes changed this week. A deprecated note no longer applies, so it leaves every
+    section. The budget is measured on the reply as printed, for one selected brain when `single`.
     """
     now = now or datetime.now(UTC)
     stamp = timestamp(now.isoformat())
     day, week = (timestamp((now - timedelta(days=days)).isoformat()) for days in (1, 7))
     ahead = timestamp((now + timedelta(days=7)).isoformat())
     current = "i.status!='deprecated'"
+    project = f"{index.ENTRY} AND i.type='project'"
 
     def build(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
         # Each preview's SQL order matches the Python merge below, so ties at a cap select the same items.
-        projects = _rows(
-            connection, f"{index.ENTRY} AND i.type='project' AND {current}", {}, "time DESC,i.ref DESC", -1
-        )
+        projects = _rows(connection, f"{project} AND {current}", {}, "time DESC,i.ref DESC", -1)
         actions = _rows(connection, f"{index.ACTION} AND {current}", {}, "i.path DESC", 10)
+        # Projects carry their own review signals in `projects`.
         changed = _rows(
             connection,
-            f"i.kind='note' AND {current} AND i.time!='' AND ({index.TIME})>=:since AND ({index.TIME})<:until",
+            f"i.kind='note' AND {current} AND NOT ({project}) AND i.time!='' "
+            f"AND ({index.TIME})>=:since AND ({index.TIME})<:until",
             {"since": week, "until": stamp},
             "time DESC,i.ref DESC",
             SECTION,
@@ -626,16 +639,26 @@ def home(stores: list[Store], now: datetime | None = None, *, counted: bool = Tr
         "projects_total": len(projects),
         "actions": sorted(_gather(parts, "actions"), key=lambda i: str(i["ref"]), reverse=True)[:10],
         # Orientation previews: titles and times; read an item for its text.
-        "changed": [_brief(item) for item in _newest(_gather(parts, "changed"), SECTION)],
+        "changed": [
+            {key: item[key] for key in _CHANGED if key in item} for item in _newest(_gather(parts, "changed"), SECTION)
+        ],
         "activity": _gather(parts, "activity"),
         "upcoming": [_brief(item) for item in _newest(_gather(parts, "upcoming"), SECTION, oldest=True)],
         "attention": _gather(parts, "attention"),
         "pages": BROWSE,
         **extra,
     }
+
+    # As the CLI and MCP print it: local times, a note's date without the time that ordered it, and with one
+    # selected brain, entries without their brain and address.
+    def printed(value: object) -> object:
+        return present(_plain(value) if single else _named(value))
+
     # Projects needing review first, each group newest first, in what the bounded previews leave of the budget.
     reply["projects"] = fitting(
-        sorted(projects, key=lambda item: not item.get("review")), BUDGET - len(encode(addressed(reply)))
+        sorted(projects, key=lambda item: not item.get("review")),
+        BUDGET - len(encode(present(local(reply) if single else addressed(reply)))),
+        printed,
     )
     return reply
 
@@ -900,13 +923,19 @@ def tagged(stores: list[Store], name: str, *, offset: int = 0, counted: bool = T
 
 
 def page(
-    stores: list[Store], path: str, now: datetime | None = None, *, offset: int = 0, counted: bool = True
+    stores: list[Store],
+    path: str,
+    now: datetime | None = None,
+    *,
+    offset: int = 0,
+    counted: bool = True,
+    single: bool = False,
 ) -> dict[str, object] | None:
-    """The page a ref names, or None when it names a note, a record or an identity."""
+    """The page a ref names, or None when it names a note, a record or an identity; `single` as for `home`."""
     if not path:
         if offset:
             raise Error("offset applies to listing pages; follow a home page's projects, actions or period link")
-        return home(stores, now, counted=counted)
+        return home(stores, now, counted=counted, single=single)
     target = route(path, now)
     match target.kind:
         case "period":
