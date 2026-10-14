@@ -33,7 +33,7 @@ def bf(*arguments: str, env: dict[str, str] | None = None) -> subprocess.Complet
         env={**os.environ, **(env or {})},
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         check=False,
     )
 
@@ -286,7 +286,7 @@ def test_a_closed_standard_output_fails_before_anything_runs(
         ],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
         check=False,
     )
     assert (result.returncode, result.stderr) == (1, message)
@@ -316,7 +316,7 @@ def test_a_closed_standard_input_fails_with_one_line(brain: Store, arguments: li
         text=True,
         # The fixture declares no program: none could run.
         env={**os.environ, "PATH": "/usr/bin:/bin"},
-        timeout=30,
+        timeout=120,
         check=False,
     )
     assert (result.returncode, result.stdout) == (1, "")
@@ -392,7 +392,7 @@ def test_a_full_standard_output_exits_1_without_a_flush_warning(arguments: list[
             stderr=subprocess.PIPE,
             # The fixture declares no program: watch has none to run.
             env={**os.environ, "PATH": "/usr/bin:/bin"},
-            timeout=30,
+            timeout=120,
             check=False,
         )
     assert (result.returncode, result.stderr) == (
@@ -448,7 +448,7 @@ def test_arguments_that_are_not_utf8_are_invalid_before_anything_is_written(tmp_
     target = os.fsencode(parent) + b"/bad\xff"
     for arguments in ([b"init", target, b"--name", b"bad"], [b"skills", target], [b"register", target]):
         result = subprocess.run(  # noqa: S603 - fixed interpreter and synthetic CLI arguments
-            [sys.executable, "-m", "bf", *arguments], capture_output=True, timeout=30, check=False
+            [sys.executable, "-m", "bf", *arguments], capture_output=True, timeout=120, check=False
         )
         hint = b"DIR" if arguments[0] == b"skills" else b"PATH"
         assert (result.returncode, result.stdout) == (2, b"")

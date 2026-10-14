@@ -223,7 +223,8 @@ alias = "t"
 description = "Run isolated tests with at least 95% branch coverage"
 # Tests pin UTC themselves; the variable also covers Python builds without time.tzset.
 env.TZ = "UTC"
-run = "uv run --locked pytest -q --numprocesses=auto --cov --cov-report="
+# Auto workers, capped: past eight, a shared host spends its time switching between cold interpreter starts.
+run = "uv run --locked pytest -q --numprocesses=auto --maxprocesses=8 --cov --cov-report="
 
 [tasks."report:coverage"]
 description = "Show per-file coverage and missing lines from the last test run"

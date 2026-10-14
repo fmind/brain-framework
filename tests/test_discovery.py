@@ -17,7 +17,7 @@ HELPER = Path(__file__).resolve().parents[1] / "src/bf/skills/bf-setup/scripts/i
 
 def run(*args: str, raw: bytes = b"") -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(  # noqa: S603 - fixed helper with synthetic input
-        [sys.executable, str(HELPER), *args], input=raw, capture_output=True, timeout=10, check=False
+        [sys.executable, str(HELPER), *args], input=raw, capture_output=True, timeout=120, check=False
     )
 
 

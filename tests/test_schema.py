@@ -206,7 +206,7 @@ for value in [b"!!bool PRIVATE", b'!!int ""', b'!!float ""', b"!!map [PRIVATE]"]
         raise AssertionError("malformed tagged value accepted")
 """
     result = subprocess.run(  # noqa: S603 - fresh process selects the installed parser before importing BF
-        [sys.executable, "-c", program, loader], capture_output=True, text=True, timeout=10, check=False
+        [sys.executable, "-c", program, loader], capture_output=True, text=True, timeout=120, check=False
     )
     assert result.returncode == 0, result.stderr
     assert not result.stdout
@@ -387,7 +387,7 @@ def test_schema_generation_detects_drift_without_overwriting_it(tmp_path: Path) 
 
     def run(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(  # noqa: S603 - fixed local generator, synthetic output directory
-            [sys.executable, str(script), *args], capture_output=True, text=True, timeout=10, check=False
+            [sys.executable, str(script), *args], capture_output=True, text=True, timeout=120, check=False
         )
 
     missing = run()

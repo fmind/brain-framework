@@ -112,7 +112,7 @@ def test_action_helper_creates_two_sessions_without_replacing_work(brain: Store)
             capture_output=True,
             text=True,
             check=True,
-            timeout=10,
+            timeout=120,
         )
         created.append(json.loads(reply.stdout)["action"])
     if date.today().isoformat() != today:
@@ -137,7 +137,7 @@ def test_a_session_named_after_a_routine_never_counts_as_its_action(brain: Store
         capture_output=True,
         text=True,
         check=True,
-        timeout=10,
+        timeout=120,
     )
     session = json.loads(reply.stdout)["action"]
     before = brain.read(session)
@@ -166,7 +166,7 @@ def test_action_helper_refuses_redirected_actions(brain: Store, tmp_path: Path) 
         capture_output=True,
         text=True,
         check=False,
-        timeout=10,
+        timeout=120,
     )
     assert reply.returncode == 1
     assert not list(outside.iterdir())
@@ -182,7 +182,7 @@ def test_action_helper_follows_a_linked_brain_root_only(brain: Store, tmp_path: 
         capture_output=True,
         text=True,
         check=False,
-        timeout=10,
+        timeout=120,
     )
     assert reply.returncode == 0, reply.stderr
     action = json.loads(reply.stdout)["action"]

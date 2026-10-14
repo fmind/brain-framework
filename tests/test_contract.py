@@ -88,10 +88,9 @@ def _breaks(old: dict, new: dict, old_root: dict, new_root: dict, path: str, *, 
     if old.get("type") != new.get("type") and (old if reply else new).get("type") is not None:
         problems.append(f"{path}: type {old.get('type')} became {new.get('type')}")
     before, after = _values(old), _values(new)
-    # A file value that starts listing its values, with a const or an enum, rejects every other value of its type.
-    if not reply and (
-        (before is not None and (after is None or not before <= after)) or (before is None and after is not None)
-    ):
+    # A file value that starts listing its values, with a const or an enum, rejects every other value of its type;
+    # one that stops listing them accepts every value of its type.
+    if not reply and after is not None and (before is None or not before <= after):
         problems.append(f"{path}: accepted values narrowed")
     # A reply value may drop listed values, but not add one or stop listing them.
     if reply and before is not None and (after is None or not after <= before):
@@ -317,3 +316,18 @@ def test_files_keep_every_accepted_bound_pattern_and_condition() -> None:
     assert _breaks(either, overlapping, {}, {}, "s", reply=False) == ["s: new oneOf alternatives"]
     assert _breaks({"anyOf": either["oneOf"]}, either, {}, {}, "s", reply=False) == ["s: new oneOf alternatives"]
     assert _breaks(either, {"anyOf": either["oneOf"]}, {}, {}, "s", reply=False) == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "reply", "broken"),
+    [
+        ({"type": "string", "enum": ["a"]}, {"type": "string"}, False, False),
+        ({"type": "string", "const": "a"}, {"type": "string", "enum": ["a", "b"]}, False, False),
+        ({"type": "string"}, {"type": "string", "enum": ["a"]}, False, True),
+        ({"type": "string", "enum": ["a", "b"]}, {"type": "string", "enum": ["a"]}, False, True),
+        ({"type": "string", "enum": ["a"]}, {"type": "string"}, True, True),
+        ({"type": "string", "enum": ["a", "b"]}, {"type": "string", "enum": ["a"]}, True, False),
+    ],
+)
+def test_listed_values_widen_files_and_narrow_replies(old: dict, new: dict, *, reply: bool, broken: bool) -> None:
+    assert bool(_breaks(old, new, old, new, "value", reply=reply)) is broken
