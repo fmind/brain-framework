@@ -4,22 +4,36 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v18.5.0](https://github.com/fmind/brain-framework/releases/tag/v18.5.0) - 2026-10-14
+
+A feature and review release. The brain format (`version: 7`) is unchanged; `bf.yaml` gains the optional `silent_after` and `keep` settings, which an older `bf` rejects, the reply schemas only gain optional fields and the search cache rebuilds once. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), run `bf skills DIR` to update all four skills, and copy the updated example `weekly-review` routine and `gmail-headers` sensor into your brain, preserving local adaptations.
+
 ### Added
 
 - A sensor's `silent_after` (seconds) reports a scheduled source that keeps succeeding without a new or changed record: `bf status` marks it `"silent": true`, and `attention`, the home page and `bf status --check` list it. Freshness proves a successful run, not new evidence: a filter or account drift used to look healthy. `bf status` and the `memories` page give each source's `changed`, the newest time this brain gained a new or changed record of it.
-- `keep` bounds generated output. An action routine's `keep: N` removes its actions older than the newest N while they still hold only the `ACTION.md` this machine wrote: an edited report, a folder holding another file and an action written before `keep` stay. A prompt's `keep: N` removes its oldest run records after each run. Replies count them as `removed`.
+- `keep` bounds generated output. An action routine's `keep: N` removes its actions older than the newest N while they still hold only the `ACTION.md` this machine wrote: an edited report, a folder holding another file and an action written before `keep` stay. A prompt's `keep: N` removes its oldest run records after each run, never another file of its folder, and never fails a recorded run. Replies count them as `removed`.
 - `bf status` names each brain's `runtime`: the `installed` bf version and, read as data from the brain's `uv.lock`, the `pinned` one. Agents compare their major versions instead of parsing the lock.
 - `bf validate` reports an enabled prompt file above the 120,000-byte limit, which every run would reject.
+- A runnable offline prompt example, `examples/prompts/`, uses `cat` as a stand-in harness with `refresh: 0`: a piped message becomes a record that search finds. The prompt guide starts with it, and troubleshooting covers failed prompts: JSON output with `text`, the 120,000-byte limit on standard input too, skipped scheduled runs, harness sign-in and tool permissions.
+- `bf-maintain` covers prompts: declare one with an explicit `refresh` (an enabled prompt runs every 30 minutes by default, unlike sensors and routines), a `timeout` above the harness's own limit and a `text` pointer; test it without a model through `command: [cat]`, then run it once with `bf run PROMPT --stdin`. It treats `memories/NAME/` records as model output and grants the harness only the tools it needs.
+- Reads return `backlinks_omitted`, the number of relation groups beyond the 64 they preview, counted across the selected brains: more than 64 relations used to drop the rest silently.
 
 ### Changed
 
 - A program another process is running, such as a manual `bf collect` during `bf watch`, is `skipped` in `bf update` instead of failed: watch no longer alerts a failure that run history never records.
 - `bf run` suggests close prompt names too: `unknown routine or prompt asistant; … did you mean assistant?`.
 - A scheduled prompt that is not due when it takes its lock, because another process ran it or it waits to retry a failure, says so instead of claiming another run just succeeded.
+- The four skills are 30% shorter (17,009 → 11,919 words) without dropping a procedure or safety rule: each shared rule lives once, references link the documentation for exact contracts, and long steps are split. They compare `runtime.pinned` with `runtime.installed` in `bf status` instead of reading a brain's `uv.lock`.
+- `bf-action` defines when an action is done: its Outcome is filled and its TODO has no open box. Discovery resumes only open actions, closing resolves every open task, and later work starts a new action linking the done one.
+- The documentation gives each rule one owner: timing and failure backoff in Watch and schedule, program names in the file formats, ranges in Limits, dry runs and status fields in Commands, scopes and incomplete answers in Retrieval. The README's Try it installs BF and links Getting started; the guides run copied example scripts as executables.
+- The example weekly review lists scheduled programs that failed or are late, says when an empty week or coming week may come from a sensor needing attention, and writes a review when attention is its only content.
+- Searches, reads and each MCP call no longer check every record file: the cache keeps each `memories/SOURCE` folder's fingerprint and lists only folders that changed, so on a brain of about 50,000 files a warm search checks its cache in about 16 ms instead of 170 ms (in-process timings on one Linux machine). Collection renames records into place, which always changes their folder; a record file edited in place, which collection never does, waits for `bf build`. Authored folders, `bf build` and `bf validate` still list every file.
+- The home page lists projects needing review first in the space `changed` used to take: `changed` names only other notes, in brief (`ref`, `kind`, `title`, `date` or `time`, `modified`, `review`), and the 32 KiB budget is measured on the reply as printed. A brain whose `changed` list repeated its projects used to show only one of the projects due for review.
+- Deep listing pages stop at their window: with one selected brain the offset is skipped in SQL, so a source page at offset 8,000 answers in about 65 ms instead of 300 ms on the same machine, and later pages of a large exact read no longer rebuild its backlinks.
 
 ### Fixed
 
-- `bf watch` stops a collection whose start a cancellation interrupted, and signals its collection and prompt workers together, so quitting takes one stop bound instead of two.
+- `bf watch` stops a collection whose start a cancellation interrupted, and signals its collection and prompt workers together, once each, so they stop in parallel.
 - `bf update` dates its due list once it holds the cycle lock: waiting for another update no longer leaves newly due programs for the next cycle.
 - A prompt answering a message and a scheduled run of the same prompt no longer overwrite each other's log entries.
 - A prompt file above the limit reports `file exceeds 120000 bytes` instead of 120001.
@@ -27,6 +41,14 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 - Programs no longer inherit `DOTNET_STARTUP_HOOKS`, `R_PROFILE_USER`, `LUA_PATH` or `LUA_CPATH`, which load code before the program starts.
 - The contract check accepts a configuration value that stops listing its allowed values, which widens what files accept, as a minor change.
 - Tests give cold interpreter starts the documented 120-second deadline and cap parallel workers at eight, so a loaded machine no longer fails the gate.
+- `guarded-write.py` serializes the check, write and rename of one file among concurrent helpers with an advisory lock below `XDG_STATE_HOME` (or `~/.local/state`), so of two sessions that read the same digest only one succeeds; before, both could report success while one edit was lost. An editor that takes no lock can still save between the helper's last check and its rename.
+- `evidence.py read` keeps the `stale` and `problems` of every page of a large exact read, so a capture refuses, and a comparison reports `unknown`, when a later page was incomplete.
+- The example Gmail headers sensor no longer misses messages received in the first or last fraction of a second of its window: it widens Gmail's whole-second search outward and filters exactly.
+- The prompt guide's Claude Code command allows the read-only `bf read` and `bf search` calls its prompt asks for, and the release checklist reads the workflows' mise pin despite its inline comment.
+- Documentation matches behavior: `--prompt` and `update --kind` repeat, prompts get name suggestions, a prompt dry run appends to its own log, program names are unique across sensors, routines and prompts and never `bf`, `bf init` creates no `prompts/` folder, and an exported `BF_BRAIN` takes precedence over the working directory.
+- A read of a note ref ending in a bare `#` is invalid input (exit 2), like a scope: it read the whole note under a ref no backlink or reminder matched, so the note listed itself as a backlink and lost its tasks and review signals. An offset on the home page or the `memories` overview exits 2 too.
+- `bf validate` resolves an alias that a later note declares before checking links, instead of reporting a missing record that exact reads resolve.
+- Spelling `suggestions` fold Latin accents as promised (`equipe`, not `équipe`), and a paged read without sections inside it omits `outline` instead of returning `outline: []`.
 
 ## [v18.4.0](https://github.com/fmind/brain-framework/releases/tag/v18.4.0) - 2026-10-13
 
