@@ -1,4 +1,4 @@
-"""Run configured sensors, routines and prompts with direct argv, bounded output and process-group cancellation."""
+"""Run configured sensors, routines and assistants with direct argv, bounded output and process-group cancellation."""
 
 from __future__ import annotations
 
@@ -62,9 +62,9 @@ LIMIT = 200
 _EXISTS = "an action for this routine already exists today"
 # The whole argument holding an expanded prompt stays below Linux's 128 KiB bound (MAX_ARG_STRLEN, NUL included).
 MAX_ARGUMENT = (128 << 10) - 1
-# A prompt run's record id: its UTC start and a random suffix. Only these records are a prompt's to prune.
+# An assistant run's record id: its window end in UTC and the last 8 characters of its job id. Only these records are
+# an assistant's to prune.
 RUN_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
-_TEMPLATE = re.compile(r"\{\{(brain|home|start|end|input)\}\}")
 # A record title shows the reply's first line, shortened.
 _TITLE = 120
 # A routine's error quotes at most this many characters of its first broken link.
@@ -391,7 +391,7 @@ def collect(
                 raise Error("reconciliation must cover its lookback through the current run")
         committed = False
         try:
-            # A {{home}} that cannot resolve fails the run in its history, as for routines and prompts.
+            # A {{home}} that cannot resolve fails the run in its history, as for routines.
             raw = runner(arguments(store, sensor, start, end), sensor, store, name, b"")
             printed = decode(raw)
             for position, item in enumerate(printed if isinstance(printed, list) else ()):
@@ -759,7 +759,7 @@ def hooked(config: Config, hook: str) -> list[str]:
 
 
 def window(store: Store, name: str, now: datetime) -> tuple[str, str]:
-    """The window a routine or prompt run covers now: since the end of its last reviewed window, else its lookback."""
+    """The window a routine run covers now: since the end of its last reviewed window, else its lookback."""
     config = load(store)
     program, last = config.routines[name], state(store, ROUTINES).get(name, {})
     start = now - timedelta(seconds=program.lookback)

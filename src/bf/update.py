@@ -174,13 +174,21 @@ def update(
     report: dict[str, object] = {"brain": config.name, "sensors": results, "routines": ran}
     if config.assistants:
         report["assistants"] = asked
-    # Enabled programs with refresh: 0 never run here: name them, so an empty cycle is not mistaken for current evidence.
+    # Enabled programs that never run here are named, so an empty cycle is not mistaken for current evidence: sensors and
+    # routines with refresh: 0, and assistants without schedules, inputs or triggers, which only bf run starts.
     manual = sorted(
-        name
-        for name, program in (*config.sensors.items(), *config.routines.items())
-        if program.enabled
-        and not program.refresh
-        and name in selected_sensors | selected_routines | selected_assistants
+        [
+            name
+            for name, program in (*config.sensors.items(), *config.routines.items())
+            if program.enabled and not program.refresh and name in selected_sensors | selected_routines
+        ]
+        + [
+            name
+            for name, assistant in config.assistants.items()
+            if assistant.enabled
+            and not (assistant.schedules or assistant.inputs or assistant.triggers)
+            and name in selected_assistants
+        ]
     )
     if manual:
         report["manual"] = manual

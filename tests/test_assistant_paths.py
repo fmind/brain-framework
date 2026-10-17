@@ -207,9 +207,14 @@ def test_channel_edited_after_the_answer_blocks_only_its_delivery(store: Store) 
     # Old work is never sent through the new command, and the unchanged channel still delivers.
     assert calls == ["send-chat"]
     blocked = deliveries(store)["desktop"]
-    assert blocked["state"] not in {"pending", "sending", "delivered"}
-    assert "configuration changed" in str(blocked["error"])
+    # Nothing was sent, yet it holds its conversation like any unresolved delivery.
+    assert blocked["state"] == "uncertain"
+    assert str(blocked["error"]) == (
+        "channel configuration changed; restore it, then retry or cancel this delivery with bf queue"
+    )
     store.write("bf.yaml", reviewed)
+    # Restoring bf.yaml alone sends nothing: the delivery waits for its explicit retry.
+    assert not assistants.deliver(store, runner=fake(calls), key=str(blocked["id"]))
     queue.retry(str(blocked["id"]))
     assert assistants.deliver(store, runner=fake(calls), key=str(blocked["id"]))
     assert calls == ["send-chat", "notify-desktop"]
@@ -428,7 +433,8 @@ print("too late")
     )
     pids: list[int] = []
     try:
-        if not wait_for(root / "harness.pids", 20):
+        # A cold watch start plus the harness's own gets the suite's 120-second cold-start budget.
+        if not wait_for(root / "harness.pids", 120):
             watch.kill()
             pytest.fail(f"the scheduled harness never started: {watch.communicate()[1].decode()}")
         pids = [int(pid) for pid in store.read("harness.pids").split()]

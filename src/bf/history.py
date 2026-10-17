@@ -1,4 +1,4 @@
-"""Run history and logs of sensors, routines and prompts, and the environment programs inherit.
+"""Run history and logs of sensors, routines and assistants, and the environment programs inherit.
 
 Status, retrieval and dashboards read this history without importing the process runner. History stays on this
 machine outside the brain; logs live in the brain's logs/ folder, which Git ignores and retrieval never reads.
@@ -76,7 +76,7 @@ class _Run(Model):
     output_bytes: int = Field(default=0, ge=0)
     action: str = ""
     failures: int = Field(default=0, ge=0)
-    # A prompt's successful runs since its history began, and the record its latest run wrote.
+    # An assistant's successful runs since its history began, and the record its latest run wrote.
     runs: int = Field(default=0, ge=0)
     record: str = ""
     # An action routine with `keep`: the SHA-256 of each action it wrote that may still be removed unchanged.
@@ -98,7 +98,7 @@ def environment() -> dict[str, str]:
 
 
 def state(store: Store, file: str = SENSORS) -> dict[str, dict[str, object]]:
-    """Per-sensor, per-routine or per-prompt run history, kept on this machine outside the brain."""
+    """Per-sensor, per-routine or per-assistant run history, kept on this machine outside the brain."""
     try:
         value = decode(state_store(store.root).read(file))
     except FileNotFoundError, Error:

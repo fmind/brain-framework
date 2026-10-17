@@ -16,7 +16,7 @@ from bf.config import load
 from bf.history import environment
 from bf.models import NAME, Error, digest
 from bf.storage import Store, expand, writer, xdg, xdg_setting
-from bf.update import late, scheduled
+from bf.update import late, scheduled, selection
 
 Backend = Literal["auto", "systemd", "launchd", "cron"]
 # The files hold this machine's paths: a preview suggests, and its commands copy from, a folder outside the brain.
@@ -216,10 +216,15 @@ def generate(
             "schedule name must start with a lowercase letter and contain only lowercase letters, digits or hyphens"
         )
     config = load(store)
-    if not scheduled(config, sensors, routines, assistants):
+    # Each run also admits the triggers its selected assistants declare, which have no interval of their own.
+    triggered = any(
+        config.assistants[name].enabled and config.assistants[name].triggers
+        for name in selection(config, sensors, routines, assistants)[2]
+    )
+    if not scheduled(config, sensors, routines, assistants) and not triggered:
         raise Error(
-            "selection contains no enabled scheduled programs; configure a nonzero refresh, or assistant schedules or read"
-            " inputs, first"
+            "selection contains no enabled scheduled programs; configure a nonzero refresh, or assistant schedules, "
+            "read inputs or triggers, first"
         )
     executable = executable or Path(sys.executable).parent / "bf"
     executable = expand(executable).absolute()

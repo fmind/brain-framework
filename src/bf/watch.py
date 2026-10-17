@@ -133,11 +133,10 @@ def snapshot(
                     log=log_path(name) if error else "",
                     action=str(entry.get("action", "")),
                     records=cast(int | None, entry.get("records")),
-                    runs=cast(int, entry.get("runs", 0)) if kind == "assistant" else None,
-                    record=str(entry.get("record", "")),
                 )
             )
-    for name, health in assistant_health(store, now=now).items():
+    # The same bf.yaml as the rows above, even when an editor saves it meanwhile.
+    for name, health in assistant_health(store, now=now, config=config).items():
         settings = config.assistants[name]
         schedules = cast(dict[str, dict[str, object]], health["schedules"])
         # A queue that cannot be read states no deadline.
@@ -422,11 +421,11 @@ class Dashboard:
                 detail.append("Wider reconciliation window\n", style="cyan")
         # An observer suggests no executing command, and neither bf collect nor bf run runs a disabled program.
         if row.kind == "assistant" and not (self.observe or row.error) and row.status is not State.DISABLED:
-            detail.append("Inputs, named schedules and triggers queue work. Use bf run NAME to ask now.")
+            detail.append(f"Inputs, named schedules and triggers queue work. Use bf run {clean(row.name)} to ask now.")
         elif not (self.observe or row.error or row.action) and row.status is not State.DISABLED:
             # bf collect runs only sensors and bf run routines.
             command = "bf collect" if row.kind == "sensor" else "bf run"
-            detail.append(f"Only due programs run here; {command} {row.name} runs it now.")
+            detail.append(f"Only due programs run here; {command} {clean(row.name)} runs it now.")
         detail.rstrip()
         return detail
 
@@ -666,6 +665,33 @@ def _settle(store: Store) -> None:
                 db.execute("DELETE FROM checkpoints WHERE key LIKE 'health:%'")
 
 
+def _failing(dispatcher: Dispatcher) -> str:
+    """Why assistant work waits, or "": a failing pass, an assistant whose schedules or triggers cannot start, a
+    failing read or stream input, then a delivery that failed or is uncertain.
+
+    Read failures are the dispatcher's own; stream workers and deliveries record theirs in the queue.
+    """
+    health = dispatcher.health
+    for prefix in ("dispatcher", "assistant:"):
+        if error := next((error for key, error in sorted(health.items()) if key.startswith(prefix) and error), ""):
+            return error
+    for key, error in sorted(health.items()):
+        if key.startswith("read:") and error:
+            channel = key.split(":")[2]
+            failed = f"channel {channel}: read failed: "
+            if error.startswith(failed):
+                return error
+            return f"{failed}{error.removeprefix(f'channel {channel}: ')}; see {log_path(f'channel.{channel}.read')}"
+    for channel in sorted(dispatcher.transports):
+        if error := str(dispatcher.queue.progress(f"health:channel:{channel}").get("error") or ""):
+            return error if error.startswith(f"channel {channel}: ") else f"channel {channel}: {error}"
+    if failed := sorted(
+        str(item["channel"]) for item in dispatcher.queue.outstanding(dispatcher.names) if item["error"]
+    ):
+        return f"channel {failed[0]}: delivery failed or uncertain; inspect bf queue"
+    return ""
+
+
 class Assistants:
     """Assistant work beside collection: the dispatcher starts once it can, and a pass that fails is shown and retried.
 
@@ -698,12 +724,8 @@ class Assistants:
                 names = selection(load(self.store), *self.selected)[2]
                 self.dispatcher = self.stack.enter_context(Dispatcher(self.store, names))
             self.dispatcher.tick()
-            # The dispatcher keeps running past a failing pass and records why: show that reason, else the first
-            # assistant whose schedule or trigger cannot start.
-            health = self.dispatcher.health
-            reason = health.get("dispatcher", "") or next(
-                (error for name, error in sorted(health.items()) if name.startswith("assistant:") and error), ""
-            )
+            # The dispatcher keeps running past a failing pass, input or delivery and records why.
+            reason = _failing(self.dispatcher)
         except StreamStoppedError:
             raise
         except (Error, OSError, UnicodeError) as error:
@@ -715,6 +737,10 @@ class Assistants:
                 if isinstance(error, Error)
                 else "Assistant work cannot read its files; run bf status for diagnostics"
             )
+        return self.report(reason)
+
+    def report(self, reason: str) -> str | None:
+        """Why assistant work waits, "" once it resumes, or None when unchanged: each reason is shown once."""
         if reason == self.reason:
             return None
         self.reason = reason
@@ -856,6 +882,8 @@ def _loop(
     refresh_requested = invalid = False
     while True:
         now = time.monotonic()
+        # Why assistant work waits, when that changed.
+        reason: str | None = None
         if dispatcher is not None:
             dashboard.assisting = dispatcher.running
         if dashboard.running and (code := job.poll()) is not None:
@@ -908,6 +936,9 @@ def _loop(
                     else "Cannot read bf.yaml or history; run bf status for diagnostics"
                 )
                 invalid = True
+                # No assistant work starts either: say so even when this snapshot reads the failure first.
+                if dispatcher is not None:
+                    reason = dispatcher.report(dashboard.message)
             if (
                 not invalid
                 and not dashboard.observe
@@ -947,17 +978,17 @@ def _loop(
                 sys.stdout.flush()
             next_read = now + preferences.poll_interval
             next_frame = 0
-        # After collection starts, so the message line keeps a new reason until the next snapshot shows it; an invalid
-        # bf.yaml already shows its own diagnostic.
+        # After collection starts, so the message line keeps a new reason until the next snapshot shows it. Nothing new
+        # starts while the snapshot fails, which reported its own reason.
         if dispatcher is not None and not dashboard.paused and not invalid:
             reason = dispatcher.tick(now)
-            if reason is not None:
-                dashboard.waiting = reason
-                dashboard.message = reason or "Assistant work resumed"
-                next_frame = 0
-                if reason and live is None:
-                    # One diagnostic line per new reason, like every other bf: line on stderr.
-                    sys.stderr.write(f"bf: {printable(reason)}\n")
+        if reason is not None:
+            dashboard.waiting = reason
+            dashboard.message = reason or "Assistant work resumed"
+            next_frame = 0
+            if reason and live is None:
+                # One diagnostic line per new reason, like every other bf: line on stderr.
+                sys.stderr.write(f"bf: {printable(reason)}\n")
         if live is None:
             time.sleep(0.1)
             continue

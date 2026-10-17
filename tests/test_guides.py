@@ -1,7 +1,8 @@
-"""Follow the first-brain guides in an isolated home and check every reply fragment they document."""
+"""Follow the first-brain guides in an isolated home; check the replies they document and the queue errors docs quote."""
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -22,6 +23,7 @@ REPLACE = re.compile(r"replace the `([^`]+)` entry under `([^`]+):`")
 POINT = re.compile(r"In `([^`]+)`, point the (\w+) line")
 INSTALL = "uv tool install --python 3.14 brain-framework"
 REPOSITORY = "https://raw.githubusercontent.com/fmind/brain-framework/"
+QUEUE_ERROR = re.compile(r"`(assistant queue [^`]*)`")
 
 
 def _merge(config: Path, fragment: str, prose: str) -> None:
@@ -108,3 +110,29 @@ def test_first_brain_guides_return_the_documented_replies() -> None:
     _follow(first, home, env, release)
     assert "local-documents:website-demo/brief.txt" in note.read_text()
     assert not (home / "brain" / "memories" / "brief").exists()
+
+
+def _messages() -> list[str]:
+    """Every string the package spells, with an f-string's fields as NUL: where its diagnostics come from."""
+    messages = []
+    for path in sorted((ROOT / "src" / "bf").glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                messages.append(node.value)
+            elif isinstance(node, ast.JoinedStr):
+                messages.append(
+                    "".join(str(part.value) if isinstance(part, ast.Constant) else "\0" for part in node.values)
+                )
+    return messages
+
+
+def test_quoted_queue_errors_are_ones_bf_reports() -> None:
+    """A recovery row must match a message the code can print, so renaming one in code leaves no dead diagnosis."""
+    messages = _messages()
+    guides = [*DOCS.glob("*.md"), *(ROOT / "src" / "bf" / "skills").rglob("*.md")]
+    quoted = {text for path in guides for text in QUEUE_ERROR.findall(path.read_text(encoding="utf-8"))}
+    assert quoted
+    for text in sorted(quoted):
+        # `…` cuts the quote short, and upper-case words such as N or NAME stand for an f-string's fields.
+        pattern = ".+?".join(map(re.escape, re.split(r"\b[A-Z]+\b", text.removesuffix("…").rstrip())))
+        assert any(re.match(pattern, message, re.DOTALL) for message in messages), text

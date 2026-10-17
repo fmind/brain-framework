@@ -6,8 +6,10 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from threading import Event, Thread
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -16,7 +18,7 @@ from bf import assistants, channels
 from bf.config import load
 from bf.messages import Message
 from bf.models import Command, Config, Error, Stream, encode, explain
-from bf.runtime import Queue
+from bf.runtime import Queue, QueueFullError
 from bf.storage import Store
 
 START, END, INSIDE = "2026-10-15T00:00:00.000000Z", "2026-10-16T00:00:00.000000Z", "2026-10-15T12:00:00.000000Z"
@@ -272,7 +274,7 @@ def test_a_failing_stream_reconnects_with_capped_backoff_reset_by_admission(
     brain.write("prompts/personal.md", b"Answer {{input}}.\n")
     calls, delays = [], []
 
-    def failing(_store: Store, _name: str, _command: Stream, _resume: dict, accept, _stopped: Event) -> None:
+    def failing(_store: Store, _name: str, _command: Stream, _resume: dict, accept, _stopped: Event, **_) -> None:
         calls.append(1)
         if len(calls) == 9:
             accept(Message.model_validate(envelope(time=INSIDE)))
@@ -308,6 +310,113 @@ def test_a_failing_stream_reconnects_with_capped_backoff_reset_by_admission(
         queue.progress("health:channel:chat")["error"]
         == "channel chat: stream exited; reconnecting from durable progress"
     )
+
+
+def drive(brain: Store, monkeypatch: pytest.MonkeyPatch, *runs: Callable[..., None]) -> tuple[list[dict], list]:
+    """Run the stream worker of a watch selecting only `personal` through `runs`, one per adapter run, each called
+    with the worker's accept and connected callbacks; it raises to fail or returns to stop. Never sleeps between
+    reconnects; returns each run's resume frame and each reconnect delay."""
+    resumes: list[dict] = []
+    delays: list = []
+
+    def fake(_store: Store, _name: str, _command: Stream, resume: dict, accept, _stopped: Event, **options) -> None:
+        resumes.append(dict(resume))
+        runs[len(resumes) - 1](accept, options["connected"])
+
+    class Instant(Event):
+        def wait(self, timeout: float | None = None) -> bool:
+            delays.append(timeout)
+            return len(resumes) >= len(runs)
+
+    monkeypatch.setattr(channels, "stream", fake)
+    dispatcher = assistants.Dispatcher(brain, {"personal"})
+    try:
+        dispatcher.stopped = Instant()
+        stream = load(brain).channels["chat"].stream
+        assert stream is not None
+        dispatcher._stream("chat", stream)  # noqa: SLF001 - the reconnect loop of one stream worker
+    finally:
+        dispatcher.close()
+    return resumes, delays
+
+
+def disconnect(*_: object) -> None:
+    raise Error("channel chat: stream closed its output")
+
+
+def test_a_scoped_watch_admits_every_subscriber_before_acknowledging_and_resumes_from_its_cursor(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subscriber = "    prompt: prompts/personal.md\n    command: [harness]\n    inputs:\n      - channel: {name: chat, mode: stream}\n"
+    brain.write("bf.yaml", ASSISTED + f"  other:\n{subscriber}  paused:\n    enabled: false\n{subscriber}".encode())
+    brain.write("prompts/personal.md", b"Answer {{input}}.\n")
+
+    def admit(accept, _connected) -> None:
+        accept(Message.model_validate(envelope(cursor="c-1")))
+        disconnect()
+
+    resumes, _ = drive(brain, monkeypatch, admit, lambda *_: None)
+    queue = Queue(brain)
+    # Watch selects only personal, yet the acknowledged message is durable for every enabled subscriber.
+    assert sorted(job["assistant"] for job in cast("list[dict]", queue.report()["jobs"])) == ["other", "personal"]
+    assert queue.report()["counts"] == {"pending": 2}
+    # The reconnect resumes from the admitted cursor; `since` stays the stream's first start.
+    assert resumes[1] == {"since": resumes[0]["since"], "cursor": "c-1"}
+    assert resumes[0]["cursor"] == ""
+
+
+def test_a_reconnected_stream_that_stays_up_is_healthy_before_its_next_message(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    brain.write("bf.yaml", ASSISTED)
+    brain.write("prompts/personal.md", b"Answer {{input}}.\n")
+    _, delays = drive(brain, monkeypatch, disconnect, disconnect, lambda _accept, connected: connected())
+    # Staying connected resets the backoff and clears the disconnect, though no message arrived.
+    assert delays == [1, 2, 1]
+    assert Queue(brain).progress("health:channel:chat")["error"] == ""
+    assert Queue(brain).report()["transports"] == {}
+
+
+def test_a_refused_message_stays_reported_after_its_stream_reconnects(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    brain.write("bf.yaml", ASSISTED)
+    brain.write("prompts/personal.md", b"Answer {{input}}.\n")
+    full = "assistant queue is full; finish, retry or cancel unfinished work before accepting more"
+
+    def refuse(*_: object, **__: object) -> None:
+        raise QueueFullError(full)
+
+    monkeypatch.setattr(assistants, "accept", refuse)
+    incoming = Message(id="m-1", sender="owner", conversation="t-1", time=START, text="Hello?")
+    _, delays = drive(
+        brain, monkeypatch, lambda accept, _connected: accept(incoming), lambda _accept, connected: connected()
+    )
+    # The reconnect proves the transport, not that the provider's redelivery can be admitted: the refusal stays.
+    assert Queue(brain).progress("health:channel:chat")["error"] == full
+    assert delays == [1, 2]
+
+
+@pytest.mark.parametrize(("body", "established"), [("time.sleep(60)", 0.2), ("sys.exit(3)", 60.0)], ids=["up", "exits"])
+def test_only_an_adapter_that_stays_up_counts_as_connected(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, body: str, established: float
+) -> None:
+    monkeypatch.setattr(channels, "ESTABLISHED", established)
+    command = adapter(brain, f"sys.stdin.readline()\n{body}\n")
+    stopped, connections = Event(), []
+
+    def connected() -> None:
+        connections.append(True)
+        stopped.set()
+
+    if body.startswith("sys.exit"):
+        # A crash-looping adapter never clears its own failure.
+        with pytest.raises(Error, match="channel chat: stream"):
+            channels.stream(brain, "chat", command, {"since": START}, lambda _: None, stopped, connected=connected)
+        assert connections == []
+    else:
+        channels.stream(brain, "chat", command, {"since": START}, lambda _: None, stopped, connected=connected)
+        assert connections == [True]
 
 
 @pytest.mark.parametrize(

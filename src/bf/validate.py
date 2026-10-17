@@ -162,8 +162,9 @@ def _routes(settings: Assistant) -> int:
 
     reply = any(isinstance(output, ReplyOutput) for output in settings.outputs)
     counts = [len(named(kind)) for kind in ("schedule", "trigger", "manual")]
-    # A reply and a named output to the incoming channel make one threaded delivery.
-    counts += [len(named("input") - {item.channel.name}) + reply for item in settings.inputs]
+    # A reply and a named output to the incoming channel make one threaded delivery; without a reply, that output is
+    # its own delivery.
+    counts += [len(named("input") - ({item.channel.name} if reply else set())) + reply for item in settings.inputs]
     return max(counts, default=0)
 
 

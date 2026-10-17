@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
 from typing import cast
@@ -16,7 +18,7 @@ from bf import assistants, channels, records, runtime
 from bf.collect import collect
 from bf.config import load
 from bf.messages import Message, Outgoing
-from bf.models import Config, Error, Send, encode, timestamp
+from bf.models import Config, Error, ReadInput, Send, encode, timestamp
 from bf.runtime import Queue, QueueFullError
 from bf.storage import BusyError, Store, collecting, writer
 
@@ -232,11 +234,13 @@ def test_receipt_cannot_change_reply_conversation(messaging: Store) -> None:
 
 def test_stream_acknowledges_after_durable_admission(messaging: Store) -> None:
     source = message()
-    script = f"""import json,sys,pathlib,time
+    # The ACK is published atomically, so the test never reads a half-written file.
+    script = f"""import json,os,sys,pathlib,time
 resume=json.loads(sys.stdin.readline())
 print({json.dumps(source.model_dump())!r},flush=True)
 ack=json.loads(sys.stdin.readline())
-pathlib.Path('ack.json').write_text(json.dumps(ack))
+pathlib.Path('ack.tmp').write_text(json.dumps(ack))
+os.replace('ack.tmp','ack.json')
 time.sleep(10)
 """
     messaging.write("channels/stream.py", script.encode())
@@ -462,7 +466,7 @@ def test_incomplete_channel_batches_fail_closed(messaging: Store, raw: bytes) ->
 def test_queue_corruption_is_preserved_and_never_rebuilt(messaging: Store) -> None:
     queue = Queue(messaging)
     queue.store.write("queue.sqlite3", b"corrupt evidence")
-    with pytest.raises(Error, match="preserve"):
+    with pytest.raises(Error, match="assistant queue is unavailable; preserve its files"):
         queue.report()
     assert queue.store.read("queue.sqlite3") == b"corrupt evidence"
 
@@ -772,6 +776,8 @@ def test_real_watch_replies_once_and_recovers_stream_redelivery(tmp_path, monkey
     store = Store(root)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    # Cold interpreter starts get the suite's 120-second budget, shared so both runs stay under the per-test limit.
+    deadline = time.monotonic() + 120
     for attempt in range(2):
         # The queue persists across both runs: the restart must re-accept hello-1 before its outcome counts.
         before = Queue(store).progress("health:channel:local") if attempt else {}
@@ -783,7 +789,6 @@ def test_real_watch_replies_once_and_recovers_stream_redelivery(tmp_path, monkey
                 env={**os.environ, "BF_BRAIN": str(root)},
             )
             try:
-                deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     if child.poll() is not None:
                         pytest.fail(f"watch exited: {child.communicate()[1].decode()}")
@@ -798,7 +803,7 @@ def test_real_watch_replies_once_and_recovers_stream_redelivery(tmp_path, monkey
                     pytest.fail("watch did not deliver its incoming reply and scheduled review")
             finally:
                 child.terminate()
-                _, stderr = child.communicate(timeout=5)
+                _, stderr = child.communicate(timeout=30)
             assert not stderr, stderr.decode()
         lines = [json.loads(line) for line in store.read("logs/deliveries.jsonl").splitlines()]
         assert len(lines) == 2
@@ -1380,3 +1385,303 @@ def test_direct_run_keeps_its_job_and_deliveries_from_background_workers(
     assert [item["status"] for item in background if item.get("job")] == ["skipped"]
     [run] = cast("list[dict]", result["assistants"])
     assert [item["state"] for item in run["deliveries"]] == ["delivered"]
+
+
+def failing_harness(_argv: list[str], program: object, *_: object) -> bytes:
+    """A harness that fails after it might have acted, and a channel accepting every send."""
+    if isinstance(program, Send):
+        return b'{"id":"sent","conversation":"thread-1"}'
+    raise Error("program exited with status 3")
+
+
+def test_failed_trigger_job_is_inspected_retried_and_cancelled_apart_from_its_trigger(messaging: Store) -> None:
+    from typer.testing import CliRunner
+
+    from bf.cli import app
+
+    def invoke(*args: str) -> dict:
+        result = CliRunner().invoke(app, ["queue", *args, "--brain", str(messaging.root)])
+        assert result.exit_code == 0, result.output + str(result.exception)
+        return json.loads(result.stdout)
+
+    queue = Queue(messaging)
+    start, end = window()
+    collect(messaging, "calendar", start=start, end=end, runner=changed())
+    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
+    key = queue.next(False, {"personal"})
+    assert key
+    with queue.connect() as db:
+        [trigger] = [row[0] for row in db.execute("SELECT id FROM triggers")]
+    assert key != trigger
+    with pytest.raises(Error, match="status 3"):
+        assistants.execute(messaging, key, runner=failing_harness)
+    detail = invoke(key)
+    assert (detail["kind"], detail["state"]) == ("trigger", "uncertain")
+    assert invoke(trigger)["state"] == "dispatched"
+    assert invoke(key, "--retry") == {"id": key, "status": "pending"}
+    with pytest.raises(Error, match="status 3"):
+        assistants.execute(messaging, key, runner=failing_harness)
+    assert invoke(key, "--cancel") == {"id": key, "status": "cancelled"}
+    # The next change to the sensor is reviewed instead of waiting behind the cancelled job.
+    collect(messaging, "calendar", start=start, end=end, runner=changed("event-2"))
+    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
+    assert queue.next(False, {"personal"}) not in {None, key}
+
+
+def test_a_removed_assistants_pending_trigger_is_dropped_by_any_pass(messaging: Store) -> None:
+    start, end = window()
+    collect(messaging, "calendar", start=start, end=end, runner=changed())
+    configure(messaging, lambda config: config["assistants"].update(other=config["assistants"].pop("personal")))
+    config = load(messaging)
+    assert assistants.materialize(messaging, set(config.assistants), config) == []
+    assert Queue(messaging).report()["trigger_counts"] == {"dropped": 1}
+    assert "dropped sensor event" in messaging.read("logs/personal.log").decode()
+
+
+def test_watch_records_an_attempt_another_process_abandoned(messaging: Store) -> None:
+    configure(messaging, lambda config: config["assistants"]["personal"].update(inputs=[], schedules={}))
+    queue = Queue(messaging)
+    start, end = window()
+    live, abandoned = (assistants.prepare(messaging, "personal", "manual", start, end) for _ in range(2))
+    with assistants.Dispatcher(messaging, {"personal"}) as dispatcher, collecting(messaging, f".job-{live.id}"):
+        for work in (live, abandoned):
+            queue.enqueue(work)
+            assert claim(queue, work.id)
+        # A bf run beside watch was killed mid-attempt: its job stays running, its lock free.
+        dispatcher.compact_at = 0
+        dispatcher._admit(load(messaging))  # noqa: SLF001 - the once-a-minute maintenance pass
+        assert queue.get(abandoned.id)["state"] == "uncertain"
+        assert queue.get(live.id)["state"] == "running"
+        with pytest.raises(Error, match="job is still running"):
+            queue.retry(live.id, cancel=True)
+
+
+def test_queue_resolves_an_abandoned_standalone_send_without_a_dispatcher(brain: Store) -> None:
+    from typer.testing import CliRunner, Result
+
+    from bf.cli import app
+    from bf.models import digest
+
+    brain.write("bf.yaml", b"version: 8\nname: fixture\nchannels:\n  local:\n    send: {command: [send-local]}\n")
+    queue = Queue(brain)
+    queue.send("local", Send(command=["send-local"]), Outgoing(id="stable", text="Hello"))
+    # A bf channel send was killed after marking its attempt.
+    assert queue.sending("stable")
+
+    def cancel() -> Result:
+        return CliRunner().invoke(app, ["queue", "stable", "--cancel", "--brain", str(brain.root)])
+
+    with collecting(brain, f".delivery-{digest(b'stable')}"):
+        refused = cancel()
+    assert refused.exit_code == 1
+    assert "delivery is still being sent" in str(refused.exception)
+    cancelled = cancel()
+    assert cancelled.exit_code == 0, cancelled.output
+    assert json.loads(cancelled.stdout) == {"id": "stable", "status": "cancelled"}
+
+
+def test_an_interrupted_run_or_send_is_recorded_before_its_process_ends(messaging: Store) -> None:
+    configure(messaging, lambda config: config["assistants"]["personal"].update(schedules={}))
+    queue = Queue(messaging)
+
+    def interrupted(*_: object) -> bytes:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        assistants.manual(messaging, "personal", text="Hi", runner=interrupted)
+    [job] = cast("list[dict]", queue.report()["jobs"])
+    assert (job["state"], job["error"]) == ("uncertain", "interrupted harness attempt; inspect before retrying")
+    queue.send("chat", Send(command=["send-chat"]), Outgoing(id="manual", text="Hello"))
+    with pytest.raises(KeyboardInterrupt):
+        assistants.deliver(messaging, runner=interrupted, key="manual")
+    sent = queue.inspect("manual")
+    assert (sent["state"], sent["error"]) == ("uncertain", "interrupted send; inspect before retrying")
+
+
+def test_a_direct_run_the_full_queue_refuses_creates_no_job(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    from bf.storage import lock_file
+
+    monkeypatch.setattr(runtime, "MAX_PENDING", 2)
+    assistants.accept(messaging, "chat", [message()], {"personal"})
+    result = assistants.manual(messaging, "personal", text="Hi", runner=lambda *_: pytest.fail("must not start"))
+    [run] = cast("list[dict]", result["assistants"])
+    assert run["status"] == "failed"
+    assert str(run["error"]).startswith("assistant queue has no unfinished-work slots")
+    assert Queue(messaging).report()["counts"] == {"pending": 1}
+    locks, _ = lock_file(messaging, "write.lock")
+    assert not [path.name for path in locks.root.iterdir() if ".job-" in path.name]
+
+
+def test_a_direct_run_without_answer_space_is_cancelled(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each started job reserves half the queue's space: a worker starting first leaves none for this run.
+    monkeypatch.setattr(runtime, "answer_space", lambda *_: runtime.MAX_DATABASE * 3 // 8)
+    assistants.accept(messaging, "chat", [message()], {"personal"})
+    queue = Queue(messaging)
+    other = queue.next(True, {"personal"})
+    assert other
+    original, raced = assistants.expanded, []
+
+    def racing(store: Store, work, queue: Queue | None = None):
+        if work.kind == "manual" and queue is not None and not raced:
+            raced.append(claim(queue, other))
+        return original(store, work, queue)
+
+    monkeypatch.setattr(assistants, "expanded", racing)
+    result = assistants.manual(messaging, "personal", text="Hi", runner=lambda *_: pytest.fail("must not start"))
+    [run] = cast("list[dict]", result["assistants"])
+    assert raced == [True]
+    assert "lacks answer space for this run, so it was cancelled" in str(run["error"])
+    assert queue.report()["counts"] == {"cancelled": 1, "running": 1}
+
+
+def read_backlog(messaging: Store, previous: str, batch: list[Message]) -> tuple[ReadInput, Callable[..., bytes]]:
+    """A read input whose checkpoint ends at `previous`, and an adapter returning the complete window of `batch`."""
+
+    def read_input(config):
+        config["channels"]["chat"]["read"] = {"command": ["read-chat", "{{start}}", "{{end}}"]}
+        config["assistants"]["personal"].update(
+            inputs=[{"channel": {"name": "chat", "mode": "read", "every": 60}}], schedules={}
+        )
+
+    configure(messaging, read_input)
+    Queue(messaging).set_progress("read:personal:chat", {"since": previous, "end": previous})
+
+    def read(argv, *_):
+        start, end = argv[1:]
+        return encode({"messages": [item.model_dump() for item in batch if start <= item.time < end]})
+
+    return ReadInput(name="chat", mode="read", every=60), read
+
+
+def test_a_read_window_beyond_one_batch_drains_in_parts(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The watcher was off for a day while 1,500 messages arrived, more than one read batch carries.
+    base = datetime.now(UTC) - timedelta(days=1)
+    batch = [
+        message(f"m-{index}").model_copy(
+            update={"time": timestamp((base + timedelta(seconds=50 * index)).isoformat()), "conversation": f"t-{index}"}
+        )
+        for index in range(1500)
+    ]
+    binding, read = read_backlog(messaging, timestamp(base.isoformat()), batch)
+    queue = Queue(messaging)
+    # A subscription older than its checkpoint: polls overlap the checkpoint by 30 seconds.
+    since = timestamp((base - timedelta(hours=1)).isoformat())
+    queue.set_progress("read:personal:chat", {"since": since, "end": timestamp(base.isoformat())})
+    windows: list[tuple[str, str]] = []
+
+    def recorded(argv, *rest):
+        windows.append((argv[1], argv[2]))
+        return read(argv, *rest)
+
+    monkeypatch.setattr(assistants, "CATCH_UP", 1)
+    # The first poll drops the overlap and halves the window, which count against no budget, then admits its earlier
+    # half, its one part; the rest follows next poll.
+    assert assistants.poll(messaging, "personal", binding, runner=recorded)
+    halfway = str(queue.progress("read:personal:chat")["end"])
+    assert batch[0].time < halfway < batch[-1].time
+    assert windows[0][0] == timestamp((base - timedelta(seconds=30)).isoformat())
+    assert windows[1:] == [(timestamp(base.isoformat()), windows[0][1]), (timestamp(base.isoformat()), halfway)]
+    assert not assistants.poll(messaging, "personal", binding, runner=recorded)
+    assert str(queue.progress("read:personal:chat")["end"]) > batch[-1].time
+    assert queue.report()["counts"] == {"pending": 1500}
+
+
+@pytest.mark.parametrize("gap", [timedelta(seconds=10), timedelta(days=1)], ids=["seconds", "day"])
+def test_a_burst_beyond_one_batch_within_a_second_fails_visibly(messaging: Store, gap: timedelta) -> None:
+    # After a day offline, halving the window must still reach the one-second floor instead of spending its reads.
+    previous = datetime.now(UTC) - gap
+    burst = timestamp((previous + timedelta(milliseconds=100)).isoformat())
+    batch = [message(f"m-{index}").model_copy(update={"time": burst}) for index in range(1001)]
+    binding, read = read_backlog(messaging, timestamp(previous.isoformat()), batch)
+    before = Queue(messaging).progress("read:personal:chat")
+    with pytest.raises(Error, match="chat: more than 1000 messages fall within one second; read them with a stream"):
+        assistants.poll(messaging, "personal", binding, runner=read)
+    assert Queue(messaging).progress("read:personal:chat") == before
+    assert Queue(messaging).report()["counts"] == {}
+
+
+def test_watch_repolls_a_read_input_while_it_catches_up(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    read_backlog(messaging, runtime.now(), [])
+    configure(messaging, lambda config: config["assistants"]["personal"]["inputs"][0]["channel"].update(every=3600))
+    polls: list[str] = []
+
+    def poll(_store: Store, name: str, binding: ReadInput, **_: object) -> bool:
+        polls.append(f"{name}:{binding.name}")
+        return len(polls) < 3
+
+    monkeypatch.setattr(assistants, "poll", poll)
+    with assistants.Dispatcher(messaging, {"personal"}) as dispatcher:
+        deadline = time.monotonic() + 30
+        while len(polls) < 3 and time.monotonic() < deadline:
+            dispatcher.tick()
+            time.sleep(0.01)
+        for _ in range(20):
+            dispatcher.tick()
+            time.sleep(0.01)
+    # Two polls left a backlog; the third caught up, so the next waits `every` seconds.
+    assert polls == ["personal:chat"] * 3
+
+
+# The pre-release v19 queue: no triggers table and fewer indexes, under the same user_version.
+PRERELEASE = """
+CREATE TABLE events (id TEXT PRIMARY KEY, kind TEXT NOT NULL, source TEXT NOT NULL, at TEXT NOT NULL,
+                     digest TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE jobs (id TEXT PRIMARY KEY, assistant TEXT NOT NULL, kind TEXT NOT NULL, slot TEXT NOT NULL,
+                   state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, payload TEXT NOT NULL,
+                   raw BLOB, prepared TEXT, error TEXT NOT NULL DEFAULT '');
+CREATE INDEX ready_jobs ON jobs(state,kind,created);
+CREATE INDEX job_slots ON jobs(assistant,slot,state);
+CREATE TABLE deliveries (id TEXT PRIMARY KEY, job TEXT REFERENCES jobs(id), channel TEXT NOT NULL,
+                         state TEXT NOT NULL, payload TEXT NOT NULL, command TEXT NOT NULL,
+                         receipt TEXT, error TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0,
+                         due TEXT NOT NULL);
+CREATE INDEX ready_deliveries ON deliveries(state,due);
+CREATE TABLE checkpoints (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE messages (id TEXT PRIMARY KEY, channel TEXT NOT NULL, conversation TEXT NOT NULL,
+                       role TEXT NOT NULL, at TEXT NOT NULL, text TEXT NOT NULL);
+CREATE INDEX conversation_messages ON messages(channel,conversation,at);
+PRAGMA user_version=1;
+"""
+
+
+@pytest.mark.parametrize(
+    ("script", "refusal"),
+    [
+        (PRERELEASE, "unexpected assistant queue schema; preserve it and repair it"),
+        (
+            runtime._SCHEMA + "CREATE TABLE extra (x);",  # noqa: SLF001
+            "unexpected assistant queue schema; preserve it and repair it",
+        ),
+        (
+            runtime._SCHEMA.replace("user_version=1", "user_version=2"),  # noqa: SLF001
+            "unsupported assistant queue version; preserve it and use its matching BF release",
+        ),
+        ("CREATE TABLE notes (x);", "unknown assistant queue format; preserve the queue and repair it"),
+    ],
+    ids=["pre-release", "extra-table", "newer-version", "foreign"],
+)
+def test_another_queue_format_is_refused_and_preserved(messaging: Store, script: str, refusal: str) -> None:
+    import sqlite3
+
+    queue = Queue(messaging)
+    queue.report()
+    path = queue.store.root / runtime.DATABASE
+    path.unlink()
+    db = sqlite3.connect(path)
+    try:
+        db.executescript(script)
+    finally:
+        db.close()
+    path.chmod(0o600)
+    before = path.read_bytes()
+    with pytest.raises(Error, match=re.escape(refusal)):
+        queue.report()
+    assert path.read_bytes() == before
+    if "schema" in refusal:
+        from bf.health import report
+
+        # bf status reads the queue read-only, yet names the same refusal and leaves it as it is.
+        entry = cast("dict", report([messaging]))["brains"][0]
+        problems = [problem["error"] for problem in entry["problems"]]
+        assert refusal in problems
+        assert path.read_bytes() == before

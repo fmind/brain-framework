@@ -77,7 +77,7 @@ These boundaries hold everywhere; other pages link here instead of repeating the
 - **Retrieval never collects.** `bf search` and `bf read` never contact providers or run programs. A fresh cache can hold old evidence: check source coverage before calling evidence current.
 - **An incomplete result proves no absence.** A reply with `problems` or `stale`, a failed source or a missing period cannot show that something does not exist. One page of results is not the whole result.
 - **Reminders are not reviews.** A `review` flag comes from dates, file edits and linked evidence. It never marks a note as checked.
-- **Programs run only when you ask.** Sensors, routines and assistants run through `bf collect`, `bf run`, `bf update`, `bf watch` or a schedule you install, in one selected brain. Registration and references never grant execution.
+- **Programs run only when you ask.** Sensors, routines, assistants and channels run through `bf collect`, `bf run`, `bf channel`, a delivery's `bf queue ID --retry`, `bf update`, `bf watch` or a schedule you install, in one selected brain. Registration and references never grant execution.
 - **It is not a sandbox or a backup.** Programs run with your account's permissions; keep backups of your brain.
 
 ## Glossary

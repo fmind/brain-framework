@@ -9,6 +9,9 @@ from pydantic import Field, field_validator
 
 from bf.models import Model, timestamp
 
+# Messages one read batch carries; a read input splits a longer window.
+MAX_BATCH = 1000
+
 
 class Message(Model):
     """An authenticated, admitted message; the configured adapter owns sender authorization."""
@@ -33,7 +36,7 @@ class Message(Model):
 
 
 class Batch(Model):
-    messages: Annotated[list[Message], Field(max_length=1000)]
+    messages: Annotated[list[Message], Field(max_length=MAX_BATCH)]
 
 
 class Outgoing(Model):

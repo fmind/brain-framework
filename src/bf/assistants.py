@@ -19,7 +19,7 @@ from bf import channels, records
 from bf.collect import MAX_ARGUMENT, RUN_ID, Runner, arguments, enabled, home_folder, parse_reply, reply_title, run
 from bf.config import load
 from bf.history import ASSISTANTS, append_log, log_path, remember, state
-from bf.messages import Message, Outgoing
+from bf.messages import MAX_BATCH, Message, Outgoing
 from bf.models import (
     MAX_PROMPT,
     Assistant,
@@ -144,21 +144,28 @@ def sensor_event(config: Config, source: str, start: str, end: str) -> EventInte
     return EventIntent(id=uuid4().hex, source=source, at=now(), data={"start": start, "end": end}, targets=targets)
 
 
+def read_failure(channel: str, error: BaseException) -> str:
+    """A failed read poll, worded alike by bf update and watch, naming the channel's read log."""
+    reason = _reason(error, "its files are inaccessible").removeprefix(f"channel {channel}: ")
+    return f"channel {channel}: read failed: {reason}; see {log_path(f'channel.{channel}.read')}"
+
+
 def materialize(
     store: Store, names: Collection[str], config: Config, *, skip: Collection[str] = ()
 ) -> list[dict[str, object]]:
     """Admit the pending sensor triggers of the selected assistants, one target at a time.
 
     A trigger whose assistant or trigger is gone, disabled or names another sensor is dropped and noted in the
-    assistant's log. One that cannot be admitted yet, as when its prompt is missing or the queue is full, stays
-    pending with its reason, and the failure is returned; the others still run.
+    assistant's log; a removed assistant is never selected, so every pass drops its triggers. One that cannot be
+    admitted yet, as when its prompt is missing or the queue is full, stays pending with its reason, and the failure
+    is returned; the others still run.
     """
     queue, failures, broken = Queue(store), [], set(skip)
     for row in queue.pending_triggers():
         key, name, trigger = str(row["id"]), str(row["assistant"]), str(row["trigger"])
-        if name not in names or name in broken:
-            continue
         settings = config.assistants.get(name)
+        if settings is not None and (name not in names or name in broken):
+            continue
         specification = settings.triggers.get(trigger) if settings is not None and settings.enabled else None
         if specification is None or specification.sensor.name != row["source"]:
             reason = "its assistant trigger was removed, disabled or changed; the sensor change was not reviewed"
@@ -176,7 +183,8 @@ def materialize(
                 str(data["end"]),
                 config=config,
                 slot=f"trigger:{trigger}",
-                key=key,
+                # Its own id, so bf queue resolves the job apart from the trigger that dispatched it.
+                key=digest(f"job:{key}".encode())[:32],
                 event={"id": str(row["event"]), "type": "sensor.changed", "sensor": str(row["source"]), **data},
             )
             queue.dispatch(key, work)
@@ -437,6 +445,11 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
             with suppress(Error, OSError):
                 append_log(store, work.assistant, message)
             raise Error(message) from error
+        except BaseException:
+            # Ctrl-C or SIGTERM ends this process: record a started attempt now, not at the next recovery pass.
+            with suppress(Error, OSError):
+                queue.interrupted(job=key)
+            raise
     finally:
         with suppress(Error, OSError):
             if queue.get(key)["state"] in {"complete", "cancelled"}:
@@ -468,7 +481,12 @@ def deliver(
                 raise Error("invalid queued delivery; preserve the queue and repair it") from error
             configured = load(store).channels.get(name)
             if configured is None or configured.send != command:
-                queue.delivery_failed(key, "channel configuration changed; restore it or cancel this delivery")
+                # Nothing was sent, yet it keeps holding its conversation, as a job whose configuration changed does.
+                queue.delivery_failed(
+                    key,
+                    "channel configuration changed; restore it, then retry or cancel this delivery with bf queue",
+                    outcome="uncertain",
+                )
                 return True
             if not queue.sending(key):
                 return False
@@ -480,6 +498,11 @@ def deliver(
                 attempts = int(str(delivery["attempts"])) + 1
                 outcome, reason, due = retry_policy(command.idempotent, delivery["job"] is not None, attempts, reason)
                 queue.delivery_failed(key, reason, outcome=outcome, due=due)
+            except BaseException:
+                # Ctrl-C or SIGTERM ends this process: record the send now, not at the next recovery pass.
+                with suppress(Error, OSError):
+                    queue.interrupted(delivery=key)
+                raise
             return True
         finally:
             with suppress(Error, OSError):
@@ -506,6 +529,11 @@ def manual(
             with collecting(store, f".job-{work.id}"):
                 try:
                     queue.enqueue(work)
+                except QueueFullError:
+                    # No job exists: the caller hears the admission refusal itself.
+                    forget(store, f".job-{work.id}")
+                    raise
+                try:
                     result.update(_execute(store, work.id, runner))
                 except QueueFullError as error:
                     # The caller hears why now: the run must not start later behind its back.
@@ -599,38 +627,71 @@ def schedule(
     return keys, failures
 
 
-def poll(store: Store, name: str, binding: ReadInput, *, runner: Runner = run) -> None:
+# Reads one poll makes at most while catching up on a window that holds more than one batch.
+CATCH_UP = 16
+
+
+def _at(value: str, delta: timedelta) -> str:
+    return timestamp((datetime.fromisoformat(value) + delta).isoformat())
+
+
+def poll(store: Store, name: str, binding: ReadInput, *, runner: Runner = run) -> bool:
+    """Admit one read input's new messages; True while more remain than this poll's reads could catch up on.
+
+    A window holding more than one batch is read in parts from the checkpoint, each admitted part moving it.
+    """
     queue = Queue(store)
     key = f"read:{name}:{binding.name}"
     progress = queue.progress(key)
     end = now()
     if not progress:
         queue.set_progress(key, {"since": end, "end": end})
-        return
+        return False
     since, previous = str(progress["since"]), str(progress["end"])
     # Small overlap catches late arrivals. Stable message IDs deduplicate it without joining conversations.
-    start = max(since, timestamp((datetime.fromisoformat(previous) - timedelta(seconds=30)).isoformat()))
-    if start >= end:
-        return
-    messages = sorted(
-        channels.read(store, binding.name, start, end, runner=runner), key=lambda item: (item.time, item.id)
-    )
-    try:
-        accept(store, binding.name, messages, {name}, checkpoint=(key, {"since": since, "end": end}), mode="read")
-    except QueueFullError:
-        # Admit the longest prefix that fits, so a backlog drains across polls instead of failing as a whole.
-        admitted = 0
-        for message in messages:
-            progressed: dict[str, JsonValue] = {"since": since, "end": max(previous, message.time)}
-            try:
-                accept(store, binding.name, [message], {name}, checkpoint=(key, progressed), mode="read")
-            except QueueFullError:
-                break
-            admitted += 1
-        raise QueueFullError(
-            f"assistant queue is full: admitted {admitted} of {len(messages)} messages; finish, retry or cancel "
-            "unfinished work and the rest follow"
-        ) from None
+    lower, upper = max(since, _at(previous, timedelta(seconds=-30))), end
+    # Only admitted parts count: halving an overflowing window ends at the one-second floor, so it cannot spin.
+    parts = 0
+    while parts < CATCH_UP:
+        if lower >= end:
+            return False
+        try:
+            batch = channels.read(store, binding.name, lower, upper, runner=runner)
+        except channels.BatchOverflowError as error:
+            if lower < previous:
+                # Catch up from the checkpoint itself, without the overlap, so each admitted part moves it forward.
+                lower = previous
+                continue
+            span = datetime.fromisoformat(upper) - datetime.fromisoformat(lower)
+            if span <= timedelta(seconds=1):
+                raise Error(
+                    f"channel {binding.name}: more than {MAX_BATCH} messages fall within one second; "
+                    "read them with a stream input"
+                ) from error
+            upper = _at(lower, span / 2)
+            continue
+        messages = sorted(batch, key=lambda item: (item.time, item.id))
+        try:
+            accept(store, binding.name, messages, {name}, checkpoint=(key, {"since": since, "end": upper}), mode="read")
+        except QueueFullError:
+            # Admit the longest prefix that fits, so a backlog drains across polls instead of failing as a whole.
+            admitted = 0
+            for message in messages:
+                progressed: dict[str, JsonValue] = {"since": since, "end": max(previous, message.time)}
+                try:
+                    accept(store, binding.name, [message], {name}, checkpoint=(key, progressed), mode="read")
+                except QueueFullError:
+                    break
+                admitted += 1
+            raise QueueFullError(
+                f"assistant queue is full: admitted {admitted} of {len(messages)} messages; finish, retry or cancel "
+                "unfinished work and the rest follow"
+            ) from None
+        parts += 1
+        # The next part doubles the one that fit, until it reaches the end of this poll's window.
+        span = datetime.fromisoformat(upper) - datetime.fromisoformat(lower)
+        previous, lower, upper = upper, upper, min(end, _at(upper, 2 * span))
+    return lower < end
 
 
 def _cycle(store: Store, names: set[str], at: datetime, runner: Runner) -> list[dict[str, object]]:
@@ -654,8 +715,7 @@ def _cycle(store: Store, names: set[str], at: datetime, runner: Runner) -> list[
             try:
                 poll(store, name, binding, runner=runner)
             except (Error, OSError, UnicodeError) as failure:
-                reason = _reason(failure, "its files are inaccessible").removeprefix(f"channel {binding.name}: ")
-                error = f"channel {binding.name}: read failed: {reason}; see {log_path(f'channel.{binding.name}.read')}"
+                error = read_failure(binding.name, failure)
                 results.append({"assistant": name, "input": binding.name, "status": "failed", "error": error})
             with suppress(Error, OSError):
                 queue.set_progress(f"health:{key}", {"error": error, "at": now()})
@@ -781,8 +841,9 @@ class Dispatcher:
             config = load(self.store)
             consumers: dict[str, set[str]] = {}
             for name in self.names:
-                settings = config.assistants[name]
-                if settings.enabled:
+                # bf.yaml may have changed since the caller selected these names: a removed assistant streams nothing.
+                settings = config.assistants.get(name)
+                if settings is not None and settings.enabled:
                     for item in settings.inputs:
                         if item.channel.mode == "stream":
                             consumers.setdefault(item.channel.name, set()).add(name)
@@ -820,6 +881,9 @@ class Dispatcher:
         """Keep one channel's stream connected; every failure, even in setup, reconnects with backoff."""
         key = f"stream:{channel}"
         delay = 1
+        # A refused admission, such as a full queue, stays reported until a message is admitted again: a reconnect
+        # that merely stays up proves the transport, not that its input can be accepted.
+        refused = False
         while not self.stopped.is_set():
             try:
                 progress = self.queue.progress(key)
@@ -829,7 +893,8 @@ class Dispatcher:
                 since = str(progress["since"])
 
                 def accepted(message: Message, since: str = since) -> None:
-                    nonlocal delay
+                    nonlocal delay, refused
+                    refused = True
                     config = load(self.store)
                     current_channel = config.channels.get(channel)
                     if current_channel is None or current_channel.stream != command:
@@ -851,7 +916,18 @@ class Dispatcher:
                         recipients,
                         checkpoint=(key, {"since": since, "cursor": message.cursor}),
                     )
+                    refused = False
                     self.queue.set_progress(f"health:channel:{channel}", {"error": "", "at": now()})
+                    delay = 1
+
+                def connected() -> None:
+                    # A reconnected stream that stays up is healthy again, though no message arrived yet, unless
+                    # its last message was refused.
+                    nonlocal delay
+                    if refused:
+                        return
+                    with suppress(Error, OSError):
+                        self.queue.set_progress(f"health:channel:{channel}", {"error": "", "at": now()})
                     delay = 1
 
                 configured = load(self.store).channels.get(channel)
@@ -864,6 +940,7 @@ class Dispatcher:
                     {"since": since, "cursor": str(progress.get("cursor", ""))},
                     accepted,
                     self.stopped,
+                    connected=connected,
                 )
             except (Error, OSError, UnicodeError) as error:
                 reason = str(error) if isinstance(error, Error) else "stream transport failed; inspect its local log"
@@ -917,13 +994,22 @@ class Dispatcher:
             del self.tasks[name]
             key = self.keys.pop(name, "")
             try:
-                future.result()
+                behind = future.result()
                 self._record(name, "")
+                if name.startswith("read:") and behind is True:
+                    # A read input catching up on a backlog polls again on the next tick, not after `every`.
+                    self.read_due.pop(name, None)
             except (Error, OSError, UnicodeError, ValueError) as error:
                 # Busy, waiting or failed work is left alone for a while instead of being picked again every tick.
                 if key:
                     self.later[key] = time.monotonic() + BACKOFF
-                self._record(name, "" if isinstance(error, BusyError) else _reason(error, "runtime worker failed"))
+                if isinstance(error, BusyError):
+                    self._record(name, "")
+                elif name.startswith("read:"):
+                    # Worded as bf update words it, so bf status reads the same whichever ran the poll.
+                    self._record(name, read_failure(name.split(":")[2], error))
+                else:
+                    self._record(name, _reason(error, "runtime worker failed"))
 
     def _jobs(self) -> None:
         waiting = self._waiting()
@@ -984,3 +1070,5 @@ class Dispatcher:
         if clock >= self.compact_at:
             self.compact_at = clock + 60
             self.queue.compact()
+            # An interrupted bf run, channel send or queue retry beside watch becomes resolvable within a minute.
+            self.queue.recover_attempts()

@@ -23,7 +23,7 @@ bf update              # run due sensors, then routines, then assistants
 bf status --check
 ```
 
-The dry run lists due programs with their windows, and names under `manual` the enabled programs with `refresh: 0` that updates skip. A healthy `bf status --check` exits 0. Set `enabled: false` to stop a program, or `refresh: 0` to keep it manual, as sensors and routines are by default. Keep CI for offline `bf validate` and `bf eval`; for a shared source, designate one [collecting laptop](team.md#collect-on-a-laptop).
+The dry run lists due programs with their windows, and names under `manual` the enabled programs that updates skip: sensors and routines with `refresh: 0`, and assistants without schedules, inputs or triggers, which only `bf run` starts. A healthy `bf status --check` exits 0. Set `enabled: false` to stop a program, or `refresh: 0` to keep it manual, as sensors and routines are by default. Keep CI for offline `bf validate` and `bf eval`; for a shared source, designate one [collecting laptop](team.md#collect-on-a-laptop).
 
 ## Watch collection
 
@@ -31,7 +31,7 @@ The dry run lists due programs with their windows, and names under `manual` the 
 bf watch
 ```
 
-Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. The assistant dispatcher supervises persistent streams, due batch reads, named schedules, queued events and deliveries beside collection; the dashboard marks assistants with `@`. A long proactive review leaves separate capacity for incoming messages. It can contact providers. Closing watch stops all owned process groups. Assistant work that cannot start, such as for a missing prompt or a full queue, never stops watch: the message line says why and watch retries; only a stopped stream worker ends it. Restart it after adding or renaming an assistant, or changing channel commands or stream subscriptions. See [assistant timing and recovery](prompts.md#schedule-and-overlap).
+Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. The assistant dispatcher supervises persistent streams, due batch reads, named schedules, queued events and deliveries beside collection; the dashboard marks assistants with `@`. A long proactive review leaves separate capacity for incoming messages. It can contact providers. Closing watch stops all owned process groups. Assistant work that cannot start, such as for a missing prompt or a full queue, and a failing read, a disconnected stream or a failed delivery never stop watch: the message line says why and watch retries work that waits; only a stopped stream worker ends it. Restart it after adding or renaming an assistant, or changing channel commands or stream subscriptions. See [assistant timing and recovery](prompts.md#schedule-and-overlap).
 
 The dashboard shows each program's state, last success, next due time, returned items and record changes. `never` means no success on this machine, such as a sensor that only backfilled older windows; `failed` means the last attempt failed. Items counts the records the last committed collection returned, even a backfill, not the stored total. Manual and disabled programs stay visible without running. Use `bf status --check` for full health.
 

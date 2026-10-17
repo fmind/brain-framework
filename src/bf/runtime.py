@@ -144,6 +144,12 @@ def _expected() -> frozenset[tuple[str, str, str]]:
         db.close()
 
 
+def check_schema(connection: sqlite3.Connection) -> None:
+    """Refuse a queue whose tables differ from this release's, such as one a pre-release build created."""
+    if frozenset(tuple(row) for row in connection.execute(_OBJECTS)) != _expected():
+        raise Error("unexpected assistant queue schema; preserve it and repair it")
+
+
 def _identity(channel: str, payload: str, command: str) -> str:
     """What one delivery id stands for; it outlives body compaction, so an identical resend stays recognizable."""
     return digest(encode([channel, payload, command]))
@@ -239,8 +245,7 @@ class Queue:
                             connection.execute(statement)
                 elif version != 1:
                     raise Error("unsupported assistant queue version; preserve it and use its matching BF release")
-                if frozenset(tuple(row) for row in connection.execute(_OBJECTS)) != _expected():
-                    raise Error("unexpected assistant queue schema; preserve it and repair it")
+                check_schema(connection)
                 if bound:
                     self._bind(connection)
                 yield connection
@@ -703,29 +708,49 @@ class Queue:
                 (outcome, error, due or now(), key),
             )
 
-    def recover_attempts(self) -> None:
-        """Only the exclusive dispatcher calls this. An interrupted harness attempt or non-idempotent send is never
-        silently replayed; an interrupted idempotent delivery retries as a failed one would."""
+    def recover_attempts(self, key: str = "") -> None:
+        """Record the harness attempts and sends whose process ended without recording them, such as one killed.
+
+        Any process may call this: a live attempt holds its job or delivery lock, so only abandoned ones are
+        recorded. `key` limits it to one job or delivery.
+        """
         with self.connect() as db:
-            runs = [row[0] for row in db.execute("SELECT id FROM jobs WHERE state='running'")]
-            sends = db.execute(
-                "SELECT id,job IS NOT NULL,coalesce(json_extract(command,'$.idempotent'),0),attempts "
-                "FROM deliveries WHERE state='sending'"
-            ).fetchall()
-        for key in runs:
-            with suppress(BusyError), collecting(self.brain, f".job-{key}"), self.connect() as db:
-                db.execute(
-                    "UPDATE jobs SET state='uncertain',error='interrupted harness attempt; inspect before retrying' "
-                    "WHERE id=? AND state='running'",
-                    (key,),
-                )
-        for key, owned, idempotent, attempts in sends:
-            reason = "interrupted send" if idempotent else "interrupted send; inspect before retrying"
-            outcome, error, due = retry_policy(bool(idempotent), bool(owned), int(attempts), reason)
-            with suppress(BusyError), collecting(self.brain, f".delivery-{digest(key.encode())}"), self.connect() as db:
+            runs = [row[0] for row in db.execute("SELECT id FROM jobs WHERE state='running' AND ? IN ('',id)", (key,))]
+            sends = [
+                row[0] for row in db.execute("SELECT id FROM deliveries WHERE state='sending' AND ? IN ('',id)", (key,))
+            ]
+        for job in runs:
+            with suppress(BusyError), collecting(self.brain, f".job-{job}"):
+                self.interrupted(job=job)
+        for delivery in sends:
+            with suppress(BusyError), collecting(self.brain, f".delivery-{digest(delivery.encode())}"):
+                self.interrupted(delivery=delivery)
+
+    def interrupted(self, *, job: str = "", delivery: str = "") -> None:
+        """Record one ended attempt; its caller holds the attempt's lock, or is the attempt itself.
+
+        An interrupted harness attempt or non-idempotent send is never silently replayed; an interrupted idempotent
+        delivery retries as a failed one would.
+        """
+        with self.connect() as db:
+            # No job or delivery has an empty id: an omitted one matches nothing.
+            db.execute(
+                "UPDATE jobs SET state='uncertain',error='interrupted harness attempt; inspect before retrying' "
+                "WHERE id=? AND state='running'",
+                (job,),
+            )
+            row = db.execute(
+                "SELECT job IS NOT NULL,coalesce(json_extract(command,'$.idempotent'),0),attempts "
+                "FROM deliveries WHERE id=? AND state='sending'",
+                (delivery,),
+            ).fetchone()
+            if row is not None:
+                owned, idempotent, attempts = row
+                reason = "interrupted send" if idempotent else "interrupted send; inspect before retrying"
+                outcome, error, due = retry_policy(bool(idempotent), bool(owned), int(attempts), reason)
                 db.execute(
                     "UPDATE deliveries SET state=?,error=?,due=? WHERE id=? AND state='sending'",
-                    (outcome, error, due or now(), key),
+                    (outcome, error, due or now(), delivery),
                 )
 
     def conversation(self, channel: str, conversation: str, before: str, *, exclude: str = "") -> list[dict[str, str]]:
@@ -779,7 +804,8 @@ class Queue:
             failures = db.execute(
                 "SELECT count(*) FROM deliveries WHERE state NOT IN ('delivered','cancelled') AND error!=''"
             ).fetchone()[0]
-            # A healthy entry, such as a stream that recovered, is recorded as an empty error: list only failures.
+            # A healthy entry, such as a stream that stayed connected after reconnecting, is recorded as an empty
+            # error: list only failures.
             health = {
                 key: value
                 for key, raw in db.execute("SELECT key,value FROM checkpoints WHERE key LIKE 'health:%'")
@@ -853,12 +879,18 @@ class Queue:
             )
 
     def retry(self, key: str, *, cancel: bool = False) -> None:
-        """Explicitly retry or cancel a job, delivery or pending sensor trigger."""
+        """Explicitly retry or cancel a job, delivery or pending sensor trigger.
+
+        An attempt whose process ended without recording it, such as an interrupted `bf run`, is recorded first.
+        """
+        self.recover_attempts(key)
         lock = ""
         with self.connect() as db:
             delivery = db.execute("SELECT state FROM deliveries WHERE id=?", (key,)).fetchone()
             trigger = db.execute("SELECT state FROM triggers WHERE id=?", (key,)).fetchone()
             if delivery is not None:
+                if delivery[0] == "sending":
+                    raise Error("delivery is still being sent; retry or cancel it once its attempt ends")
                 if delivery[0] not in {"uncertain", "failed", "pending"}:
                     raise Error("only pending or unresolved deliveries can be retried or cancelled")
                 # An explicit retry starts the automatic backoff of an idempotent delivery over.
@@ -876,6 +908,8 @@ class Queue:
                 return
             else:
                 row = db.execute("SELECT state,raw,prepared,payload FROM jobs WHERE id=?", (key,)).fetchone()
+                if row is not None and row[0] == "running":
+                    raise Error("job is still running; retry or cancel it once its attempt ends")
                 if row is None or row[0] not in {"failed", "uncertain", "pending"}:
                     raise Error("only pending or unresolved jobs can be retried or cancelled")
                 state = (

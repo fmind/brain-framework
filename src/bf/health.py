@@ -14,7 +14,7 @@ from bf import __version__, index, usage
 from bf.config import Selection, brain_name, load, related
 from bf.history import ASSISTANTS, ROUTINES, log_path, state
 from bf.models import CACHE, Assistant, Config, Error, Program, Sensor, decode, timestamp
-from bf.runtime import DATABASE, Queue
+from bf.runtime import DATABASE, Queue, check_schema
 from bf.storage import Store
 
 # Counters of the last committed collection, reported apart from indexed totals.
@@ -64,12 +64,12 @@ def _silent(sensor: Sensor | None, success: str, changed: str, now: datetime) ->
 
 
 def source_health(
-    store: Store, names: Iterable[str] = (), *, now: datetime | None = None
+    store: Store, names: Iterable[str] = (), *, now: datetime | None = None, config: Config | None = None
 ) -> dict[str, dict[str, object]]:
     """Describe active, disabled and historical sources without running them or exposing logs.
 
     `names` may be the indexed counts per source, whose `changed` then reports a source silent past its
-    `silent_after`.
+    `silent_after`. A caller passes the `config` it loaded, so one reply describes one bf.yaml even mid-save.
     """
     now = now or datetime.now(UTC)
     changed = (
@@ -77,22 +77,24 @@ def source_health(
         if isinstance(names, Mapping)
         else {}
     )
-    config, history, asked = load(store), state(store), state(store, ASSISTANTS)
-    assistant_states = assistant_health(store, now=now)
+    config = config or load(store)
+    history, asked = state(store), state(store, ASSISTANTS)
+    assistant_states = assistant_health(store, now=now, config=config)
     result: dict[str, dict[str, object]] = {}
     for name in sorted({*config.sensors, *config.assistants, *names}):
         if name in config.assistants:
             # An assistant's records are its runs: the assistant is their source.
-            assistant = config.assistants[name]
-            entry = asked.get(name, {})
-            success = str(entry.get("success", ""))
+            assistant, health = config.assistants[name], assistant_states[name]
+            success = str(asked.get(name, {}).get("success", ""))
             item: dict[str, object] = {"state": "active" if assistant.enabled else "disabled", "freshness": "unknown"}
             if success:
                 item["last_collected"] = success
-            if entry.get("error"):
+            # Its failed or uncertain work, unresolved until retried or cancelled, even once disabled. An unreadable
+            # queue, which names no log, leaves the freshness unknown instead.
+            if health.get("failed") and "log" in health:
                 item["failed"] = True
             if assistant.enabled:
-                item["freshness"] = assistant_states[name]["freshness"]
+                item["freshness"] = health["freshness"]
             result[name] = item
             continue
         settings = config.sensors.get(name)
@@ -129,10 +131,12 @@ def _failure(name: str, entry: dict[str, object]) -> dict[str, object]:
     }
 
 
-def routine_health(store: Store, *, now: datetime | None = None) -> dict[str, dict[str, object]]:
+def routine_health(
+    store: Store, *, now: datetime | None = None, config: Config | None = None
+) -> dict[str, dict[str, object]]:
     """Each configured routine's state, freshness, last success, latest action and failure."""
     now = now or datetime.now(UTC)
-    config, history = load(store), state(store, ROUTINES)
+    config, history = config or load(store), state(store, ROUTINES)
     result: dict[str, dict[str, object]] = {}
     for name, settings in sorted(config.routines.items()):
         entry = history.get(name, {})
@@ -178,6 +182,7 @@ class _Reader(Queue):
                 connection.execute("BEGIN")
                 if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
                     raise Error("unsupported assistant queue version; preserve it and use its matching BF release")
+                check_schema(connection)
                 # The binding execution writes and checks: a queue it refuses reports nothing either. A drained
                 # queue follows a moved or renamed brain at its next execution, so reading it is safe now.
                 bound = connection.execute("SELECT value FROM checkpoints WHERE key='binding'").fetchone()
@@ -194,6 +199,9 @@ class _Reader(Queue):
             finally:
                 connection.close()
         except sqlite3.DatabaseError as error:
+            # A read-only reader cannot roll back the journal a killed writer left; the next writer does.
+            if getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_READONLY_ROLLBACK:
+                raise Error("assistant queue holds an interrupted write; run bf queue to recover it") from error
             raise Error(
                 "assistant queue is unavailable; preserve its files and check permissions, disk space or corruption"
             ) from error
@@ -212,13 +220,16 @@ class _Reader(Queue):
         return [row[0] for row in jobs], [row[0] for row in deliveries]
 
 
-def assistant_health(store: Store, *, now: datetime | None = None) -> dict[str, dict[str, object]]:
-    """Each configured assistant's state, freshness, last scheduled success, runs, latest record and failure.
+def assistant_health(
+    store: Store, *, now: datetime | None = None, config: Config | None = None
+) -> dict[str, dict[str, object]]:
+    """Each assistant `config` declares (by default, bf.yaml's): its state, freshness, last scheduled success, runs,
+    latest record and failure.
 
     A queue that cannot be read leaves every freshness unknown and names the reason as each assistant's error.
     """
     now = now or datetime.now(UTC)
-    config, history = load(store), state(store, ASSISTANTS)
+    config, history = config or load(store), state(store, ASSISTANTS)
     result: dict[str, dict[str, object]] = {}
     if not config.assistants:
         return result
@@ -345,11 +356,12 @@ def attention(
         except Error, OSError, sqlite3.DatabaseError:
             # Silence needs the cache; failures and lateness come from run history alone.
             counts = {}
+    config = load(store)
     return _attention(
-        load(store),
-        source_health(store, counts, now=now),
-        routine_health(store, now=now),
-        assistant_health(store, now=now),
+        config,
+        source_health(store, counts, now=now, config=config),
+        routine_health(store, now=now, config=config),
+        assistant_health(store, now=now, config=config),
     )
 
 
@@ -416,9 +428,9 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
         try:
             config, history, summary = load(store), state(store), index.status(store)
             counts = cast("dict[str, dict[str, object]]", summary.pop("sources"))
-            coverage = source_health(store, counts, now=now)
-            routines = routine_health(store, now=now)
-            assistants = assistant_health(store, now=now)
+            coverage = source_health(store, counts, now=now, config=config)
+            routines = routine_health(store, now=now, config=config)
+            assistants = assistant_health(store, now=now, config=config)
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
             # Status diagnoses brains: among registered ones, even beside only unavailable ones, one that cannot load
             # is reported, and the others still are. A brain selected alone fails with its own error.

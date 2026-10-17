@@ -25,6 +25,12 @@ from bf.storage import Store
 _FIELDS = frozenset({"messages", *Message.model_fields})
 # Diagnostics kept from a stream's stderr; the log itself is bounded too.
 _STDERR = 256 << 10
+# Seconds an adapter must keep running after it starts before its connection counts as established.
+ESTABLISHED = 5.0
+
+
+class BatchOverflowError(Error):
+    """A read window holds more messages than one batch carries; a shorter window may fit."""
 
 
 def _invalid(error: Error | ValidationError) -> str:
@@ -54,7 +60,12 @@ def read(
     try:
         batch = Batch.model_validate(decode(raw))
     except (Error, ValidationError) as error:
-        raise Error(f"channel {name}: read must return a complete JSON messages batch{_invalid(error)}") from error
+        overflow = isinstance(error, ValidationError) and any(
+            item["type"] == "too_long" and item["loc"] == ("messages",) for item in error.errors()
+        )
+        raise (BatchOverflowError if overflow else Error)(
+            f"channel {name}: read must return a complete JSON messages batch{_invalid(error)}"
+        ) from error
     if len({item.id for item in batch.messages}) != len(batch.messages):
         raise Error(f"channel {name}: read returned duplicate message ids")
     if any(not start <= item.time < end for item in batch.messages):
@@ -83,11 +94,14 @@ def stream(
     resume: dict[str, str],
     accept: Callable[[Message], None],
     stopped: Event,
+    *,
+    connected: Callable[[], None] | None = None,
 ) -> None:
     """Pump bounded JSON Lines; acknowledge only after accept has durably recorded all recipients.
 
     The adapter receives one resume frame, then ack frames. Idle streams have no total time limit. A broken or
     blocked control pipe restarts the adapter instead of growing an unbounded buffer or delaying other channels.
+    `connected` runs once, when BF wrote the resume frame and the adapter still runs ESTABLISHED seconds after starting.
     Every run ends with one timed log entry naming its outcome and, when the adapter exited on its own, its status.
     """
     env = {**environment(), "BF_BRAIN": str(store.root)}
@@ -119,12 +133,16 @@ def stream(
             selector.register(child.stdout, selectors.EVENT_READ)
             selector.register(child.stderr, selectors.EVENT_READ)
             selector.register(child.stdin, selectors.EVENT_WRITE)
-            writing = True
+            writing = resuming = True
             while not stopped.is_set():
                 if pending and time.monotonic() - blocked > command.timeout:
                     raise Error(f"channel {name}: stream stopped reading acknowledgements")
                 if child.poll() is not None:
                     raise Error(f"channel {name}: stream exited; reconnecting from durable progress")
+                if connected is not None and not resuming and time.monotonic() - started >= ESTABLISHED:
+                    # A crash-looping adapter exits before this, so its failure stays visible.
+                    connected()
+                    connected = None
                 if pending and not writing:
                     selector.register(child.stdin, selectors.EVENT_WRITE)
                     writing = True
@@ -135,7 +153,7 @@ def stream(
                         blocked = time.monotonic()
                         if not pending:
                             selector.unregister(child.stdin)
-                            writing = False
+                            writing = resuming = False
                         continue
                     data = os.read(key.fd, 65_536)
                     if not data:

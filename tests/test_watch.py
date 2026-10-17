@@ -14,9 +14,11 @@ import sys
 import termios
 import time
 from collections.abc import Callable
+from concurrent import futures
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
@@ -26,8 +28,10 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 import bf.collect as collector
+import bf.watch as watching
 from bf.assistants import Dispatcher
 from bf.cli import _cancel, app
+from bf.config import load
 from bf.history import state
 from bf.models import Error, WatchSettings, encode, local, timestamp
 from bf.runtime import Queue
@@ -155,7 +159,7 @@ def test_dashboard_layout_keeps_data_literal_and_handles_resize(width: int, heig
     dashboard = Dashboard(
         "[red]fixture\x1b]0;bad",
         rows=[
-            Row("prompt", "assistant", State.FRESH, True, 1800, runs=1, record="memories/\x1b[2Jassistant"),
+            Row("assistant", "assistant", State.FRESH, True, 1800, runs=1, record="memories/\x1b[2Jassistant"),
             Row(
                 "sensor",
                 "calendar",
@@ -185,6 +189,7 @@ def test_dashboard_layout_keeps_data_literal_and_handles_resize(width: int, heig
     # Brackets stay text, never markup; details need 80 columns.
     assert "[red]fixture" in output.getvalue()
     if width >= 80:
+        assert "@ assistant" in output.getvalue()
         assert "[bold]literal" in output.getvalue()
         assert "q quit" in output.getvalue()
     assert clean("x\n\x1b\t") == "x   "
@@ -325,13 +330,14 @@ def test_details_show_diagnostics_and_routine_markers_at_every_width(width: int,
         (Row("sensor", "calendar", State.FRESH, True, 60), "bf collect calendar"),
         (Row("sensor", "manual", State.MANUAL, True, 0), "bf collect manual"),
         (Row("routine", "weekly-log", State.FRESH, True, 60), "bf run weekly-log"),
-        (Row("prompt", "assistant", State.NEVER, True, 1800, runs=0), "bf run assistant"),
+        (Row("assistant", "personal", State.NEVER, True, 1800, runs=0), "bf run personal"),
+        (Row("assistant", "manual", State.MANUAL, True, 0, runs=0), "bf run manual"),
         (Row("sensor", "disabled", State.DISABLED, True, 60), ""),
-        (Row("prompt", "paused", State.DISABLED, True, 1800, runs=0), ""),
+        (Row("assistant", "paused", State.DISABLED, True, 1800, runs=0), ""),
     ],
 )
 def test_details_name_the_command_that_runs_the_program_now(row: Row, command: str) -> None:
-    # bf collect runs only sensors and bf run routines and prompts; neither runs a disabled program.
+    # bf collect runs only sensors and bf run routines and assistants; neither runs a disabled program.
     commands = re.compile(r"bf (?:collect|run) \S+")
     assert commands.findall(Dashboard("fixture", rows=[row]).details(row).plain) == ([command] if command else [])
     # An observer runs nothing and suggests no executing command.
@@ -1242,6 +1248,17 @@ def json_watch(
     return [json.loads(line) for line in captured.out.splitlines()], captured.err.splitlines()
 
 
+def test_snapshot_reads_one_bf_yaml_while_an_editor_saves_it(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    brain.write("bf.yaml", CONFIG + HELPER.replace(b"  helper:", b"  renamed:"))
+    renamed = load(brain)
+    brain.write("bf.yaml", CONFIG + HELPER)
+    # The atomic save that renames the assistant lands right after the dashboard's own load.
+    monkeypatch.setattr("bf.health.load", lambda _store: renamed)
+    rows = {row.name: row for row in snapshot(brain)}
+    assert rows["helper"].kind == "assistant"
+    assert "renamed" not in rows
+
+
 def test_watch_signals_the_update_then_stops_the_dispatcher_then_waits(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1267,9 +1284,11 @@ def test_watch_signals_the_update_then_stops_the_dispatcher_then_waits(
     class Dispatching:
         def __init__(self, _store: Store, names: set[str]) -> None:
             assert names == {"helper"}
+            self.names = names
             self.tasks: dict[str, object] = {}
             self.transports: dict[str, object] = {}
             self.health: dict[str, str] = {}
+            self.queue = SimpleNamespace(outstanding=lambda _names: [])
 
         def __enter__(self) -> Dispatching:
             events.append("dispatcher start")
@@ -1291,7 +1310,7 @@ def test_watch_signals_the_update_then_stops_the_dispatcher_then_waits(
     assert events == ["start", "dispatcher start", "terminate", "dispatcher close", "close"]
 
 
-@pytest.mark.parametrize("failure", ["invalid", "prompt", "capacity"])
+@pytest.mark.parametrize("failure", ["invalid", "snapshot", "prompt", "capacity"])
 def test_watch_shows_dispatcher_errors_and_keeps_collecting(
     brain: Store,
     monkeypatch: pytest.MonkeyPatch,
@@ -1312,16 +1331,20 @@ def test_watch_shows_dispatcher_errors_and_keeps_collecting(
     ran: list[str] = []
     monkeypatch.setattr("bf.assistants.Dispatcher.runner", lambda *_: ran.append("harness") or b"Reviewed.")
 
+    # Saved between two-second snapshots, so the next dispatcher pass reads it first, or right after a pass, so the
+    # next snapshot does.
+    saved = {"invalid": (0.5, 3.5), "snapshot": (1.5, 4.5)}.get(failure, ())
+
     def step(now: float) -> None:
-        # Saved between two-second snapshots, so the next dispatcher pass reads it first.
-        if failure == "invalid" and now == 0.5:
+        if saved and now == saved[0]:
             brain.write("bf.yaml", config + b"  broken: [\n")
-        if failure == "invalid" and now == 3.5:
+        if saved and now == saved[1]:
             brain.write("bf.yaml", config)
 
-    events, errors = json_watch(brain, monkeypatch, capsys, 7, step)
+    events, errors = json_watch(brain, monkeypatch, capsys, 9, step)
     reason = {
         "invalid": "bf.yaml: invalid YAML",
+        "snapshot": "bf.yaml: invalid YAML",
         "prompt": "prompts/helper.md: cannot read assistant helper's prompt",
         "capacity": "assistant queue is full",
     }[failure]
@@ -1330,13 +1353,90 @@ def test_watch_shows_dispatcher_errors_and_keeps_collecting(
     # One diagnostic line on stderr for each new reason, not one per pass.
     assert [line for line in errors if reason in line] == [errors[0]]
     assert errors[0].startswith("bf: ")
-    if failure == "invalid":
+    if saved:
         assert "Configuration recovered" in messages
         assert messages[-1] == "Assistant work resumed"
     else:
         # A schedule that cannot be admitted queues nothing, and collection keeps reporting its programs.
         assert ran == []
         assert all(event["programs"] for event in events)
+
+
+@pytest.mark.parametrize("failure", ["read", "stream", "delivery"])
+def test_watch_shows_failing_inputs_and_deliveries_until_they_recover(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: str
+) -> None:
+    channel = {
+        "read": b"  inbox:\n    read: {command: [reader]}\n",
+        "stream": b"  chat:\n    send: {command: [send]}\n    stream: {command: [receive]}\n",
+        "delivery": b"  chat:\n    send: {command: [send]}\n",
+    }[failure]
+    settings = {
+        "read": b"    inputs:\n      - channel: {name: inbox, mode: read, every: 1}\n",
+        "stream": b"    inputs:\n      - channel: {name: chat, mode: stream}\n",
+        "delivery": b"    schedules:\n      review: {every: 3600}\n    outputs:\n      - channel: {name: chat}\n",
+    }[failure]
+    brain.write("bf.yaml", CONFIG + b"channels:\n" + channel + HELPER + settings)
+    brain.write("prompts/helper.md", b"Review.\n")
+    queue = Queue(brain)
+    # The read's previous window ended an hour ago, so each poll reads.
+    earlier = timestamp((datetime.now(UTC) - timedelta(hours=1)).isoformat())
+    queue.set_progress("read:helper:inbox", {"since": earlier, "end": earlier})
+    broken, connections = [True], []
+
+    def reading(*_args: object, **_kwargs: object) -> list[object]:
+        if broken[0]:
+            raise Error("program exited with status 1")
+        return []
+
+    def streaming(*args: object, **_: object) -> None:
+        # Stops once with an error, then stays connected until watch stops.
+        connections.append(1)
+        if len(connections) == 1:
+            raise Error("channel chat: stream closed its output")
+        cast("Event", args[-1]).wait()
+
+    def runner(_self: Dispatcher, _argv: list[str], _command: object, _store: Store, name: str, _stdin: bytes) -> bytes:
+        if name == "channel.chat.send":
+            raise Error("program exited with status 1")
+        return b"Reviewed."
+
+    monkeypatch.setattr("bf.assistants.channels.read", reading)
+    monkeypatch.setattr("bf.assistants.channels.stream", streaming)
+    monkeypatch.setattr("bf.assistants.Dispatcher.runner", runner)
+    # The dispatcher's read intervals follow watch's fake clock.
+    monkeypatch.setattr("bf.assistants.time", SimpleNamespace(monotonic=lambda: watching.time.monotonic()))
+    dispatchers: list[Dispatcher] = []
+    enter = Dispatcher.__enter__
+    monkeypatch.setattr(Dispatcher, "__enter__", lambda self: dispatchers.append(self) or enter(self))
+
+    def step(now: float) -> None:
+        # Each pass sees the outcome of the work the previous one started, and a stream's recorded failure.
+        if dispatchers:
+            futures.wait(list(dispatchers[0].tasks.values()), timeout=10)
+        if failure == "stream" and now == 0.5:
+            deadline = time.monotonic() + 10
+            while not queue.progress("health:channel:chat").get("error") and time.monotonic() < deadline:
+                time.sleep(0.01)
+        if now == 4.5:
+            # The input reads again, the stream accepts a message, or the owner cancels the uncertain delivery.
+            broken[0] = False
+            if failure == "stream":
+                queue.set_progress("health:channel:chat", {"error": "", "at": timestamp(datetime.now(UTC).isoformat())})
+            for delivery in cast("list[dict]", queue.report()["deliveries"]):
+                queue.retry(str(delivery["id"]), cancel=True)
+
+    events, errors = json_watch(brain, monkeypatch, capsys, 9, step)
+    reason = {
+        "read": "channel inbox: read failed: program exited with status 1; see logs/channel.inbox.read.log",
+        "stream": "channel chat: stream closed its output",
+        "delivery": "channel chat: delivery failed or uncertain; inspect bf queue",
+    }[failure]
+    messages = [event["message"] for event in events]
+    assert reason in messages, messages
+    # One diagnostic line for the failure, whichever pass sees it again; then work resumes.
+    assert errors == [f"bf: {reason}"]
+    assert messages[-1] == "Assistant work resumed"
 
 
 def test_watch_waits_for_an_update_that_owns_assistant_work(

@@ -139,7 +139,7 @@ Search lists in `sources` the sources of returned records and those needing atte
 | `state`                             | `active`, `disabled` or `historical` (records remain but `bf.yaml` no longer declares the sensor).                                                 |
 | `freshness`                         | `fresh`, `overdue`, `never`, `manual` (no `refresh`) or `unknown` (disabled or historical).                                                        |
 | `last_collected`, `window`          | This machine's last collection that brought the source up to date, and the contiguous interval collected.                                          |
-| `failed`                            | The last attempt failed.                                                                                                                           |
+| `failed`                            | The last attempt failed or, for an assistant, one of its jobs is failed or uncertain and not yet retried or cancelled, even while it is disabled.  |
 | `mode`, `records`, `latest`, `page` | `window` or `snapshot`; on `memories` pages, also the indexed records and the newest event time, and on the `memories` overview the source's page. |
 | `changed`                           | On `memories` pages: when this brain last gained a new or changed record of the source.                                                            |
 | `silent`                            | `true` when `changed` is older than the source's [`silent_after`](schedule.md#silent-sources); a record read's `collection` omits it.              |

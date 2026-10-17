@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,8 +19,8 @@ from typer.testing import CliRunner
 from bf import assistants, index, records
 from bf.cli import app
 from bf.collect import collect, routine
-from bf.config import ABSENT, register
-from bf.health import report, source_health
+from bf.config import ABSENT, load, register
+from bf.health import attention, report, source_health
 from bf.history import log_path
 from bf.messages import Message
 from bf.models import Error, Query, encode, timestamp
@@ -506,3 +509,80 @@ def test_status_names_an_assistant_whose_work_cannot_start(brain: Store) -> None
     status = cast("dict", report([brain]))
     assert status["brains"][0]["attention"] == []
     assert status["healthy"]
+
+
+def test_coverage_marks_an_assistant_with_unresolved_failed_work_as_failed(brain: Store) -> None:
+    assisted(brain)
+    queue = Queue(brain)
+
+    def failing(*_: object) -> bytes:
+        raise Error("harness timed out")
+
+    assert assistants.manual(brain, "notes", runner=lambda *_: b"Checked.")["ok"]
+    assert not assistants.manual(brain, "notes", runner=failing)["ok"]
+
+    def coverage(reply: dict[str, object]) -> dict[str, object]:
+        return next(entry for entry in cast("list[dict]", reply["sources"]) if entry["source"] == "notes")
+
+    # Search and read coverage say what status says: the latest run failed, however fresh its last record.
+    assert coverage(search([brain], Query(text="Checked", prefix="memories/notes")))["failed"] is True
+    # An unscoped search that returns none of its records still lists it.
+    assert coverage(search([brain], Query(text="Durable evidence")))["failed"] is True
+    assert cast("dict", report([brain]))["brains"][0]["sources"]["notes"]["failed"] is True
+    for job in cast("list[dict]", queue.report()["jobs"]):
+        if job["state"] in {"failed", "uncertain"}:
+            queue.retry(str(job["id"]), cancel=True)
+    assert "failed" not in coverage(search([brain], Query(text="Checked", prefix="memories/notes")))
+    assert "failed" not in source_health(brain)["notes"]
+
+
+def test_status_says_an_interrupted_queue_write_recovers_with_bf_queue(brain: Store) -> None:
+    assisted(brain)
+    queue = Queue(brain)
+    queue.set_progress("created", {})
+    database = runtime_store(brain).root / DATABASE
+    # A writer killed once its journal was synced, as when it spills pages to the file mid-transaction, leaves a
+    # journal only the next writer can roll back.
+    killed = (
+        "import os, signal, sqlite3, sys\n"
+        "db = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+        "db.execute('PRAGMA cache_size=5')\n"
+        "db.execute('BEGIN IMMEDIATE')\n"
+        "for i in range(2000):\n"
+        "    db.execute('INSERT INTO checkpoints VALUES (?,?)', (f'spill:{i}', 'x' * 500))\n"
+        "os.kill(os.getpid(), signal.SIGKILL)\n"
+    )
+    process = subprocess.run([sys.executable, "-I", "-c", killed, str(database)], check=False)  # noqa: S603
+    assert process.returncode == -signal.SIGKILL
+    assert database.with_name(database.name + "-journal").exists()
+    interrupted = "assistant queue holds an interrupted write; run bf queue to recover it"
+    entry = cast("dict", report([brain]))["brains"][0]
+    assert {"error": interrupted} in entry["problems"]
+    assert entry["assistants"]["notes"]["error"] == interrupted
+    assert "failed" not in entry["sources"]["notes"]
+    # Any execution, such as bf queue, rolls the write back.
+    queue.report()
+    assert not database.with_name(database.name + "-journal").exists()
+    assert queue.progress("spill:0") == {}
+    entry = cast("dict", report([brain]))["brains"][0]
+    assert entry["problems"] == []
+    assert "error" not in entry["assistants"]["notes"]
+
+
+def test_status_and_coverage_describe_one_bf_yaml_while_it_is_saved(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assisted(brain)
+    brain.write("bf.yaml", ASSISTED.replace(b"  notes:", b"  renamed:"))
+    renamed = load(brain)
+    brain.write("bf.yaml", ASSISTED)
+    original = load(brain)
+    # An editor's atomic save lands right after the first load: every later one reads the renamed assistant.
+    loads = iter([original])
+    monkeypatch.setattr("bf.health.load", lambda _store: next(loads, renamed))
+    entry = cast("dict", report([brain]))["brains"][0]
+    assert set(entry["assistants"]) == {"notes", "personal"}
+    loads = iter([original])
+    assert attention(brain) == []
+    loads = iter([original])
+    assert set(source_health(brain)) == {"notes", "personal"}

@@ -43,6 +43,7 @@ def export() -> str:
             0,
             [
                 '"valid":true',
+                '"manual":["assistant"]',
                 '"status":"ran"',
                 '"record":"assistant:',
                 "Owner message: What changed in the launch?",
@@ -124,3 +125,12 @@ def test_readme_walkthrough(example: str, block: int | None, expected: list[str]
         assert re.search(r"^\s*4$", result.stdout, re.MULTILINE), result.stdout
     assert not (tmp_path / "unrelated-brain").exists()
     assert not list(tmp_path.glob("tmp.*")), "walkthrough did not remove its disposable brain"
+
+
+@pytest.mark.parametrize("brain", sorted(path.parent.name for path in (ROOT / "examples").glob("*/bf.yaml")))
+def test_example_brains_keep_their_cache_logs_and_records_out_of_git(brain: str) -> None:
+    """A user who keeps a copied example commits what `bf init` would ignore only on purpose."""
+    ignored = set((ROOT / "examples" / brain / ".gitignore").read_text().splitlines())
+    # The retrieval example commits its fixture records: its evaluation cases expect them.
+    expected = {"/.bf/", "/logs/"} | (set() if brain == "retrieval" else {"/memories/"})
+    assert expected <= ignored

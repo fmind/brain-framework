@@ -118,6 +118,44 @@ def test_schedules_for_other_selections_queue_instead_of_failing(
     assert [report["sensors"][0]["status"] for report in reports] == ["collected", "collected"]
 
 
+ASSISTANTS = b"""assistants:
+  ask:
+    prompt: prompts/ask.md
+    command: [harness]
+  reviewer:
+    prompt: prompts/ask.md
+    command: [harness]
+    triggers:
+      changed: {event: sensor.changed, sensor: {name: mail}}
+  idle:
+    prompt: prompts/ask.md
+    command: [harness]
+    enabled: false
+"""
+
+
+def test_update_names_manual_assistants_and_schedule_accepts_trigger_only_ones(scheduled: Store) -> None:
+    scheduled.write("bf.yaml", CONFIG + ASSISTANTS)
+    # An assistant without schedules, inputs or triggers runs only through bf run, so update names it as skipped.
+    assert update(scheduled, dry_run=True)["manual"] == ["ask", "manual"]
+    assert update(scheduled, assistants=("ask",), dry_run=True)["manual"] == ["ask"]
+    assert "manual" not in update(scheduled, assistants=("reviewer", "idle"), dry_run=True)
+    # Watch's collection job runs no assistant, so it names none.
+    assert update(scheduled, kinds=frozenset({"sensor", "routine"}), dry_run=True)["manual"] == ["manual"]
+    # A trigger-only assistant gets its own job: each run admits the triggers its sensor's collection recorded.
+    preview = generate(scheduled, assistants=("reviewer",), executable=Path(sys.executable))
+    assert cast("list[str]", preview["argv"])[1:] == [
+        "update",
+        "--brain",
+        str(scheduled.root),
+        "--assistant",
+        "reviewer",
+    ]
+    for selected in (("ask",), ("idle",)):
+        with pytest.raises(Error, match="assistant schedules, read inputs or triggers"):
+            generate(scheduled, assistants=selected, executable=Path(sys.executable))
+
+
 def test_cli_selection_and_preview_do_not_execute(scheduled: Store, tmp_path: Path) -> None:
     result = CliRunner().invoke(app, ["update", "--brain", str(scheduled.root), "--sensor", "mail", "--dry-run"])
     assert result.exit_code == 0, result.output
