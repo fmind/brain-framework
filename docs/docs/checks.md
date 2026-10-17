@@ -58,7 +58,7 @@ Each spelling counts the notes and records naming it, most used first, up to 20 
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/checks/
-version: 7
+version: 8
 cases:
   - name: find-the-reason
     query: visitors clear explanation
@@ -126,7 +126,7 @@ Rename the heading back before continuing. `regressions` lists cases that passed
 
 ## Suite reference
 
-A suite declares `version: 7`, the brain format, and a list of `cases`. `bf schema --kind eval` prints its JSON Schema (`title: Suite`) for editor validation.
+A suite declares `version: 8`, the brain format, and a list of `cases`. `bf schema --kind eval` prints its JSON Schema (`title: Suite`) for editor validation.
 
 | Field               | What it checks                                                                                    |
 | ------------------- | ------------------------------------------------------------------------------------------------- |

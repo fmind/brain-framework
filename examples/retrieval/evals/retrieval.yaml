@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/docs/checks/
-version: 7
+version: 8
 cases:
   - name: why-atlas-uses-sqlite
     query: Why does Atlas use SQLite for offline retrieval?

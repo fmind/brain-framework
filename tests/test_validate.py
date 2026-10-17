@@ -77,7 +77,7 @@ def test_problems_are_collected_not_fail_fast(brain: Store) -> None:
 
 def test_non_finite_note_fields_are_invalid_not_unanswerable(brain: Store) -> None:
     # YAML reads .nan and .inf as floats, which strict JSON replies cannot carry.
-    brain.write("bf.yaml", b"version: 7\nname: fixture\nfields:\n  weight:\n    description: W.\n    type: number\n")
+    brain.write("bf.yaml", b"version: 8\nname: fixture\nfields:\n  weight:\n    description: W.\n    type: number\n")
     for value in (b".nan", b"-.inf", b"[1, .inf]"):
         brain.write("projects/weight.md", b"---\ntype: project\nfields:\n  weight: " + value + b"\n---\n# Weight\n")
         assert "projects/weight.md: invalid frontmatter: fields" in "\n".join(located(validate(brain)))
@@ -89,7 +89,7 @@ def test_non_finite_note_fields_are_invalid_not_unanswerable(brain: Store) -> No
 
 
 def test_link_schema_and_identity_problems_name_their_file_once(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 7\nname: fixture\n")
+    brain.write("bf.yaml", b"version: 8\nname: fixture\n")
     brain.write("concepts/foreign.md", b"---\ntype: person\nentity: bf://other/people/alice\n---\n# Foreign\n")
     brain.write(
         "concepts/relation.md",
@@ -404,7 +404,7 @@ def test_okf_status_and_reserved_files_are_valid(brain: Store, folder: str, stat
 def test_case_variant_identities_warn_without_failing(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nfields:\n"
+        b"version: 8\nname: fixture\nfields:\n"
         b"  repository: {description: Repository., type: identity, cardinality: many, relation: true}\n",
     )
     records_file(
@@ -479,7 +479,7 @@ def test_an_interrupted_edit_warns_before_case_variants(brain: Store, monkeypatc
 
 
 GRAPH = (
-    b"version: 7\nname: fixture\nfields:\n"
+    b"version: 8\nname: fixture\nfields:\n"
     b"  owner:\n    description: Responsible person.\n    type: identity\n    cardinality: many\n"
     b'    relation: true\n    targets: ["person:email/"]\n'
     b"sensors:\n  calendar:\n    command: [gws]\n"
@@ -586,7 +586,7 @@ def test_one_problem_never_hides_a_note_s_others_or_breaks_links_to_it(brain: St
 def test_claim_errors_neither_hide_each_other_nor_unname_the_note(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nfields:\n"
+        b"version: 8\nname: fixture\nfields:\n"
         b"  owner: {description: Owner., type: identity, cardinality: many, relation: true}\n"
         b"  weight: {description: Weight., type: number}\n",
     )
@@ -620,7 +620,7 @@ def test_claim_errors_neither_hide_each_other_nor_unname_the_note(brain: Store) 
 def test_a_problem_repeated_across_links_is_reported_once_where_it_first_occurs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nfields:\n"
+        b"version: 8\nname: fixture\nfields:\n"
         b"  owner: {description: Owner., type: identity, cardinality: many, relation: true, targets: ['person:']}\n",
     )
     # A relation removed from bf.yaml leaves links naming it in frontmatter and in 250 sections, beside as many owner
@@ -674,7 +674,7 @@ def test_a_link_no_bf_address_can_hold_hides_neither_its_note_nor_other_problems
 def test_every_problem_of_a_record_is_reported(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nfields:\n  owner: {description: Owner., type: identity, relation: true}\n",
+        b"version: 8\nname: fixture\nfields:\n  owner: {description: Owner., type: identity, relation: true}\n",
     )
     records_file(
         brain,
@@ -734,7 +734,7 @@ def test_record_links_that_are_no_identities_warn_without_failing(brain: Store) 
 def test_scripts_run_through_an_interpreter_must_exist(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n"
+        b"version: 8\nname: fixture\nsensors:\n"
         b"  brief:\n    command: [uv, run, --no-project, sensors/brief.py, '{{start}}']\n"
         b"  packaged:\n    command: [uv, run, --project, sensors/news, news]\n"
         b"  piped:\n    command: [sh, -c, sensors/a.sh | sensors/b.sh]\n"
@@ -782,11 +782,11 @@ def test_validation_parses_each_note_once(brain: Store, monkeypatch: pytest.Monk
 def test_validate_reports_a_prompt_file_every_run_would_reject(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nprompts:\n  assistant:\n    prompt: prompts/a.md\n    command: [agent]\n",
+        b"version: 8\nname: fixture\nassistants:\n  assistant:\n    prompt: prompts/a.md\n    command: [agent]\n",
     )
     brain.write("prompts/a.md", b"x" * (MAX_PROMPT + 1))
     problems = cast("list[dict[str, str]]", validate(brain)["problems"])
     assert {
         "file": "bf.yaml",
-        "error": f"prompts.assistant.prompt: prompts/a.md exceeds {MAX_PROMPT} bytes",
+        "error": f"assistants.assistant.prompt: prompts/a.md exceeds {MAX_PROMPT} bytes",
     } in problems

@@ -313,7 +313,7 @@ def test_unedited_templates_validate_and_keep_their_documented_anchors(brain: St
 def test_template_comments_are_valid_frontmatter(brain: Store) -> None:
     # The commented optional keys of the project template validate once uncommented.
     template = (SKILLS / "bf-use/templates/project.md").read_text(encoding="utf-8")
-    brain.write("bf.yaml", b"version: 7\nname: fixture\n" + cli_fields())
+    brain.write("bf.yaml", b"version: 8\nname: fixture\n" + cli_fields())
     uncommented = re.sub(r"^# (\w+: .*?)(?:\s+#.*)?$", r"\1", template, flags=re.MULTILINE)
     uncommented = uncommented.replace("[LABEL]", "[website]")
     brain.write("projects/one.md", uncommented.encode())

@@ -23,13 +23,14 @@ from pydantic import FailFast, JsonValue, TypeAdapter, ValidationError
 
 from bf import ontology, records
 from bf.config import load
-from bf.history import PROMPTS, ROUTINES, SENSORS, append_log, environment, log_path, remember, state
+from bf.history import ROUTINES, SENSORS, append_log, environment, log_path, remember, state
 from bf.markdown import note, parse, validate_okf
 from bf.models import (
     _CONTROL,
     MAX_NOTE,
-    MAX_PROMPT,
     RECORD_KEYS,
+    Assistant,
+    Command,
     Config,
     Error,
     Program,
@@ -69,14 +70,14 @@ _TITLE = 120
 
 
 class Runner(Protocol):
-    def __call__(self, argv: list[str], program: Program, store: Store, name: str, stdin: bytes, /) -> bytes: ...
+    def __call__(self, argv: list[str], program: Command, store: Store, name: str, stdin: bytes, /) -> bytes: ...
 
 
 def _now() -> str:
     return local(timestamp(datetime.now(UTC).isoformat()))
 
 
-def enabled[P: Program](programs: Mapping[str, P], kind: str, name: str) -> P:
+def enabled[P: Program | Assistant](programs: Mapping[str, P], kind: str, name: str) -> P:
     """The enabled program called `name`; an unknown or disabled name fails, suggesting only programs that can run."""
     program = programs.get(name)
     if program is None:
@@ -117,25 +118,40 @@ def starting() -> Iterator[None]:
             handlers[signum](signum, frame)
 
 
-def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes = b"", /) -> bytes:
+def executable(store: Store, command: str, env: Mapping[str, str]) -> str:
+    """Resolve an owner's argv executable without following brain-owned symlinks."""
+    if command.startswith(("sensors/", "routines/", "channels/")):
+        relative(command)
+        store.fingerprint(command)
+        return str(store.root / command)
+    if "/" in command:
+        raise Error("executable must be a bare command name or a sensors/, routines/ or channels/ path")
+    found = shutil.which(command, path=env.get("PATH"))
+    if found is None:
+        raise Error(f"{command} is not on PATH")
+    return found
+
+
+def run(
+    argv: list[str],
+    sensor: Command,
+    store: Store,
+    name: str,
+    stdin: bytes = b"",
+    /,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+    overrides: Mapping[str, str] | None = None,
+) -> bytes:
     """Execute one sensor or routine from the brain root, feeding it `stdin`; returns its stdout.
 
     Its stderr, and a `log` routine's stdout, go to the program's bounded log in logs/, never to errors.
     """
     # A nested bf call without --brain reads the executing brain, never an inherited selection.
-    env = {**environment(), "BF_BRAIN": str(store.root)}
-    executable = argv[0]
-    if executable.startswith(("sensors/", "routines/")):
-        relative(executable)
-        # A regular file below the brain, never a link; any size.
-        store.fingerprint(executable)
-        executable = str(store.root / executable)
-    elif "/" in executable:
-        raise Error("executable must be a bare command name or a sensors/ or routines/ path")
-    elif (found := shutil.which(executable, path=env.get("PATH"))) is None:
-        raise Error(f"{executable} is not on PATH")
-    else:
-        executable = found
+    env = {**environment(), "BF_BRAIN": str(store.root), **(overrides or {})}
+    if cancelled is not None and cancelled():
+        raise Error("program cancelled")
+    command = executable(store, argv[0], env)
     started = time.monotonic()
     child: subprocess.Popen[bytes] | None = None
     output, errors = bytearray(), bytearray()
@@ -146,10 +162,12 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
     outcome = "failed"
     try:
         with starting():
+            if cancelled is not None and cancelled():
+                raise Error("program cancelled")
             try:
                 child = subprocess.Popen(  # noqa: S603
                     # Direct argv from the owner's bf.yaml, plus a `bf run` caller's arguments; no shell interprets them.
-                    [executable, *argv[1:]],
+                    [command, *argv[1:]],
                     cwd=store.root,
                     env=env,
                     stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
@@ -160,7 +178,7 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
             except OSError as error:
                 # A log that cannot be written must not hide why the program did not start.
                 with suppress(Error, OSError):
-                    append_log(store, name, f"{_now()} could not start {executable}")
+                    append_log(store, name, f"{_now()} could not start {command}")
                 raise Error("could not start the program; check its executable bit and interpreter") from error
         stdout, stderr = child.stdout, child.stderr
         if stdout is None or stderr is None:
@@ -176,6 +194,8 @@ def run(argv: list[str], sensor: Program, store: Store, name: str, stdin: bytes 
             # A run ends with the program's exit and the end of its stdout. Stderr only feeds the log,
             # so a background descendant holding it cannot delay or fail a finished program.
             while stdout in selector.get_map() or child.poll() is None:
+                if cancelled is not None and cancelled():
+                    raise Error("program cancelled")
                 now = time.monotonic()
                 if exited is None and child.poll() is not None:
                     exited = now
@@ -358,7 +378,7 @@ def collect(
     sensor = enabled(config.sensors, "sensor", name)
     if reconcile and sensor.reconcile is None:
         raise Error("reconciliation requires the sensor's reconcile setting")
-    argv = _argv(store, sensor, start, end)
+    argv = arguments(store, sensor, start, end)
     with collecting(store, name):
         started = clock()
         observed = timestamp(started.isoformat())
@@ -413,7 +433,11 @@ def collect(
                 records.recover(store)
                 if snapshot and not allow_removal and (refusal := _shrink(store, name, incoming)):
                     raise Error(refusal)
-                result.update(records.upsert(store, name, incoming, snapshot=snapshot))
+                # Local import avoids coupling the low-level process runner to the assistant dispatcher.
+                from bf.assistants import sensor_event
+
+                event = sensor_event(config, name, start, end)
+                result.update(records.upsert(store, name, incoming, snapshot=snapshot, event=event))
                 committed = True
                 result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
                 coverage, latest = _coverage(state(store).get(name, {}), start, end, observed, sensor)
@@ -430,6 +454,8 @@ def collect(
                     **{key: value for key, value in result.items() if key != "sensor"},
                 )
         except (Error, OSError, UnicodeError) as error:
+            if isinstance(error, records.DispatchPendingError):
+                raise
             message = (
                 str(error)
                 if isinstance(error, Error)
@@ -503,7 +529,7 @@ def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, ob
     }
 
 
-def _argv(store: Store, program: Program, start: str, end: str, prompt: str = "") -> list[str]:
+def arguments(store: Store, program: Command, start: str, end: str, prompt: str = "") -> list[str]:
     values = {"brain": str(store.root), "home": str(Path.home()), "start": start, "end": end, "prompt": prompt}
     # One pass: an expanded prompt that mentions a placeholder keeps it as text.
     return [
@@ -594,7 +620,7 @@ def routine(
         path = f"{folder}/ACTION.md"
         written = False
         try:
-            raw = runner([*_argv(store, program, start, end), *args], program, store, name, stdin)
+            raw = runner([*arguments(store, program, start, end), *args], program, store, name, stdin)
             result: dict[str, object] = {"routine": name}
             text = ""
             if program.output == "action":
@@ -656,7 +682,7 @@ def routine(
         return result
 
 
-def _reply(raw: bytes, pointer: str | None) -> tuple[str, dict[str, JsonValue]]:
+def parse_reply(raw: bytes, pointer: str | None) -> tuple[str, dict[str, JsonValue]]:
     """The reply text, and the other members of a JSON reply; the error never quotes the output."""
     try:
         output = raw.decode("utf-8")
@@ -678,143 +704,18 @@ def _reply(raw: bytes, pointer: str | None) -> tuple[str, dict[str, JsonValue]]:
     if isinstance(holder, dict):
         # The reply is the record's text: keep it once.
         holder.pop(key.replace("~1", "/").replace("~0", "~"), None)
+    elif isinstance(holder, list):
+        # Preserve the other elements' positions without duplicating a potentially large answer.
+        holder[int(key)] = None
     return value.strip(), cast(dict[str, JsonValue], document)
 
 
-def _title(name: str, reply: str) -> str:
+def reply_title(name: str, reply: str) -> str:
     """The reply's first line without Markdown heading marks or control characters, else a neutral title."""
     for line in reply.splitlines():
         if line := _CONTROL.sub(" ", line).strip().lstrip("#").strip():
             return line if len(line) <= _TITLE else line[: _TITLE - 1].rstrip() + "…"
     return f"{name} run without a reply"
-
-
-def prompt(
-    store: Store,
-    name: str,
-    *,
-    start: str,
-    end: str,
-    text: str = "",
-    scheduled: bool = False,
-    dry_run: bool = False,
-    runner: Runner = run,
-    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-) -> dict[str, object]:
-    """Run one prompt over [start, end) with `text` as its input, and record the reply in memories/NAME/.
-
-    The prompt file, with {{brain}}, {{home}}, {{start}}, {{end}} and {{input}} expanded, replaces {{prompt}} in the
-    command, or is its standard input when the command holds no {{prompt}}. A scheduled run holds the prompt's lock,
-    then checks again that the prompt is due and covers the window since its last scheduled run: another process may
-    have just run it. It reports `skipped` instead. A direct run, such as an owner's message, never waits for a
-    scheduled one and leaves the schedule's history unchanged, failures included: only its log and run count change.
-    A failure writes no record.
-    """
-    start, end = _window(start, end)
-    config = load(store)
-    program = enabled(config.prompts, "prompt", name)
-    with ExitStack() as stack:
-        if scheduled:
-            stack.enter_context(collecting(store, name))
-        started = clock()
-        if scheduled:
-            last = state(store, PROMPTS).get(name, {})
-            success = datetime.fromisoformat(str(last["success"])) if last.get("success") else None
-            # A success after this run's own clock, within one refresh, is another process's run that started later,
-            # such as watch's prompt process during a long update; a larger gap is a clock correction, which runs.
-            recent = success is not None and timedelta(0) < success - started < timedelta(seconds=program.refresh)
-            if recent:
-                return {"prompt": name, "skipped": "another run of this prompt just succeeded"}
-            if not _due(program, last, started):
-                return {"prompt": name, "skipped": "not due: another process ran it or it waits to retry a failure"}
-            start, end = window(store, name, started)
-        observed = timestamp(started.isoformat())
-        measured = time.monotonic()
-        committed = False
-        try:
-            template = store.read(program.prompt, MAX_PROMPT)
-            values = {"brain": str(store.root), "home": str(Path.home()), "start": start, "end": end, "input": text}
-            try:
-                expanded = _TEMPLATE.sub(lambda match: values[match[1]], template.decode("utf-8"))
-            except UnicodeError as error:
-                raise Error(f"{program.prompt} must be UTF-8 Markdown") from error
-            if len(expanded.encode()) > MAX_PROMPT:
-                raise Error(f"the expanded prompt exceeds {MAX_PROMPT:,} bytes; shorten {program.prompt} or its input")
-            passed = any("{{prompt}}" in argument for argument in program.command)
-            if passed and "\x00" in expanded:
-                raise Error("a prompt passed as {{prompt}} cannot hold a NUL character; remove it from the input")
-            argv = _argv(store, program, start, end, expanded if passed else "")
-            if passed and max(len(os.fsencode(argument)) for argument in argv) > MAX_ARGUMENT:
-                raise Error(
-                    "the argument holding {{prompt}} exceeds Linux's 128 KiB limit; shorten the prompt or its input"
-                )
-            raw = runner(argv, program, store, name, b"" if passed else expanded.encode())
-            reply, output = _reply(raw, program.text)
-            elapsed = round(time.monotonic() - measured, 6)
-            # Runs a second apart, such as a message answered during a scheduled run, keep distinct records.
-            record = Record(
-                id=started.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[-8:],
-                title=_title(name, reply),
-                text=reply,
-                time=observed,
-                attributes={
-                    "observed": observed,
-                    "trigger": "schedule" if scheduled else "run",
-                    "window": {"start": start, "end": end},
-                    "elapsed_seconds": elapsed,
-                    **({"input": text} if text else {}),
-                    **({"output": output} if output else {}),
-                },
-            ).readable()
-            ref = f"{name}:{record.id}"
-            result: dict[str, object] = {"prompt": name, "record": ref, "text": reply}
-            if dry_run:
-                return {key: value for key, value in result.items() if key != "record"}
-            with writer(store, wait=120):
-                records.recover(store)
-                records.upsert(store, name, [record], snapshot=False)
-                committed = True
-                runs = int(str(state(store, PROMPTS).get(name, {}).get("runs", 0))) + 1
-                # Only the schedule's own runs move it: answering a message leaves the next review, its retry
-                # backoff and any failure it reported as they were.
-                scheduling = {
-                    "run": observed,
-                    "success": observed,
-                    "start": start,
-                    "end": end,
-                    "error": "",
-                    "failures": 0,
-                    "records": 1,
-                    "elapsed_seconds": elapsed,
-                    "output_bytes": len(raw),
-                }
-                remember(store, name, PROMPTS, runs=runs, record=ref, **(scheduling if scheduled else {}))
-                if program.keep is not None:
-                    try:
-                        result["removed"] = records.prune(store, name, program.keep, RUN_ID)
-                    except (Error, OSError, UnicodeError) as error:
-                        # The run is recorded: a file that cannot be pruned must never make it run again.
-                        result["removed"] = 0
-                        with suppress(Error, OSError):
-                            append_log(store, name, f"{_now()} kept older runs: {error}")
-        except (Error, OSError, UnicodeError, ValidationError) as error:
-            message = (
-                str(error)
-                if isinstance(error, Error)
-                else "prompt reply is not a valid record: " + explain(error, RECORD_KEYS)
-                if isinstance(error, ValidationError)
-                else "prompt files are inaccessible; check the prompt file, its command and free space"
-            )
-            message = (
-                "the run was recorded but local run history could not be saved"
-                if committed
-                else f"{message}; no record was written"
-            )
-            # A direct run's failure is logged only: it never moves the schedule's retry backoff or attention.
-            _failed(store, name, PROMPTS, started, message, error, dry_run=dry_run or not scheduled)
-        with suppress(Error, OSError):
-            append_log(store, name, f"{_now()} recorded {ref}")
-        return result
 
 
 def hooked(config: Config, hook: str) -> list[str]:
@@ -825,10 +726,7 @@ def hooked(config: Config, hook: str) -> list[str]:
 def window(store: Store, name: str, now: datetime) -> tuple[str, str]:
     """The window a routine or prompt run covers now: since the end of its last reviewed window, else its lookback."""
     config = load(store)
-    if name in config.prompts:
-        program, last = config.prompts[name], state(store, PROMPTS).get(name, {})
-    else:
-        program, last = config.routines[name], state(store, ROUTINES).get(name, {})
+    program, last = config.routines[name], state(store, ROUTINES).get(name, {})
     start = now - timedelta(seconds=program.lookback)
     if last.get("end") and (reviewed := datetime.fromisoformat(str(last["end"]))) < now:
         start = reviewed
@@ -871,11 +769,6 @@ def _due_windows(store: Store, programs: Mapping[str, Program], file: str, now: 
 def due_routines(store: Store, now: datetime) -> list[tuple[str, str, str]]:
     """Due routines; each covers the time since the end of its last reviewed window."""
     return _due_windows(store, load(store).routines, ROUTINES, now)
-
-
-def due_prompts(store: Store, now: datetime) -> list[tuple[str, str, str]]:
-    """Due prompts; each covers the time since the end of its last scheduled window."""
-    return _due_windows(store, load(store).prompts, PROMPTS, now)
 
 
 def due(store: Store, now: datetime) -> list[tuple[str, str, str, bool]]:

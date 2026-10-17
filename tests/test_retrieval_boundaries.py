@@ -33,7 +33,7 @@ def corpus(brain: Store, tmp_path: Path) -> list[Store]:
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     for n, store in enumerate([brain, team]):
         records_file(
             store,
@@ -102,7 +102,7 @@ def test_authored_folder_continuation(brain: Store) -> None:
 
 
 def test_empty_search_describes_failed_and_never_collected_sources(brain: Store) -> None:
-    brain.write("bf.yaml", b'version: 7\nname: fixture\nsensors:\n  mail:\n    command: ["fake"]\n    refresh: 3600\n')
+    brain.write("bf.yaml", b'version: 8\nname: fixture\nsensors:\n  mail:\n    command: ["fake"]\n    refresh: 3600\n')
 
     def failed(*_args: object) -> bytes:
         raise Error("synthetic failure")
@@ -220,7 +220,7 @@ def test_evaluation_assembles_paged_exact_reads_before_checking_them(brain: Stor
     records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000 + "closing clause")])
     brain.write(
         "evals/large.yaml",
-        b"version: 7\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n  text: [closing clause]\n",
+        b"version: 8\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n  text: [closing clause]\n",
     )
     assert "closing clause" not in str(retrieve.read([brain], "docs:large"))
     reply = evaluate(brain)
@@ -231,7 +231,7 @@ def test_evaluation_rejects_a_paged_read_that_changes_between_pages(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000)])
-    brain.write("evals/large.yaml", b"version: 7\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n")
+    brain.write("evals/large.yaml", b"version: 8\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n")
     original = retrieve.read
 
     def changing(stores: list[Store], ref: str = "", *, offset: int = 0, counted: bool = True) -> dict[str, object]:
@@ -275,7 +275,7 @@ def test_linked_transaction_directory_still_blocks_reads(brain: Store, tmp_path:
 def test_claim_preview_keeps_every_relation_and_reports_truncation(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nfields:\n"
+        b"version: 8\nname: fixture\nfields:\n"
         + b"".join(
             f"  {name}:\n    description: A relation.\n    type: identity\n    cardinality: many\n    relation: true\n".encode()
             for name in ("attendee", "depends-on", "organizer")
@@ -372,7 +372,7 @@ def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(
 def test_typed_links_read_their_unowned_target_identity(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nfields:\n  owner:\n    description: Owner.\n    type: identity\n    relation: true\n",
+        b"version: 8\nname: fixture\nfields:\n  owner:\n    description: Owner.\n    type: identity\n    relation: true\n",
     )
     brain.write("projects/a.md", b"---\ntype: project\n---\n# A\n\n[Alice](bf://fixture/people/alice?rel=owner)\n")
     plain = retrieve.read([brain], "bf://fixture/people/alice")
@@ -390,7 +390,7 @@ def test_identity_problems_name_the_configured_brain(
     root = tmp_path / "team-folder"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     original = index.database
     opened: list[Path] = []
 
@@ -430,7 +430,7 @@ sys.addaudithook(_audit)
 def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n  mail:\n    command: [sensors/marker.sh]\n    refresh: 60\n"
+        b"version: 8\nname: fixture\nsensors:\n  mail:\n    command: [sensors/marker.sh]\n    refresh: 60\n"
         b"routines:\n  digest:\n    command: [routines/marker.sh]\n    refresh: 60\n",
     )
     marker = brain.root / "ran"
@@ -441,7 +441,7 @@ def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> N
         script.chmod(0o700)
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 7\ncases:\n- name: decision\n  query: retention\n  expect: [projects/offline.md]\n",
+        b"version: 8\ncases:\n- name: decision\n  query: retention\n  expect: [projects/offline.md]\n",
     )
     mcp = server([brain])
     events: set[str] = set()
@@ -495,7 +495,7 @@ def test_an_identity_read_without_a_cache_keeps_its_cause(
 def test_a_brain_whose_bf_yaml_fails_is_named_with_its_cause(brain: Store, tmp_path: Path) -> None:
     (tmp_path / "other").mkdir()
     other = Store(tmp_path / "other")
-    other.write("bf.yaml", b"version: 7\nname: other\nbogus: true\n")
+    other.write("bf.yaml", b"version: 8\nname: other\nbogus: true\n")
     problem = {"brain": "other", "error": "invalid bf.yaml: bogus: Extra inputs are not permitted"}
     # Like search and status, a read names the key to fix, where it said only "bf.yaml is invalid" before 18.
     assert problem in cast("list[dict]", retrieve.read([brain, other], "projects/offline.md")["problems"])

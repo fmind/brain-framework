@@ -80,7 +80,7 @@ HOME = {
     "attention": [
         {"sensor": "github", "freshness": "overdue"},
         {"routine": "weekly-review", "freshness": "fresh", "failed": True},
-        {"prompt": "assistant", "freshness": "overdue"},
+        {"assistant": "assistant", "freshness": "overdue"},
     ],
 }
 

@@ -25,7 +25,7 @@ from bf.cli import app
 from bf.collect import Runner, due_routines, routine
 from bf.health import attention, routine_health
 from bf.history import ROUTINES, log_path, state
-from bf.models import Config, Error, Program, Routine
+from bf.models import Command, Config, Error, Routine
 from bf.retrieve import read
 from bf.storage import Store, collecting
 from bf.update import update
@@ -35,7 +35,7 @@ from conftest import plain
 NOW = datetime(2026, 9, 25, 8, tzinfo=UTC)
 START = "2026-09-24T08:00:00.000000Z"
 END = "2026-09-25T08:00:00.000000Z"
-CONFIG = b"""version: 7
+CONFIG = b"""version: 8
 name: fixture
 routines:
   digest:
@@ -61,7 +61,7 @@ def configured(brain: Store) -> Store:
 
 
 def printing(output: bytes, calls: list[list[str]] | None = None) -> Runner:
-    def runner(argv: list[str], program: Program, _store: Store, _name: str, _stdin: bytes) -> bytes:
+    def runner(argv: list[str], program: Command, _store: Store, _name: str, _stdin: bytes) -> bytes:
         assert program.max_bytes == 1 << 20
         if calls is not None:
             calls.append(argv)
@@ -72,18 +72,18 @@ def printing(output: bytes, calls: list[list[str]] | None = None) -> Runner:
 
 def test_configuration_names_routines_like_action_slugs() -> None:
     assert Config.model_validate(
-        {"version": 7, "name": "b", "routines": {"weekly-review": {"command": ["x"]}}}
+        {"version": 8, "name": "b", "routines": {"weekly-review": {"command": ["x"]}}}
     ).routines
     for name in ("Weekly", "weekly-", "a--b", "1st"):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 7, "name": "b", "routines": {name: {"command": ["x"]}}})
+            Config.model_validate({"version": 8, "name": "b", "routines": {name: {"command": ["x"]}}})
     with pytest.raises(ValidationError, match="distinct"):
         Config.model_validate(
-            {"version": 7, "name": "b", "sensors": {"x": {"command": ["x"]}}, "routines": {"x": {"command": ["x"]}}}
+            {"version": 8, "name": "b", "sensors": {"x": {"command": ["x"]}}, "routines": {"x": {"command": ["x"]}}}
         )
     for settings in ({"command": ["x"], "max_bytes": 5 << 20}, {"command": ["x", "{{secret}}"]}, {"command": []}):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 7, "name": "b", "routines": {"digest": settings}})
+            Config.model_validate({"version": 8, "name": "b", "routines": {"digest": settings}})
 
 
 def test_a_routine_writes_one_action_per_day_after_success(configured: Store) -> None:
@@ -338,7 +338,7 @@ def test_update_runs_routines_after_sensors_and_isolates_failures(configured: St
     )
     order: list[str] = []
 
-    def runner(argv: list[str], _program: Program, _store: Store, _name: str, _stdin: bytes) -> bytes:
+    def runner(argv: list[str], _program: Command, _store: Store, _name: str, _stdin: bytes) -> bytes:
         order.append(argv[0])
         if argv[0] == "broken":
             return b"---\nupdated: soon\n---\n"
@@ -403,7 +403,7 @@ def fixed_action_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(collector, "uuid4", lambda: UUID(int=1))
 
 
-HOOKED = b"""version: 7
+HOOKED = b"""version: 8
 name: fixture
 routines:
   check:
@@ -511,9 +511,9 @@ def test_a_direct_run_never_waits_for_input_an_agent_shell_holds_open(hooked: St
 @pytest.mark.parametrize(
     ("arguments", "code", "message"),
     [
-        ([], 2, "name a routine or prompt, or pass --hook EVENT"),
+        ([], 2, "name a routine or assistant, or pass --hook EVENT"),
         (["--hook", "Pre Push"], 2, "hook names are lowercase words"),
-        (["missing"], 1, "unknown routine or prompt missing"),
+        (["missing"], 1, "unknown routine or assistant missing"),
         (["paused"], 1, "routine paused is disabled in bf.yaml; set enabled: true to run it"),
     ],
 )
@@ -552,7 +552,7 @@ def test_update_selection_suggests_close_names(hooked: Store) -> None:
 def test_hooks_are_distinct_slugs() -> None:
     for hooks in (["pre-push", "pre-push"], ["Pre-Push"], ["pre push"]):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 7, "name": "b", "routines": {"x": {"command": ["x"], "hooks": hooks}}})
+            Config.model_validate({"version": 8, "name": "b", "routines": {"x": {"command": ["x"], "hooks": hooks}}})
 
 
 def test_update_names_the_manual_programs_it_skipped(hooked: Store) -> None:
@@ -564,7 +564,7 @@ def test_update_names_the_manual_programs_it_skipped(hooked: Store) -> None:
 def test_keep_removes_older_unchanged_reports_and_spares_edited_ones(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 2\n",
+        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 2\n",
     )
     report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     written = []
@@ -594,11 +594,11 @@ def test_update_skips_a_program_another_process_is_running(configured: Store) ->
 def test_run_suggests_prompt_names_too(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nprompts:\n  assistant:\n    prompt: prompts/a.md\n    command: [agent]\n",
+        b"version: 8\nname: fixture\nassistants:\n  assistant:\n    prompt: prompts/a.md\n    command: [agent]\n",
     )
     result = CliRunner().invoke(app, ["run", "asistant", "--brain", str(brain.root)])
     assert result.exit_code == 1
-    assert "unknown routine or prompt asistant; check names in bf.yaml; did you mean assistant?" in str(
+    assert "unknown routine or assistant asistant; check names in bf.yaml; did you mean assistant?" in str(
         result.exception
     )
 
@@ -606,7 +606,7 @@ def test_run_suggests_prompt_names_too(brain: Store) -> None:
 def test_keep_spares_a_report_folder_holding_anything_else(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
     )
     report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     first = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)

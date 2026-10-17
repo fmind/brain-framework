@@ -1,5 +1,5 @@
 # https://fmind.github.io/brain-framework/docs/schema/
-version: 7
+version: 8
 name: context-demo
 fields:
   project:

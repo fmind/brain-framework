@@ -26,9 +26,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from bf.assistants import Dispatcher
 from bf.collect import next_due, starting
 from bf.config import load
-from bf.history import PROMPTS, ROUTINES, SENSORS, environment, log_path, state
+from bf.health import assistant_health
+from bf.history import ROUTINES, SENSORS, environment, log_path, state
 from bf.models import Error, WatchSettings, decode, local, present, printable, terminal, timestamp
 from bf.storage import BusyError, Store, collecting
 from bf.update import KINDS, ProgramKind, late, selection
@@ -75,23 +77,20 @@ class Row:
 
 
 # The table marks each kind beside its name; sensors carry none.
-MARKERS = {"routine": "* ", "prompt": "@ "}
-# Watch runs prompts in their own process beside collection: a long agent run never delays sensors.
-LANES: tuple[frozenset[ProgramKind], frozenset[ProgramKind]] = (frozenset({"sensor", "routine"}), frozenset({"prompt"}))
+MARKERS = {"routine": "* ", "assistant": "@ "}
 
 
 def snapshot(
-    store: Store, sensors: tuple[str, ...] = (), routines: tuple[str, ...] = (), prompts: tuple[str, ...] = ()
+    store: Store, sensors: tuple[str, ...] = (), routines: tuple[str, ...] = (), assistants: tuple[str, ...] = ()
 ) -> list[Row]:
     """Read only configuration and small local history files; never scan evidence or run providers."""
     config = load(store)
-    selected = selection(config, sensors, routines, prompts)
+    selected = selection(config, sensors, routines, assistants)
     now = datetime.now(UTC)
     rows = []
     for kind, programs, file, included in (
         ("sensor", config.sensors, SENSORS, selected[0]),
         ("routine", config.routines, ROUTINES, selected[1]),
-        ("prompt", config.prompts, PROMPTS, selected[2]),
     ):
         # state() validates every entry, so each present field already has its history type.
         history = state(store, file)
@@ -133,10 +132,45 @@ def snapshot(
                     log=log_path(name) if error else "",
                     action=str(entry.get("action", "")),
                     records=cast(int | None, entry.get("records")),
-                    runs=cast(int, entry.get("runs", 0)) if kind == "prompt" else None,
+                    runs=cast(int, entry.get("runs", 0)) if kind == "assistant" else None,
                     record=str(entry.get("record", "")),
                 )
             )
+    for name, health in assistant_health(store, now=now).items():
+        settings = config.assistants[name]
+        schedules = cast(dict[str, dict[str, object]], health["schedules"])
+        deadlines = [str(item["next_due"]) for item in schedules.values()]
+        due = min(deadlines) if deadlines else ""
+        success = str(health.get("last_success", ""))
+        error = str(health.get("error", ""))
+        status = (
+            State.DISABLED
+            if not settings.enabled
+            else State.FAILED
+            if error
+            else State.MANUAL
+            if not schedules
+            else State.NEVER
+            if health["freshness"] == "never"
+            else State.DUE
+            if due and datetime.fromisoformat(due) <= now
+            else State.FRESH
+        )
+        rows.append(
+            Row(
+                kind="assistant",
+                name=name,
+                status=status,
+                included=name in selected[2],
+                refresh=min((spec.every for spec in settings.schedules.values()), default=0),
+                success=success,
+                next_due=timestamp(due) if due else "",
+                error=error,
+                log=log_path(name) if error else "",
+                runs=cast(int, health["runs"]),
+                record=str(health.get("record", "")),
+            )
+        )
     return rows
 
 
@@ -236,7 +270,7 @@ class Dashboard:
     help: bool = False
     running: bool = False
     # A prompt cycle runs in its own process beside the collection cycle.
-    prompting: bool = False
+    assisting: bool = False
     message: str = "Ready"
     # Why the check interval runs a selected program late, shown in the summary and the guide.
     late: str = ""
@@ -327,7 +361,7 @@ class Dashboard:
                 "Configure watch in bf.yaml; restart to apply.",
                 "f (or u) reloads bf.yaml and checks due programs now.",
                 "While updating, refresh queues one check; pause still applies.",
-                "Selection, refresh and backoff apply; prompts run beside collection.",
+                "Selection, refresh and backoff apply; assistants run beside collection.",
                 "Space pauses future checks; q cancels an active update.",
             ]
         lines = [
@@ -337,7 +371,7 @@ class Dashboard:
             "Newest/largest first; name, state, due, refresh and kind ascend.",
             "Unknown values stay last; ties use name. Sorting is session-only.",
             "Items: records the last committed collection returned, not total stored.",
-            "+ added / ~ updated / - removed; changes sorts the sum. * routine, @ prompt",
+            "+ added / ~ updated / - removed; changes = sum. * routine, @ assistant",
             "Failed runs keep prior counts. — means unknown or not applicable.",
             *mode,
             "Fresh is local success, not proof the provider is unchanged.",
@@ -371,8 +405,8 @@ class Dashboard:
             detail.append(f"Last run: {row.elapsed_seconds:.2f}s · {row.output_bytes:,} bytes\n")
             if row.reconcile:
                 detail.append("Wider reconciliation window\n", style="cyan")
-        if row.kind == "prompt" and not row.error:
-            detail.append("Only due prompts run here. Use bf run NAME to ask one now.")
+        if row.kind == "assistant" and not row.error:
+            detail.append("Inputs, named schedules and triggers queue work. Use bf run NAME to ask now.")
         elif not row.error and not row.action:
             detail.append("Only due programs run. Use bf collect for an intentional manual collection.")
         detail.rstrip()
@@ -383,8 +417,8 @@ class Dashboard:
         now = now or datetime.now(UTC)
         mode = "OBSERVE · no execution" if self.observe else "PAUSED" if self.paused else "WATCH · collection enabled"
         working = "Updating…" if self.running else f"Next check in {duration(self.next_check - time.monotonic())}"
-        if self.prompting:
-            working += " · prompt running"
+        if self.assisting:
+            working += " · assistant running"
         header = Text.assemble(
             (" BF ", "bold white on blue"),
             (f"  {clean(self.brain)}", "bold cyan"),
@@ -453,7 +487,7 @@ class Dashboard:
         elif visible:
             detail = self.details(visible[self.cursor])
         else:
-            detail = Text("Add a reviewed sensor, routine or prompt in bf.yaml. Press ? for controls and timing.")
+            detail = Text("Add a reviewed sensor, routine or assistant in bf.yaml. Press ? for controls and timing.")
         keys = (
             "s sort  r reverse  n name  t last OK  i items  ? help  q quit\nj/k ↑/↓ select  g/G first/last  Tab attention  "
             + ("u reread" if self.observe else "f refresh  Space pause")
@@ -492,13 +526,13 @@ class Job:
         store: Store,
         sensors: tuple[str, ...],
         routines: tuple[str, ...],
-        prompts: tuple[str, ...] = (),
+        assistants: tuple[str, ...] = (),
         kinds: frozenset[ProgramKind] = KINDS,
     ) -> None:
         # Like -I without -s: PYTHON* variables and the working directory never change what runs, while a user-site
         # installation, such as pip install --user, still imports bf.
         self.argv = [sys.executable, "-E", "-P", "-m", "bf", "update", "--brain", str(store.root)]
-        for flag, names in (("--sensor", sensors), ("--routine", routines), ("--prompt", prompts)):
+        for flag, names in (("--sensor", sensors), ("--routine", routines), ("--assistant", assistants)):
             for name in names:
                 self.argv.extend((flag, name))
         if kinds != KINDS:
@@ -541,7 +575,7 @@ class Job:
         programs = [
             *cast(list[object], value.get("sensors") or []),
             *cast(list[object], value.get("routines") or []),
-            *cast(list[object], value.get("prompts") or []),
+            *cast(list[object], value.get("assistants") or []),
         ]
         cache = value.get("index")
         if any(not isinstance(item, dict) or item.get("status") == "failed" for item in programs):
@@ -613,7 +647,7 @@ def watch(
     *,
     sensors: tuple[str, ...] = (),
     routines: tuple[str, ...] = (),
-    prompts: tuple[str, ...] = (),
+    assistants: tuple[str, ...] = (),
     interval: int | None = None,
     poll_interval: float | None = None,
     notifications: str | None = None,
@@ -633,15 +667,17 @@ def watch(
             else "watch needs an interactive terminal; use bf watch --json or bf status"
         )
     dashboard = Dashboard(
-        load(store).name, observe=observe, rows=snapshot(store, sensors, routines, prompts), preferences=preferences
+        load(store).name, observe=observe, rows=snapshot(store, sensors, routines, assistants), preferences=preferences
     )
-    if not observe and (reason := late(load(store), preferences.interval, sensors, routines, prompts)):
+    if not observe and (
+        reason := late(load(store), preferences.interval, sensors, routines, assistants, include_assistants=False)
+    ):
         # Due programs run only at checks: a slower check runs them late, so status reports them overdue.
         dashboard.late = f"{reason}; lower the watch interval"
         if json_output:
             sys.stderr.write(f"bf: {printable(dashboard.late)}\n")
-    selected = (sensors, routines, prompts)
-    job, agent = (Job(store, *selected, kinds=lane) for lane in LANES)
+    selected = (sensors, routines, assistants)
+    job = Job(store, *selected, kinds=frozenset({"sensor", "routine"}))
     with ExitStack() as stack:
         if not observe:
             try:
@@ -651,9 +687,15 @@ def watch(
                     raise Error("another watcher owns this brain; open bf watch in a terminal to observe it") from None
                 dashboard.observe = True
                 dashboard.message = "Observing an active watcher; its selection and settings control collection"
-        stack.callback(_stop, job, agent)
+        stack.callback(job.close)
+        dispatcher = (
+            stack.enter_context(Dispatcher(store, selection(load(store), *selected)[2]))
+            if not dashboard.observe and selection(load(store), *selected)[2]
+            else None
+        )
+        stack.callback(job.terminate)
         if json_output:
-            _loop(store, dashboard, job, *selected, agent=agent)
+            _loop(store, dashboard, job, *selected, dispatcher=dispatcher)
         else:
             console = Console(markup=False, highlight=False)
             with (
@@ -662,7 +704,7 @@ def watch(
                     console=console, screen=True, auto_refresh=False, redirect_stdout=False, redirect_stderr=False
                 ) as live,
             ):
-                _loop(store, dashboard, job, *selected, agent=agent, live=live, descriptor=descriptor)
+                _loop(store, dashboard, job, *selected, dispatcher=dispatcher, live=live, descriptor=descriptor)
 
 
 def _stop(*jobs: Job) -> None:
@@ -673,29 +715,19 @@ def _stop(*jobs: Job) -> None:
         job.close()
 
 
-def _prompt_due(rows: list[Row], now: datetime) -> bool:
-    """Whether a selected scheduled prompt is due, failure backoff included: only then start a prompt cycle."""
-    return any(
-        row.kind == "prompt" and row.included and row.next_due and datetime.fromisoformat(row.next_due) <= now
-        for row in rows
-    )
-
-
 def _loop(
     store: Store,
     dashboard: Dashboard,
     job: Job,
     sensors: tuple[str, ...],
     routines: tuple[str, ...],
-    prompts: tuple[str, ...] = (),
+    assistants: tuple[str, ...] = (),
     *,
-    agent: Job | None = None,
+    dispatcher: Dispatcher | None = None,
     live: Live | None = None,
     descriptor: int = -1,
 ) -> None:
     preferences = dashboard.preferences
-    # A finished prompt cycle waits one interval: a run skipped as still active elsewhere must not restart at once.
-    next_prompt = 0.0
     next_read = next_frame = 0.0
     size = (0, 0)
     notifications = Notifications(preferences)
@@ -704,6 +736,9 @@ def _loop(
     refresh_requested = invalid = False
     while True:
         now = time.monotonic()
+        if dispatcher is not None and not dashboard.paused and not invalid:
+            dispatcher.tick()
+            dashboard.assisting = bool({"reactive", "proactive"} & dispatcher.tasks.keys())
         if dashboard.running and (code := job.poll()) is not None:
             dashboard.running = False
             skipped = job.skipped() if code else 0
@@ -719,25 +754,9 @@ def _loop(
             dashboard.next_check = now + preferences.interval
             completed = 0 if skipped else code
             next_read = 0
-        if agent is not None and dashboard.prompting and (code := agent.poll()) is not None:
-            dashboard.prompting = False
-            # As for collection: a cycle the search cache alone failed still completed its prompts.
-            skipped = agent.skipped() if code else 0
-            agent.discard()
-            dashboard.message = (
-                "Prompt run complete"
-                if code == 0
-                else f"Search cache skipped {skipped} files; run bf validate"
-                if skipped
-                else "Prompt run failed; inspect its details or run bf status"
-            )
-            next_prompt = now + preferences.interval
-            code = 0 if skipped else code
-            completed = code if completed is None else completed or code
-            next_read = 0
         if now >= next_read:
             try:
-                dashboard.replace_rows(snapshot(store, sensors, routines, prompts))
+                dashboard.replace_rows(snapshot(store, sensors, routines, assistants))
                 if invalid:
                     dashboard.message = "Configuration recovered"
                 invalid = False
@@ -788,19 +807,6 @@ def _loop(
                 refresh_requested = False
                 dashboard.running = True
                 dashboard.message = "Running due sensors, then routines; existing per-program limits apply"
-            if (
-                agent is not None
-                and not invalid
-                and not dashboard.observe
-                and not dashboard.paused
-                and not dashboard.prompting
-                and now >= next_prompt
-                and _prompt_due(dashboard.rows, datetime.now(UTC))
-            ):
-                previous.update({(row.kind, row.name): row.success for row in dashboard.rows if row.kind == "prompt"})
-                agent.start()
-                dashboard.prompting = True
-                dashboard.message = "Running due prompts beside collection"
             if live is None:
                 # Bytes, like every command reply: JSON Lines stay UTF-8 whatever the terminal's locale.
                 sys.stdout.buffer.write(
@@ -809,7 +815,7 @@ def _loop(
                             {
                                 "brain": dashboard.brain,
                                 "running": dashboard.running,
-                                "prompting": dashboard.prompting,
+                                "assisting": dashboard.assisting,
                                 "message": dashboard.message,
                                 "programs": [asdict(row) for row in dashboard.rows],
                             }

@@ -56,7 +56,7 @@ Questions that once took a tour of your tools become one prompt, once you write 
 - **Every source, even the ones no product connects.** Mail, calendar, documents, chat, issues and pull requests, of course. But also the release notes and security advisories of the tools you depend on, model retirement dates, provider incidents, mentions of your projects on Hacker News or Bluesky, your domains' certificates and mail security, repository traffic that GitHub forgets after 14 days and your past agent sessions. If you can script it, you can collect it.
 - **Unlimited integrations, both ways.** A sensor is a small program that prints JSON: wrap a CLI such as `gh`, `gws` or `gcloud`, call an API, drive a browser, query a database or parse an export. The same CLIs, APIs and MCP servers then let your agent act on what it learned: draft the issue, answer the thread, fix the alert.
 - **One vocabulary, one knowledge graph.** Each tool names things its own way. You declare a small ontology in `bf.yaml` and sensors map provider fields into it at collection, so the same project, person or repository connects across every tool. BF turns those explicit links into a graph you navigate in one read, each claim pointing back to its evidence.
-- **Private by design.** Your brain is a folder on your disk. BF has no account, server or telemetry and never runs a model itself: [prompts](https://fmind.github.io/brain-framework/docs/prompts/) launch your agent harness. Search and read work offline.
+- **Private by design.** Your brain is a folder on your disk. BF has no account, server or telemetry and never runs a model itself: [assistants](https://fmind.github.io/brain-framework/docs/prompts/) launch your agent harness. Search and read work offline.
 - **Portable and versioned.** Markdown notes, JSON records and scripts: open them in any editor, grep them, copy them to another machine. Keep the brain in a private Git repository for history, rollback, review and conflict resolution.
 - **For you or your whole team.** A personal brain stays on your laptop. A team brain is a private Git repository with one clone per teammate, so decisions, reviewed evidence and next steps are shared by everyone and their agents. Your personal brain can include the team's in its searches.
 - **Any agent, guided by skills.** Claude Code, Codex, GitHub Copilot, Antigravity or your own agent reach the same brain through the `bf` command, packaged skills or MCP. The skills teach them to find evidence, keep notes current, connect sources and maintain the brain.
@@ -97,7 +97,7 @@ A brain gives your work the structure of a detective's case file, in plain files
 | `prompts/`  | Markdown prompts your agent harness runs; each run's reply is a record.      | An assistant that reviews new mail and chat every half hour.         |
 | `evals/`    | Saved questions with the evidence that search or read must return.           | “Why one page?” must return the project's Decision section.          |
 
-Notes are Markdown with YAML metadata, records are JSON, and `bf validate` checks both. `bf init --full` creates `sensors/` and `routines/`; create `prompts/` when you add a [prompt](https://fmind.github.io/brain-framework/docs/prompts/). A prompt's records hold model output, so search weighs them at half, like a low-priority source. The SQLite search cache in `.bf/` is disposable and rebuilds itself from the files. See the [file conventions](https://fmind.github.io/brain-framework/docs/brain/#directory-reference).
+Notes are Markdown with YAML metadata, records are JSON, and `bf validate` checks both. `bf init --full` creates `sensors/` and `routines/`; create `prompts/` and `channels/` when you add an [assistant](https://fmind.github.io/brain-framework/docs/prompts/). An assistant's records hold model output, so search weighs them at half, like a low-priority source. The SQLite search cache in `.bf/` is disposable and rebuilds itself from the files. See the [file conventions](https://fmind.github.io/brain-framework/docs/brain/#directory-reference).
 
 ### `bf.yaml`, the coordination hub
 
@@ -105,7 +105,7 @@ One file declares what the brain knows how to name, collect and check:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/configuration/
-version: 7
+version: 8
 name: brain
 fields: # the ontology: shared fields and typed relations
   project: { type: identity, cardinality: one, relation: true, description: Project the source names. }
@@ -130,7 +130,7 @@ watch: # keep sources fresh and alert on failure
   notifications: failure
 ```
 
-BF runs each program with its configured arguments and no shell, bounds its time and output, validates what it prints and keeps its stderr in `logs/`. A failed run never changes your evidence. `bf watch` keeps due sensors, routines and prompts fresh in a terminal dashboard, and `bf schedule` generates native systemd, launchd or cron jobs for you to install. See [sensors](https://fmind.github.io/brain-framework/docs/sensors/), [routines](https://fmind.github.io/brain-framework/docs/routines/) and [watch and schedule](https://fmind.github.io/brain-framework/docs/schedule/).
+BF runs each program with its configured arguments and no shell, bounds its time and output, validates what it prints and keeps its stderr in `logs/`. A failed sensor run preserves its evidence; assistant answers and delivery obligations have durable recovery. `bf watch` keeps due sensors, routines and assistants fresh in a terminal dashboard, and `bf schedule` generates native systemd, launchd or cron jobs for you to install. See [sensors](https://fmind.github.io/brain-framework/docs/sensors/), [routines](https://fmind.github.io/brain-framework/docs/routines/) and [watch and schedule](https://fmind.github.io/brain-framework/docs/schedule/).
 
 ### One vocabulary, set at collection
 
@@ -200,7 +200,7 @@ Each host reads its own folder: for Claude Code, use `~/.claude/skills` instead.
 | `bf-use`      | Find evidence, cite it, and keep projects and concepts current.                 |
 | `bf-action`   | Start, resume and hand off a tracked work session: `/bf-action website-review`. |
 | `bf-setup`    | Install BF, create a brain, connect the agent and choose sources worth adding.  |
-| `bf-maintain` | Run sensors, routines and prompts, check the brain and upgrade it safely.       |
+| `bf-maintain` | Run sensors, routines and assistants, check the brain and upgrade it safely.    |
 
 Working in a code repository instead? The [example session hook](https://github.com/fmind/brain-framework/tree/main/examples/hooks) prints the project that declares the repository, its next task and linked evidence when the session starts. During collection, a usable cached reply carries an “Index refreshing” note. Hosts that prefer tools can call `search` and `read` through [MCP](https://fmind.github.io/brain-framework/docs/mcp/). See the [agent guide](https://fmind.github.io/brain-framework/docs/agents/), which also points agents to this documentation as Markdown.
 
@@ -237,7 +237,9 @@ A brain is a folder, so Git gives it history, rollback, review and conflict reso
 
 1. **It runs on your computer, not in someone else's cloud.** That is a feature: your agent works where you can watch it, interrupt it and inspect every file it reads or writes, instead of a black box on a remote server. Sensors collect while your machine is on, through `bf watch` or a native schedule.
 1. **It takes some setup.** Each source needs its access: an API key, `gh auth login`, `gws` or `gcloud` authentication, then a sensor you review. Providers ship better CLIs and MCP servers every month, so this keeps getting easier, and the `bf-setup` skill walks your agent through it.
-1. **It needs an agent harness for the reasoning.** BF never runs a model itself: it collects, validates, searches and connects, and its [prompts](https://fmind.github.io/brain-framework/docs/prompts/) launch your harness. Claude Code, Codex, Copilot, Antigravity or another harness does the thinking, so the privacy of what your agent reads depends on that harness's data terms. BF sends no telemetry or personal data to us; see [privacy and security](https://fmind.github.io/brain-framework/docs/privacy/) for a fully local setup.
+1. **It needs an agent harness for the reasoning.** BF never runs a model itself: it collects, validates, searches and connects, and its [assistants](https://fmind.github.io/brain-framework/docs/prompts/) launch your harness. Claude Code, Codex, Copilot, Antigravity or another harness does the thinking, so the privacy of what your agent reads depends on that harness's data terms. BF sends no telemetry or personal data to us; see [privacy and security](https://fmind.github.io/brain-framework/docs/privacy/) for a fully local setup.
 1. **It finds what was said and linked, not what was meant.** Search matches words and explicit identities, without embeddings, and incomplete results say so. Search and read never contact providers: collect again when you need newer evidence. See [what BF does not do](https://fmind.github.io/brain-framework/docs/concepts/#what-bf-does-not-do).
 
 [Browse the commands](https://fmind.github.io/brain-framework/docs/commands/) · [Report an issue](https://github.com/fmind/brain-framework/issues) · [Contribute](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md) · [MIT licensed](https://github.com/fmind/brain-framework/blob/main/LICENSE) · [Third-party notices](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md)
+
+[Assistants and channels](https://fmind.github.io/brain-framework/docs/prompts/) connect your own harness to any messaging surface through small scripts: receive messages, reply in their thread, review on a schedule and fan out saved answers. The [offline messaging example](https://github.com/fmind/brain-framework/tree/main/examples/channels) demonstrates the full loop without a provider or model.

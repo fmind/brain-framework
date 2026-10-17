@@ -43,7 +43,7 @@ These two cases in `evals/retrieval.yaml` check the Atlas budget. Zephyr has a d
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/checks/
-version: 7
+version: 8
 cases:
   - name: atlas-budget-first-result
     query: What is the Atlas launch budget?

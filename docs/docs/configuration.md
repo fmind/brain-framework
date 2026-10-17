@@ -12,7 +12,7 @@ cd ~/brain
 bf read projects/new-website.md#decision
 ```
 
-Each brain's `bf.yaml` holds its format `version`, its `name` and optional `brains`, [`fields`](schema.md#shared-fields-and-sensor-mappings), [`sensors`](sensors.md#sensor-settings), [`routines`](routines.md#routine-settings), [`prompts`](prompts.md#prompt-settings) and [`watch`](schedule.md#watch-preferences) sections. Unknown keys, duplicate keys and invalid values fail with the file and field named. An optional section left empty, such as `sensors:` with every entry commented out, holds nothing, and an empty `watch:` keeps its defaults. The [JSON Schema](../bf.schema.json) describes the format; see [editor schemas](schema.md#editor-schemas).
+Each brain's `bf.yaml` holds its format `version`, its `name` and optional `brains`, [`fields`](schema.md#shared-fields-and-sensor-mappings), [`sensors`](sensors.md#sensor-settings), [`routines`](routines.md#routine-settings), [`assistants`](prompts.md#assistant-settings), [`channels`](channels.md) and [`watch`](schedule.md#watch-preferences) sections. Unknown keys, duplicate keys and invalid values fail with the file and field named. An optional section left empty, such as `sensors:` with every entry commented out, holds nothing, and an empty `watch:` keeps its defaults. The [JSON Schema](../bf.schema.json) describes the format; see [editor schemas](schema.md#editor-schemas).
 
 | File                       | Purpose                                             | Needed when…                                     |
 | -------------------------- | --------------------------------------------------- | ------------------------------------------------ |
@@ -102,7 +102,7 @@ Names are unique. After moving a brain, run `bf register` at its new place: it t
 
 Any other conflict fails and names the entry to remove from the registry, such as another brain registered under that name, or a registered folder that exists but cannot be reached, like a locked folder or a disconnected network mount: `cannot reach the brain registered as NAME at PATH`.
 
-Registration never runs a brain's programs. Before running a cloned brain's sensors, routines or prompts, review its `bf.yaml`, `sensors/`, `routines/` and `prompts/`, then select it explicitly, as with `bf update --brain ~/team-brain`. Delete a registry entry to stop selecting a brain by default; its files stay in place, and an empty `brains:` is valid.
+Registration never runs a brain's programs. Before running a cloned brain's sensors, routines, assistants or channels, review its `bf.yaml`, `sensors/`, `routines/`, `prompts/` and `channels/`, then select it explicitly, as with `bf update --brain ~/team-brain`. Delete a registry entry to stop selecting a brain by default; its files stay in place, and an empty `brains:` is valid.
 
 ## Local state
 
@@ -111,3 +111,5 @@ Run history, locks and usage counts stay on this machine, in the `bf/` folder of
 The state folder must be outside the brain. BF creates `bf/` with mode 700 and fails when another account owns it; set `XDG_STATE_HOME` to a writable folder if needed. The state folder, its `bf/` folder and everything below must be real folders: a symbolic link there makes every command fail with `state directory may not contain symlinks`. Links above them, such as `/home` pointing to `/var/home`, are fine.
 
 Processes using one physical brain share its locks, even through another path such as a bind mount, so they must share the state folder. Run history and usage follow the brain's path instead. After moving a brain, sources show `never` and window sensors restart from `lookback`: update its registry entry with `bf register`, regenerate schedules and backfill any gap with `bf collect SENSOR --since DATE`. Removing state loses collection windows and freshness history, never notes or records.
+
+Assistant obligations live separately under the private `bf/runtime/` state directory. This durable queue is bound to physical brain identity, path and name; it must not be deleted with disposable caches or run history. Drain it before moving a brain. See [queue recovery](channels.md#queue-and-recovery).

@@ -1,11 +1,10 @@
 # https://fmind.github.io/brain-framework/docs/prompts/
-version: 7
+version: 8
 name: prompt-demo
-prompts:
+assistants:
   assistant:
     prompt: prompts/assistant.md
     # A stand-in harness: cat prints the expanded prompt it receives on standard input, offline.
     command: [cat]
-    # Prompts run every 30 minutes by default; 0 keeps this one for bf run only.
-    refresh: 0
+    # No schedules or inputs: this assistant runs only through bf run.
     timeout: 60

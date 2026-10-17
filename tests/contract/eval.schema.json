@@ -104,7 +104,7 @@
   "properties": {
     "cases": { "items": { "$ref": "#/$defs/Case" }, "maxItems": 200, "minItems": 1, "title": "Cases", "type": "array" },
     "version": {
-      "const": 7,
+      "const": 8,
       "description": "Brain format, shared with bf.yaml; independent of the package version.",
       "title": "Version",
       "type": "integer"

@@ -13,6 +13,7 @@ from typing import Annotated, Literal
 from pydantic import Field, ValidationError
 
 from bf.models import MAX_FILES, MAX_RECORD, NAME, RECORD_KEYS, Error, Model, Record, decode, digest, encode, explain
+from bf.runtime import EventIntent, admit
 from bf.storage import BusyError, Store, reader
 
 _PENDING = "memories/.pending"
@@ -34,6 +35,11 @@ class _Journal(Model):
     source: Annotated[str, Field(pattern=NAME)]
     complete: bool = False
     changes: Annotated[list[_Change], Field(max_length=MAX_FILES)]
+    event: EventIntent | None = None
+
+
+class DispatchPendingError(Error):
+    """Records committed, but their durable lifecycle event still needs admission."""
 
 
 def _pending(store: Store) -> bool:
@@ -123,9 +129,21 @@ def recover(store: Store) -> None:
         with suppress(FileNotFoundError):
             # A commit interrupted before creating its source directory changed nothing there.
             store.sync(directory)
+        journal.event = None
         journal.complete = True
         store.write(_MANIFEST, encode(journal.model_dump()))
     store.sweep(directory)
+    _finish(store, journal)
+
+
+def _finish(store: Store, journal: _Journal) -> None:
+    if journal.event is not None:
+        try:
+            admit(store, journal.event)
+        except (Error, OSError) as error:
+            raise DispatchPendingError(
+                "records were committed; event dispatch is pending; preserve memories/.pending and retry"
+            ) from error
     _clear(store)
 
 
@@ -167,7 +185,9 @@ def reading(store: Store) -> Iterator[None]:
         yield
 
 
-def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) -> None:
+def _commit(
+    store: Store, source: str, replacements: dict[str, bytes | None], *, event: EventIntent | None = None
+) -> None:
     if not replacements:
         return
     # A commit's backups and its manifest share memories/.pending, which the scan limit bounds like any tree.
@@ -196,7 +216,7 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
             f"{tree} would exceed the {MAX_FILES:,}-entry scan limit; split its sensor into several sources or "
             "archive older records outside the brain"
         )
-    journal = _Journal(source=source, changes=changes)
+    journal = _Journal(source=source, changes=changes, event=event)
     manifest = encode(journal.model_dump())
     if len(manifest) > _MANIFEST_LIMIT:
         raise Error("record transaction exceeds its manifest limit")
@@ -225,14 +245,21 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
         landed = journal.complete and _completed(store)
         try:
             recover(store)
+        except DispatchPendingError:
+            raise
         except (Error, OSError) as recovery_error:
             raise Error("record transaction needs recovery; preserve memories/.pending and retry") from recovery_error
         if not (landed and isinstance(error, Error | OSError)):
             raise
         return
     # A cleanup failure cannot turn a durable successful commit into a failed collection; recovery clears it later.
-    with suppress(Error, OSError):
-        _clear(store)
+    # Event admission must succeed before cleanup. A failure preserves the committed journal for recovery.
+    try:
+        _finish(store, journal)
+    except DispatchPendingError:
+        raise
+    except Error, OSError:
+        pass
 
 
 def path(source: str, record_id: str) -> str:
@@ -312,7 +339,9 @@ def source_of(name: str) -> str:
     return parts[1]
 
 
-def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool) -> dict[str, int]:
+def upsert(
+    store: Store, source: str, incoming: list[Record], *, snapshot: bool, event: EventIntent | None = None
+) -> dict[str, int]:
     """Update independent record files; snapshot removal and all replacements remain transactional.
 
     Only files a change replaces or removes are parsed, and each must hold its own id: collection never
@@ -325,7 +354,12 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
     # Only writers holding the brain lock write records: a temporary file there belongs to a killed write.
     store.sweep(f"memories/{source}")
     counts, replacements = plan(store, source, incoming, snapshot=snapshot)
-    _commit(store, source, replacements)
+    if event is not None:
+        if not any(counts[key] for key in ("added", "updated", "removed")):
+            event = None
+        else:
+            event.data.update(counts)
+    _commit(store, source, replacements, event=event)
     return counts
 
 

@@ -24,7 +24,7 @@ from bf.validate import validate
 from conftest import records_file
 from test_interfaces import invoke
 
-CONFIG = b"""version: 7
+CONFIG = b"""version: 8
 name: fixture
 fields:
   friend:
@@ -365,7 +365,7 @@ def test_cli_mcp_and_evals_expose_links(brain: Store) -> None:
     assert asyncio.run(call())["backlinks"] == cli["backlinks"]
     brain.write(
         "evals/links.yaml",
-        b"version: 7\ncases:\n- name: friend\n  read: person:bob\n  expect: [projects/alice.md]\n"
+        b"version: 8\ncases:\n- name: friend\n  read: person:bob\n  expect: [projects/alice.md]\n"
         b"- name: stranger\n  read: person:nobody\n  empty: true\n",
     )
     assert evaluate(brain)["passed"]
@@ -568,7 +568,7 @@ def test_the_same_record_in_two_brains_keeps_qualified_reads_exact(brain: Store,
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     for store in (brain, team):
         records_file(store, "jira", [Record(id="PROJ-1", title="Launch issue")])
     brain.write("projects/launch.md", b"---\ntype: project\n---\n# Launch\n\n[Issue](jira:PROJ-1)\n")
@@ -619,7 +619,7 @@ def test_page_addresses_are_link_targets(brain: Store) -> None:
                 check(ref)
     brain.write(
         "evals/pages.yaml",
-        b"version: 7\ncases:\n  - {name: expected, query: hub, expect: ['bf://fixture/tasks#part']}\n"
+        b"version: 8\ncases:\n  - {name: expected, query: hub, expect: ['bf://fixture/tasks#part']}\n"
         b"  - {name: forbidden, query: hub, expect: [projects/hub.md], forbid: ['tasks#part']}\n",
     )
     with pytest.raises(Error, match=r"cases\.0\.expect: pages have no sections.*cases\.1\.forbid: pages have no"):
@@ -707,11 +707,11 @@ def test_folders_and_tag_membership_are_not_claimed(brain: Store) -> None:
     assert any("field tagged-with is reserved" in p for p in problems(brain))
     # bf.yaml cannot declare it either.
     field = "  tagged-with: {description: Tags, type: identity, relation: true}\n"
-    brain.write("bf.yaml", b"version: 7\nname: fixture\nfields:\n" + field.encode())
+    brain.write("bf.yaml", b"version: 8\nname: fixture\nfields:\n" + field.encode())
     with pytest.raises(Error, match=r"fields\.tagged-with is reserved for tag membership"):
         load(brain)
     # `links` names the backlink group and relation page of untyped links.
-    brain.write("bf.yaml", b"version: 7\nname: fixture\nfields:\n" + field.replace("tagged-with", "links").encode())
+    brain.write("bf.yaml", b"version: 8\nname: fixture\nfields:\n" + field.replace("tagged-with", "links").encode())
     with pytest.raises(Error, match=r"fields\.links is reserved for untyped backlinks"):
         load(brain)
 
@@ -742,7 +742,7 @@ def test_okf_sources_cite_their_resources(brain: Store) -> None:
     assert "problems" not in read([brain], "bf://fixture/people/bob?rel=cites")
     assert validate(brain)["valid"]
     field = "  cites: {description: Derived from, type: identity, relation: true}\n"
-    brain.write("bf.yaml", b"version: 7\nname: fixture\nfields:\n" + field.encode())
+    brain.write("bf.yaml", b"version: 8\nname: fixture\nfields:\n" + field.encode())
     with pytest.raises(Error, match=r"fields\.cites is reserved for OKF sources"):
         load(brain)
 
@@ -869,7 +869,7 @@ def test_other_brains_link_a_record_by_its_bare_ref(brain: Store, tmp_path: Path
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     team.write("projects/followup.md", b"---\ntype: project\n---\n# Follow-up\n\n[the meeting](meetings:decision-1)\n")
     expected = {("fixture", "projects/offline.md"), ("team", "projects/followup.md")}
     # The record's ref, qualified address and alias all list the links from every selected brain, in reads, relation

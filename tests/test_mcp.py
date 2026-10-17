@@ -161,9 +161,9 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
 def test_qualified_mcp_reads_keep_backlinks_from_referenced_brains(brain: Store, tmp_path: Path) -> None:
     (tmp_path / "team").mkdir()
     team = Store(tmp_path / "team")
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     team.write("projects/linker.md", b"# Linker\n\nSee [offline](bf://fixture/projects/offline.md).\n")
-    brain.write("bf.yaml", f"version: 7\nname: fixture\nbrains:\n  team:\n    path: {team.root}\n".encode())
+    brain.write("bf.yaml", f"version: 8\nname: fixture\nbrains:\n  team:\n    path: {team.root}\n".encode())
     expected = invoke("read", "bf://fixture/projects/offline.md", "--brain", str(brain.root))
 
     async def check() -> None:

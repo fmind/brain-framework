@@ -42,13 +42,13 @@ def export() -> str:
             0,
             [
                 '"valid":true',
-                '"manual":["assistant"]',
                 '"status":"ran"',
                 '"record":"assistant:',
                 "Owner message: What changed in the launch?",
                 '"title":"Brain assistant"',
             ],
         ),
+        ("channels", 0, ['"valid":true', '"id":"hello-1"', '"counts":{}', "Acknowledged."]),
         ("routines", 0, ['"status":"ran"', "weekly-review-", '"valid":true']),
         (
             "routines",

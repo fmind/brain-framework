@@ -4,6 +4,25 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+Assistants can receive messages, reply in their conversation and send scheduled or sensor-triggered results through brain-owned channel commands. This is a breaking, format-8 change; it requires the next major release (v19) and is not published.
+
+### Upgrade from v18
+
+1. Stop execution owners and drain any external chat bridge's accepted work. Back up the brain and local runtime state. Install the published v19 release before changing a pinned brain.
+1. Change `version: 7` to `version: 8` in `bf.yaml` and `evals/*.yaml`. Existing record files and note formats remain unchanged.
+1. Rename the `prompts:` registry to `assistants:`; keep each assistant's `prompt: prompts/NAME.md`, command and `text` pointer. Remove assistant `refresh` and `lookback`. For automatic reviews, add `schedules: {review: {every: 1800, lookback: 86400}}`; omit schedules for manual use. Schedules have independent durable progress and begin with their configured lookback.
+1. Replace `--prompt` with `--assistant` and `--kind prompt` with `--kind assistant`. Consumers of run/update/status/home replies must accept `assistants` and `assistant` in place of executable prompt fields; watch JSON uses `assisting` instead of `prompting`.
+1. Declare passive `channels` and assistant-level `inputs`/`outputs` as needed. Remove model-owned sends when outputs perform delivery. Review adapter sender admission and destination restrictions. Do not run a legacy listener beside the new stream on one subscription.
+1. Run `bf skills DIR`, update copied hook/routine examples that consume assistant attention, then run `bf validate`, the brain's checks and a disposable channel trial before restarting `bf watch`.
+
+### Added
+
+- Optional `send`, bounded `read` and persistent `stream` channel commands, each with an argv contract and no provider dependencies. Stream acknowledgements follow durable admission for every configured subscriber; execution remains selected.
+- Assistant fan-in, fan-out, threaded `reply: {}`, named schedules and `sensor.changed` triggers. Inputs and outputs live at the same level; channels own transport, assistants own calling policy, and the owner chooses the harness.
+- Durable local work and delivery queues outside `.bf/`, with saved answers, stable delivery IDs, explicit retry/cancel, per-conversation ordering, bounded retention and backpressure. `bf queue` inspects/retries work; `bf channel read|send` uses an endpoint directly.
+- Watch supervises streams beside collection, with reserved reactive and proactive capacity and up to four independent channel deliveries. Failed or interrupted harness attempts require explicit review; only declared idempotent sends retry automatically.
+- Offline channel examples and fault tests cover redelivery, cancellation, configuration changes, independent recipients, queue recovery and provider-neutral transport boundaries.
+
 ## [v18.5.0](https://github.com/fmind/brain-framework/releases/tag/v18.5.0) - 2026-10-14
 
 A feature and review release. The brain format (`version: 7`) is unchanged; `bf.yaml` gains the optional `silent_after` and `keep` settings, which an older `bf` rejects, the reply schemas only gain optional fields and the search cache rebuilds once. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), run `bf skills DIR` to update all four skills, and copy the updated example `weekly-review` routine and `gmail-headers` sensor into your brain, preserving local adaptations.

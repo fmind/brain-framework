@@ -1,11 +1,11 @@
 ---
 icon: lucide/calendar-clock
-description: Run or observe due sensors, routines and prompts, set watch preferences and generate native schedules.
+description: Run or observe due sensors, routines and assistants, set watch preferences and generate native schedules.
 ---
 
 # Watch and schedule updates
 
-Keep reviewed sensors, routines and [prompts](prompts.md) current with their `enabled` and `refresh` settings in `bf.yaml`; [timing and health](#timing-and-health) says when each one is due and how failures retry. Start inside your brain.
+Keep reviewed sensors and routines current with `enabled` and `refresh`; [assistants](prompts.md) declare separate inputs, outputs, schedules and triggers in `bf.yaml`; [timing and health](#timing-and-health) says when each one is due and how failures retry. Start inside your brain.
 
 | You want to…                              | Use                                                                       |
 | ----------------------------------------- | ------------------------------------------------------------------------- |
@@ -31,7 +31,7 @@ The dry run lists due programs with their windows, and names under `manual` the 
 bf watch
 ```
 
-Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. Due [prompts](prompts.md#schedule-and-overlap) run in a second process beside that cycle, so a long agent run never delays collection; the dashboard marks them with `@`. It can contact providers. A failed program retries after the [failure backoff](#timing-and-health). Closing watch stops its collection.
+Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. The assistant dispatcher supervises persistent streams, due batch reads, named schedules, queued events and deliveries beside collection; the dashboard marks assistants with `@`. A long proactive review leaves separate capacity for incoming messages. It can contact providers. Closing watch stops all owned process groups. Restart after changing channel commands or input subscriptions. See [assistant timing and recovery](prompts.md#schedule-and-overlap).
 
 The dashboard shows each program's state, last success, next due time, returned items and record changes. `never` means no success on this machine, such as a sensor that only backfilled older windows; `failed` means the last attempt failed. Items counts the records the last completed collection returned, even a backfill, not the stored total. Manual and disabled programs stay visible without running. Use `bf status --check` for full health.
 
@@ -65,7 +65,7 @@ bf watch --json     # run due work and stream JSON Lines
 
 Observation shows local history alongside a native scheduler. It offers `u` to reread and has no pause. Without an interactive terminal, it fails and suggests `bf status`.
 
-`bf watch --json` writes a snapshot every `poll_interval` with `brain`, `running`, `prompting` (a prompt process is active), `message` and `programs`, one row per program. A row's `status` is the dashboard state: `failed`, `never`, `due`, `fresh`, `manual` or `disabled`. Times show your local offset, and absent values are empty strings or null. The [`Row` class](https://github.com/fmind/brain-framework/blob/main/src/bf/watch.py) defines every row field. A JSON watcher always collects and fails while another watcher owns the brain.
+`bf watch --json` writes a snapshot every `poll_interval` with `brain`, `running`, `assisting` (assistant work is active), `message` and `programs`, one row per program. A row's `status` is the dashboard state: `failed`, `never`, `due`, `fresh`, `manual` or `disabled`. Times show your local offset, and absent values are empty strings or null. The [`Row` class](https://github.com/fmind/brain-framework/blob/main/src/bf/watch.py) defines every row field. A JSON watcher always collects and fails while another watcher owns the brain.
 
 ## Watch preferences
 
@@ -95,7 +95,7 @@ Command-line options override `bf.yaml`, then defaults apply. Every command load
 
 ## Select programs
 
-Repeat `--sensor`, `--routine` and `--prompt` on `update`, `watch` or `schedule`:
+Repeat `--sensor`, `--routine` and `--assistant` on `update`, `watch` or `schedule`:
 
 ```bash
 bf update --sensor git-commits --dry-run
@@ -103,7 +103,7 @@ bf watch --sensor git-commits --routine weekly-review
 bf schedule --sensor git-commits --name git-only
 ```
 
-With no selector, every configured program is eligible, including programs added later. `bf update --kind KIND`, repeatable, keeps only sensors, routines or prompts, as watch does for its prompt process. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run.
+With no selector, every configured program is eligible, including programs added later (restart watch to activate new stream subscriptions). `bf update --kind KIND`, repeatable, keeps only sensors, routines or assistants. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run.
 
 ## Generate a native schedule
 
@@ -141,9 +141,9 @@ Updates of one brain run one at a time. A second update waits up to 10 minutes, 
 
 ## Timing and health
 
-A program is **due** when it is enabled, has a nonzero `refresh` and has not succeeded on this machine within that many seconds. `refresh` defaults to `0` for sensors and routines, which keeps them manual: only `bf collect` or `bf run` starts them. **Prompts default to `refresh: 1800`**: `bf watch`, `bf update` and schedules run a prompt every 30 minutes unless you set `refresh: 0`.
+A program is **due** when it is enabled, has a nonzero `refresh` and has not succeeded on this machine within that many seconds. `refresh` defaults to `0` for sensors and routines, which keeps them manual: only `bf collect` or `bf run` starts them. Assistants have no implicit schedule: declare `schedules: {review: {every: 1800}}` for a 30-minute review; their input and schedule windows are independent.
 
-A failure lets the other programs continue and makes `bf update` exit 1. The failed program retries 1 minute later, then after 2, 4, 8… minutes per consecutive failure, never waiting longer than its `refresh`; a success resets the delay. `bf collect` and `bf run` always run at once, and a direct prompt run [leaves the schedule unchanged](prompts.md#schedule-and-overlap). Each run appends to the program's log, `logs/NAME.log` in the brain, as [processes and logs](limits.md#processes-and-logs) describes.
+A sensor or routine failure lets the other programs continue and makes `bf update` exit 1. The failed program retries 1 minute later, then after 2, 4, 8… minutes per consecutive failure, never waiting longer than its `refresh`; a success resets the delay. `bf collect` and `bf run` always run at once, and a direct assistant run [leaves the schedule unchanged](prompts.md#schedule-and-overlap). An assistant failure instead remains queued for explicit inspection and retry; uncertain model effects are never replayed automatically. Each run appends to the program's log, `logs/NAME.log` in the brain, as [processes and logs](limits.md#processes-and-logs) describes.
 
 A scheduled program is `fresh` when it succeeded on this machine within twice its `refresh`, `overdue` when it has succeeded but not within that time, and `never` when it has no local success. A sensor succeeds only with a collection reaching the moment it runs: one that only [backfilled](sensors.md#backfills-and-coverage) older windows stays `never`. A program with `refresh: 0` is `manual`; a disabled program or historical source is `unknown`. `bf status --check` exits 1 for an enabled scheduled program that is `overdue`, `never` succeeded, last failed or, for a source, [fell silent](#silent-sources). Run it on the collecting machine: run history is local, even when records are shared.
 

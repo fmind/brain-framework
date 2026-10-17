@@ -17,12 +17,12 @@ import pytest
 from typer.testing import CliRunner
 
 from bf.cli import app
-from bf.models import Error, Program
+from bf.models import Command, Error, Program
 from bf.schedule import backend_name, generate
 from bf.storage import Store, collecting
 from bf.update import update
 
-CONFIG = b"""version: 7
+CONFIG = b"""version: 8
 name: fixture
 sensors:
   mail:
@@ -92,8 +92,8 @@ def test_schedules_for_other_selections_queue_instead_of_failing(
             queued.set()
         return lock(*args, **kwargs)
 
-    def slow(_argv: list[str], program: Program, *_: object) -> bytes:
-        if program.refresh == 3600:
+    def slow(_argv: list[str], program: Command, *_: object) -> bytes:
+        if isinstance(program, Program) and program.refresh == 3600:
             entered.set()
             assert release.wait(5)
         else:

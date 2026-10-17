@@ -11,24 +11,24 @@ A minimal `bf.yaml` declares the brain format and a stable name:
 
 ```yaml
 # https://fmind.github.io/brain-framework/
-version: 7
+version: 8
 name: brain
 ```
 
-`version` is the brain format of `bf.yaml`, `evals/*.yaml`, record files and the `memories/` layout; it is independent of the package version. A missing or different version fails before any other field, naming the supported one: `bf.yaml declares version 6; this release reads version: 7`. The changelog lists the upgrade steps of each format.
+`version` is the brain format of `bf.yaml`, `evals/*.yaml`, record files and the `memories/` layout; it is independent of the package version. A missing or different version fails before any other field, naming the supported one: `bf.yaml declares version 6; this release reads version: 8`. The changelog lists the upgrade steps of each format.
 
-Add `fields`, [sensors](sensors.md#sensor-settings), [routines](routines.md#routine-settings), [prompts](prompts.md#prompt-settings), related `brains` and [watch preferences](schedule.md#watch-preferences) only as needed. `bf init` writes the version, the name and the [starter relations](links.md#choose-the-right-relation). A program's `command` starts with a bare command name found on PATH, or a normalized path below `sensors/` or `routines/`; absolute paths, other folders, `..` and placeholders there are errors.
+Add `fields`, [sensors](sensors.md#sensor-settings), [routines](routines.md#routine-settings), [assistants](prompts.md#assistant-settings), related `brains` and [watch preferences](schedule.md#watch-preferences) only as needed. `bf init` writes the version, the name and the [starter relations](links.md#choose-the-right-relation). A program's `command` starts with a bare command name found on PATH, or a normalized path below `sensors/` or `routines/` or `channels/`; absolute paths, other folders, `..` and placeholders there are errors.
 
 ## Program names
 
-Sensors, routines and prompts are named by their keys in `bf.yaml`, and each name is unique across all three: programs share logs and locks by name, and a sensor's or prompt's name is also the source of its records, as in `brief:website-brief`. A clash fails naming both entries, such as `sensors.mail and prompts.mail: program names must be distinct`.
+Sensors, routines and assistants are named by their keys in `bf.yaml`, and each name is unique across all three: programs share logs and locks by name, and a sensor's or assistant's name is also the source of its records, as in `brief:website-brief`. A clash fails naming both entries, such as `sensors.mail and assistants.mail: program names must be distinct`.
 
-| Program        | Name                                                                                                                                         |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Sensor, prompt | A lowercase letter, then lowercase letters, digits or hyphens.                                                                               |
-| Routine        | Lowercase letters and digits in words joined by single hyphens, starting with a letter; it also names the action folders the routine writes. |
+| Program                    | Name                                                                                                                                         |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sensor, assistant, channel | A lowercase letter, then lowercase letters, digits or hyphens.                                                                               |
+| Routine                    | Lowercase letters and digits in words joined by single hyphens, starting with a letter; it also names the action folders the routine writes. |
 
-Never name a sensor or prompt `bf`: refs starting with `bf:` read as [BF addresses](link-reference.md#bf-links), so its records could not be read by ref. [Limits](limits.md#size-bounds) gives the length bound.
+Never name a sensor or assistant `bf`: refs starting with `bf:` read as [BF addresses](link-reference.md#bf-links), so its records could not be read by ref. [Limits](limits.md#size-bounds) gives the length bound.
 
 ## Editor schemas
 
@@ -93,7 +93,7 @@ For example, map a Git record's author identities to `author`, and label its kin
 
 ```yaml
 # https://fmind.github.io/brain-framework/
-version: 7
+version: 8
 name: brain
 fields:
   author:

@@ -1,4 +1,4 @@
-"""Collect every due sensor, run every due routine and prompt of one brain, then refresh its search cache."""
+"""Collect every due sensor, run every due routine and assistant of one brain, then refresh its search cache."""
 
 from __future__ import annotations
 
@@ -7,16 +7,17 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import UTC, datetime
 from typing import Literal
 
+from bf import assistants as assistant_runtime
 from bf import index
-from bf.collect import Runner, collect, due, due_prompts, due_routines, enabled, hooked, prompt, routine, run, window
+from bf.collect import Runner, collect, due, due_routines, enabled, hooked, routine, run, window
 from bf.config import load
 from bf.models import Config, Error, suggest
 from bf.storage import BusyError, Store, collecting
 
 # Seconds a cycle waits for another update of the same brain before failing visibly.
 WAIT = 600
-ProgramKind = Literal["sensor", "routine", "prompt"]
-KINDS: frozenset[ProgramKind] = frozenset({"sensor", "routine", "prompt"})
+ProgramKind = Literal["sensor", "routine", "assistant"]
+KINDS: frozenset[ProgramKind] = frozenset({"sensor", "routine", "assistant"})
 
 
 def _failure(error: Error | OSError | UnicodeError) -> str:
@@ -27,38 +28,43 @@ def selection(
     config: Config,
     sensors: tuple[str, ...] = (),
     routines: tuple[str, ...] = (),
-    prompts: tuple[str, ...] = (),
+    assistants: tuple[str, ...] = (),
     kinds: frozenset[ProgramKind] = KINDS,
 ) -> tuple[set[str], set[str], set[str]]:
     """An explicit list selects only those programs; omitted lists select all programs. `kinds` keeps only those
-    kinds of program, as watch does to run prompts beside collection."""
+    kinds of program, as watch does to run assistants beside collection."""
     for kind, names, known in (
         ("sensor", sensors, config.sensors),
         ("routine", routines, config.routines),
-        ("prompt", prompts, config.prompts),
+        ("assistant", assistants, config.assistants),
     ):
         if unknown := sorted(set(names) - known.keys()):
             raise Error(f"unknown {kind} {unknown[0]}; check names in bf.yaml{suggest(unknown[0], known)}")
-    if not (sensors or routines or prompts):
-        sensors, routines, prompts = tuple(config.sensors), tuple(config.routines), tuple(config.prompts)
+    if not (sensors or routines or assistants):
+        sensors, routines, assistants = tuple(config.sensors), tuple(config.routines), tuple(config.assistants)
     return (
         set(sensors) if "sensor" in kinds else set(),
         set(routines) if "routine" in kinds else set(),
-        set(prompts) if "prompt" in kinds else set(),
+        set(assistants) if "assistant" in kinds else set(),
     )
 
 
 def scheduled(
-    config: Config, sensors: tuple[str, ...] = (), routines: tuple[str, ...] = (), prompts: tuple[str, ...] = ()
+    config: Config, sensors: tuple[str, ...] = (), routines: tuple[str, ...] = (), assistants: tuple[str, ...] = ()
 ) -> list[tuple[int, str]]:
     """The selected enabled programs that refresh on their own, as (refresh seconds, name), fastest first."""
-    selected_sensors, selected_routines, selected_prompts = selection(config, sensors, routines, prompts)
+    selected_sensors, selected_routines, selected_assistants = selection(config, sensors, routines, assistants)
     programs = [
         *((name, config.sensors[name]) for name in selected_sensors),
         *((name, config.routines[name]) for name in selected_routines),
-        *((name, config.prompts[name]) for name in selected_prompts),
     ]
-    return sorted((program.refresh, name) for name, program in programs if program.enabled and program.refresh)
+    intervals = [(program.refresh, name) for name, program in programs if program.enabled and program.refresh]
+    for name in selected_assistants:
+        assistant = config.assistants[name]
+        if assistant.enabled:
+            intervals.extend((schedule.every, name) for schedule in assistant.schedules.values())
+            intervals.extend((item.channel.every, name) for item in assistant.inputs if item.channel.mode == "read")
+    return sorted(intervals)
 
 
 def late(
@@ -66,10 +72,14 @@ def late(
     every: int,
     sensors: tuple[str, ...] = (),
     routines: tuple[str, ...] = (),
-    prompts: tuple[str, ...] = (),
+    assistants: tuple[str, ...] = (),
+    *,
+    include_assistants: bool = True,
 ) -> str:
     """Why checking every `every` seconds runs the fastest selected program late, or ""."""
-    programs = scheduled(config, sensors, routines, prompts)
+    programs = scheduled(config, sensors, routines, assistants)
+    if not include_assistants:
+        programs = [(every, name) for every, name in programs if name not in config.assistants]
     if not programs or every < programs[0][0]:
         return ""
     refresh, name = programs[0]
@@ -99,7 +109,7 @@ def _update(
     runner: Runner,
     sensors: tuple[str, ...],
     routines: tuple[str, ...],
-    prompts: tuple[str, ...] = (),
+    assistants: tuple[str, ...] = (),
     kinds: frozenset[ProgramKind] = KINDS,
     wait: float = 0,
 ) -> dict[str, object]:
@@ -111,7 +121,7 @@ def _update(
     """
     given = now
     config = load(store)
-    selected_sensors, selected_routines, selected_prompts = selection(config, sensors, routines, prompts, kinds)
+    selected_sensors, selected_routines, selected_assistants = selection(config, sensors, routines, assistants, kinds)
     failed = False
     results: list[dict[str, object]] = []
     ran: list[dict[str, object]] = []
@@ -152,33 +162,20 @@ def _update(
                 result.update(status="failed", error=_failure(error))
                 failed = True
             ran.append(result)
-    asked: list[dict[str, object]] = []
-    # Sensors and earlier prompts can run for minutes: each prompt is due, and dated, by the time it starts.
-    clock = (lambda: given) if given else (lambda: datetime.now(UTC))
-    for program, start, end in [item for item in due_prompts(store, clock()) if item[0] in selected_prompts]:
-        result = {"prompt": program, "start": start, "end": end}
-        if dry_run:
-            asked.append({**result, "status": "due"})
-            continue
-        try:
-            result.update(prompt(store, program, start=start, end=end, scheduled=True, runner=runner, clock=clock))
-            result.pop("text", None)
-            result["status"] = "skipped" if "skipped" in result else "ran"
-        except BusyError:
-            # A scheduled run still answering keeps its window: the next cycle covers this one too.
-            result.update(status="skipped", skipped="a scheduled run of this prompt is still active")
-        except (Error, OSError, UnicodeError) as error:
-            result.update(status="failed", error=_failure(error))
-            failed = True
-        asked.append(result)
+    asked = assistant_runtime.cycle(
+        store, selected_assistants, at=given or datetime.now(UTC), dry_run=dry_run, runner=runner
+    )
+    failed |= any(item["status"] == "failed" for item in asked)
     report: dict[str, object] = {"brain": config.name, "sensors": results, "routines": ran}
-    if config.prompts:
-        report["prompts"] = asked
+    if config.assistants:
+        report["assistants"] = asked
     # Enabled programs with refresh: 0 never run here: name them, so an empty cycle is not mistaken for current evidence.
     manual = sorted(
         name
-        for name, program in (*config.sensors.items(), *config.routines.items(), *config.prompts.items())
-        if program.enabled and not program.refresh and name in selected_sensors | selected_routines | selected_prompts
+        for name, program in (*config.sensors.items(), *config.routines.items())
+        if program.enabled
+        and not program.refresh
+        and name in selected_sensors | selected_routines | selected_assistants
     )
     if manual:
         report["manual"] = manual
@@ -201,7 +198,7 @@ def update(
     runner: Runner = run,
     sensors: tuple[str, ...] = (),
     routines: tuple[str, ...] = (),
-    prompts: tuple[str, ...] = (),
+    assistants: tuple[str, ...] = (),
     kinds: frozenset[ProgramKind] = KINDS,
     wait: float = WAIT,
 ) -> dict[str, object]:
@@ -212,7 +209,7 @@ def update(
     same minute, then computes its due list inside the lock.
     """
     # Validate the selection before waiting for the lock or executing anything.
-    selection(load(store), sensors, routines, prompts, kinds)
+    selection(load(store), sensors, routines, assistants, kinds)
     return _update(
         store,
         dry_run=dry_run,
@@ -220,7 +217,7 @@ def update(
         runner=runner,
         sensors=sensors,
         routines=routines,
-        prompts=prompts,
+        assistants=assistants,
         kinds=kinds,
         wait=wait,
     )
@@ -244,11 +241,11 @@ def run_routines(
     now = datetime.now(UTC)
     config = load(store)
     for name in names:
-        if name not in config.routines and name not in config.prompts:
+        if name not in config.routines and name not in config.assistants:
             runnable = [
-                known for known, program in (*config.routines.items(), *config.prompts.items()) if program.enabled
+                known for known, program in (*config.routines.items(), *config.assistants.items()) if program.enabled
             ]
-            raise Error(f"unknown routine or prompt {name}; check names in bf.yaml{suggest(name, runnable)}")
+            raise Error(f"unknown routine or assistant {name}; check names in bf.yaml{suggest(name, runnable)}")
         enabled(config.routines, "routine", name)
     selected = list(names) if names else hooked(config, hook)
     results: list[dict[str, object]] = []
@@ -268,18 +265,6 @@ def run_routines(
     return {"ok": not failed, "dry_run": dry_run, **({"hook": hook} if hook else {}), "routines": results}
 
 
-def run_prompt(store: Store, name: str, *, text: str = "", dry_run: bool = False) -> dict[str, object]:
-    """Run one prompt now with `text` as its {{input}}, such as an owner's message, and reply with its answer.
-
-    It never waits for a scheduled run of the same prompt and leaves its schedule unchanged.
-    """
-    now = datetime.now(UTC)
-    enabled(load(store).prompts, "prompt", name)
-    start, end = window(store, name, now)
-    result: dict[str, object] = {"prompt": name}
-    try:
-        result.update(prompt(store, name, start=start, end=end, text=text, dry_run=dry_run, clock=lambda: now))
-        result["status"] = "ran"
-    except (Error, OSError, UnicodeError) as error:
-        result.update(status="failed", error=_failure(error))
-    return {"ok": result["status"] == "ran", "dry_run": dry_run, "prompts": [result]}
+def run_assistant(store: Store, name: str, *, text: str = "", dry_run: bool = False) -> dict[str, object]:
+    """Run one assistant now; its named schedules and subscriptions keep independent progress."""
+    return assistant_runtime.manual(store, name, text=text, dry_run=dry_run)

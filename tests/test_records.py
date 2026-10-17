@@ -576,7 +576,7 @@ def test_collection_replaces_its_own_records_that_break_current_rules(brain: Sto
 
 
 ATTENDED = (
-    b"version: 7\nname: fixture\nfields:\n  attendee:\n    description: A person who attended.\n    type: identity\n"
+    b"version: 8\nname: fixture\nfields:\n  attendee:\n    description: A person who attended.\n    type: identity\n"
     b"    cardinality: many\n    relation: true\nsensors:\n  meetings:\n    command: [sensors/meetings.py]\n"
     b"    fields:\n      attendee:\n        path: /attributes/people\n"
 )

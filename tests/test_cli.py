@@ -70,7 +70,7 @@ def test_routine_help_never_runs_a_routine(
     marker = tmp_path / "ran"
     store.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nroutines:\n  review:\n    command: [routines/review.sh]\n    hooks: [pre-push]\n",
+        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [routines/review.sh]\n    hooks: [pre-push]\n",
     )
     store.write("routines/review.sh", f"#!/bin/sh\ntouch '{marker}'\n".encode())
     (store.root / "routines/review.sh").chmod(0o700)

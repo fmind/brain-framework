@@ -64,6 +64,11 @@
         "relation": { "type": "string" },
         "subject": { "type": "string" },
         "target": { "type": "string" },
+        "target_ref": {
+          "description": "The ref of the one item in the asserting brain that the target names, when exactly one does: read it to follow the claim.",
+          "type": "string"
+        },
+        "target_title": { "description": "The title of the item `target_ref` names.", "type": "string" },
         "time": {
           "description": "When the asserting record happened; notes state `date` instead.",
           "format": "date-time",
@@ -77,6 +82,11 @@
       "description": "A source's local collection state; freshness never proves complete provider history.",
       "properties": {
         "brain": { "type": "string" },
+        "changed": {
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "format": "date-time",
+          "type": "string"
+        },
         "failed": { "const": true },
         "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
         "last_collected": {
@@ -92,6 +102,7 @@
         "mode": { "enum": ["window", "snapshot"] },
         "page": { "type": "string" },
         "records": { "minimum": 0, "type": "integer" },
+        "silent": { "const": true },
         "source": { "type": "string" },
         "state": { "enum": ["active", "disabled", "historical"] },
         "window": {
@@ -235,6 +246,7 @@
         "attention": {
           "items": {
             "properties": {
+              "assistant": { "type": "string" },
               "brain": { "type": "string" },
               "failed": { "const": true },
               "freshness": { "type": "string" },
@@ -418,7 +430,12 @@
     },
     {
       "properties": {
-        "backlinks": { "items": { "$ref": "#/$defs/Backlinks" }, "type": "array" },
+        "backlinks": { "items": { "$ref": "#/$defs/Backlinks" }, "maxItems": 64, "type": "array" },
+        "backlinks_omitted": {
+          "description": "Relation groups beyond the 64 that backlinks preview, untyped links last; read the same ref with rel to list one.",
+          "minimum": 1,
+          "type": "integer"
+        },
         "claims": {
           "description": "Typed claims the subject makes (declared relations, cites, tagged-with), up to 20 per relation and 50 in all. Untyped links stay in the text, in each target's `links` backlinks and in bf export.",
           "items": { "$ref": "#/$defs/Claim" },
@@ -440,7 +457,12 @@
     },
     {
       "properties": {
-        "backlinks": { "items": { "$ref": "#/$defs/Backlinks" }, "type": "array" },
+        "backlinks": { "items": { "$ref": "#/$defs/Backlinks" }, "maxItems": 64, "type": "array" },
+        "backlinks_omitted": {
+          "description": "Relation groups beyond the 64 that backlinks preview, untyped links last; read the same ref with rel to list one.",
+          "minimum": 1,
+          "type": "integer"
+        },
         "brain": { "type": "string" },
         "claims": {
           "description": "Typed claims the subject makes (declared relations, cites, tagged-with), up to 20 per relation and 50 in all. Untyped links stay in the text, in each target's `links` backlinks and in bf export.",
@@ -509,7 +531,12 @@
     },
     {
       "properties": {
-        "backlinks": { "items": { "$ref": "#/$defs/Backlinks" }, "type": "array" },
+        "backlinks": { "items": { "$ref": "#/$defs/Backlinks" }, "maxItems": 64, "type": "array" },
+        "backlinks_omitted": {
+          "description": "Relation groups beyond the 64 that backlinks preview, untyped links last; read the same ref with rel to list one.",
+          "minimum": 1,
+          "type": "integer"
+        },
         "brain": { "type": "string" },
         "claims": {
           "description": "Typed claims the subject makes (declared relations, cites, tagged-with), up to 20 per relation and 50 in all. Untyped links stay in the text, in each target's `links` backlinks and in bf export.",
@@ -527,6 +554,7 @@
               "type": "string"
             },
             "mode": { "enum": ["window", "snapshot"] },
+            "silent": { "const": true },
             "state": { "enum": ["active", "disabled", "historical"] },
             "window": {
               "properties": {

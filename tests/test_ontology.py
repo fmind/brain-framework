@@ -26,7 +26,7 @@ def search(stores: list[Store], query: Query) -> dict:
     return cast(dict, retrieve_search(stores, query))
 
 
-CONFIG = b"""version: 7
+CONFIG = b"""version: 8
 name: fixture
 fields:
   sender:
@@ -165,7 +165,7 @@ def test_config_contracts_and_pointer_escaping() -> None:
     with pytest.raises(ValidationError, match=r"sensors\.x\.fields\.missing: not declared in fields"):
         Config.model_validate(
             {
-                "version": 7,
+                "version": 8,
                 "name": "test",
                 "sensors": {"x": {"command": ["fake"], "fields": {"missing": {"value": "x"}}}},
             }
@@ -228,11 +228,11 @@ def test_cli_mcp_and_evaluation_share_relationship_pages(brain: Store) -> None:
     assert invoke("search", "mail", "--scope", "person:alice")["items"][0]["ref"] == "mail:one"
     brain.write(
         "evals/relations.yaml",
-        b"version: 7\ncases:\n- name: sender\n  read: person:alice\n  expect: [mail:one]\n  text: [sender]\n",
+        b"version: 8\ncases:\n- name: sender\n  read: person:alice\n  expect: [mail:one]\n  text: [sender]\n",
     )
     brain.write(
         "evals/nested/empty.yml",
-        b"version: 7\ncases:\n- name: absent\n  read: person:unknown\n  empty: true\n",
+        b"version: 8\ncases:\n- name: absent\n  read: person:unknown\n  empty: true\n",
     )
     assert evaluate(brain)["score"] == "2/2"
     assert evaluate(brain, "evals/relations.yaml")["score"] == "1/1"
@@ -240,7 +240,7 @@ def test_cli_mcp_and_evaluation_share_relationship_pages(brain: Store) -> None:
         with pytest.raises(ValidationError):
             Query.model_validate(params)
     brain.write(
-        "evals/duplicate.yaml", b"version: 7\ncases:\n- name: twice\n  empty: true\n- name: twice\n  empty: true\n"
+        "evals/duplicate.yaml", b"version: 8\ncases:\n- name: twice\n  empty: true\n- name: twice\n  empty: true\n"
     )
     with pytest.raises(Error, match="duplicate"):
         evaluate(brain)
@@ -292,16 +292,16 @@ def field(**values: object) -> dict[str, object]:
 )
 def test_broader_and_targets_are_checked_before_anything_runs(schema: dict, message: str) -> None:
     with pytest.raises(ValidationError, match=message):
-        Config.model_validate({"version": 7, "name": "test", "fields": schema})
+        Config.model_validate({"version": 8, "name": "test", "fields": schema})
 
 
 def test_constant_mappings_respect_their_targets() -> None:
     schema = {"owner": field(targets=["person:"])}
     sensors = {"mail": {"command": ["fake"], "fields": {"owner": {"value": ["team:core"]}}}}
     with pytest.raises(ValidationError, match=r"sensors\.mail\.fields\.owner: value outside the declared targets"):
-        Config.model_validate({"version": 7, "name": "test", "fields": schema, "sensors": sensors})
+        Config.model_validate({"version": 8, "name": "test", "fields": schema, "sensors": sensors})
     sensors["mail"]["fields"]["owner"]["value"] = ["person:alice"]
-    config = Config.model_validate({"version": 7, "name": "test", "fields": schema, "sensors": sensors})
+    config = Config.model_validate({"version": 8, "name": "test", "fields": schema, "sensors": sensors})
     assert config.ontology["owner"].allows(["person:alice", "person:bob"])
     assert not config.ontology["owner"].allows(["person:alice", "team:core"])
 

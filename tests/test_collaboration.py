@@ -87,7 +87,7 @@ def test_same_routine_on_two_clones_creates_distinct_actions(tmp_path: Path) -> 
         root.mkdir()
         store = Store(root)
         store.write(
-            "bf.yaml", b"version: 7\nname: team\nroutines:\n  review:\n    command: [fake]\n    output: action\n"
+            "bf.yaml", b"version: 8\nname: team\nroutines:\n  review:\n    command: [fake]\n    output: action\n"
         )
         result = routine(
             store,
@@ -129,7 +129,7 @@ def test_action_helper_creates_two_sessions_without_replacing_work(brain: Store)
 def test_a_session_named_after_a_routine_never_counts_as_its_action(brain: Store) -> None:
     # A routine skips a day that already holds its own action; a person's suffixed session must not be taken for one.
     brain.write(
-        "bf.yaml", b"version: 7\nname: fixture\nroutines:\n  review:\n    command: [fake]\n    output: action\n"
+        "bf.yaml", b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [fake]\n    output: action\n"
     )
     script = Path(__file__).parents[1] / "src/bf/skills/bf-action/scripts/new-action.py"
     reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain

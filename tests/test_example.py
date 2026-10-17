@@ -65,7 +65,7 @@ def test_prepared_knowledge_transfer_works_without_the_source_brain(tmp_path: Pa
     store.write(manifest["files"][0], candidate)
     store.write(
         "evals/retrieval.yaml",
-        b"version: 7\ncases:\n  - name: shared-procedure\n    read: concepts/selected-evidence.md\n"
+        b"version: 8\ncases:\n  - name: shared-procedure\n    read: concepts/selected-evidence.md\n"
         b"    text: [draft, Partial evidence remains partial, No successful outcome]\n"
         b"  - name: no-private-history\n    query: unverified belief\n    empty: true\n",
     )

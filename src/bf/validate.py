@@ -131,7 +131,7 @@ def _script(argument: str) -> bool:
     """
     parts = argument.split("/")
     return (
-        parts[0] in {"sensors", "routines"}
+        parts[0] in {"sensors", "routines", "channels"}
         and len(parts) > 1
         and not any(part in {"", ".", ".."} for part in parts)
         and not re.search(r"[{}\\\s]", argument)
@@ -146,23 +146,36 @@ def _programs(store: Store, config: Config) -> list[dict[str, str]]:
     ones may name files the program creates.
     """
     problems = []
-    for name, prompt in sorted(config.prompts.items()):
+    for name, prompt in sorted(config.assistants.items()):
         try:
             readable = prompt.enabled and stat.S_ISREG(store.mode(prompt.prompt))
             size = store.lstat(prompt.prompt).st_size if readable else 0
         except Error, OSError:
             readable, size = False, 0
         if prompt.enabled and not readable:
-            problems.append(_problem("bf.yaml", f"prompts.{name}.prompt: {prompt.prompt} is not a regular file"))
+            problems.append(_problem("bf.yaml", f"assistants.{name}.prompt: {prompt.prompt} is not a regular file"))
         elif size > MAX_PROMPT:
             # Every run would fail on it: say so before the schedule does.
-            problems.append(_problem("bf.yaml", f"prompts.{name}.prompt: {prompt.prompt} exceeds {MAX_PROMPT} bytes"))
-    for kind, programs in (("sensors", config.sensors), ("routines", config.routines), ("prompts", config.prompts)):
+            problems.append(
+                _problem("bf.yaml", f"assistants.{name}.prompt: {prompt.prompt} exceeds {MAX_PROMPT} bytes")
+            )
+    channel_commands = {
+        f"{name}.{kind}": command
+        for name, channel in config.channels.items()
+        for kind in ("send", "read", "stream")
+        if (command := getattr(channel, kind)) is not None
+    }
+    for kind, programs in (
+        ("sensors", config.sensors),
+        ("routines", config.routines),
+        ("assistants", config.assistants),
+        ("channels", channel_commands),
+    ):
         for name, program in sorted(programs.items()):
             # Program.command already requires a normalized path when the brain's own script runs directly.
-            direct = program.command[0].startswith(("sensors/", "routines/"))
+            direct = program.command[0].startswith(("sensors/", "routines/", "channels/"))
             path = program.command[0] if direct else next(filter(_script, program.command[1:]), "")
-            if not program.enabled or not path:
+            if not getattr(program, "enabled", True) or not path:
                 continue
             try:
                 mode = store.mode(path)
@@ -375,7 +388,7 @@ class _Validation:
                 # A label no note declares opens an empty page: most likely a typo.
                 return len(parts) == 2 and parts[1] in self.tagged
             if parts[0] == "memories":
-                known = parts[1] in self.ids or parts[1] in self.config.sensors or parts[1] in self.config.prompts
+                known = parts[1] in self.ids or parts[1] in self.config.sensors or parts[1] in self.config.assistants
                 if len(parts) > 3 or not known:
                     return False
                 name = parts[2] if len(parts) == 3 else ""
@@ -405,7 +418,7 @@ class _Validation:
             for target in item.targets:
                 source = scheme(item.path, target)
                 written_source, _, record_id = target.partition(":")
-                collected = source in ids or source in config.sensors or source in config.prompts
+                collected = source in ids or source in config.sensors or source in config.assistants
                 if collected and written_source != source:
                     # A URL scheme ignores case, but a record ref names its source exactly: Mail:m1 never links
                     # mail:m1.

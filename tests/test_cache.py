@@ -27,7 +27,7 @@ from bf.storage import BusyError, Store, building, writer
 from bf.validate import validate
 from conftest import records_file
 
-FIELDS = b"""version: 7
+FIELDS = b"""version: 8
 name: fixture
 sensors: {}
 fields:
@@ -46,7 +46,7 @@ REVIEWER = b"""  reviewer:
     relation: true
 """
 # Documentation, `broader`, `targets` and sensors leave the cached rows as they are: no rebuild follows.
-REWORDED = b"""version: 7
+REWORDED = b"""version: 8
 name: fixture
 sensors:
   tickets:
@@ -968,7 +968,7 @@ def test_a_build_publishes_after_readers_close_the_generation_it_replaces(
 
 
 def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
-    schema = b"version: 7\nname: fixture\nfields:\n  owner:\n    description: Who owns it.\n    type: identity\n"
+    schema = b"version: 8\nname: fixture\nfields:\n  owner:\n    description: Who owns it.\n    type: identity\n"
     brain.write("bf.yaml", schema + b"    relation: true\n")
     index.refresh(brain)
     generation = cache_file(brain)

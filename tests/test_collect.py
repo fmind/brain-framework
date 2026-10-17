@@ -25,7 +25,7 @@ from bf.cli import app
 from bf.collect import Runner, collect, due, run
 from bf.health import source_health
 from bf.history import LOG_LIMIT, SENSORS, environment, log_path, remember, state
-from bf.models import MAX_FIELDS, Error, Program, Record, Sensor, encode, timestamp
+from bf.models import MAX_FIELDS, Command, Error, Record, Sensor, encode, timestamp
 from bf.storage import BusyError, Store, state_store, writer
 from bf.update import update
 from bf.watch import snapshot
@@ -33,7 +33,7 @@ from bf.watch import snapshot
 START = "2026-09-01T00:00:00.000000Z"
 END = "2026-09-02T00:00:00.000000Z"
 NOW = datetime(2026, 9, 2, tzinfo=UTC)
-CONFIG = b"""version: 7
+CONFIG = b"""version: 8
 name: fixture
 sensors:
   sample:
@@ -65,8 +65,9 @@ def configured(brain: Store) -> Store:
 def test_collect_dry_run_then_upsert(configured: Store) -> None:
     output = emit({"id": "x", "title": "Decision", "text": "Keep evidence", "time": "2026-09-01T10:00:00Z"})
 
-    def fake(argv: list[str], source: Program, store: Store, name: str, stdin: bytes) -> bytes:
+    def fake(argv: list[str], source: Command, store: Store, name: str, stdin: bytes) -> bytes:
         assert argv[1:] == [START, END, str(configured.root), str(Path.home())]
+        assert isinstance(source, Sensor)
         assert source.refresh == 3600
         assert store.root == configured.root
         assert (name, stdin) == ("sample", b"")
@@ -227,7 +228,7 @@ def test_due_windows_resume_with_overlap_and_catch_up_at_most_30_days(configured
 
 
 def test_update_isolates_failures_and_refreshes_the_cache(configured: Store) -> None:
-    def fake(_argv: list[str], source: Program, *_: object) -> bytes:
+    def fake(_argv: list[str], source: Command, *_: object) -> bytes:
         if isinstance(source, Sensor) and source.mode == "snapshot":
             raise Error("provider unavailable")
         return emit({"id": "x", "title": "Collected zirconium", "time": "2026-09-01T10:00:00Z"})
@@ -463,7 +464,7 @@ def test_placeholders_are_expanded_once(configured: Store, monkeypatch: pytest.M
 def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n"
+        b"version: 8\nname: fixture\nsensors:\n"
         b"  a-missing:\n    command: [sensors/missing.py]\n    refresh: 3600\n"
         b'  b-good:\n    command: [echo, "[]"]\n    refresh: 3600\n',
     )
@@ -703,7 +704,7 @@ def test_cancellation_kills_collector_and_descendants(
         "bf.yaml",
         json.dumps(
             {
-                "version": 7,
+                "version": 8,
                 "name": "fixture",
                 "sensors": {"sample": {"command": ["sensors/wait.sh", str(marker)]}},
             }

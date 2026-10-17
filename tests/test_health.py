@@ -26,7 +26,7 @@ from bf.update import update
 def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n"
+        b"version: 8\nname: fixture\nsensors:\n"
         b"  mail:\n    command: [echo]\n    refresh: 3600\n    reconcile: {refresh: 86400, lookback: 604800}\n"
         b"  folders:\n    command: [echo]\n    mode: snapshot\n    refresh: 86400\n"
         b"routines:\n  review:\n    command: [review]\n    refresh: 86400\n",
@@ -82,7 +82,7 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
 def test_history_offsets_read_back_as_canonical_utc_in_status_and_home(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n"
+        b"version: 8\nname: fixture\nsensors:\n  mail:\n    command: [echo]\n    refresh: 3600\n"
         b"routines:\n  review:\n    command: [review]\n    refresh: 60\n",
     )
     local = "2026-09-23T15:00:00+02:00"
@@ -121,7 +121,7 @@ def test_invalid_usage_counts_do_not_break_health_or_hide_valid_events(brain: St
 def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n"
+        b"version: 8\nname: fixture\nsensors:\n"
         b"  current:\n    command: [echo]\n    refresh: 3600\n"
         b"  missing:\n    command: [echo]\n    refresh: 3600\n"
         b"  paused:\n    command: [echo]\n    enabled: false\n"
@@ -161,7 +161,7 @@ def test_init_quotes_yaml_names_and_keeps_private_evidence_out_of_git(tmp_path) 
 
 
 def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 7\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
+    brain.write("bf.yaml", b"version: 8\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
     brain.write(
         "memories/current/ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb.json",
         b'{"id":"a","title":"First"}\n',
@@ -182,7 +182,7 @@ def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store)
 def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failures_are_inactive(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
+        b"version: 8\nname: fixture\nsensors:\n  agenda:\n    command: [echo]\n    mode: snapshot\n    enabled: false\n",
     )
     state_store(brain.root).write(
         "sensors.json",
@@ -197,7 +197,7 @@ def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failure
 
 def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 7\nname: fixture\nsensors:\n  meetings:\n    command: [echo]\n    refresh: 3600\n"
+        "bf.yaml", b"version: 8\nname: fixture\nsensors:\n  meetings:\n    command: [echo]\n    refresh: 3600\n"
     )
     record = cast("dict[str, object]", read([brain], "meetings:decision-1")["collection"])
     found = cast("list[dict[str, object]]", search([brain], Query(text="offline retrieval"))["sources"])
@@ -214,9 +214,9 @@ def test_status_reports_a_broken_brain_and_still_reports_the_others(tmp_path: Pa
     # The broken brain keeps its registered name, not its directory's.
     (tmp_path / "other-dir").mkdir()
     other = Store(tmp_path / "other-dir")
-    other.write("bf.yaml", b"version: 7\nname: other\n")
+    other.write("bf.yaml", b"version: 8\nname: other\n")
     register(other)
-    other.write("bf.yaml", b"version: 7\nname: [broken\n")
+    other.write("bf.yaml", b"version: 8\nname: [broken\n")
     result = CliRunner().invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     brains = json.loads(result.stdout)["brains"]
@@ -284,7 +284,7 @@ def test_status_reports_the_bytes_each_source_holds(brain: Store) -> None:
 def test_a_source_that_succeeds_without_new_evidence_falls_silent(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n"
+        b"version: 8\nname: fixture\nsensors:\n"
         b"  papers:\n    command: [echo]\n    refresh: 86400\n    silent_after: 345600\n"
         b"  quiet:\n    command: [echo]\n    refresh: 86400\n",
     )

@@ -9,7 +9,7 @@ Agent procedures for **gather → normalize → organize and connect → act →
 | [bf-use](bf-use/SKILL.md)           | Finding and citing evidence, saving knowledge and reviewing projects and decisions      | “Why did we choose a single product page? Read and cite the source.”    |
 | [bf-action](bf-action/SKILL.md)     | Starting, resuming, handing off and closing a tracked work session (an action)          | “/bf-action website-review”                                             |
 | [bf-setup](bf-setup/SKILL.md)       | Installing BF, creating a brain, connecting an agent, discovering and importing sources | “Set up `~/brain` and check that you can find our project decision.”    |
-| [bf-maintain](bf-maintain/SKILL.md) | Sensors, routines, prompts and hooks, collection, refresh, recovery and conflicts       | “Why is the local-documents source overdue? Diagnose it before fixing.” |
+| [bf-maintain](bf-maintain/SKILL.md) | Sensors, routines, assistants and hooks, collection, refresh, recovery and conflicts    | “Why is the local-documents source overdue? Diagnose it before fixing.” |
 
 Install all four: each one names its neighbors when a task crosses into their scope. `bf-use` covers everyday work, including "remember this"; `bf-action` starts a session when invoked with a topic, so no request wording is needed, and resumes or hands one off; `bf-setup` and `bf-maintain` hand selected sources to each other without collecting, scheduling or authenticating on their own.
 
@@ -44,7 +44,7 @@ It exits 1 unless every skill is `current`. Start a fresh host session after ins
 - `bf-use`: retrieval and answering in `SKILL.md`; references for complete reads and graph context, writing knowledge back, links, evidence retention, reviews, consolidation, sharing and decisions; the helpers `guarded-write.py` and `evidence.py`; project and concept templates.
 - `bf-action`: starting an action from a topic, and when an action is open or done, in `SKILL.md`; references for starting, resuming and closing a session, its working-context budget and handoffs; the helpers `new-action.py` and `check-handoff.py`; the action template.
 - `bf-setup`: installation, brain creation, agent access and verification in `SKILL.md`; references for scoped discovery, discovery methods and imports; the `inventory.py` helper.
-- `bf-maintain`: diagnosis, the pinned-runtime rules and core commands in `SKILL.md`; references for integrations (sensors, routines, prompts and Git hooks), operations and conflicts.
+- `bf-maintain`: diagnosis, the pinned-runtime rules and core commands in `SKILL.md`; references for integrations (sensors, routines, assistants and Git hooks), operations and conflicts.
 
 Helpers are standalone Python 3.11+ scripts using only the standard library, run with the agent's `python3` by their path inside the skill folder. When that `python3` is older, agents run them with the Python 3.14 that `uv python find --system --no-config --no-project 3.14` names, never through `uv run`: even with `--no-project`, it adopts a `.venv` in the working directory or a parent, so a brain could supply the interpreter, code it runs at startup and the `bf` first on PATH. They never contact a network; the ones that read the brain call the offline `bf read` of the installed `bf`, the first on PATH. `guarded-write.py` serializes concurrent writes of one file with short-lived lock files in `bf/guarded-write/` below `XDG_STATE_HOME`, or `~/.local/state`, outside the brain.
 

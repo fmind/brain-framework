@@ -18,7 +18,7 @@ An exact read above 32 KiB returns its text in pages; the first carries the back
 
 - English and French function words are ignored unless quoted (`"son"`) or written as a capitalized acronym (`AI`, `EU`); `AND` and `OR` always drop. Only the first 32 distinct words count.
 - Unspaced Chinese and Japanese match only as a whole run; Thai, Devanagari and vocalized Arabic match by fragments, so a query can miss a word.
-- Records of a `priority: low` source, and every prompt's records, rank at half weight; on period and home pages they appear only as a count with the `page` that lists them.
+- Records of a `priority: low` source, and every assistant's records, rank at half weight; on period and home pages they appear only as a count with the `page` that lists them.
 - `"identity":"unknown"` means nothing in the cache names that identity.
 
 ## Check coverage

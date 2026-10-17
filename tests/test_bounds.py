@@ -20,7 +20,7 @@ from bf.retrieve import search
 from bf.storage import Store
 
 MIB = 1 << 20
-ROUTINES = b"""version: 7
+ROUTINES = b"""version: 8
 name: fixture
 routines:
   count:
@@ -107,7 +107,7 @@ def test_replies_list_200_skipped_files_then_a_count(brain: Store) -> None:
 def test_evaluation_runs_at_most_100_suites(brain: Store) -> None:
     (brain.root / "evals").mkdir()
     for number in range(101):
-        (brain.root / f"evals/suite-{number:03}.yaml").write_bytes(b"version: 7\ncases: []\n")
+        (brain.root / f"evals/suite-{number:03}.yaml").write_bytes(b"version: 8\ncases: []\n")
     with pytest.raises(Error, match="evaluation exceeds 100 suites"):
         evaluate(brain)
     # A hundred suites pass the limit, so the run reads them and rejects the first one, which has no case.

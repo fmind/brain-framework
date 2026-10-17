@@ -1,5 +1,129 @@
 {
   "$defs": {
+    "Assistant": {
+      "additionalProperties": false,
+      "description": "One harness with independent acquisition, delivery, schedules and event reactions.",
+      "properties": {
+        "command": {
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "items": { "type": "string" },
+          "maxItems": 128,
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
+              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
+              "type": "string"
+            }
+          ],
+          "title": "Command",
+          "type": "array"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Allow execution and input subscriptions.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "inputs": { "items": { "$ref": "#/$defs/AssistantInput" }, "maxItems": 32, "title": "Inputs", "type": "array" },
+        "keep": {
+          "anyOf": [{ "maximum": 50000, "minimum": 1, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Keep this many newest run records in memories/NAME/; older ones are removed after a run. Unset keeps every run.",
+          "title": "Keep"
+        },
+        "max_bytes": {
+          "default": 1048576,
+          "description": "Maximum stdout in bytes; exceeding it fails without recording the run.",
+          "maximum": 4194304,
+          "minimum": 1,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "outputs": {
+          "items": { "anyOf": [{ "$ref": "#/$defs/ChannelOutput" }, { "$ref": "#/$defs/ReplyOutput" }] },
+          "maxItems": 32,
+          "title": "Outputs",
+          "type": "array"
+        },
+        "prompt": {
+          "description": "The prompt file: a normalized Markdown path in prompts/, such as prompts/assistant.md.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
+          "pattern": "^prompts(?:/[^/{}\\\\]+)+\\.md$",
+          "title": "Prompt",
+          "type": "string"
+        },
+        "schedules": {
+          "maxProperties": 32,
+          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/AssistantSchedule" } },
+          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+          "title": "Schedules",
+          "type": "object"
+        },
+        "text": {
+          "anyOf": [{ "maxLength": 4096, "pattern": "^/(?:[^~\\x00]|~[01])*$", "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "JSON Pointer to the reply text in the command's JSON stdout, such as /response; the other members become the record's output attribute. Omitted, all of stdout is the reply.",
+          "title": "Text"
+        },
+        "timeout": {
+          "default": 900,
+          "description": "Maximum runtime in seconds.",
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Timeout",
+          "type": "integer"
+        },
+        "triggers": {
+          "maxProperties": 32,
+          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/AssistantTrigger" } },
+          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+          "title": "Triggers",
+          "type": "object"
+        }
+      },
+      "required": ["command", "prompt"],
+      "title": "Assistant",
+      "type": "object"
+    },
+    "AssistantInput": {
+      "additionalProperties": false,
+      "properties": {
+        "channel": {
+          "discriminator": {
+            "mapping": { "read": "#/$defs/ReadInput", "stream": "#/$defs/StreamInput" },
+            "propertyName": "mode"
+          },
+          "oneOf": [{ "$ref": "#/$defs/ReadInput" }, { "$ref": "#/$defs/StreamInput" }],
+          "title": "Channel"
+        }
+      },
+      "required": ["channel"],
+      "title": "AssistantInput",
+      "type": "object"
+    },
+    "AssistantSchedule": {
+      "additionalProperties": false,
+      "properties": {
+        "every": { "maximum": 31536000, "minimum": 1, "title": "Every", "type": "integer" },
+        "lookback": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" }
+      },
+      "required": ["every"],
+      "title": "AssistantSchedule",
+      "type": "object"
+    },
+    "AssistantTrigger": {
+      "additionalProperties": false,
+      "properties": {
+        "event": { "const": "sensor.changed", "title": "Event", "type": "string" },
+        "sensor": { "$ref": "#/$defs/SensorReference" }
+      },
+      "required": ["event", "sensor"],
+      "title": "AssistantTrigger",
+      "type": "object"
+    },
     "BrainReference": {
       "additionalProperties": false,
       "description": "A directly related brain, located relative to the declaring brain.",
@@ -14,6 +138,69 @@
       },
       "required": ["path"],
       "title": "BrainReference",
+      "type": "object"
+    },
+    "Channel": {
+      "additionalProperties": false,
+      "anyOf": [
+        { "properties": { "send": { "type": "object" } }, "required": ["send"] },
+        { "properties": { "read": { "type": "object" } }, "required": ["read"] },
+        { "properties": { "stream": { "type": "object" } }, "required": ["stream"] }
+      ],
+      "description": "Passive transport capabilities; assistants decide when to use them.",
+      "properties": {
+        "read": { "anyOf": [{ "$ref": "#/$defs/Command" }, { "type": "null" }], "default": null },
+        "send": { "anyOf": [{ "$ref": "#/$defs/Send" }, { "type": "null" }], "default": null },
+        "stream": { "anyOf": [{ "$ref": "#/$defs/Stream" }, { "type": "null" }], "default": null }
+      },
+      "title": "Channel",
+      "type": "object"
+    },
+    "ChannelOutput": {
+      "additionalProperties": false,
+      "properties": { "channel": { "$ref": "#/$defs/OutputChannel" } },
+      "required": ["channel"],
+      "title": "ChannelOutput",
+      "type": "object"
+    },
+    "Command": {
+      "additionalProperties": false,
+      "description": "An owner's process interface, without scheduling or provider-specific settings.",
+      "properties": {
+        "command": {
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "items": { "type": "string" },
+          "maxItems": 128,
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
+              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
+              "type": "string"
+            }
+          ],
+          "title": "Command",
+          "type": "array"
+        },
+        "max_bytes": {
+          "default": 67108864,
+          "description": "Maximum stdout in bytes; exceeding it fails without committing evidence.",
+          "maximum": 268435456,
+          "minimum": 1,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "timeout": {
+          "default": 300,
+          "description": "Maximum runtime in seconds.",
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Timeout",
+          "type": "integer"
+        }
+      },
+      "required": ["command"],
+      "title": "Command",
       "type": "object"
     },
     "JsonValue": {},
@@ -44,87 +231,55 @@
       "title": "Mapping",
       "type": "object"
     },
-    "Prompt": {
+    "OutputChannel": {
       "additionalProperties": false,
-      "description": "An agent run: a harness command fed the expanded prompt file, run when due or now, recorded in memories/.",
       "properties": {
-        "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
-          "items": { "type": "string" },
-          "maxItems": 128,
-          "minItems": 1,
-          "prefixItems": [
-            {
-              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
-              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines)(?:/[^/{}\\\\]+)+)$",
-              "type": "string"
-            }
-          ],
-          "title": "Command",
-          "type": "array"
-        },
-        "enabled": {
-          "default": true,
-          "description": "Allow execution; false disables both manual and due runs.",
-          "title": "Enabled",
-          "type": "boolean"
-        },
-        "keep": {
-          "anyOf": [{ "maximum": 50000, "minimum": 1, "type": "integer" }, { "type": "null" }],
-          "default": null,
-          "description": "Keep this many newest run records in memories/NAME/; older ones are removed after a run. Unset keeps every run.",
-          "title": "Keep"
-        },
-        "lookback": {
-          "default": 86400,
-          "description": "Seconds {{start}} reaches back when no scheduled run has finished yet.",
-          "maximum": 31536000,
-          "minimum": 1,
-          "title": "Lookback",
-          "type": "integer"
-        },
-        "max_bytes": {
-          "default": 1048576,
-          "description": "Maximum stdout in bytes; exceeding it fails without recording the run.",
-          "maximum": 4194304,
-          "minimum": 1,
-          "title": "Max Bytes",
-          "type": "integer"
-        },
-        "prompt": {
-          "description": "The prompt file: a normalized Markdown path in prompts/, such as prompts/assistant.md.",
-          "maxLength": 4096,
-          "minLength": 1,
-          "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
-          "pattern": "^prompts(?:/[^/{}\\\\]+)+\\.md$",
-          "title": "Prompt",
+        "name": {
+          "not": { "pattern": "[^a-z0-9-]" },
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "title": "Name",
           "type": "string"
         },
-        "refresh": {
-          "default": 1800,
-          "description": "Seconds between due runs; zero keeps the prompt manual, run only by bf run.",
-          "maximum": 31536000,
-          "minimum": 0,
-          "title": "Refresh",
-          "type": "integer"
-        },
-        "text": {
-          "anyOf": [{ "type": "string" }, { "type": "null" }],
+        "when": {
+          "anyOf": [
+            {
+              "items": { "enum": ["input", "schedule", "trigger", "manual"], "type": "string" },
+              "maxItems": 4,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            { "type": "null" }
+          ],
           "default": null,
-          "description": "JSON Pointer to the reply text in the command's JSON stdout, such as /response; the other members become the record's output attribute. Omitted, all of stdout is the reply.",
-          "title": "Text"
-        },
-        "timeout": {
-          "default": 900,
-          "description": "Maximum runtime in seconds.",
-          "maximum": 3600,
-          "minimum": 1,
-          "title": "Timeout",
-          "type": "integer"
+          "description": "Invocation kinds to deliver; omitted means every kind.",
+          "title": "When"
         }
       },
-      "required": ["command", "prompt"],
-      "title": "Prompt",
+      "required": ["name"],
+      "title": "OutputChannel",
+      "type": "object"
+    },
+    "ReadInput": {
+      "additionalProperties": false,
+      "properties": {
+        "every": {
+          "description": "Seconds between complete batch reads.",
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Every",
+          "type": "integer"
+        },
+        "mode": { "const": "read", "title": "Mode", "type": "string" },
+        "name": {
+          "not": { "pattern": "[^a-z0-9-]" },
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": ["name", "mode", "every"],
+      "title": "ReadInput",
       "type": "object"
     },
     "Reconciliation": {
@@ -150,19 +305,33 @@
       "title": "Reconciliation",
       "type": "object"
     },
+    "Reply": {
+      "additionalProperties": false,
+      "description": "Use the admitted incoming message's channel, conversation and message identity.",
+      "properties": {},
+      "title": "Reply",
+      "type": "object"
+    },
+    "ReplyOutput": {
+      "additionalProperties": false,
+      "properties": { "reply": { "$ref": "#/$defs/Reply" } },
+      "required": ["reply"],
+      "title": "ReplyOutput",
+      "type": "object"
+    },
     "Routine": {
       "additionalProperties": false,
       "description": "A deterministic brain program: run when due, by a named hook, or now with `bf run`.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
           "prefixItems": [
             {
               "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
-              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines)(?:/[^/{}\\\\]+)+)$",
+              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
               "type": "string"
             }
           ],
@@ -171,7 +340,7 @@
         },
         "enabled": {
           "default": true,
-          "description": "Allow execution; false disables both manual and due runs.",
+          "description": "Allow manual and scheduled execution.",
           "title": "Enabled",
           "type": "boolean"
         },
@@ -195,7 +364,7 @@
         },
         "lookback": {
           "default": 86400,
-          "description": "Seconds covered by a sensor's first run, each snapshot run and bf collect without --since, and by a routine run without history.",
+          "description": "Seconds covered by a first run or a snapshot.",
           "maximum": 31536000,
           "minimum": 1,
           "title": "Lookback",
@@ -218,7 +387,7 @@
         },
         "refresh": {
           "default": 0,
-          "description": "Seconds between due runs; zero excludes this program from update and watch.",
+          "description": "Seconds between due runs; zero keeps this program manual.",
           "maximum": 31536000,
           "minimum": 0,
           "title": "Refresh",
@@ -315,20 +484,66 @@
       "title": "SchemaField",
       "type": "object"
     },
-    "Sensor": {
+    "Send": {
       "additionalProperties": false,
-      "description": "Execution and explicit mapping of sensor output into the declared fields.",
-      "if": { "properties": { "reconcile": { "type": "object" } }, "required": ["reconcile"] },
+      "description": "A bounded sender; only explicitly idempotent adapters may retry uncertain outcomes automatically.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
           "prefixItems": [
             {
               "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
-              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines)(?:/[^/{}\\\\]+)+)$",
+              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
+              "type": "string"
+            }
+          ],
+          "title": "Command",
+          "type": "array"
+        },
+        "idempotent": {
+          "default": false,
+          "description": "Repeated sends with the same delivery id have one effect.",
+          "title": "Idempotent",
+          "type": "boolean"
+        },
+        "max_bytes": {
+          "default": 67108864,
+          "description": "Maximum stdout in bytes; exceeding it fails without committing evidence.",
+          "maximum": 268435456,
+          "minimum": 1,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "timeout": {
+          "default": 300,
+          "description": "Maximum runtime in seconds.",
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Timeout",
+          "type": "integer"
+        }
+      },
+      "required": ["command"],
+      "title": "Send",
+      "type": "object"
+    },
+    "Sensor": {
+      "additionalProperties": false,
+      "description": "Execution and explicit mapping of sensor output into the declared fields.",
+      "if": { "properties": { "reconcile": { "type": "object" } }, "required": ["reconcile"] },
+      "properties": {
+        "command": {
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "items": { "type": "string" },
+          "maxItems": 128,
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
+              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
               "type": "string"
             }
           ],
@@ -337,7 +552,7 @@
         },
         "enabled": {
           "default": true,
-          "description": "Allow execution; false disables both manual and due runs.",
+          "description": "Allow manual and scheduled execution.",
           "title": "Enabled",
           "type": "boolean"
         },
@@ -356,7 +571,7 @@
         },
         "lookback": {
           "default": 86400,
-          "description": "Seconds covered by a sensor's first run, each snapshot run and bf collect without --since, and by a routine run without history.",
+          "description": "Seconds covered by a first run or a snapshot.",
           "maximum": 31536000,
           "minimum": 1,
           "title": "Lookback",
@@ -399,7 +614,7 @@
         },
         "refresh": {
           "default": 0,
-          "description": "Seconds between due runs; zero excludes this program from update and watch.",
+          "description": "Seconds between due runs; zero keeps this program manual.",
           "maximum": 31536000,
           "minimum": 0,
           "title": "Refresh",
@@ -423,6 +638,75 @@
       "required": ["command"],
       "then": { "properties": { "mode": { "const": "window" } } },
       "title": "Sensor",
+      "type": "object"
+    },
+    "SensorReference": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "not": { "pattern": "[^a-z0-9-]" },
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": ["name"],
+      "title": "SensorReference",
+      "type": "object"
+    },
+    "Stream": {
+      "additionalProperties": false,
+      "description": "A persistent JSON Lines process; timeout bounds acknowledgement writes, not healthy idle time.",
+      "properties": {
+        "command": {
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "items": { "type": "string" },
+          "maxItems": 128,
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
+              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
+              "type": "string"
+            }
+          ],
+          "title": "Command",
+          "type": "array"
+        },
+        "max_bytes": {
+          "default": 65536,
+          "description": "Maximum bytes per incoming JSON Lines frame.",
+          "maximum": 1048576,
+          "minimum": 1024,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "timeout": {
+          "default": 30,
+          "description": "Seconds a blocked acknowledgement pipe may wait; idle streams do not time out.",
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Timeout",
+          "type": "integer"
+        }
+      },
+      "required": ["command"],
+      "title": "Stream",
+      "type": "object"
+    },
+    "StreamInput": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "const": "stream", "title": "Mode", "type": "string" },
+        "name": {
+          "not": { "pattern": "[^a-z0-9-]" },
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": ["name", "mode"],
+      "title": "StreamInput",
       "type": "object"
     },
     "WatchSettings": {
@@ -469,6 +753,20 @@
   "additionalProperties": false,
   "description": "One brain: its name, related brains, declared fields, and the sensors, routines and prompts it may run.",
   "properties": {
+    "assistants": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "maxProperties": 32,
+          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Assistant" } },
+          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+          "type": "object"
+        },
+        { "type": "null" }
+      ],
+      "description": "Agent runs: a harness command fed a prompt file, run when due or with bf run, each run recorded in memories/NAME/; names must differ from sensors and routines.",
+      "title": "Assistants"
+    },
     "brains": {
       "anyOf": [
         {
@@ -482,6 +780,19 @@
       ],
       "description": "Direct references keyed by the target name; retrieval only, without recursion or execution.",
       "title": "Brains"
+    },
+    "channels": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "maxProperties": 64,
+          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Channel" } },
+          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+          "type": "object"
+        },
+        { "type": "null" }
+      ],
+      "title": "Channels"
     },
     "fields": {
       "anyOf": [
@@ -502,19 +813,6 @@
       "pattern": "^[a-z][a-z0-9-]{0,63}$",
       "title": "Name",
       "type": "string"
-    },
-    "prompts": {
-      "anyOf": [
-        {
-          "additionalProperties": false,
-          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/Prompt" } },
-          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-          "type": "object"
-        },
-        { "type": "null" }
-      ],
-      "description": "Agent runs: a harness command fed a prompt file, run when due or with bf run, each run recorded in memories/NAME/; names must differ from sensors and routines.",
-      "title": "Prompts"
     },
     "routines": {
       "anyOf": [
@@ -543,7 +841,7 @@
       "title": "Sensors"
     },
     "version": {
-      "const": 7,
+      "const": 8,
       "description": "Brain format of bf.yaml, evaluation suites, the memories/<source>/<sha256>.json layout and the record envelope; independent of the package version.",
       "title": "Version",
       "type": "integer"

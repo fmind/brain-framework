@@ -23,7 +23,7 @@ Keep selected evidence, decisions and next steps in a folder you can inspect and
 | Act                  | You review the page and record the result in an action.                                            |
 | Learn                | When the brief changes, BF flags the project; you update it and keep a useful lesson as a concept. |
 
-Start with notes; add sources, routines and prompts as the work needs them. The [four-tool walkthrough](context-hub.md) runs the whole loop on fictional Workspace, Jira, GitHub and Gcloud evidence.
+Start with notes; add sources, routines and assistants as the work needs them. The [four-tool walkthrough](context-hub.md) runs the whole loop on fictional Workspace, Jira, GitHub and Gcloud evidence.
 
 ## Choose a guide
 
@@ -32,7 +32,7 @@ Start with notes; add sources, routines and prompts as the work needs them. The 
 | Learn by doing         | [Getting started](getting-started.md), then the [four-tool walkthrough](context-hub.md).                                                                                                 |
 | Understand the model   | [Core concepts](concepts.md), including the glossary and what BF does not do.                                                                                                            |
 | Use it each day        | [Write notes](brain.md), [search and read](search.md), [link knowledge](links.md) and [check your brain](checks.md).                                                                     |
-| Collect and automate   | [Add a sensor](sensors.md), [run routines](routines.md) and [prompts](prompts.md), then [watch and schedule](schedule.md).                                                               |
+| Collect and automate   | [Add a sensor](sensors.md), [run routines](routines.md) and [assistants](prompts.md), then [watch and schedule](schedule.md).                                                            |
 | Work with others       | [Use an agent](agents.md), [connect one with MCP](mcp.md) or [set up a team brain](team.md).                                                                                             |
 | Look up exact behavior | [Commands](commands.md), [configuration](configuration.md), [file formats](schema.md), [link rules](link-reference.md), the [retrieval reference](retrieval.md) and [limits](limits.md). |
 | Resolve a problem      | [Troubleshooting](troubleshooting.md), [install and update](upgrades.md) or the [changelog](../changelog.md).                                                                            |

@@ -607,10 +607,10 @@ def test_yaml_follows_the_1_2_core_schema(brain: Store) -> None:
         "t": [True, 17, 15, 31, "1:30", 1.5, None],
     }
     assert note("concepts/x.md", b"---\ntags: [yes, 2026]\n---\n# X\n").knowledge.tags == ["yes", "2026"]
-    brain.write("bf.yaml", b"version: 7\nname: fixture\nsensors:\n  on:\n    command: [echo]\n    timeout: 1:30\n")
+    brain.write("bf.yaml", b"version: 8\nname: fixture\nsensors:\n  on:\n    command: [echo]\n    timeout: 1:30\n")
     with pytest.raises(Error, match=r"sensors\.on\.timeout"):
         load(brain)
-    brain.write("bf.yaml", b"version: 7\nname: fixture\nwatch:\n  notifications: off\n")
+    brain.write("bf.yaml", b"version: 8\nname: fixture\nwatch:\n  notifications: off\n")
     assert settings(brain).notifications == "off"
 
 
@@ -699,19 +699,19 @@ def test_relative_moments_resolve_deterministically() -> None:
             moment(bad, now)
 
 
-def test_configuration_is_strict_and_version_7(brain: Store) -> None:
+def test_configuration_is_strict_and_version_8(brain: Store) -> None:
     assert load(brain).name == "fixture"
     # One diagnostic names the supported format instead of every field a format change renamed.
     for data, problem in (
         (b"name: fixture\n", "has no version"),
         (b"version: 4\nid: x\nname: old\n", "declares version 4"),
-        (b"version: 8\nname: fixture\nfuture: {}\n", "declares version 8"),
+        (b"version: 99\nname: fixture\nfuture: {}\n", "declares version 99"),
         (b'version: "7"\nname: fixture\n', "declares an invalid version"),
     ):
         brain.write("bf.yaml", data)
-        with pytest.raises(Error, match=rf"^bf\.yaml {problem}; this release reads version: 7$"):
+        with pytest.raises(Error, match=rf"^bf\.yaml {problem}; this release reads version: 8$"):
             load(brain)
-    brain.write("bf.yaml", b"version: 7\nname: fixture\nunknown: 1\n")
+    brain.write("bf.yaml", b"version: 8\nname: fixture\nunknown: 1\n")
     with pytest.raises(Error, match="unknown"):
         load(brain)
 
@@ -721,7 +721,7 @@ def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.Mo
     other = tmp_path / "team"
     other.mkdir()
     team = Store(other)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     register(team)
     assert [s.root for s in select()] == [brain.root, team.root]
     assert one("team").root == team.root
@@ -738,10 +738,10 @@ def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.Mo
     assert [s.root for s in select()] == [brain.root]
     clone = tmp_path / "clone"
     clone.mkdir()
-    Store(clone).write("bf.yaml", b"version: 7\nname: team\n")
+    Store(clone).write("bf.yaml", b"version: 8\nname: team\n")
     with pytest.raises(Error, match="already registered as team"):
         register(Store(clone))
-    brain.write("bf.yaml", b"version: 7\nname: renamed\n")
+    brain.write("bf.yaml", b"version: 8\nname: renamed\n")
     with pytest.raises(Error, match="already registered as fixture"):
         register(brain)
     monkeypatch.chdir(tmp_path)
@@ -785,7 +785,7 @@ def test_registering_keeps_an_entry_whose_directory_cannot_be_reached(brain: Sto
     clone, other = tmp_path / "clone", tmp_path / "other"
     for root, name in ((clone, "fixture"), (other, "other")):
         root.mkdir()
-        Store(root).write("bf.yaml", f"version: 7\nname: {name}\n".encode())
+        Store(root).write("bf.yaml", f"version: 8\nname: {name}\n".encode())
     locked.chmod(0)
     try:
         with pytest.raises(
@@ -808,7 +808,7 @@ def test_registration_conflicts_name_the_entry_to_change(brain: Store, tmp_path:
     registry = re.escape(str(user_path()))
     clone = tmp_path / "clone"
     clone.mkdir()
-    Store(clone).write("bf.yaml", b"version: 7\nname: fixture\n")
+    Store(clone).write("bf.yaml", b"version: 8\nname: fixture\n")
     # Two present brains claim one name: the owner chooses which entry to keep.
     with pytest.raises(
         Error,
@@ -816,7 +816,7 @@ def test_registration_conflicts_name_the_entry_to_change(brain: Store, tmp_path:
         rf"from {registry}, or rename one of the brains in its bf\.yaml$",
     ):
         register(Store(clone))
-    brain.write("bf.yaml", b"version: 7\nname: renamed\n")
+    brain.write("bf.yaml", b"version: 8\nname: renamed\n")
     with pytest.raises(
         Error, match=rf"^this brain is already registered as fixture; remove that entry from {registry}, then run"
     ):
@@ -856,7 +856,7 @@ def test_concurrent_registrations_keep_every_brain(tmp_path: Path, monkeypatch: 
         root = tmp_path / f"brain-{number}"
         root.mkdir()
         store = Store(root)
-        store.write("bf.yaml", f"version: 7\nname: brain-{number}\n".encode())
+        store.write("bf.yaml", f"version: 8\nname: brain-{number}\n".encode())
         stores.append(store)
     original = config.user_config
     start = Barrier(len(stores))

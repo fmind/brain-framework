@@ -11,10 +11,12 @@ From the checkout, run `uv sync --locked` first, then follow each README's dispo
 | Does retrieval find the right evidence?       | [Retrieval](retrieval/README.md)               | `26/26` cases rank the right section first, collapse duplicate records and report absent evidence; `mrr` is 1.0.                                              |
 | Can an agent start with the relevant project? | [Hooks](hooks/README.md)                       | A local Git remote identity selects the owning project and its next task; a prompt lists its matching note section.                                           |
 | Can I run my own checks and reviews?          | [Routines](routines/README.md)                 | A weekly review creates a draft action; a pre-commit hook refuses a commit while `bf validate` finds a broken link.                                           |
-| Can my agent harness review the brain?        | [Prompts](prompts/README.md)                   | A stand-in harness, `cat`, answers a piped message; the run becomes a record that search finds, and `refresh: 0` keeps it out of updates.                     |
+| Can my agent harness review the brain?        | [Assistants](prompts/README.md)                | A stand-in harness, `cat`, answers a piped message; the run becomes a record that search finds, and omitting schedules keeps it out of automatic updates.     |
 | Can I see updates and failures?               | [Watch](watch/README.md)                       | Two sources succeed, one intentionally fails; native schedule files can be inspected without installation.                                                    |
 | Can two people contribute through Git?        | [Team](team/README.md)                         | Independent records and actions merge; incompatible edits conflict and fail validation.                                                                       |
 
 [Sensors](sensors/README.md) holds seven programs to copy and adapt: local Git history, GitHub history, documents, selected highlights, Google Calendar, Gmail headers and Drive folders. Provider examples need the owner's configured CLI; their tests use fake providers. Start with the local-file walkthrough before selecting a live source.
 
 The normal test suite checks these examples on disposable data, including adapter failures. Retrieval scores measure the supplied cases only. Fixture results do not establish live-provider freshness, agent-answer quality or time saved; the [team pilot](../docs/docs/team.md#evaluate-a-pilot) describes a real comparison.
+
+[Channels](channels/README.md) demonstrates finite history reads, reactive replies and proactive delivery with a deterministic harness and no external provider.

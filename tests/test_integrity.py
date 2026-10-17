@@ -163,7 +163,7 @@ def test_damage_in_one_brain_discards_only_its_own_cache(brain: Store, tmp_path:
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     team.write("concepts/team.md", b"---\ntype: concept\nstatus: stable\n---\n# Team offline notes\n")
     for store in (brain, team):
         index.refresh(store)
@@ -275,7 +275,7 @@ def test_missing_identity_in_skipped_evidence_is_not_proven_absent(brain: Store)
     brain.write("projects/broken.md", b"---\nstale_after: invalid\n---\n# Broken\n")
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 7\ncases:\n- name: absent\n  read: 'repo:example/absent'\n  empty: true\n",
+        b"version: 8\ncases:\n- name: absent\n  read: 'repo:example/absent'\n  empty: true\n",
     )
     assert not evaluate(brain)["passed"]
     with pytest.raises(Error, match="incomplete"):

@@ -9,7 +9,7 @@ Agents read `bf status`, a JSON snapshot that runs nothing, never the interactiv
 - `cache` `busy` means another writer works, and replies carry `stale` meanwhile; `stale` or `missing` with `pending_transaction: true` means an interrupted record write awaits recovery.
 - `runtime` names the `installed` version and the `pinned` one the brain's `uv.lock` names, if any.
 - A sensor's `freshness` counts only collections that reached the present (`last_collected`); `last_run` counts the last committed run, backfills included. `manual` means no `refresh`, `unknown` a disabled program or a `historical` source, kept after its sensor left `bf.yaml`.
-- A prompt appears under `prompts`, with its `runs`, `last_run` and latest `record`, and under `sources`, with its records.
+- An assistant appears under `assistants`, with its `runs`, `last_success` and latest `record`, and under `sources`, with its records.
 - A failed program shows its `error`, consecutive `failures` and `log`.
 
 `bf status --check` exits 1 on a scheduled program that failed or is `overdue` or `never`, on problems, a `stale` or `missing` cache, an unavailable brain or an unreadable `brains:` reference.
@@ -19,7 +19,7 @@ Agents read `bf status`, a JSON snapshot that runs nothing, never the interactiv
 | Symptom                      | Next check                                                                                                                                                                                  |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Failed sensor or routine     | Read `logs/NAME.log` locally; within live authority, reproduce with `bf collect SENSOR --since 1d --dry-run` or `bf run --dry-run ROUTINE`. Add a fake-provider regression before retrying. |
-| Failed prompt                | Read `logs/NAME.log`. `bf run --dry-run PROMPT` runs the full harness with every permission it has: reproduce only within live authority.                                                   |
+| Failed assistant             | Read `logs/NAME.log`. `bf run --dry-run ASSISTANT` runs the full harness with every permission it has: reproduce only within live authority.                                                |
 | `overdue` or `never` program | Check the watcher or scheduler and its logs. Catch-up covers at most 30 days: an older gap needs `bf collect SENSOR --since YYYY-MM-DD`.                                                    |
 | Snapshot removal rejected    | `snapshot would remove N of M records`: check account, scope and mounts with `bf collect SENSOR --dry-run`; for an intended removal, run `bf collect SENSOR --allow-removal` once.          |
 | Brain not found              | `PATH has no bf.yaml`: pass the brain's root. `registered brain directory is absent on this machine`: run `bf register` at its new place.                                                   |
@@ -27,17 +27,17 @@ Agents read `bf status`, a JSON snapshot that runs nothing, never the interactiv
 | Skipped files                | `problems` name the file; `bf build` and `bf update` exit 1 until it is fixed. Fix a skipped record's sensor, then collect a window returning it.                                           |
 | Scan-limit warning           | A source or folder above 80% of its 100,000-entry limit: split the sensor or archive older records outside the brain before scans fail.                                                     |
 
-`bf read memories/SOURCE` shows a source's coverage and latest records. Only `.bf/` is disposable: preserve records, logs, action files and pending journals. Review a shared brain's `bf.yaml`, programs, prompts and pin files before running them. An available provider executable does not prove access to the right account.
+`bf read memories/SOURCE` shows a source's coverage and latest records. The durable local assistant queue is not a cache. Only `.bf/` is disposable: preserve records, logs, action files and pending journals. Review a shared brain's `bf.yaml`, programs, prompts and pin files before running them. An available provider executable does not prove access to the right account.
 
 ## Watch or schedule
 
-`bf watch` is the primary refresh mode: it runs due sensors, then routines, with due prompts in a second process, until the user quits; `--sensor NAME`, `--routine NAME` or `--prompt NAME` restrict it. Restart it after editing its `watch:` preferences in `bf.yaml`. Agents observe with `bf status`, or stream `bf watch --json` when authorized to collect. Keep one execution owner per program and one collecting machine per shared source ([watch and schedule](https://fmind.github.io/brain-framework/docs/schedule/)).
+`bf watch` is the primary refresh mode: it runs due sensors, then routines, with independent assistant workers and channel streams, until the user quits; `--sensor NAME`, `--routine NAME` or `--assistant NAME` restrict it. Restart it after editing its `watch:` preferences in `bf.yaml`. Agents observe with `bf status`, or stream `bf watch --json` when authorized to collect. Keep one execution owner per program and one collecting machine per shared source ([watch and schedule](https://fmind.github.io/brain-framework/docs/schedule/)).
 
 With recurring-execution authority, `bf schedule --sensor SENSOR --output ~/.config/bf-schedules` writes native systemd, launchd or cron files and returns the commands to activate, inspect and remove them; it activates nothing. The files capture this machine's `PATH`: keep them out of a shared brain's Git, generate them through the pin for a pinned brain and regenerate them after an upgrade moves `bf`. Report generated, enabled and observed runs separately.
 
 ## Windows and freshness
 
-For mutable window sources, use a short `refresh` and an `overlap`, plus `reconcile: {refresh: 86400, lookback: 604800}` when a daily seven-day revisit is justified; preview with `bf update --dry-run`. A failed program retries after 1 minute, doubling up to its `refresh`. A backfill chunk ending before now extends `window` without making the source fresh: finish with `--since` and no `--until`, or let the next update run ([backfills and coverage](https://fmind.github.io/brain-framework/docs/sensors/#backfills-and-coverage)).
+For mutable window sources, use a short `refresh` and an `overlap`, plus `reconcile: {refresh: 86400, lookback: 604800}` when a daily seven-day revisit is justified; preview with `bf update --dry-run`. A failed sensor or routine retries after 1 minute, doubling up to its `refresh`. A backfill chunk ending before now extends `window` without making the source fresh: finish with `--since` and no `--until`, or let the next update run ([backfills and coverage](https://fmind.github.io/brain-framework/docs/sensors/#backfills-and-coverage)).
 
 ## Upgrade Brain Framework
 

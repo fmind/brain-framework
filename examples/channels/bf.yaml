@@ -1,0 +1,23 @@
+# https://fmind.github.io/brain-framework/docs/channels/
+version: 8
+name: channel-demo
+channels:
+  local:
+    send:
+      command: [python3, channels/local.py, send]
+    read:
+      command: [python3, channels/local.py, read, "{{start}}", "{{end}}"]
+    stream:
+      command: [python3, channels/local.py, stream]
+assistants:
+  personal:
+    prompt: prompts/personal.md
+    # A deterministic stand-in for an agent CLI; no model or network access.
+    command: [printf, "Acknowledged."]
+    inputs:
+      - channel: { name: local, mode: stream }
+    outputs:
+      - reply: {}
+      - channel: { name: local, when: [manual, schedule] }
+    schedules:
+      review: { every: 1800 }

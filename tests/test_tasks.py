@@ -50,7 +50,7 @@ def test_tasks_continue_in_one_stable_order_across_brains(brain: Store, tmp_path
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     for store in (brain, team):
         store.write("projects/work.md", ("# Work\n\n" + "\n".join(f"- [ ] Task {n}." for n in range(63))).encode())
     stores = [team, brain]

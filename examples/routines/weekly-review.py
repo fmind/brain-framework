@@ -115,7 +115,7 @@ def attention(home: dict) -> list[str]:
     """
     lines = []
     for entry in home.get("attention", []):
-        kind = next((kind for kind in ("sensor", "routine", "prompt") if entry.get(kind)), "")
+        kind = next((kind for kind in ("sensor", "routine", "assistant") if entry.get(kind)), "")
         if not kind:
             continue
         where = f" in brain {code(entry['brain'])}" if entry.get("brain") else ""

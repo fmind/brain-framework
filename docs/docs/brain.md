@@ -200,17 +200,17 @@ BF stores each record as one JSON file in `memories/SOURCE/`, named by the SHA-2
 
 ## Directory reference
 
-`bf init PATH` creates `bf.yaml`, `AGENTS.md`, `.gitignore`, `projects/`, `concepts/`, `actions/` and `evals/retrieval.yaml`. `--full` also creates `memories/`, `assets/`, `sensors/`, `routines/` and `skills/`. Create other folders, such as `prompts/`, as you need them:
+`bf init PATH` creates `bf.yaml`, `AGENTS.md`, `.gitignore`, `projects/`, `concepts/`, `actions/` and `evals/retrieval.yaml`. `--full` also creates `memories/`, `assets/`, `sensors/`, `routines/` and `skills/`. Create other folders, such as `prompts/` and `channels/`, as you need them:
 
 ```text
-bf.yaml                                  # name, fields, sensors, routines, prompts and watch preferences
+bf.yaml                                  # name, fields, sensors, routines, assistants and watch preferences
 AGENTS.md                                # instructions for agents working in the brain
 projects/<project>.md                    # one OKF note per project
 concepts/index.md, concepts/<concept>.md # reusable OKF knowledge
 actions/YYYY-MM-DD_topic/ACTION.md       # one work session, with its inputs/ and outputs/
-memories/<source>/<sha256-id>.json       # collected records, and prompt runs' replies
+memories/<source>/<sha256-id>.json       # collected records, and assistant runs' replies
 evals/*.yaml                             # retrieval cases for bf eval
-sensors/, routines/, prompts/            # programs and prompt files declared in bf.yaml
+sensors/, routines/, prompts/, channels/            # programs and prompt files declared in bf.yaml
 hooks/                                   # agent host hooks copied from the examples
 assets/                                  # images and media that notes link to
 skills/                                  # agent procedures kept with the brain
@@ -219,7 +219,7 @@ inputs/, originals/                      # imports to process and retained origi
 .bf/                                     # disposable search cache; ignored by Git
 ```
 
-Search covers Markdown under `projects/`, `concepts/` and `actions/`, and records under `memories/`; a [prompt's](prompts.md#what-a-run-records) records hold model output, so they rank like a low-priority source. Everything else is configuration, programs and media. New brains also ignore `memories/` in Git; [Team setup](team.md#collect-on-a-laptop) shows how to share a reviewed source. Back up `memories/`, `inputs/` and `originals/`: ignored does not mean disposable. `.bf/` and `logs/` are safe to delete while BF is idle.
+Search covers Markdown under `projects/`, `concepts/` and `actions/`, and records under `memories/`; an [assistant's](prompts.md#what-a-run-records) records hold model output, so they rank like a low-priority source. Everything else is configuration, programs and media. New brains also ignore `memories/` in Git; [Team setup](team.md#collect-on-a-laptop) shows how to share a reviewed source. Back up `memories/`, `inputs/` and `originals/`: ignored does not mean disposable. `.bf/` and `logs/` are safe to delete while BF is idle.
 
 ## Personal and team brains
 

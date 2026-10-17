@@ -170,10 +170,10 @@ def render(repo: str, page: dict, project: dict | None, attention: list, stale: 
         )
     # Scheduled sensors, routines and prompts that failed or are overdue: their evidence may be older than it looks.
     late = [
-        f"{plain(entry.get('sensor') or entry.get('routine') or entry.get('prompt'), 64)} "
+        f"{plain(entry.get('sensor') or entry.get('routine') or entry.get('assistant'), 64)} "
         + ("failed" if entry.get("failed") else plain(entry.get("freshness"), 16))
         for entry in attention
-        if isinstance(entry, dict) and (entry.get("sensor") or entry.get("routine") or entry.get("prompt"))
+        if isinstance(entry, dict) and (entry.get("sensor") or entry.get("routine") or entry.get("assistant"))
     ]
     if late:
         extra = f" and {len(late) - ATTENTION} more" if len(late) > ATTENTION else ""

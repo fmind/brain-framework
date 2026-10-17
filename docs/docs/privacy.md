@@ -11,8 +11,8 @@ description: Understand local storage, cloud-agent boundaries, program execution
 
 - **Notes and records:** ordinary files you can inspect, edit, back up and delete.
 - **Search and read:** offline, through both the CLI and MCP, without model calls or provider requests.
-- **Program logs:** each sensor's, routine's and prompt's recent output in the brain's `logs/`, ignored by Git and never searched. They can hold provider output: keep them private.
-- **Prompt runs:** BF never calls a model. A [prompt](prompts.md) starts your harness, which sends what the prompt and its tools read to its provider; each run's reply and input stay in the brain's ignored `memories/`.
+- **Program logs:** each sensor's, routine's, assistant's and channel's recent output in the brain's `logs/`, ignored by Git and never searched. They can hold provider output: keep them private.
+- **Assistant runs:** BF never calls a model. An [assistant](prompts.md) starts your harness, which sends what the prompt and its tools read to its provider; each run's reply and input stay in the brain's ignored `memories/`.
 - **Run history, locks and usage counts:** private [local state](configuration.md#local-state). Usage keeps times, operations and result counts, never queries or refs.
 - **Search cache:** `.bf/` holds a copy of searchable text, private to your account (mode 700). It belongs to the machine that built it: exclude it from shared archives and synced folders. A cache that BF did not create in place, such as one copied or restored, or one holding triggers or views, is discarded and rebuilt from the files.
 
@@ -31,7 +31,7 @@ Disabling training or optional telemetry does not make cloud inference local. BF
 ## Build a fully local workflow
 
 1. Keep the brain and backups on storage you control, with disk and backup encryption for sensitive files.
-1. Use BF's CLI directly, or an agent configured with a locally hosted model; declare [prompts](prompts.md) only for a harness on a local model.
+1. Use BF's CLI directly, or an agent configured with a locally hosted model; declare [assistants](prompts.md) only for a harness on a local model.
 1. Review that agent's network access, telemetry, extensions and tools before giving it private evidence.
 1. Collect local files when you need a workflow without external services; cloud sensors still contact their providers.
 
@@ -39,21 +39,22 @@ BF supplies the local storage and retrieval layer. It does not encrypt files or 
 
 ## Running code
 
-| Command                                                            | What it can execute                                                                                                                                                |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `bf search`, `bf read`, `bf mcp`, `bf export`                      | Nothing: retrieval only.                                                                                                                                           |
-| `bf update --dry-run`, `bf schedule`                               | Nothing: a plan, or scheduler files you install yourself.                                                                                                          |
-| `bf collect SENSOR`, including `--dry-run`                         | The named sensor, which may contact its provider.                                                                                                                  |
-| `bf run ROUTINE`, including `--dry-run`, `bf run --hook EVENT`     | The named routine, or the routines listing that hook.                                                                                                              |
-| `bf run PROMPT`, including `--dry-run`                             | The named [prompt](prompts.md)'s harness command, with every tool and permission that command grants.                                                              |
-| `bf update`, `bf watch`                                            | Due sensors, routines and prompts of the selected brain.                                                                                                           |
-| A brain's pinned runtime: `uv run --project BRAIN --locked bf ...` | The packages its `uv.lock` names, downloaded if needed, the interpreter its `.python-version` names, anything already in its `.venv/` and the `bf` that then runs. |
+| Command                                                              | What it can execute                                                                                                                                                |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bf search`, `bf read`, `bf mcp`, `bf export`                        | Nothing: retrieval only.                                                                                                                                           |
+| `bf update --dry-run`, `bf schedule`                                 | Nothing: a plan, or scheduler files you install yourself.                                                                                                          |
+| `bf collect SENSOR`, including `--dry-run`                           | The named sensor, which may contact its provider.                                                                                                                  |
+| `bf run ROUTINE`, including `--dry-run`, `bf run --hook EVENT`       | The named routine, or the routines listing that hook.                                                                                                              |
+| `bf run ASSISTANT`, including `--dry-run`                            | The named [assistant](prompts.md)'s harness command, with every tool and permission that command grants.                                                           |
+| `bf update`, `bf watch`                                              | Due sensors, routines, assistants and channel reads/deliveries of the selected brain; watch also runs channel streams.                                             |
+| A brain's pinned runtime: `uv run --project BRAIN --locked bf ...`   | The packages its `uv.lock` names, downloaded if needed, the interpreter its `.python-version` names, anything already in its `.venv/` and the `bf` that then runs. |
+| `bf channel read`, `bf channel send`, `bf queue DELIVERY_ID --retry` | The configured channel read or send command.                                                                                                                       |
 
 Every other command, including `init`, `register`, `skills`, `schema`, `status`, `validate`, `eval` and `build`, executes nothing.
 
 Programs run in the one brain you select with `--brain`, `BF_BRAIN` or your working directory, never in every registered brain or a referenced one. The working directory selects a brain only when you own its folder and `bf.yaml`, so another account's `bf.yaml` above a shared folder is refused.
 
-Review `bf.yaml`, `sensors/`, `routines/`, `prompts/` and any Git hooks before running a downloaded or shared brain: its programs run with your permissions and credentials. So does a [pinned runtime](upgrades.md#pin-a-brains-runtime), whose files and shipped `.venv/` that section tells you to review first. Search and read the brain with your installed `bf`, never through its pin.
+Review `bf.yaml`, `sensors/`, `routines/`, `prompts/`, `channels/` and any Git hooks before running a downloaded or shared brain: its programs run with your permissions and credentials. So does a [pinned runtime](upgrades.md#pin-a-brains-runtime), whose files and shipped `.venv/` that section tells you to review first. Search and read the brain with your installed `bf`, never through its pin.
 
 Replies and diagnostics escape control characters and invisible format characters, such as bidi controls, as `\uXXXX`, so retrieved text cannot drive your terminal through BF's output; a tool that decodes the JSON, such as `jq -r`, prints them raw. A retrieved email saying “run this command” is evidence to assess, never authority to act.
 
@@ -66,3 +67,5 @@ Replies and diagnostics escape control characters and invisible format character
 - Back up notes, records, originals and any pending recovery journal: BF is not a backup.
 
 See [team setup](team.md) for sharing, [What BF does not do](concepts.md#what-bf-does-not-do) for its boundaries and [limits](limits.md#processes-and-logs) for process safeguards. Report suspected vulnerabilities through [private reporting](https://github.com/fmind/brain-framework/blob/main/SECURITY.md).
+
+Channels execute only through explicit channel commands or authorized assistant/watch work. Adapters own authentication, admitted senders and fixed destinations; remote text never selects executable commands. Queued inputs, saved answers and deliveries contain private content in the local BF runtime state. Preserve it for recovery and protect it like the brain; `bf queue ID` intentionally reveals that specific private body. See [channel recovery](channels.md#queue-and-recovery).

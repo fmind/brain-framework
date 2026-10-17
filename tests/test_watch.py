@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
-CONFIG = b"""version: 7
+CONFIG = b"""version: 8
 name: fixture
 sensors:
   calendar:
@@ -675,7 +675,7 @@ def test_watcher_names_a_selected_program_bf_yaml_no_longer_declares(
 def test_job_runs_selected_program_and_retains_state(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n",
+        b"version: 8\nname: fixture\nsensors:\n  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n",
     )
     brain.write("sensors/sample.py", b'import json\nprint(json.dumps([{"id":"one","title":"Local fixture"}]))\n')
     job = Job(brain, ("sample",), ())
@@ -753,7 +753,7 @@ def test_stopping_a_job_after_the_terminal_closed_still_waits_then_kills(
 def test_job_tells_skipped_cache_files_apart_from_failed_programs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n"
+        b"version: 8\nname: fixture\nsensors:\n"
         b"  sample:\n    command: [python3, sensors/sample.py]\n    refresh: 60\n"
         b"  failing:\n    command: [python3, sensors/failing.py]\n    refresh: 60\n",
     )
@@ -798,7 +798,7 @@ def test_tui_exit_restores_terminal_and_cancels_sensor(
 ) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n  slow:\n    command: [python3, sensors/slow.py]\n    refresh: 60\n",
+        b"version: 8\nname: fixture\nsensors:\n  slow:\n    command: [python3, sensors/slow.py]\n    refresh: 60\n",
     )
     marker = tmp_path / "started"
     brain.write(
@@ -920,7 +920,7 @@ def test_json_watch_reports_completion_rows_and_delivery_warning(
     assert len(starts) == 2
     assert any(event["message"] == "Update complete" for event in events)
     assert not events[-1]["running"]
-    assert set(events[0]) == {"brain", "running", "prompting", "message", "programs"}
+    assert set(events[0]) == {"brain", "running", "assisting", "message", "programs"}
     calendar = next(row for row in events[0]["programs"] if row["name"] == "calendar")
     assert (calendar["records"], calendar["added"], calendar["updated"]) == (10, 1, None)
     assert calendar["success"] == "2026-09-01T12:00:00+00:00"
@@ -1095,5 +1095,5 @@ def test_stopping_signals_every_update_before_waiting_for_any() -> None:
         def close(self) -> None:
             events.append(f"close {self.name}")
 
-    _stop(*cast("list[Job]", [Recorder("collection"), Recorder("prompts")]))
-    assert events == ["terminate collection", "terminate prompts", "close collection", "close prompts"]
+    _stop(*cast("list[Job]", [Recorder("collection"), Recorder("assistants")]))
+    assert events == ["terminate collection", "terminate assistants", "close collection", "close assistants"]

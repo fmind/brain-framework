@@ -29,7 +29,7 @@ def refs(reply: dict[str, object], key: str = "items") -> list[str]:
 
 def populate(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 7\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n    refresh: 3600\n"
+        "bf.yaml", b"version: 8\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n    refresh: 3600\n"
     )
     brain.write(
         "projects/fresh.md",
@@ -495,7 +495,7 @@ def test_deep_listing_pages_skip_their_offset_in_sql_and_keep_their_order(
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     records_file(team, "mail", mail[:10])
     monkeypatch.setattr(pages, "SECTION", 7)
     statements: list[str] = []
@@ -540,7 +540,7 @@ def test_backlinks_preview_64_relation_groups_and_count_the_others(brain: Store,
     declared = "".join(
         f"  r{n:02}:\n    description: Relation {n}.\n    type: identity\n    relation: true\n" for n in range(66)
     )
-    brain.write("bf.yaml", f"version: 7\nname: fixture\nfields:\n{declared}".encode())
+    brain.write("bf.yaml", f"version: 8\nname: fixture\nfields:\n{declared}".encode())
     links = "\n".join(f"- [hub](bf://fixture/projects/hub.md?rel=r{n:02})" for n in range(65))
     brain.write("projects/hub.md", b"---\ntype: project\n---\n# Hub\n")
     brain.write("projects/spokes.md", f"---\ntype: project\n---\n# Spokes\n\n{links}\n".encode())
@@ -550,7 +550,7 @@ def test_backlinks_preview_64_relation_groups_and_count_the_others(brain: Store,
     root.mkdir()
     team = Store(root)
     team.write(
-        "bf.yaml", f"version: 7\nname: team\nbrains: {{fixture: {{path: {brain.root}}}}}\nfields:\n{declared}".encode()
+        "bf.yaml", f"version: 8\nname: team\nbrains: {{fixture: {{path: {brain.root}}}}}\nfields:\n{declared}".encode()
     )
     team.write("concepts/far.md", b"# Far\n\n[hub](bf://fixture/projects/hub.md?rel=r65)\n")
     reply = read([brain], "projects/hub.md")
@@ -569,7 +569,7 @@ def test_pages_combine_selected_brains_and_count_reads(brain: Store, tmp_path: P
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     team.write("projects/shared.md", b"---\ntype: project\nstatus: stable\nupdated: 2026-09-20\n---\n# Shared\n")
     team.write("projects/cite.md", b"# Cite\n\nSee [offline](bf://fixture/projects/offline.md).\n")
     register(team)
@@ -612,7 +612,7 @@ def test_retrieval_cases_read_pages_and_treat_missing_ones_as_empty(brain: Store
 
     brain.write(
         "evals/pages.yaml",
-        b"version: 7\ncases:\n"
+        b"version: 8\ncases:\n"
         b"- name: home\n  read: ''\n  expect: [projects/offline.md]\n"
         b"- name: august\n  read: 2026-08\n  expect: ['meetings:lunch']\n  forbid: [projects/offline.md]\n"
         b"- name: unknown-source\n  read: memories/unknown\n  empty: true\n",
@@ -623,7 +623,7 @@ def test_retrieval_cases_read_pages_and_treat_missing_ones_as_empty(brain: Store
 def test_records_have_excerpts_without_trust_labels(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n  git:\n    command: [git-cli]\n",
+        b"version: 8\nname: fixture\nsensors:\n  mail:\n    command: [mail-cli]\n  git:\n    command: [git-cli]\n",
     )
     records_file(
         brain,
@@ -755,8 +755,8 @@ def test_pages_over_several_brains_fit_newer_refs_as_addresses(
     root = tmp_path / "home-lab"
     root.mkdir()
     lab = Store(root)
-    lab.write("bf.yaml", b"version: 7\nname: home-lab\n")
-    brain.write("bf.yaml", f"version: 7\nname: fixture\nbrains:\n  home-lab:\n    path: {root}\n".encode())
+    lab.write("bf.yaml", b"version: 8\nname: home-lab\n")
+    brain.write("bf.yaml", f"version: 8\nname: fixture\nbrains:\n  home-lab:\n    path: {root}\n".encode())
     brain.delete("projects/offline.md")
     edited, time = (now - timedelta(days=10)).timestamp(), (now - timedelta(days=1)).isoformat()
     for name, store in (("fixture", brain), ("home-lab", lab)):
@@ -811,7 +811,7 @@ def test_a_file_in_one_brain_does_not_hide_a_folder_note_in_another(brain: Store
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     team.write("projects/archive/old.md", b"# Old\n\nKiwi evidence.\n")
     brain.write("projects/archive", b"a plain file\n")
     found = search([brain, team], Query(text="kiwi"))
@@ -836,7 +836,7 @@ def test_a_file_in_one_brain_does_not_hide_a_folder_note_in_another(brain: Store
 def test_relation_pages_list_every_link_of_one_relation(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nfields:\n"
+        b"version: 8\nname: fixture\nfields:\n"
         b"  depends-on: {description: Needs it., type: identity, cardinality: many, relation: true}\n"
         b"  owner: {description: Owns it., type: identity, cardinality: many, relation: true}\n",
     )
@@ -936,8 +936,8 @@ def test_backlink_previews_keep_the_newest_items_and_name_brains_only_when_sever
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
-    brain.write("bf.yaml", f"version: 7\nname: fixture\nbrains:\n  team:\n    path: {root}\n".encode())
+    team.write("bf.yaml", b"version: 8\nname: team\n")
+    brain.write("bf.yaml", f"version: 8\nname: fixture\nbrains:\n  team:\n    path: {root}\n".encode())
     team.write("projects/cite.md", b"---\nupdated: 2026-09-30\n---\n# Cite\n\n[o](bf://fixture/projects/offline.md)\n")
     # A referenced brain is selected: every entry names its brain and address again.
     group = cast("list[dict[str, object]]", read([brain], "projects/offline.md")["backlinks"])[0]
@@ -968,7 +968,7 @@ def test_a_broader_relation_page_also_lists_its_narrower_relations(brain: Store)
     field = "{description: Took part., type: identity, cardinality: many, relation: true"
     brain.write(
         "bf.yaml",
-        f"version: 7\nname: fixture\nfields:\n  participant: {field}}}\n"
+        f"version: 8\nname: fixture\nfields:\n  participant: {field}}}\n"
         f"  organizer: {field}, broader: participant}}\n  attendee: {field}, broader: participant}}\n".encode(),
     )
     alice = "person:alice"
@@ -1002,7 +1002,7 @@ def test_a_broader_relation_page_also_lists_its_narrower_relations(brain: Store)
 def test_backlinks_show_each_source_s_facts_side_by_side(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 7\nname: fixture\nfields:\n"
+        b"version: 8\nname: fixture\nfields:\n"
         b"  status: {description: Workflow state., type: string, cardinality: optional}\n"
         b"  labels: {description: Labels., type: string, cardinality: many}\n"
         b"  mirrors: {description: Same work item., type: identity, cardinality: many, relation: true}\n",
@@ -1040,7 +1040,7 @@ def test_backlinks_show_each_source_s_facts_side_by_side(brain: Store) -> None:
 
 def test_listed_fields_stop_before_their_byte_budget(brain: Store) -> None:
     declared = "".join(f"  f{n:03d}: {{description: Fact., type: string}}\n" for n in range(100))
-    brain.write("bf.yaml", f"version: 7\nname: fixture\nfields:\n{declared}".encode())
+    brain.write("bf.yaml", f"version: 8\nname: fixture\nfields:\n{declared}".encode())
     facts = {f"f{n:03d}": "v" * 190 for n in range(100)}
     records_file(brain, "jira", [Record(id="WEB-9", title="Crowded facts", text="Open.", fields=facts)])
     item = cast("list[dict[str, object]]", search([brain], Query(text="crowded"))["items"])[0]
@@ -1108,7 +1108,7 @@ def test_observed_period_pagination_merges_brains_and_keeps_boundaries(
     root = tmp_path / "team"
     root.mkdir()
     team = Store(root)
-    team.write("bf.yaml", b"version: 7\nname: team\n")
+    team.write("bf.yaml", b"version: 8\nname: team\n")
     for store, hours in ((brain, (0, 4, 8)), (team, (2, 6, 10))):
         records_file(
             store,
@@ -1135,7 +1135,7 @@ def test_observed_period_pagination_merges_brains_and_keeps_boundaries(
 
 def test_low_priority_observed_records_stay_in_period_counts(brain: Store) -> None:
     brain.write(
-        "bf.yaml", b"version: 7\nname: fixture\nsensors:\n  feed:\n    command: [feed-cli]\n    priority: low\n"
+        "bf.yaml", b"version: 8\nname: fixture\nsensors:\n  feed:\n    command: [feed-cli]\n    priority: low\n"
     )
     records_file(brain, "feed", [Record(id="entry", title="Entry", attributes={"observed": "2026-09-25T10:00:00Z"})])
     reply = read([brain], "2026-09-25")

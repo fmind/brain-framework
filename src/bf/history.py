@@ -17,7 +17,7 @@ from bf.storage import Store, appending, state_store
 
 SENSORS = "sensors.json"
 ROUTINES = "routines.json"
-PROMPTS = "prompts.json"
+ASSISTANTS = "assistants.json"
 
 # Known variables that make a shell, loader or interpreter run code before the program itself.
 _STARTUP = (

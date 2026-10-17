@@ -461,6 +461,15 @@ def state_store(root: Path) -> Store:
     return _private(digest(os.fsencode(root)), root=root)
 
 
+def runtime_store(store: Store) -> Store:
+    """Durable assistant obligations follow the physical brain, as its execution locks do.
+
+    The queue also checks the canonical path and configured name to reject accidental identity reuse.
+    Drain pending work before moving or renaming a brain; never discard this directory as a search cache.
+    """
+    return _private("runtime", store.identity, root=store.root)
+
+
 def lock_file(store: Store, name: str) -> tuple[Store, str]:
     """Where a lock lives: every lock follows the physical brain, whatever path or mount reached it."""
     leaf = f"{store.identity}.lock" if name == "write.lock" else f"{store.identity}-{name}"

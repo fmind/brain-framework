@@ -276,7 +276,7 @@ def test_weekly_review_qualifies_empty_sections_while_a_sensor_needs_attention()
     attention = [
         {"sensor": "calendar", "freshness": "never", "failed": True},
         {"routine": "backup", "freshness": "overdue"},
-        {"brain": "team", "prompt": "assistant", "freshness": "fresh", "failed": True},
+        {"brain": "team", "assistant": "assistant", "freshness": "fresh", "failed": True},
     ]
     home = {"projects": [], "tasks": EMPTY_TASKS, "upcoming": [], "attention": attention}
     text = "\n".join(weekly_review().render("2026-09-25", home, {"total": 0}))
@@ -284,7 +284,7 @@ def test_weekly_review_qualifies_empty_sections_while_a_sensor_needs_attention()
     assert lines.index("## Programs needing attention") < lines.index("## Projects to review")
     assert "- Sensor `calendar`: never succeeded on this machine; last attempt failed." in lines
     assert "- Routine `backup`: overdue." in lines
-    assert "- Prompt `assistant` in brain `team`: last attempt failed." in lines
+    assert "- Assistant `assistant` in brain `team`: last attempt failed." in lines
     assert "- 0 items in the period, and a sensor needing attention may have missed some" in lines
     assert "No upcoming item was collected, and a sensor needing attention may have missed some." in lines
     assert lines[-1].startswith("Repair the programs needing attention first.")

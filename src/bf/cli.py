@@ -20,6 +20,7 @@ from pathlib import Path
 from string import Template
 from types import FrameType
 from typing import Annotated, Any, Literal, NoReturn, cast
+from uuid import uuid4
 
 import typer
 import yaml
@@ -27,10 +28,11 @@ from pydantic import ValidationError
 from typer.completion import completion_init
 from typer.core import TyperCommand, TyperGroup, TyperOption
 
-from bf import __version__, health, index, pages
+from bf import __version__, assistants, channels, health, index, pages
 from bf.collect import collect, hooked
 from bf.collect import reproject as remap
 from bf.config import execution, load, one, register, select
+from bf.messages import Outgoing
 from bf.models import (
     FAILURES,
     FORMAT,
@@ -41,6 +43,8 @@ from bf.models import (
     Error,
     InputError,
     SchemaField,
+    Send,
+    decode,
     explain,
     failure,
     moment,
@@ -49,9 +53,10 @@ from bf.models import (
     terminal,
 )
 from bf.retrieve import edges, identities, read, search
+from bf.runtime import Queue
 from bf.schemas import Kind, document
 from bf.storage import Store, expand, relative, writer
-from bf.update import KINDS, ProgramKind, run_prompt, run_routines, update
+from bf.update import KINDS, ProgramKind, run_assistant, run_routines, update
 from bf.validate import validate
 
 
@@ -160,7 +165,9 @@ SensorOption = Annotated[
 RoutineOption = Annotated[
     list[str] | None, typer.Option("--routine", help="Select a routine; repeat to select several.")
 ]
-PromptOption = Annotated[list[str] | None, typer.Option("--prompt", help="Select a prompt; repeat to select several.")]
+AssistantOption = Annotated[
+    list[str] | None, typer.Option("--assistant", help="Select an assistant; repeat to select several.")
+]
 # Every brain starts with knowledge and verification; the other folders are created as needed or with --full.
 FOLDERS = ("projects", "actions")
 OPTIONAL = ("memories", "assets", "sensors", "routines", "skills")
@@ -512,7 +519,7 @@ def perform(
         # for real: routine arguments that start with a dash follow `--`.
         typer.Argument(
             metavar="[PROGRAM] [ARGS]...",
-            help="A routine from bf.yaml, then arguments appended to its command, or a prompt; with --hook, only "
+            help="A routine from bf.yaml, then arguments appended to its command, or an assistant; with --hook, only "
             "arguments. Put -- before arguments that start with a dash.",
         ),
     ] = None,
@@ -524,40 +531,40 @@ def perform(
     dry_run: Annotated[
         bool,
         typer.Option(
-            help="Run the routines or the prompt, but write no action or record and record no run; logs still grow."
+            help="Run the routines or the assistant, but write no action or record and record no run; logs still grow."
         ),
     ] = False,
     forward: Annotated[
         bool,
         typer.Option(
             "--stdin",
-            help="Pass piped input to the routine, or as a prompt's {{input}}. A hook passes what Git pipes to the "
+            help="Pass piped input to the routine, or as an assistant's {{input}}. A hook passes what Git pipes to the "
             "routines it runs; otherwise none.",
         ),
     ] = False,
 ) -> None:
-    """Run one routine or prompt, or every routine of a hook, now; a hook's piped input reaches each routine."""
+    """Run one routine or assistant, or every routine of a hook, now; a hook's piped input reaches each routine."""
     values = tuple(arguments or ())
     if hook:
         _option("--hook", _slug, hook)
         names, args = (), values
     elif values and not values[0].strip():
-        raise typer.BadParameter("give a routine or prompt name; an empty value names none", param_hint="PROGRAM")
+        raise typer.BadParameter("give a routine or assistant name; an empty value names none", param_hint="PROGRAM")
     elif values:
         names, args = values[:1], values[1:]
     else:
-        raise typer.BadParameter("name a routine or prompt, or pass --hook EVENT", param_hint="PROGRAM")
+        raise typer.BadParameter("name a routine or assistant, or pass --hook EVENT", param_hint="PROGRAM")
     store = execution(brain)
     config = load(store)
-    if names and names[0] in config.prompts:
+    if names and names[0] in config.assistants:
         if args:
-            raise typer.BadParameter("a prompt takes no arguments; pipe its input with --stdin", param_hint="ARGS")
+            raise typer.BadParameter("an assistant takes no arguments; pipe its input with --stdin", param_hint="ARGS")
         stdin = _input() if forward else b""
         try:
             text = stdin.decode("utf-8")
         except UnicodeError as error:
-            raise Error("prompt input must be UTF-8 text") from error
-        result = run_prompt(store, names[0], text=text, dry_run=dry_run)
+            raise Error("assistant input must be UTF-8 text") from error
+        result = run_assistant(store, names[0], text=text, dry_run=dry_run)
         emit(result)
         if not result["ok"]:
             raise typer.Exit(1)
@@ -571,27 +578,121 @@ def perform(
         raise typer.Exit(1)
 
 
+@app.command("channel", rich_help_panel="Collect and automate")
+def channel_command(
+    action: Annotated[Literal["read", "send"], typer.Argument(help="Read a bounded batch or send one message.")],
+    name: Annotated[str, typer.Argument(metavar="CHANNEL", help="A configured channel name.")],
+    brain: RunOption = "",
+    since: Annotated[str, typer.Option(help="Required start of a read window.")] = "",
+    until: Annotated[str, typer.Option(help="End of a read window; defaults to now.")] = "now",
+    forward: Annotated[bool, typer.Option("--stdin", help="Read a JSON outgoing message from stdin for send.")] = False,
+) -> None:
+    """Use a passive channel explicitly; reading never advances subscriptions or starts an assistant."""
+    store = execution(brain)
+    if action == "read":
+        if not since or forward:
+            raise typer.BadParameter("read requires --since and does not accept --stdin", param_hint="--since")
+        at = datetime.now(UTC)
+        start = _option("--since", lambda value: moment(value, at), since)
+        end = _option("--until", lambda value: moment(value, at), until)
+        if start >= end:
+            raise typer.BadParameter("start must be earlier than end", param_hint="--since")
+        emit(
+            {
+                "channel": name,
+                "start": start,
+                "end": end,
+                "messages": [item.model_dump(exclude_defaults=True) for item in channels.read(store, name, start, end)],
+            }
+        )
+        return
+    if not forward or since or until != "now":
+        raise typer.BadParameter("send requires --stdin and takes no time window", param_hint="--stdin")
+    command = channels.operation(store, name, "send")
+    if not isinstance(command, Send):
+        raise Error("channel requires a send operation")
+    try:
+        value = decode(_input())
+        if not isinstance(value, dict):
+            raise Error("send input must be a JSON object containing text")
+        message = Outgoing.model_validate({"id": uuid4().hex, **value})
+    except (Error, ValidationError) as error:
+        raise typer.BadParameter(
+            "expected a valid outgoing JSON message with text and optional id, conversation, reply_to",
+            param_hint="--stdin",
+        ) from error
+    queue = Queue(store)
+    queue.send(name, command, message)
+    assistants.deliver(store, key=message.id)
+    with queue.connect() as db:
+        saved = dict(
+            db.execute("SELECT id,channel,state,receipt,error FROM deliveries WHERE id=?", (message.id,)).fetchone()
+        )
+    if saved["receipt"]:
+        saved["receipt"] = decode(saved["receipt"])
+    emit(saved)
+    if saved["state"] != "delivered":
+        raise typer.Exit(1)
+
+
+@app.command("queue", rich_help_panel="Collect and automate")
+def queue_command(
+    key: Annotated[
+        str, typer.Argument(metavar="[ID]", help="Inspect one job, or identify work to retry or cancel.")
+    ] = "",
+    brain: RunOption = "",
+    retry: Annotated[
+        bool, typer.Option(help="Retry unresolved work; a harness without a saved answer may repeat effects.")
+    ] = False,
+    cancel: Annotated[bool, typer.Option(help="Cancel pending or unresolved work, preserving its identity.")] = False,
+    limit: Annotated[int, typer.Option(min=1, max=10000, help="Maximum listed jobs and deliveries.")] = 50,
+) -> None:
+    """Inspect durable work or explicitly resolve an uncertain attempt; listing contains no message bodies."""
+    if (retry and cancel) or ((retry or cancel) and not key):
+        raise typer.BadParameter("give an ID and exactly one of --retry or --cancel", param_hint="ID")
+    queue = Queue(execution(brain))
+    if retry or cancel:
+        queue.retry(key, cancel=cancel)
+        saved = queue.inspect(key)
+        if retry and "channel" in saved:
+            assistants.deliver(queue.brain, key=key)
+            saved = queue.inspect(key)
+        emit({"id": key, "status": saved["state"]})
+        if retry and "channel" in saved and saved["state"] != "delivered":
+            raise typer.Exit(1)
+    elif key:
+        row = queue.inspect(key)
+        for name in ("payload", "prepared", "command", "receipt"):
+            if row.get(name):
+                row[name] = decode(str(row[name]))
+        if row.get("raw") is not None:
+            row["raw"] = cast(bytes, row["raw"]).decode("utf-8", errors="replace")
+        emit(row)
+    else:
+        emit(queue.report(limit=limit))
+
+
 @app.command("update", rich_help_panel="Collect and automate")
 def refresh(
     brain: RunOption = "",
     sensor: SensorOption = None,
     routine: RoutineOption = None,
-    prompt: PromptOption = None,
+    assistant: AssistantOption = None,
     kind: Annotated[
         list[str] | None,
-        typer.Option(help="Run only this kind of program: sensor, routine or prompt; repeat for several."),
+        typer.Option(help="Run only this kind of program: sensor, routine or assistant; repeat for several."),
     ] = None,
     dry_run: Annotated[
-        bool, typer.Option(help="List due sensors, routines and prompts with their windows; run nothing.")
+        bool, typer.Option(help="List due sensors, routines and assistants with their windows; run nothing.")
     ] = False,
 ) -> None:
-    """Run due sensors, then due routines, then due prompts, of one brain, then refresh its search cache."""
+    """Run due sensors, then due routines, then due assistants, of one brain, then refresh its search cache."""
     result = update(
         execution(brain),
         dry_run=dry_run,
         sensors=tuple(sensor or ()),
         routines=tuple(routine or ()),
-        prompts=tuple(prompt or ()),
+        assistants=tuple(assistant or ()),
         kinds=_kinds(kind or []),
     )
     emit(result)
@@ -602,7 +703,7 @@ def refresh(
 def _kinds(values: list[str]) -> frozenset[ProgramKind]:
     """The program kinds an update runs; none given runs every kind."""
     if unknown := sorted(set(values) - KINDS):
-        raise typer.BadParameter(f"{unknown[0]} is not sensor, routine or prompt", param_hint="--kind")
+        raise typer.BadParameter(f"{unknown[0]} is not sensor, routine or assistant", param_hint="--kind")
     return cast("frozenset[ProgramKind]", frozenset(values)) if values else KINDS
 
 
@@ -611,7 +712,7 @@ def monitor(
     brain: RunOption = "",
     sensor: SensorOption = None,
     routine: RoutineOption = None,
-    prompt: PromptOption = None,
+    assistant: AssistantOption = None,
     interval: Annotated[
         int | None,
         typer.Option(min=5, max=86400, help="Seconds between cycles; overrides bf.yaml watch.interval (default 60)."),
@@ -643,7 +744,7 @@ def monitor(
         execution(brain),
         sensors=tuple(sensor or ()),
         routines=tuple(routine or ()),
-        prompts=tuple(prompt or ()),
+        assistants=tuple(assistant or ()),
         interval=interval,
         poll_interval=poll_interval,
         notifications=notify,
@@ -656,7 +757,7 @@ def scheduling(
     brain: RunOption = "",
     sensor: SensorOption = None,
     routine: RoutineOption = None,
-    prompt: PromptOption = None,
+    assistant: AssistantOption = None,
     backend: Annotated[
         Literal["auto", "systemd", "launchd", "cron"],
         typer.Option(help="Scheduler format; auto detects available platform tools."),
@@ -696,7 +797,7 @@ def scheduling(
             executable=executable,
             sensors=tuple(sensor or ()),
             routines=tuple(routine or ()),
-            prompts=tuple(prompt or ()),
+            assistants=tuple(assistant or ()),
         )
     )
 
@@ -718,7 +819,7 @@ def report(
         ),
     ] = False,
 ) -> None:
-    """Show each brain's cache, notes, records, sensor, routine and prompt freshness, errors, logs and usage."""
+    """Show each brain's cache, notes, records, sensor, routine and assistant freshness, errors, logs and usage."""
     if watch:
         if check:
             raise typer.BadParameter("cannot be combined with --check", param_hint="--watch")
@@ -850,7 +951,7 @@ def _input() -> bytes:
 _GIVEN = {
     "--brain": "give a brain name or path; an empty value would select another brain",
     "--hook": "give an event name; an empty value would run the first argument as a routine",
-    "--prompt": "give a prompt name; an empty value names none",
+    "--assistant": "give an assistant name; an empty value names none",
     "--output": "give a directory; an empty value would name the brain's root",
     "--reproject": "give a sensor name; an empty value would rebuild the cache instead",
     "--routine": "give a routine name; an empty value names none",
@@ -859,6 +960,7 @@ _GIVEN = {
     "DIR": "give a directory; an empty value would name the working directory",
     "PATH": "give a directory; an empty value would name the working directory",
     "SENSOR": "give a sensor name from bf.yaml",
+    "CHANNEL": "give a channel name from bf.yaml",
 }
 
 

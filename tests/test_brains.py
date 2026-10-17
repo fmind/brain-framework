@@ -32,7 +32,7 @@ def make(root: Path, name: str, references: dict[str, str] | None = None) -> Sto
         "bf.yaml",
         yaml.safe_dump(
             {
-                "version": 7,
+                "version": 8,
                 "name": name,
                 "brains": {key: {"path": value} for key, value in (references or {}).items()},
             }
@@ -102,7 +102,7 @@ def test_missing_and_mismatched_references_keep_available_answers(tmp_path: Path
         read([first], "bf://wrong/projects/example.md")
     first.write(
         "evals/retrieval.yaml",
-        b"version: 7\ncases:\n- name: incomplete\n  query: durable\n  expect: [projects/example.md]\n",
+        b"version: 8\ncases:\n- name: incomplete\n  query: durable\n  expect: [projects/example.md]\n",
     )
     assert not evaluate(first)["passed"]
 
@@ -127,7 +127,7 @@ def test_missing_read_cannot_prove_absence_with_an_unavailable_brain(tmp_path: P
     first = make(tmp_path / "first", "first", {"missing": "../absent"})
     first.write(
         "evals/retrieval.yaml",
-        yaml.safe_dump({"version": 7, "cases": [{"name": "absent", "read": ref, "empty": True}]}).encode(),
+        yaml.safe_dump({"version": 8, "cases": [{"name": "absent", "read": ref, "empty": True}]}).encode(),
     )
     assert not evaluate(first)["passed"]
     with pytest.raises(Error, match="incomplete"):
@@ -169,7 +169,7 @@ def test_init_never_writes_global_config_by_default(tmp_path: Path, monkeypatch:
 )
 def test_reference_schema_rejects_invalid_declarations(tmp_path: Path, references: dict) -> None:
     store = make(tmp_path / "first", "first")
-    store.write("bf.yaml", yaml.safe_dump({"version": 7, "name": "first", "brains": references}).encode())
+    store.write("bf.yaml", yaml.safe_dump({"version": 8, "name": "first", "brains": references}).encode())
     with pytest.raises(Error, match=r"invalid bf\.yaml"):
         load(store)
 
@@ -181,7 +181,7 @@ def test_mcp_and_evaluations_share_local_scope(tmp_path: Path) -> None:
     second = make(tmp_path / "second", "second")
     first.write(
         "evals/retrieval.yaml",
-        b"version: 7\ncases:\n- name: cross-brain\n  query: durable\n  expect: [bf://second/projects/example.md]\n",
+        b"version: 8\ncases:\n- name: cross-brain\n  query: durable\n  expect: [bf://second/projects/example.md]\n",
     )
     assert evaluate(first)["passed"]
     mcp = server([first])
@@ -196,7 +196,7 @@ def test_mcp_and_evaluations_share_local_scope(tmp_path: Path) -> None:
         assert result.structured_content is not None
         assert "second durable answer" in result.structured_content["text"]
         # A long-running host rereads direct declarations at request time.
-        second.write("bf.yaml", b"version: 7\nname: changed\n")
+        second.write("bf.yaml", b"version: 8\nname: changed\n")
         result = await mcp.call_tool("search", {"query": "durable"})
         assert isinstance(result, CallToolResult)
         assert result.structured_content is not None
@@ -211,7 +211,7 @@ def test_plain_eval_refs_name_only_the_evaluated_brain(tmp_path: Path) -> None:
     first.delete("projects/example.md")
     first.write(
         "evals/retrieval.yaml",
-        b"version: 7\ncases:\n"
+        b"version: 8\ncases:\n"
         b"- name: own\n  query: durable\n  expect: [projects/example.md]\n"
         b"- name: referenced\n  query: durable\n  expect: [bf://second/projects/example.md]\n"
         b"- name: forbidden\n  query: durable\n  expect: [bf://second/projects/example.md]\n"
@@ -320,7 +320,7 @@ def test_registered_brains_are_searched_but_never_run_implicitly(
     personal = make(tmp_path / "personal", "personal")
     team = make(tmp_path / "team", "team")
     team.write(
-        "bf.yaml", b"version: 7\nname: team\nsensors:\n  pulled:\n    command: [sensors/pulled.sh]\n    refresh: 900\n"
+        "bf.yaml", b"version: 8\nname: team\nsensors:\n  pulled:\n    command: [sensors/pulled.sh]\n    refresh: 900\n"
     )
     for store in (personal, team):
         register(store)
@@ -346,7 +346,7 @@ def test_execution_names_only_registered_or_enclosing_brains(tmp_path: Path, mon
     marker = tmp_path / "ran"
     team.write("sensors/s.sh", f"#!/bin/sh\ntouch '{marker}'\n".encode())
     (team.root / "sensors/s.sh").chmod(0o700)
-    team.write("bf.yaml", b"version: 7\nname: team\nsensors:\n  s:\n    command: [sensors/s.sh]\n    refresh: 60\n")
+    team.write("bf.yaml", b"version: 8\nname: team\nsensors:\n  s:\n    command: [sensors/s.sh]\n    refresh: 60\n")
     monkeypatch.chdir(main.root)
     # A reference is readable by name, but its programs never run through that name.
     assert one("team").root == team.root
@@ -411,13 +411,13 @@ def test_absent_registered_brains_make_answers_incomplete(tmp_path: Path, monkey
 def test_a_newer_referenced_format_is_named(tmp_path: Path) -> None:
     first = make(tmp_path / "first", "first", {"team": "../team"})
     team = make(tmp_path / "team", "team")
-    team.write("bf.yaml", b"version: 8\nname: team\n")
+    team.write("bf.yaml", b"version: 99\nname: team\n")
     found = cast(dict, search([first], Query(text="durable")))
     assert found["problems"] == [
         {
             "brain": "first",
             "file": "bf.yaml",
-            "error": "brains.team: bf.yaml declares version 8; this release reads version: 7",
+            "error": "brains.team: bf.yaml declares version 99; this release reads version: 8",
         }
     ]
 
@@ -453,7 +453,7 @@ def test_a_folder_without_bf_yaml_is_named_before_anything_is_cached(
 def test_a_huge_integer_in_a_referenced_note_leaves_every_brain_answering(tmp_path: Path) -> None:
     first = make(tmp_path / "first", "first", {"team": "../team"})
     team = make(tmp_path / "team", "team")
-    team.write("bf.yaml", b"version: 7\nname: team\nfields:\n  count:\n    description: A count.\n    type: integer\n")
+    team.write("bf.yaml", b"version: 8\nname: team\nfields:\n  count:\n    description: A count.\n    type: integer\n")
     # A hex literal escapes Python's digit limit for decimal text; printing it in a reply or the cache once crashed.
     team.write("concepts/count.md", b"---\ntype: concept\nfields: {count: 0x" + b"f" * 3600 + b"}\n---\n# Count\n")
     found = cast(dict, search([first], Query(text="durable")))

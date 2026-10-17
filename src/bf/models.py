@@ -104,7 +104,7 @@ class FormatError(Error):
 
 
 # The one brain format: bf.yaml, evaluation suites, record files and the memories/ layout share this number.
-FORMAT = 7
+FORMAT = 8
 
 
 def check_version(value: dict[str, object], name: str) -> None:
@@ -204,7 +204,7 @@ def local(value: str) -> str:
 # Provider data and declared field values: replies return them exactly as the record or note stores them.
 _VERBATIM = frozenset({"attributes", "fields"})
 # Status maps keyed by program name: a sensor may be named `time` or `fields`, so only the entries are presented.
-_NAMED = frozenset({"prompts", "routines", "sources"})
+_NAMED = frozenset({"assistants", "channels", "schedules", "triggers", "routines", "sources"})
 
 
 def present(value: object) -> object:
@@ -705,8 +705,8 @@ class Mapping(Model):
         return self
 
 
-class Program(Model):
-    """An executable declared in bf.yaml: direct argv, bounded runtime and a due rule."""
+class Command(Model):
+    """An owner's process interface, without scheduling or provider-specific settings."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -715,34 +715,22 @@ class Program(Model):
 
     command: Annotated[list[str], Field(min_length=1, max_length=128)] = Field(
         description=(
-            "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then "
+            "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then "
             "arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}."
         ),
         json_schema_extra={
             "prefixItems": [
                 {
                     "type": "string",
-                    "pattern": r"^(?:[^/{}\\]+|(?:sensors|routines)(?:/[^/{}\\]+)+)$",
+                    "pattern": r"^(?:[^/{}\\]+|(?:sensors|routines|channels)(?:/[^/{}\\]+)+)$",
                     "not": {"pattern": r"(?:^|/)\.\.?(?:/|$)"},
                 }
             ]
         },
     )
-    enabled: bool = Field(default=True, description="Allow execution; false disables both manual and due runs.")
     timeout: Annotated[int, Field(ge=1, le=3600)] = Field(default=300, description="Maximum runtime in seconds.")
     max_bytes: Annotated[int, Field(ge=1, le=256 << 20)] = Field(
         default=64 << 20, description="Maximum stdout in bytes; exceeding it fails without committing evidence."
-    )
-    # Zero keeps the program manual. These are due rules for `bf update`, not an installed schedule.
-    refresh: Annotated[int, Field(ge=0, le=31_536_000)] = Field(
-        default=0, description="Seconds between due runs; zero excludes this program from update and watch."
-    )
-    lookback: Annotated[int, Field(ge=1, le=31_536_000)] = Field(
-        default=86_400,
-        description=(
-            "Seconds covered by a sensor's first run, each snapshot run and bf collect without --since, and by a "
-            "routine run without history."
-        ),
     )
 
     @field_validator("command")
@@ -761,10 +749,24 @@ class Program(Model):
         if (
             any(character in executable for character in "{}\\")
             or any(part in {"", ".", ".."} for part in parts)
-            or (len(parts) > 1 and parts[0] not in {"sensors", "routines"})
+            or (len(parts) > 1 and parts[0] not in {"sensors", "routines", "channels"})
         ):
-            raise ValueError("executable must be a bare command name or a normalized sensors/ or routines/ path")
+            raise ValueError(
+                "executable must be a bare command name or a normalized sensors/, routines/ or channels/ path"
+            )
         return values
+
+
+class Program(Command):
+    """A sensor or deterministic routine with a due rule."""
+
+    enabled: bool = Field(default=True, description="Allow manual and scheduled execution.")
+    refresh: Annotated[int, Field(ge=0, le=31_536_000)] = Field(
+        default=0, description="Seconds between due runs; zero keeps this program manual."
+    )
+    lookback: Annotated[int, Field(ge=1, le=31_536_000)] = Field(
+        default=86_400, description="Seconds covered by a first run or a snapshot."
+    )
 
 
 class Reconciliation(Model):
@@ -862,8 +864,106 @@ class Routine(Program):
         return self
 
 
-class Prompt(Program):
-    """An agent run: a harness command fed the expanded prompt file, run when due or now, recorded in memories/."""
+class Send(Command):
+    """A bounded sender; only explicitly idempotent adapters may retry uncertain outcomes automatically."""
+
+    idempotent: bool = Field(default=False, description="Repeated sends with the same delivery id have one effect.")
+
+
+class Stream(Command):
+    """A persistent JSON Lines process; timeout bounds acknowledgement writes, not healthy idle time."""
+
+    max_bytes: Annotated[int, Field(ge=1024, le=1 << 20)] = Field(
+        default=65_536, description="Maximum bytes per incoming JSON Lines frame."
+    )
+    timeout: Annotated[int, Field(ge=1, le=3600)] = Field(
+        default=30, description="Seconds a blocked acknowledgement pipe may wait; idle streams do not time out."
+    )
+
+
+class Channel(Model):
+    """Passive transport capabilities; assistants decide when to use them."""
+
+    send: Send | None = None
+    read: Command | None = None
+    stream: Stream | None = None
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "anyOf": [
+                {"required": [name], "properties": {name: {"type": "object"}}} for name in ("send", "read", "stream")
+            ]
+        }
+    )
+
+    @model_validator(mode="after")
+    def capability(self) -> Channel:
+        if self.send is None and self.read is None and self.stream is None:
+            raise ValueError("a channel requires send, read or stream")
+        return self
+
+
+class ReadInput(Model):
+    name: Name
+    mode: Literal["read"]
+    every: Annotated[int, Field(ge=1, le=86_400)] = Field(description="Seconds between complete batch reads.")
+
+
+class StreamInput(Model):
+    name: Name
+    mode: Literal["stream"]
+
+
+class AssistantInput(Model):
+    channel: Annotated[ReadInput | StreamInput, Field(discriminator="mode")]
+
+
+Invocation = Literal["input", "schedule", "trigger", "manual"]
+
+
+class OutputChannel(Model):
+    name: Name
+    when: (
+        Annotated[list[Invocation], Field(min_length=1, max_length=4, json_schema_extra={"uniqueItems": True})] | None
+    ) = Field(default=None, description="Invocation kinds to deliver; omitted means every kind.")
+
+    @field_validator("when")
+    @classmethod
+    def distinct(cls, value: list[Invocation] | None) -> list[Invocation] | None:
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError("when must be distinct")
+        return value
+
+
+class ChannelOutput(Model):
+    channel: OutputChannel
+
+
+class Reply(Model):
+    """Use the admitted incoming message's channel, conversation and message identity."""
+
+
+class ReplyOutput(Model):
+    reply: Reply
+
+
+class AssistantSchedule(Model):
+    every: Annotated[int, Field(ge=1, le=31_536_000)]
+    lookback: Annotated[int, Field(ge=1, le=31_536_000)] = 86_400
+
+
+class SensorReference(Model):
+    name: Name
+
+
+class AssistantTrigger(Model):
+    # Assistant/output events are observable, but cannot start other assistants.
+    event: Literal["sensor.changed"]
+    sensor: SensorReference
+
+
+class Assistant(Command):
+    """One harness with independent acquisition, delivery, schedules and event reactions."""
 
     PLACEHOLDERS: ClassVar[tuple[str, ...]] = ("brain", "home", "start", "end", "prompt")
 
@@ -871,19 +971,13 @@ class Prompt(Program):
         description="The prompt file: a normalized Markdown path in prompts/, such as prompts/assistant.md.",
         json_schema_extra={"pattern": r"^prompts(?:/[^/{}\\]+)+\.md$", "not": {"pattern": r"(?:^|/)\.\.?(?:/|$)"}},
     )
-    # Every half hour by default: an assistant that looks at the brain often enough to follow the owner's day.
-    refresh: Annotated[int, Field(ge=0, le=31_536_000)] = Field(
-        default=1800, description="Seconds between due runs; zero keeps the prompt manual, run only by bf run."
-    )
+    enabled: bool = Field(default=True, description="Allow execution and input subscriptions.")
     timeout: Annotated[int, Field(ge=1, le=3600)] = Field(default=900, description="Maximum runtime in seconds.")
-    lookback: Annotated[int, Field(ge=1, le=31_536_000)] = Field(
-        default=86_400, description="Seconds {{start}} reaches back when no scheduled run has finished yet."
-    )
     # The reply becomes a record's text, which a record bounds at 4 MiB.
     max_bytes: Annotated[int, Field(ge=1, le=4 << 20)] = Field(
         default=1 << 20, description="Maximum stdout in bytes; exceeding it fails without recording the run."
     )
-    text: str | None = Field(
+    text: Annotated[str, Field(max_length=4096, pattern=r"^/(?:[^~\x00]|~[01])*$")] | None = Field(
         default=None,
         description="JSON Pointer to the reply text in the command's JSON stdout, such as /response; the other "
         "members become the record's output attribute. Omitted, all of stdout is the reply.",
@@ -893,6 +987,10 @@ class Prompt(Program):
         description="Keep this many newest run records in memories/NAME/; older ones are removed after a run. Unset "
         "keeps every run.",
     )
+    inputs: Annotated[list[AssistantInput], Field(max_length=32)] = Field(default_factory=list)
+    outputs: Annotated[list[ChannelOutput | ReplyOutput], Field(max_length=32)] = Field(default_factory=list)
+    schedules: dict[Name, AssistantSchedule] = Field(default_factory=dict, max_length=32)
+    triggers: dict[Name, AssistantTrigger] = Field(default_factory=dict, max_length=32)
 
     @field_validator("prompt")
     @classmethod
@@ -911,9 +1009,21 @@ class Prompt(Program):
     @field_validator("text")
     @classmethod
     def json_pointer(cls, value: str | None) -> str | None:
-        if value is not None and (not value.startswith("/") or "\x00" in value or len(value) > 4096):
+        if value is not None and (not re.fullmatch(r"/(?:[^~\x00]|~[01])*", value) or len(value) > 4096):
             raise ValueError("text must be a JSON Pointer starting with /, such as /response")
         return value
+
+    @model_validator(mode="after")
+    def distinct_inputs(self) -> Assistant:
+        names = [item.channel.name for item in self.inputs]
+        if len(set(names)) != len(names):
+            raise ValueError("each input channel may appear once per assistant")
+        if sum(isinstance(item, ReplyOutput) for item in self.outputs) > 1:
+            raise ValueError("reply may appear once in outputs")
+        outputs = [item.channel.name for item in self.outputs if isinstance(item, ChannelOutput)]
+        if len(outputs) != len(set(outputs)):
+            raise ValueError("each output channel may appear once; combine its when values")
+        return self
 
 
 class BrainReference(Model):
@@ -953,7 +1063,7 @@ class Config(Model):
     # reach its dictionaries: read them, never change them, or a later load returns the changed value.
     model_config = ConfigDict(frozen=True)
 
-    version: Literal[7] = Field(
+    version: Literal[8] = Field(
         description=(
             "Brain format of bf.yaml, evaluation suites, the memories/<source>/<sha256>.json layout and the record "
             "envelope; independent of the package version."
@@ -989,14 +1099,18 @@ class Config(Model):
         description="Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ from sensors.",
     )
     # A prompt name is the source of the records its runs write.
-    prompts: dict[Name, Prompt] = Field(
+    channels: dict[Name, Channel] = Field(default_factory=dict, max_length=64, json_schema_extra=_nullable)
+    assistants: dict[Name, Assistant] = Field(
         default_factory=dict,
+        max_length=32,
         json_schema_extra=_nullable,
         description="Agent runs: a harness command fed a prompt file, run when due or with bf run, each run recorded "
         "in memories/NAME/; names must differ from sensors and routines.",
     )
 
-    _empty = field_validator("brains", "ontology", "sensors", "watch", "routines", "prompts", mode="before")(empty)
+    _empty = field_validator(
+        "brains", "ontology", "sensors", "watch", "routines", "channels", "assistants", mode="before"
+    )(empty)
 
     @model_validator(mode="after")
     def mapped(self) -> Config:
@@ -1008,11 +1122,28 @@ class Config(Model):
                 "logs and locks"
             )
         for kind, programs in (("sensors", self.sensors), ("routines", self.routines)):
-            if shared := sorted(programs.keys() & self.prompts.keys()):
+            if shared := sorted(programs.keys() & self.assistants.keys()):
                 raise ValueError(
-                    f"{kind}.{shared[0]} and prompts.{shared[0]}: program names must be distinct; they share logs, "
+                    f"{kind}.{shared[0]} and assistants.{shared[0]}: program names must be distinct; they share logs, "
                     "locks and, for sensors, the records in memories/"
                 )
+        for name, assistant in self.assistants.items():
+            replies = any(isinstance(item, ReplyOutput) for item in assistant.outputs)
+            for item in assistant.inputs:
+                binding = item.channel
+                channel = self.channels.get(binding.name)
+                if channel is None or getattr(channel, binding.mode) is None:
+                    raise ValueError(f"assistants.{name}.inputs: channel {binding.name} requires {binding.mode}")
+                if replies and channel.send is None:
+                    raise ValueError(f"assistants.{name}.outputs: reply requires send on input channel {binding.name}")
+            for item in assistant.outputs:
+                if isinstance(item, ChannelOutput):
+                    channel = self.channels.get(item.channel.name)
+                    if channel is None or channel.send is None:
+                        raise ValueError(f"assistants.{name}.outputs: channel {item.channel.name} requires send")
+            for trigger, settings in assistant.triggers.items():
+                if settings.sensor.name not in self.sensors:
+                    raise ValueError(f"assistants.{name}.triggers.{trigger}: unknown sensor {settings.sensor.name}")
         if TAGGED in self.ontology:
             raise ValueError(f"fields.{TAGGED} is reserved for tag membership")
         if LINKS in self.ontology:

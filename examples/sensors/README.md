@@ -27,7 +27,7 @@ The [four-tool walkthrough](../context-hub/README.md) shows how differently name
 
 ```yaml
 # https://fmind.github.io/brain-framework/
-version: 7
+version: 8
 name: brain
 sensors:
   git-commits:
