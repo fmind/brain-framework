@@ -10,7 +10,7 @@ import re
 import sqlite3
 import stat
 import time
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -23,7 +23,7 @@ from pydantic import JsonValue
 from bf import links as bf_links
 from bf import models, ontology, records
 from bf.config import load
-from bf.markdown import LEAD, authored, editor_lock, entry_note, note
+from bf.markdown import LEAD, authored, editor_lock, entry_note, note, preview
 from bf.models import (
     AUTHORED,
     IDENTITY,
@@ -39,9 +39,9 @@ from bf.models import (
     fold,
     moment,
 )
-from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, writer
+from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, unread, writer
 
-SCHEMA = 35
+SCHEMA = 36
 CACHE = ".bf/index.sqlite"
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
@@ -69,10 +69,10 @@ Tree = tuple[int, int, int, int, int, int]
 # so adding, replacing or removing one changes its folder's times; but a filesystem with a coarse clock, such as FAT's
 # 2-second times, keeps them for a second change within one tick. A folder changed this recently is listed again.
 _SETTLE = 5_000_000_000
-# `file` binds a generation to the database file bf created: a cache copied, cloned or extracted from
-# elsewhere has another inode, so it is rebuilt from the brain's files instead of trusted.
 _TOKENIZER = "porter unicode61 remove_diacritics 2"
 _DDL = f"""
+-- `file` binds a generation to the database file bf created: a cache copied, cloned or extracted from elsewhere has
+-- another inode, so it is rebuilt from the brain's files instead of trusted.
 CREATE TABLE ontology(signature TEXT NOT NULL, file TEXT NOT NULL);
 -- A rowid table: secondary indexes of a WITHOUT ROWID table would copy its whole composite key.
 CREATE TABLE edges(item INTEGER NOT NULL, subject TEXT NOT NULL, relation TEXT NOT NULL, target TEXT NOT NULL,
@@ -112,7 +112,8 @@ _INDEXES = (
     "CREATE INDEX edges_subject ON edges(subject,relation)",
     "CREATE INDEX items_path ON items(path)",
     "CREATE INDEX items_kind_time ON items(kind,time)",
-    "CREATE INDEX items_kind_source_time ON items(kind,source,time)",
+    # Its (kind,source,time) prefix orders a source's page; `observed` lets source totals read this index alone.
+    "CREATE INDEX items_kind_source_time ON items(kind,source,time,observed)",
     # The expression must stay identical to the record branch of MODIFIED for SQLite to use it.
     "CREATE INDEX items_kind_modified ON items(kind,coalesce(nullif(updated,''),time))",
     "CREATE INDEX passages_item ON passages(item)",
@@ -189,7 +190,7 @@ def inputs(
     A source folder that `reuse` accepts by its fingerprint is not listed: the cache answers for its files and
     entries. Each listed one comes with its fingerprint, stated before its listing, and its entries. It is trusted
     when it holds no folder, whose own changes would leave it unchanged, and had been unchanged for _SETTLE: any
-    later change then gives it other times.
+    later change then gives it other times. An unreadable folder counts as a skipped entry, which `_dirty` states.
     """
     started = time.time_ns()
     found: Fingerprints = {}
@@ -289,10 +290,11 @@ def _scan(store: Store, connection: sqlite3.Connection | None, counts: dict[str,
 
 
 def _dirty(store: Store, connection: sqlite3.Connection, stored: Mapping[str, Tree]) -> set[str]:
-    """Trusted source folders holding a skipped file changed in place, as when its permissions are restored.
+    """Trusted source folders holding a skipped entry changed in place, as when its permissions are restored.
 
-    Such a change leaves its folder's fingerprint as it was. A link or special file changes only by being replaced,
-    which changes its folder, and an unaddressable name cannot be stated.
+    Such a change leaves its folder's fingerprint as it was. Each entry is stated as itself, whatever its type: an
+    unreadable subfolder, which the folder's trust counts as a skipped entry, changes only its own times when its
+    permissions are restored. An unaddressable name cannot be stated.
     """
     found: set[str] = set()
     cursor = connection.cursor()
@@ -302,7 +304,7 @@ def _dirty(store: Store, connection: sqlite3.Connection, stored: Mapping[str, Tr
         if tree in found or tree not in stored or not stored[tree][5]:
             continue
         try:
-            same = store.fingerprint(path) == tuple(stamp)
+            same = store.fingerprint(path, regular=False) == tuple(stamp)
         except Error:
             continue
         except OSError:
@@ -319,14 +321,14 @@ def _trees(connection: sqlite3.Connection) -> dict[str, Tree]:
 
 
 @contextmanager
-def _writable() -> Iterator[None]:
+def _writable() -> Generator[None]:
     """Name the cache's write access, which retrieval needs even for a brain it only reads."""
     try:
         yield
     except OSError as error:
         if error.errno in {errno.EACCES, errno.EPERM, errno.EROFS}:
             raise Error(
-                "search and read need write access to the brain's .bf cache directory; grant it or use a writable copy"
+                "the search cache needs write access to the brain's .bf directory; grant it or use a writable copy"
             ) from error
         raise
 
@@ -571,9 +573,6 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
     if unnamed(path):
         # Only the scan's escaped form of the name exists: nothing can open it.
         raise Error(UNNAMED)
-    # Validate skipped entries before interpreting their extension as a record file.
-    if not authored(path) and not path.endswith(".json"):
-        store.read(path, 0)
     if authored(path):
         projection = note(path, store.read(path, MAX_NOTE))
         knowledge = projection.knowledge
@@ -637,7 +636,18 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
             [(item, ontology.qualify(config, f"tags/{tag}")) for tag in knowledge.tags],
         )
         return
-    source = records.source_of(path)
+    if "/" not in path:
+        # A file, link or special file in a scanned folder's place, such as projects, or that folder when unreadable:
+        # named as bf validate names it, never as a misnamed record.
+        raise Error(unread(store, path))
+    try:
+        source = records.source_of(path)
+    except Error:
+        # A link, special file or unreadable folder names its own problem, whatever its name or folder; a misnamed
+        # file is rejected by its name without being read.
+        if not stat.S_ISREG(store.mode(path)):
+            store.read(path, 0)
+        raise
     record = records.load(store, path)
     ref = f"{source}:{record.id}"
     edges = ontology.record_claims(record, config, ref)
@@ -670,15 +680,16 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
 
 
 def lead(record: Record) -> str:
-    """The first LEAD characters with whitespace collapsed, reading only a growing prefix of a long text.
+    """A preview of the text with whitespace collapsed, reading only a growing prefix of a long text.
 
-    Collapsing a prefix always yields a prefix of the collapsed text, even when the cut splits a word.
+    Collapsing a prefix always yields a prefix of the collapsed text, even when the cut splits a word: one character
+    beyond LEAD shows that the preview cuts the text.
     """
     size = 4 * LEAD
     while True:
         collapsed = " ".join(record.text[:size].split())
-        if len(collapsed) >= LEAD or size >= len(record.text):
-            return collapsed[:LEAD]
+        if len(collapsed) > LEAD or size >= len(record.text):
+            return preview(collapsed)
         size *= 4
 
 
@@ -784,7 +795,8 @@ def _build(store: Store, wait: float) -> dict[str, object]:
 
     The build lock keeps one build at a time, but the brain writer lock is held only to publish: searches keep
     reading the live cache, incremental refreshes keep updating it, and collections keep committing. A file that
-    changes after the build fingerprinted it no longer matches its fingerprint, so the next refresh indexes it again.
+    changes after the build fingerprinted it no longer matches its fingerprint, so the next refresh indexes it again;
+    a freshness check that found no usable generation compares the one it built once more before answering.
     """
     config = load(store)
     try:
@@ -807,7 +819,8 @@ def _publish(store: Store) -> None:
     SQLite finds a database's -wal and -shm files by name, never checking which database they belong to: a
     connection to the old file would attach the new generation's log. Readers therefore hold the generation lock
     while connected, and the publish takes it exclusively. The old generation leaves WAL mode, which removes both
-    files, so connections to the new file can neither replay nor share them. The rename keeps the inode `file` records.
+    files, so connections to the new file can neither replay nor share them; a first build has no old generation, so
+    the rename alone publishes it. The rename keeps the inode `file` records.
     """
     with generation(store, shared=False, wait=_PUBLISH):
         _replace(store)
@@ -815,21 +828,27 @@ def _publish(store: Store) -> None:
 
 def _replace(store: Store) -> None:
     path = _path(store)
-    deadline = time.monotonic() + _PUBLISH
-    with closing(_connect(path)) as live:
-        while True:
-            try:
-                live.execute("PRAGMA journal_mode=DELETE")
-                break
-            except sqlite3.OperationalError as error:
-                if error.sqlite_errorcode not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
-                    raise
-                if time.monotonic() >= deadline:
-                    raise BusyError("readers kept the search cache open; retry bf build") from error
-                time.sleep(0.05)
-            except sqlite3.DatabaseError:
-                # Not a database: no connection can use a log beside it.
-                break
+    try:
+        store.lstat(CACHE)
+    except FileNotFoundError:
+        # A first build: connecting would create an empty, non-private file that a crash before the rename leaves.
+        pass
+    else:
+        deadline = time.monotonic() + _PUBLISH
+        with closing(_connect(path)) as live:
+            while True:
+                try:
+                    live.execute("PRAGMA journal_mode=DELETE")
+                    break
+                except sqlite3.OperationalError as error:
+                    if error.sqlite_errorcode not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise BusyError("readers kept the search cache open; retry bf build") from error
+                    time.sleep(0.05)
+                except sqlite3.DatabaseError:
+                    # Not a database: no connection can use a log beside it.
+                    break
     _remove(store, CACHE, _SIDECARS[1:])
     with _writable(), store.parent(CACHE) as (directory, leaf):
         os.replace(Path(BUILD).name, leaf, src_dir_fd=directory, dst_dir_fd=directory)
@@ -942,42 +961,50 @@ def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
     The check lists the authored folders and memories/ itself, but only the source folders whose fingerprint
     changed or is not trusted yet: records are renamed into place, so collection always changes their folder. A
     record file edited in place, which collection never does, therefore waits for bf build.
+
+    A check that finds no usable generation builds one, then compares it once more: the build reads the brain
+    without the writer lock, so a collection that committed meanwhile is indexed, or the cache answers as `busy`.
     """
     # The cache folder's own checks come first: they name the problem more precisely than a lock would.
     _path(store)
     _sweep(store)
-    connection = None
-    compared: Scan | None = None
-    try:
-        with generation(store, shared=True, wait=_PUBLISH):
-            connection = _open(store)
-            try:
-                with reader(store, wait=0):
-                    # A live writer may have a pending journal; only an abandoned one blocks cached reads.
-                    records.require_ready(store)
+    for _ in range(2):
+        connection = None
+        compared: Scan | None = None
+        try:
+            with generation(store, shared=True, wait=_PUBLISH):
+                connection = _open(store)
+                try:
+                    with reader(store, wait=0):
+                        # A live writer may have a pending journal; only an abandoned one blocks cached reads.
+                        records.require_ready(store)
+                        if connection is not None:
+                            if counts is not None:
+                                counts.clear()
+                            compared = _scan(store, connection, counts)
+                            if compared.unchanged():
+                                return "ready"
+                finally:
                     if connection is not None:
-                        if counts is not None:
-                            counts.clear()
-                        compared = _scan(store, connection, counts)
-                        if compared.unchanged():
-                            return "ready"
-            finally:
-                if connection is not None:
-                    connection.close()
-    except BusyError:
+                        connection.close()
+        except BusyError:
+            if connection is not None:
+                return "busy"
+        except sqlite3.DatabaseError as error:
+            if not _damaged(error):
+                raise
+            # Nothing to serve: the refresh below discards the damaged generation and builds another.
+            connection, compared = None, None
+        try:
+            # Without any usable generation there is nothing to serve, so wait for the other writer or build.
+            refresh(store, wait=0 if connection is not None else 120, compared=compared)
+        except BusyError:
+            # A check whose files all matched only had folder rows to update: the cache answers as it is.
+            return "ready" if compared is not None and compared.matches() else "busy"
+        # Only a check that found no usable generation compares again. A check that found one refreshed it in place
+        # under the writer lock, unless a structural bf.yaml edit or damage made that refresh rebuild.
         if connection is not None:
-            return "busy"
-    except sqlite3.DatabaseError as error:
-        if not _damaged(error):
-            raise
-        # Nothing to serve: the refresh below discards the damaged generation and builds another.
-        connection, compared = None, None
-    try:
-        # Without any usable generation there is nothing to serve, so wait for the other writer or build.
-        refresh(store, wait=0 if connection is not None else 120, compared=compared)
-    except BusyError:
-        # A check whose files all matched only had folder rows to update: the cache answers as it is.
-        return "ready" if compared is not None and compared.matches() else "busy"
+            break
     return "ready"
 
 
@@ -986,7 +1013,7 @@ _CHECKED: ContextVar[dict[Path, str] | None] = ContextVar("checked", default=Non
 
 
 @contextmanager
-def session() -> Iterator[None]:
+def session() -> Generator[None]:
     """Compare each brain's files with its cache once per reply, however many views the reply opens."""
     token = _CHECKED.set({})
     try:
@@ -996,7 +1023,7 @@ def session() -> Iterator[None]:
 
 
 @contextmanager
-def database(store: Store, counts: dict[str, int] | None = None) -> Iterator[tuple[sqlite3.Connection, str]]:
+def database(store: Store, counts: dict[str, int] | None = None) -> Generator[tuple[sqlite3.Connection, str]]:
     """The fresh cache generation and its state, within one read snapshot; `counts` as for `fresh`."""
     checked = _CHECKED.get()
     state = checked.get(store.root, "") if checked is not None else ""
@@ -1159,6 +1186,18 @@ def unmatched(connection: sqlite3.Connection, text: str) -> list[str]:
 # An unmatched word gets up to SUGGESTIONS close indexed terms, chosen among CANDIDATES sharing its first two letters.
 SUGGESTIONS = 3
 CANDIDATES = 5000
+# A stem in more than SPREAD passages is first looked for among the WALK items whose refs sort first.
+SPREAD, WALK = 1000, 64
+_SORTED = (
+    "SELECT p.id FROM search s JOIN passages p ON p.id=s.rowid JOIN items i ON i.id=p.item "
+    "WHERE s.search MATCH :stem ORDER BY i.ref,p.fragment LIMIT 1"
+)
+# CROSS JOIN keeps the items outermost, in ref order, so the walk ends at the first passage holding the stem.
+_WALKED = (
+    "SELECT p.id FROM items i CROSS JOIN passages p ON p.item=i.id "
+    "WHERE i.ref<=(SELECT ref FROM items ORDER BY ref LIMIT 1 OFFSET :walk) "
+    "AND EXISTS(SELECT 1 FROM search WHERE search MATCH :stem AND rowid=p.id) ORDER BY i.ref,p.fragment LIMIT 1"
+)
 
 
 def suggestions(connection: sqlite3.Connection, term: str) -> list[str]:
@@ -1167,11 +1206,13 @@ def suggestions(connection: sqlite3.Connection, term: str) -> list[str]:
         return []
     stem = _stem(term)
     rows = connection.execute(
-        "SELECT term FROM vocabulary WHERE term>=? AND term<? LIMIT ?", (stem[:2], stem[:2] + "\U0010ffff", CANDIDATES)
+        "SELECT term,doc FROM vocabulary WHERE term>=? AND term<? LIMIT ?",
+        (stem[:2], stem[:2] + "\U0010ffff", CANDIDATES),
     )
-    close = difflib.get_close_matches(stem, [row[0] for row in rows], n=SUGGESTIONS, cutoff=0.75)
+    passages = {row[0]: row[1] for row in rows}
+    close = difflib.get_close_matches(stem, list(passages), n=SUGGESTIONS, cutoff=0.75)
     # The index holds stems, such as `polici`: show a word one of its passages spells, such as `policy`.
-    return list(dict.fromkeys(word for found in close if (word := _spelled(connection, found))))
+    return list(dict.fromkeys(word for found in close if (word := _spelled(connection, found, passages[found]))))
 
 
 @lru_cache(maxsize=256)
@@ -1185,11 +1226,23 @@ def _stem(word: str, tokenizer: str = _TOKENIZER) -> str:
     return row[0] if row else word.lower()
 
 
-def _spelled(connection: sqlite3.Connection, stem: str) -> str:
-    """The first indexed spelling of a stem, lowercased with Latin accents folded as search folds query words: a
-    one-token snippet of a passage holding it."""
+def _spelled(connection: sqlite3.Connection, stem: str, passages: int) -> str:
+    """An indexed spelling of a stem, lowercased with Latin accents folded as search folds query words: a one-token
+    snippet of the passage holding it whose ref sorts first. Passage numbers follow the order files were indexed in,
+    so a refreshed cache would otherwise suggest another word than a full build of the same files.
+
+    Sorting every passage that holds a stem found in most records took about 5 ms at 20,000 records: such a stem is
+    first looked for among the first WALK items by ref, which find the same passage whenever one of them holds it.
+    """
+    parameters = {"stem": _string(stem), "walk": WALK - 1}
+    passage = connection.execute(_WALKED, parameters).fetchone() if passages > SPREAD else None
+    if not (passage := passage or connection.execute(_SORTED, parameters).fetchone()):
+        return ""
+    # A separate lookup by number: FTS5 ignores a `rowid=NULL` constraint, so a subquery finding no passage would
+    # return the stem's first passage by number.
     row = connection.execute(
-        "SELECT snippet(search,-1,char(1),char(2),'',1) FROM search WHERE search MATCH ? LIMIT 1", (_string(stem),)
+        "SELECT snippet(search,-1,char(1),char(2),'',1) FROM search WHERE search MATCH ? AND rowid=?",
+        (parameters["stem"], passage[0]),
     ).fetchone()
     found = re.search("\x01([^\x01\x02]+)\x02", row[0]) if row else None
     return _stem(found[1], _TOKENIZER.removeprefix("porter ")) if found else ""
@@ -1453,7 +1506,7 @@ _RELATION_ROWS = f"""{_INCOMING} SELECT {_ROW},k.relation FROM linked k JOIN ite
 
 
 def incoming(
-    connection: sqlite3.Connection, targets: set[str], *, exclude: str = "", limit: int = 20
+    connection: sqlite3.Connection, targets: set[str], *, exclude: str = "", limit: int
 ) -> list[dict[str, object]]:
     """Items linking to any target, grouped by explicit relation; links without one come last as LINKS.
 
@@ -1575,11 +1628,9 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
     if isinstance(excerpt := row.get("excerpt"), str):
         # A one-line preview; `bf read` returns the exact text.
         row["excerpt"] = re.sub(r"\s+", " ", excerpt).strip()
-    if isinstance(title := row.get("title"), str) and len(title) > TITLE:
-        # Some sources title records with a whole message, such as a commit; cut at a word when one is near.
-        cut = title[: TITLE - 1]
-        space = cut.rfind(" ")
-        row["title"] = (cut[:space] if space >= TITLE // 2 else cut).rstrip() + "…"
+    if isinstance(title := row.get("title"), str):
+        # Some sources title records with a whole message, such as a commit.
+        row["title"] = preview(title, TITLE)
     row.pop("score", None)
     row.pop("position", None)
     opened, done = int(cast("int", row.pop("tasks_open", 0) or 0)), int(cast("int", row.pop("tasks_done", 0) or 0))
@@ -1601,7 +1652,8 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
 
 
 def problems(connection: sqlite3.Connection) -> list[dict[str, object]]:
-    """Skipped files shared by search, pages and status, up to 200 and a count of the rest; bf validate lists all.
+    """Skipped files shared by search, pages and status, up to 200 and a count of the rest; bf validate also lists at
+    most 200 problems per run.
 
     Each error keeps at most _PROBLEM bytes, so a few files with long errors cannot push a reply past its limit.
     """
@@ -1609,7 +1661,8 @@ def problems(connection: sqlite3.Connection) -> list[dict[str, object]]:
     result: list[dict[str, object]] = [{"file": row["path"], "error": _capped(row["error"])} for row in rows[:200]]
     if len(rows) > 200:
         more = connection.execute("SELECT count(*) FROM files WHERE error!=''").fetchone()[0] - 200
-        result.append({"error": f"{more} more files were skipped; run bf validate"})
+        rest = "1 more file was" if more == 1 else f"{more} more files were"
+        result.append({"error": f"{rest} skipped; run bf validate"})
     return result
 
 
@@ -1705,7 +1758,7 @@ def _abandoned(store: Store) -> bool:
 
 
 @contextmanager
-def _last(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
+def _last(store: Store) -> Generator[tuple[sqlite3.Connection, str]]:
     """The last generation as it is, never refreshed, since that would index half-changed records."""
     _path(store)
     with generation(store, shared=True, wait=_PUBLISH):

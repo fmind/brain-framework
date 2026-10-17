@@ -21,7 +21,7 @@ class Address:
     brain: str
     path: str
     fragment: str
-    # The declared relationship of a `?rel=` link; the only query a BF link accepts.
+    # The declared relation of a `?rel=` link; the only query a BF link accepts.
     relation: str = ""
 
     @property
@@ -104,13 +104,12 @@ def tag(value: str) -> str | None:
     parsed = parse(value)
     if parsed is None or not parsed.path.startswith("tags/"):
         return None
+    if parsed.fragment or parsed.relation:
+        raise Error("use a tag address without a section or relation: bf://brain/tags/label")
     try:
-        name = tag_name(parsed.path.removeprefix("tags/"))
-        if parsed.fragment or parsed.relation:
-            raise ValueError
-    except ValueError:
-        raise Error("use a tag address without a section or relation: bf://brain/tags/label") from None
-    return name
+        return tag_name(parsed.path.removeprefix("tags/"))
+    except ValueError as error:
+        raise Error(f"invalid tag address; {error}") from None
 
 
 def reserved(path: str) -> bool:

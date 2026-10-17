@@ -90,9 +90,11 @@ def day(value: object) -> str:
 
 
 def visible(text: str) -> str:
-    """Escape controls and invisible format characters, which bf replies escape and JSON decoding restored."""
+    """Escape controls, line and paragraph separators and invisible format characters, which bf replies escape and
+    JSON decoding restored."""
     return "".join(
-        char.encode("unicode_escape").decode() if unicodedata.category(char) in {"Cc", "Cf"} else char for char in text
+        char.encode("unicode_escape").decode() if unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} else char
+        for char in text
     )
 
 
@@ -160,18 +162,29 @@ def render(repo: str, page: dict, project: dict | None, attention: list, stale: 
         more = any(int(g.get("total", 0)) > len(g.get("items", [])) for g in groups)
         hint = f"; list one relation with {code(f'bf read {target} --rel RELATION')}" if more else ""
         lines.append(f"- Linked evidence: {counts}{hint}.")
-        items = [
-            i for g in groups for i in g.get("items", []) if i.get("kind") == "note" and NOTE.fullmatch(address(i))
-        ]
-        newest = sorted(items, key=lambda i: day(i.get("date")), reverse=True)[:NEWEST]
+        # A note linking with several relations appears in each of their groups: list it once.
+        items = {
+            address(i): i
+            for g in groups
+            for i in g.get("items", [])
+            if i.get("kind") == "note" and NOTE.fullmatch(address(i))
+        }
+        newest = sorted(items.values(), key=lambda i: day(i.get("date")), reverse=True)[:NEWEST]
         lines.extend(
             f"  - {' '.join(filter(None, [day(i.get('date')), plain(i.get('title', ''))]))} ({code(address(i))})"
             for i in newest
         )
-    # Scheduled sensors, routines and prompts that failed or are overdue: their evidence may be older than it looks.
+    # Scheduled sensors, routines and assistants that failed, are late or fell silent: their evidence may be older or
+    # sparser than it looks. A stopped sensor falls silent too: its failure or lateness names what to repair first.
     late = [
         f"{plain(entry.get('sensor') or entry.get('routine') or entry.get('assistant'), 64)} "
-        + ("failed" if entry.get("failed") else plain(entry.get("freshness"), 16))
+        + (
+            "failed"
+            if entry.get("failed")
+            else "silent"
+            if entry.get("silent") and entry.get("freshness") == "fresh"
+            else plain(entry.get("freshness"), 16)
+        )
         for entry in attention
         if isinstance(entry, dict) and (entry.get("sensor") or entry.get("routine") or entry.get("assistant"))
     ]

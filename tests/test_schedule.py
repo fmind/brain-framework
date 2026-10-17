@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import pwd
+import re
 import shlex
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -200,6 +202,21 @@ def test_launchd_preserves_literal_arguments_and_calendar_catchup(scheduled: Sto
     ]
 
 
+def test_launchd_needs_a_home_directory_for_its_agents(
+    scheduled: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unknown(uid: int) -> NoReturn:
+        raise KeyError(uid)
+
+    # As for a container user without HOME or a passwd entry: before, generation failed with a traceback.
+    monkeypatch.delenv("HOME")
+    monkeypatch.setattr(pwd, "getpwuid", unknown)
+    output = tmp_path / "schedules"
+    with pytest.raises(Error, match=r"^cannot find the home directory for ~/Library/LaunchAgents; set HOME$"):
+        generate(scheduled, backend="launchd", executable=Path(sys.executable), output=output)
+    assert not output.exists()
+
+
 def test_cron_keeps_existing_crontab_and_escapes_percent(scheduled: Store, tmp_path: Path) -> None:
     executable = tmp_path / "bf % weird'"
     executable.write_text("#!/bin/sh\nexit 0\n")
@@ -215,12 +232,13 @@ def test_cron_keeps_existing_crontab_and_escapes_percent(scheduled: Store, tmp_p
 
 
 def test_generated_files_are_idempotent_but_never_overwrite_edits(scheduled: Store, tmp_path: Path) -> None:
-    for folder in (scheduled.root / "settings/schedules", tmp_path / "schedules"):
+    # The diagnostic names the file to review, relative to the brain when it lies inside it.
+    for folder, shown in ((scheduled.root / "settings/schedules", "settings/schedules/"), (tmp_path / "schedules", "")):
         first: dict = generate(scheduled, backend="systemd", executable=Path(sys.executable), output=folder)
         assert first == generate(scheduled, backend="systemd", executable=Path(sys.executable), output=folder)
         target = Path(first["written"][0])
         target.write_text("user edit")
-        with pytest.raises(Error, match="already exists"):
+        with pytest.raises(Error, match=f"^{re.escape(shown + target.name)} already exists with different content"):
             generate(scheduled, backend="systemd", executable=Path(sys.executable), output=folder)
         assert target.read_text() == "user edit"
     symlink = tmp_path / "link"

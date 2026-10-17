@@ -6,13 +6,18 @@ import os
 import subprocess
 import sys
 from textwrap import dedent
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
-from bf.models import Error, Query, Record, timestamp
+from bf import models, replies
+from bf.health import report
+from bf.models import Error, Query, Record, present, timestamp
 from bf.pages import period, scope
+from bf.retrieve import read
 from bf.storage import Store
+from conftest import records_file
 
 
 def python_in_timezone(zone: str, program: str, *arguments: str) -> None:
@@ -64,8 +69,56 @@ def test_replies_localize_instants_but_return_stored_provider_values() -> None:
         named = {name: {"last_collected": stored} for name in ("date", "time", "fields")}
         local = {name: {"last_collected": "2026-09-26T11:00:00+02:00"} for name in named}
         assert present({"sources": named, "routines": named}) == {"sources": local, "routines": local}
+        # Only a source's `changed` is an instant: under that key, pages list items and cache refreshes count files.
+        assert present({"changed": [], "index": {"changed": 4}}) == {"changed": [], "index": {"changed": 4}}
         """,
     )
+
+
+def test_instants_before_standard_time_are_stated_in_utc() -> None:
+    # New York kept local mean time, -04:56:02, until 1883: RFC 3339 date-times take only whole-minute offsets.
+    python_in_timezone(
+        "America/New_York",
+        """
+        from bf.models import local
+
+        assert local("1850-03-01T12:00:00.000000Z") == "1850-03-01T12:00:00+00:00"
+        assert local("2026-09-20T13:00:00.000000Z") == "2026-09-20T09:00:00-04:00"
+        """,
+    )
+
+
+def test_every_reply_date_time_is_an_instant_replies_localize() -> None:
+    # Search and read replies state each declared date-time with the local offset, to the second.
+    def date_times(schema: object) -> set[str]:
+        found: set[str] = set()
+        if isinstance(schema, dict):
+            properties = schema.get("properties", {})
+            found |= {key for key, value in properties.items() if value.get("format") == "date-time"}
+            for value in schema.values():
+                found |= date_times(value)
+        elif isinstance(schema, list):
+            for value in schema:
+                found |= date_times(value)
+        return found
+
+    declared = date_times(replies.SEARCH) | date_times(replies.READ)
+    assert {"changed", "observed", "time"} <= declared <= models._INSTANTS  # noqa: SLF001 - what present() localizes
+
+
+def test_source_coverage_states_its_newest_change_like_its_latest_event(brain: Store) -> None:
+    # A source's `changed` once stayed a UTC instant with microseconds beside its localized `latest`.
+    observed = "2026-09-26T09:00:00.123456Z"
+    records_file(
+        brain, "papers", [Record(id="p", title="Paper", time="2026-09-26T08:00:00Z", attributes={"observed": observed})]
+    )
+    expected = {"latest": "2026-09-26T08:00:00+00:00", "changed": "2026-09-26T09:00:00+00:00"}
+    for ref in ("memories", "memories/papers"):
+        page = cast("dict", present(read([brain], ref, counted=False)))
+        coverage = next(entry for entry in page["sources"] if entry["source"] == "papers")
+        assert {key: coverage[key] for key in expected} == expected
+    status = cast("dict", present(report([brain])))["brains"][0]["sources"]["papers"]
+    assert {key: status[key] for key in expected} == expected
 
 
 def test_timestamp_overflow_is_a_validation_failure() -> None:

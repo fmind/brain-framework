@@ -1,6 +1,7 @@
 """Check or regenerate third-party notices from the synced environment; the default checks without changing files."""
 
 import argparse
+import hashlib
 import re
 from importlib import metadata
 from pathlib import Path
@@ -37,6 +38,16 @@ BUNDLED = {
     "zensical-javascript-LICENSE.txt": "zensical/templates/assets/javascripts/LICENSE",
 }
 SITE_VERSION = re.compile(r"^(\| Zensical(?: browser bundle)? +\| )(\S+)", re.MULTILINE)
+# Licenses of the npm libraries that Zensical's prebuilt search client bundles but its license file omits, keyed by their
+# published name. No synced distribution holds them, so each is the package's license file copied byte for byte and
+# pinned by SHA-256; after a Zensical update, search its browser bundle for them and for any new library.
+OMITTED = {
+    "clsx-LICENSE.txt": "9a9edad7baae52622bddf3c15b2ef8a33d2c89f2d25408ad13e8a7481c6b0c97",
+    "lodash-debounce-LICENSE.txt": "ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272",
+    "preact-LICENSE.txt": "1fe6958409c8c257a70c587a18b6f7f412b179b456630790d30b2ec9a8e4b7d4",
+    "preact-signals-LICENSE.txt": "a11fc89e4c6b118854c7a667734a0b2e6bf2af5e45c6686de31adbccc8f3ae8d",
+    "usehooks-ts-LICENSE.txt": "24eefa8efca11bec72b94aba31f5d38afc49debbfdb58ec3e3ae9fe24a828cca",
+}
 
 
 def closure() -> list[metadata.Distribution]:
@@ -130,11 +141,17 @@ def notices() -> str:
 
 def site() -> tuple[str, dict[str, bytes]]:
     zensical = metadata.distribution("zensical")
-    page = SITE_VERSION.sub(lambda match: match[1] + zensical.version, SITE.read_text(encoding="utf-8"))
+    page, rows = SITE_VERSION.subn(lambda match: match[1] + zensical.version, SITE.read_text(encoding="utf-8"))
+    if rows != 2:
+        raise SystemExit(f"{SITE.name}: expected the Zensical and browser bundle version rows, found {rows}")
     return page, {
         published: zensical.locate_file(installed.format(version=zensical.version)).read_bytes()
         for published, installed in BUNDLED.items()
     }
+
+
+def pinned(path: Path, digest: str) -> bool:
+    return path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest
 
 
 def main() -> None:
@@ -143,7 +160,10 @@ def main() -> None:
     args = parser.parse_args()
     # Generate everything before replacing a file; a missing distribution must not leave a partial update.
     text, (page, bundled) = notices(), site()
-    stray = sorted(path.name for path in SITE_FILES.iterdir() if path.name not in bundled)
+    stray = sorted(path.name for path in SITE_FILES.iterdir() if path.name not in bundled.keys() | OMITTED.keys())
+    # No synced source can regenerate these copies, so a missing or changed one fails --write too.
+    if changed := [name for name, digest in OMITTED.items() if not pinned(SITE_FILES / name, digest)]:
+        parser.exit(1, f"changed npm license copies ({', '.join(changed)}); restore each from its npm package\n")
     if args.write:
         NOTICES.write_text(text, encoding="utf-8")
         SITE.write_text(page, encoding="utf-8")

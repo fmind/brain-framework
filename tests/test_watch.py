@@ -25,9 +25,9 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 import bf.collect as collector
-from bf.cli import app
+from bf.cli import _cancel, app
 from bf.history import state
-from bf.models import Error, encode, local, timestamp
+from bf.models import Error, WatchSettings, encode, local, timestamp
 from bf.storage import Store, state_store
 from bf.watch import (
     Dashboard,
@@ -40,6 +40,7 @@ from bf.watch import (
     clean,
     duration,
     keyboard,
+    period,
     read_keys,
     snapshot,
     watch,
@@ -151,6 +152,7 @@ def test_dashboard_layout_keeps_data_literal_and_handles_resize(width: int, heig
     dashboard = Dashboard(
         "[red]fixture\x1b]0;bad",
         rows=[
+            Row("prompt", "assistant", State.FRESH, True, 1800, runs=1, record="memories/\x1b[2Jassistant"),
             Row(
                 "sensor",
                 "calendar",
@@ -162,20 +164,25 @@ def test_dashboard_layout_keeps_data_literal_and_handles_resize(width: int, heig
                 updated=2,
                 removed=0,
             ),
-            Row("sensor", "git", State.FAILED, True, 300, error="[bold]literal\x1b[2J", log="/private/log"),
-            Row("routine", "review", State.NEVER, False, 86400),
+            Row("sensor", "git", State.FAILED, True, 300, error="[bold]literal\x1b[2J", log="/private/\x1b[2Jlog"),
+            Row("routine", "review", State.NEVER, False, 86400, action="actions/\x1b[2Jreview"),
         ],
     )
     output = io.StringIO()
     console = Console(file=output, width=width, height=height, color_system=None)
     console.print(dashboard.render(width, height))
     assert "BF" in output.getvalue()
-    assert "\x1b" not in output.getvalue()
-    dashboard.cursor = 1
-    console.print(dashboard.render(width, height))
+    # Every row's details, then the guide: control characters in history are data, never terminal instructions.
+    for cursor in range(1, len(dashboard.rows)):
+        dashboard.cursor = cursor
+        console.print(dashboard.render(width, height))
     dashboard.help = True
     console.print(dashboard.render(width, height))
+    assert "\x1b" not in output.getvalue()
+    # Brackets stay text, never markup; details need 80 columns.
+    assert "[red]fixture" in output.getvalue()
     if width >= 80:
+        assert "[bold]literal" in output.getvalue()
         assert "q quit" in output.getvalue()
     assert clean("x\n\x1b\t") == "x   "
 
@@ -211,6 +218,40 @@ def test_empty_many_rows_and_controls() -> None:
     dashboard.key(" ")
     assert dashboard.paused
     assert [duration(n) for n in (-1, 15, 120, 7200, 172800)] == ["0s", "15s", "2m", "2h", "2d"]
+
+
+def test_an_empty_attention_filter_says_nothing_needs_attention() -> None:
+    dashboard = Dashboard("fixture", attention=True, rows=[Row("sensor", "calendar", State.FRESH, True, 60)])
+    output = screen(dashboard, 80, 24)
+    assert "No matching programs" in output
+    assert "Nothing needs attention; press Tab to show every program." in output
+    assert "Add a reviewed sensor" not in output
+    # Without any program, the filter is not why the table is empty.
+    dashboard.rows = []
+    assert "Add a reviewed sensor, routine or assistant in bf.yaml." in screen(dashboard, 80, 24)
+
+
+@pytest.mark.parametrize(
+    ("states", "running", "paused", "summary"),
+    [
+        # No check starts until Space, so a countdown would announce one.
+        ([State.FAILED], False, True, "1 program   1 selected   1 needs attention   Checks paused"),
+        # An active update finishes while paused.
+        ([State.FAILED], True, True, "1 program   1 selected   1 needs attention   Updating…"),
+        (
+            [State.FAILED, State.DUE, State.FRESH],
+            False,
+            False,
+            "3 programs   3 selected   2 need attention   Next check in ",
+        ),
+    ],
+)
+def test_summary_agrees_with_its_counts_and_shows_no_countdown_while_paused(
+    states: list[State], summary: str, *, running: bool, paused: bool
+) -> None:
+    rows = [Row("sensor", f"source-{index}", status, True, 60) for index, status in enumerate(states)]
+    dashboard = Dashboard("fixture", rows=rows, running=running, paused=paused)
+    assert screen(dashboard, 80, 24).splitlines()[1].startswith(summary)
 
 
 @pytest.mark.parametrize(
@@ -275,6 +316,34 @@ def test_details_show_diagnostics_and_routine_markers_at_every_width(width: int,
     assert "Log: /state/b.log" in output
 
 
+@pytest.mark.parametrize(
+    ("row", "command"),
+    [
+        (Row("sensor", "calendar", State.FRESH, True, 60), "bf collect calendar"),
+        (Row("sensor", "manual", State.MANUAL, True, 0), "bf collect manual"),
+        (Row("routine", "weekly-log", State.FRESH, True, 60), "bf run weekly-log"),
+        (Row("prompt", "assistant", State.NEVER, True, 1800, runs=0), "bf run assistant"),
+        (Row("sensor", "disabled", State.DISABLED, True, 60), ""),
+        (Row("prompt", "paused", State.DISABLED, True, 1800, runs=0), ""),
+    ],
+)
+def test_details_name_the_command_that_runs_the_program_now(row: Row, command: str) -> None:
+    # bf collect runs only sensors and bf run routines and prompts; neither runs a disabled program.
+    commands = re.compile(r"bf (?:collect|run) \S+")
+    assert commands.findall(Dashboard("fixture", rows=[row]).details(row).plain) == ([command] if command else [])
+    # An observer runs nothing and suggests no executing command.
+    assert not commands.findall(Dashboard("fixture", observe=True, rows=[row]).details(row).plain)
+
+
+def test_configured_periods_show_exactly() -> None:
+    row = Row("sensor", "git", State.FRESH, True, 5400)
+    dashboard = Dashboard("fixture", rows=[row], preferences=WatchSettings(interval=90))
+    # Ages and countdowns round down; a configured period does not, so the guide matches the late warning's seconds.
+    assert "Refresh: 90m" in dashboard.details(row).plain
+    assert "Check: 90s" in dashboard.guide().plain
+    assert [period(n) for n in (5, 60, 90, 3600, 5400, 86400, 604800)] == ["5s", "1m", "90s", "1h", "90m", "1d", "7d"]
+
+
 def test_details_show_the_last_success_in_local_time() -> None:
     success = "2026-09-01T11:59:00.123456Z"
     dashboard = Dashboard("fixture", rows=[Row("sensor", "calendar", State.FRESH, True, 60, success=success)])
@@ -323,6 +392,21 @@ def test_columns_keep_state_ages_and_counts_whole(width: int, height: int) -> No
     # Only the program name shortens.
     assert "z-very-very-" in output
     assert "long-name" not in output
+
+
+def test_text_on_a_background_sets_its_own_color() -> None:
+    dashboard = Dashboard(
+        "fixture", rows=[Row("sensor", "calendar", State.FRESH, True, 60), Row("sensor", "git", State.DUE, True, 60)]
+    )
+    console = Console(file=io.StringIO(), width=120, height=24, color_system="truecolor", force_terminal=True)
+    filled = [
+        (segment.text, segment.style.color)
+        for segment in console.render(dashboard.render(120, 24, NOW))
+        if segment.text.strip() and segment.style is not None and segment.style.bgcolor is not None
+    ]
+    # A light theme's dark default text would be unreadable on the selected row's dark highlight.
+    assert any(text.startswith("> calendar") for text, _ in filled)
+    assert all(color is not None for _, color in filled)
 
 
 def test_fixed_lines_truncate_instead_of_hiding_sort_and_keys() -> None:
@@ -691,9 +775,9 @@ def test_job_runs_selected_program_and_retains_state(brain: Store) -> None:
 
 @pytest.mark.parametrize("slow", [False, True])
 def test_stopping_a_job_leaves_time_to_roll_back_a_commit(
-    brain: Store, capsys: pytest.CaptureFixture[str], *, slow: bool
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], *, slow: bool
 ) -> None:
-    signals: list[str] = []
+    clock, signals = [0], []
 
     class Update:
         def poll(self) -> None:
@@ -705,9 +789,11 @@ def test_stopping_a_job_leaves_time_to_roll_back_a_commit(
         def wait(self, timeout: float | None = None) -> int:
             signals.append(f"wait {timeout}")
             if slow and timeout == 1:
+                clock[0] += 1
                 raise subprocess.TimeoutExpired("bf", 1)
             return 130
 
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
     job = Job(brain, (), ())
     job.process = cast("subprocess.Popen[bytes]", Update())
     job.close()
@@ -718,36 +804,88 @@ def test_stopping_a_job_leaves_time_to_roll_back_a_commit(
     assert capsys.readouterr().err == (stopping if slow else "")
 
 
+class Hung:
+    """An update that exits only once killed; each timed wait advances the fake clock by its whole timeout."""
+
+    def __init__(self, clock: list[int], signals: list[str], name: str = "") -> None:
+        self.clock, self.signals, self.name = clock, signals, name
+
+    def poll(self) -> None:
+        return None
+
+    def terminate(self) -> None:
+        self.signals.append(f"terminate{self.name}")
+
+    def kill(self) -> None:
+        self.signals.append(f"kill{self.name}")
+
+    def wait(self, timeout: int | None = None) -> int:
+        self.signals.append(f"wait {timeout}{self.name}")
+        if timeout is None:
+            return -9
+        self.clock[0] += timeout
+        raise subprocess.TimeoutExpired("bf", timeout)
+
+
 def test_stopping_a_job_after_the_terminal_closed_still_waits_then_kills(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    signals: list[str] = []
-
-    class Update:
-        def poll(self) -> None:
-            return None
-
-        def terminate(self) -> None:
-            signals.append("terminate")
-
-        def kill(self) -> None:
-            signals.append("kill")
-
-        def wait(self, timeout: float | None = None) -> int:
-            signals.append(f"wait {timeout}")
-            if timeout is not None:
-                raise subprocess.TimeoutExpired("bf", timeout)
-            return -9
+    clock, signals = [0], []
 
     class HungUp(io.StringIO):
         def write(self, _text: str) -> int:
             raise OSError(5, "Input/output error")
 
     monkeypatch.setattr(sys, "stderr", HungUp())
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
     job = Job(brain, (), ())
-    job.process = cast("subprocess.Popen[bytes]", Update())
+    job.process = cast("subprocess.Popen[bytes]", Hung(clock, signals))
     job.close()
     assert signals == ["terminate", "wait 1", "wait 59", "kill", "wait None"]
+
+
+def test_a_cancellation_while_stopping_still_waits_then_kills(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    clock, signals = [0], []
+
+    class Closing(Hung):
+        def wait(self, timeout: int | None = None) -> int:
+            if timeout == 59:
+                # The closing terminal hangs watch up again, or its user presses Ctrl-C a second time.
+                os.kill(os.getpid(), signal.SIGHUP)
+            return super().wait(timeout)
+
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
+    job = Job(brain, (), ())
+    job.process = cast("subprocess.Popen[bytes]", Closing(clock, signals))
+    # Like main(): a hangup cancels like Ctrl-C.
+    previous = signal.signal(signal.SIGHUP, _cancel)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            _stop(job)
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+    # The interrupt waits until the update was killed, so watch never exits leaving it unsupervised.
+    assert signals == ["terminate", "wait 1", "wait 59", "kill", "wait None"]
+
+
+def test_updates_stopping_together_share_one_bound_and_one_notice(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock, signals = [0], []
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
+    jobs = [Job(brain, (), ()), Job(brain, (), ())]
+    for job, name in zip(jobs, (" collection", " prompts"), strict=True):
+        job.process = cast("subprocess.Popen[bytes]", Hung(clock, signals, name))
+    _stop(*jobs)
+    # Signalled together, the prompt update has had its whole bound once the collection update is killed.
+    assert clock[0] == 60
+    assert [event for event in signals if not event.startswith("wait")] == [
+        "terminate collection",
+        "terminate prompts",
+        "kill collection",
+        "kill prompts",
+    ]
+    assert capsys.readouterr().err == "bf: stopping the active update; this can take up to 60 seconds\n"
 
 
 def test_job_tells_skipped_cache_files_apart_from_failed_programs(brain: Store) -> None:
@@ -1069,12 +1207,18 @@ def test_a_check_interval_slower_than_a_refresh_is_flagged(
     assert late.startswith("bf: ")
     assert "but checks happen every 7200s" in late
     assert late.endswith("; lower the watch interval\n")
-    # The dashboard keeps it in its summary, whatever the message line says, and the guide explains it.
+    # The dashboard keeps it in its header, whatever the message line says, and the guide explains it: both whole
+    # at the 80 by 24 minimum, where the guide keeps its closing lines too.
     monkeypatch.setattr("bf.watch.time", time)
     dashboard = Dashboard("fixture", late=late.removeprefix("bf: ").strip())
-    assert "Interval too slow; press ?" in screen(dashboard, 140, 36)
+    assert "interval too slow, press ?" in screen(dashboard, 80, 24)
     dashboard.help = True
-    assert "lower the watch interval" in screen(dashboard, 140, 36)
+    guide = screen(dashboard, 80, 24)
+    for line in ("checks happen every 7200s", "Space pauses future checks", "not proof the provider is unchanged"):
+        assert line in guide
+    # A long program name wraps the warning onto a third line, which costs a line that the footer repeats.
+    dashboard.late = dashboard.late.replace("git", "a-long-program-name-for-the-weekly-git-review")
+    assert "not proof the provider is unchanged" in screen(dashboard, 80, 24)
     # An interval faster than every refresh says nothing.
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=iter([0.0]).__next__, sleep=lambda _: None))
     with pytest.raises(StopIteration):
@@ -1092,8 +1236,10 @@ def test_stopping_signals_every_update_before_waiting_for_any() -> None:
         def terminate(self) -> None:
             events.append(f"terminate {self.name}")
 
-        def close(self) -> None:
-            events.append(f"close {self.name}")
+        def close(self, _deadline: float | None = None, *, announce: bool = True) -> bool:
+            events.append(f"close {self.name}{'' if announce else ' quietly'}")
+            return True
 
     _stop(*cast("list[Job]", [Recorder("collection"), Recorder("assistants")]))
-    assert events == ["terminate collection", "terminate assistants", "close collection", "close assistants"]
+    # Once one update said why the terminal waits, the next one says nothing.
+    assert events == ["terminate collection", "terminate assistants", "close collection", "close assistants quietly"]

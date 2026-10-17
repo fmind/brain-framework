@@ -99,7 +99,7 @@ fields:
   owner: [person:email/alice@example.test]
 ```
 
-`owner` is a relation, so the project now claims Alice as its owner, with the whole note as origin. `bf read person:email/alice@example.test --rel owner` lists the project. Values are checked like a record's: an identity must be a `scheme:value`, and a relation's `targets` apply. A declared single-value field that is not a relation, such as a `status` string, shows beside the note in listings and backlink previews.
+`owner` is a relation, so the project now claims Alice as its owner, with the whole note as origin. `bf read person:email/alice@example.test --rel owner` lists the project. Values are checked like a record's: an identity must be a `scheme:value`, and a relation's `targets` apply. Each declared single-value field, such as a `status` string or a single-value relation, shows beside the note in listings and backlink previews when its value fits 200 characters.
 
 Write declared fields only under `fields:`. `bf validate` reports a declared relation written at the top of the frontmatter, such as `owner:`, because OKF would ignore it.
 
@@ -120,11 +120,11 @@ bf read bf://brain/projects/new-website
 bf read repo:github.com/example/new-website
 ```
 
-| Field      | Meaning                                                                                         |
-| ---------- | ----------------------------------------------------------------------------------------------- |
-| `entity`   | A logical `bf://` name for the subject; it creates no folder.                                   |
-| `aliases`  | Other exact identities of the subject, such as a repository or an email address.                |
-| `resource` | OKF: the URI of the asset the note describes. Links to that URI count as backlinks of the note. |
+| Field      | Meaning                                                                                                                           |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `entity`   | The subject's own identity, usually a logical `bf://` name; it creates no folder, and the note's claims name it as their subject. |
+| `aliases`  | Other exact identities of the subject, such as a repository or an email address.                                                  |
+| `resource` | OKF: the URI of the asset the note describes. Links to that URI count as backlinks of the note.                                   |
 
 Identities are case-sensitive: write them as your sensors emit them, such as lowercase GitHub owners. Each names a whole subject, so a BF `entity`, alias or `resource` stays in this brain's namespace and never names a `#section`, a note's file, a page or a record. No identity may hold an invisible format character, such as U+200B. `bf validate` reports those mistakes and [warns](checks.md#warnings) about identities that differ only by letter case. Declare only identities you have verified.
 

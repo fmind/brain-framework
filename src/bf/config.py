@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from bf.models import Config, Error, FormatError, Registration, UserConfig, check_version, digest, explain, suggest
 from bf.storage import Store, expand, writer, xdg
 
-_HEADER = "# https://fmind.github.io/brain-framework/\n"
+_HEADER = "# https://fmind.github.io/brain-framework/docs/configuration/\n"
 
 
 # libyaml parses bf.yaml about nine times faster; the pure-Python loader remains the fallback.
@@ -138,7 +138,10 @@ def load(store: Store) -> Config:
 
     Callers must not change the returned dictionaries, such as `sensors`: other loads share them.
     """
-    data = store.read("bf.yaml", 1 << 20)
+    try:
+        data = store.read("bf.yaml", 1 << 20)
+    except FileNotFoundError:
+        raise Error("bf.yaml is missing; restore it, or select the brain's root directory") from None
     key = digest(data)
     if (config := _LOADED.get(key)) is None:
         value = yaml_object(data, "bf.yaml")
@@ -172,8 +175,12 @@ def _registry() -> tuple[UserConfig, str]:
         registry = UserConfig.model_validate(yaml_object(data, str(path)))
     except ValidationError as error:
         raise Error(f"invalid {path}: " + explain(error)) from error
-    # yaml_object has already rejected invalid UTF-8.
-    header = "".join(takewhile(lambda line: line.startswith("#"), data.decode().splitlines(keepends=True)))
+    # yaml_object has already rejected invalid UTF-8. Blank lines may separate the comments' paragraphs.
+    lines = data.decode().splitlines(keepends=True)
+    block = list(takewhile(lambda line: line.startswith("#") or not line.strip(), lines))
+    while block and not block[-1].startswith("#"):
+        block.pop()
+    header = "".join(block)
     return registry, header if not header or header.endswith("\n") else header + "\n"
 
 
@@ -189,20 +196,34 @@ def _identity(entry: Registration) -> str | None:
         return None
 
 
+def _location(entry: Registration) -> Path:
+    """The directory an entry names, resolving only its leading `~`: a home reached through a link, such as /home ->
+    /var/home, is a spelling, while a link the entry names itself is another path to the brain."""
+    path = Path(entry.path)
+    if not entry.path.startswith("~"):
+        return path
+    head, *rest = path.parts
+    home = Path(head).expanduser()
+    try:
+        return home.resolve(strict=True).joinpath(*rest)
+    except OSError, RuntimeError:
+        return home.joinpath(*rest)
+
+
 def register(store: Store) -> dict[str, object]:
     """Add or update this brain in the user registry, keyed by its configured name.
 
-    The entry of that name moves here when its directory no longer exists, as after moving the brain, or is this
-    physical brain through another path; the reply names the path it replaced. A path that exists but cannot be
-    reached, such as a locked folder or a disconnected network mount, keeps its entry; a share that is not mounted
-    at all looks moved.
+    The entry of that name moves here when its directory no longer exists or holds no bf.yaml, as after moving the
+    brain, or is this physical brain through another path; the reply names the path it replaced. An entry that names
+    this brain's directory, even spelled with `~`, stays as written. A path that exists but cannot be reached, such as
+    a locked folder or a disconnected network mount, keeps its entry; a share that is not mounted at all looks moved.
     """
     name = load(store).name
     path = user_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     registry_store = Store(path.parent)
     # Registration is one shared read/modify/write transaction, independent of each brain's lock.
-    with writer(registry_store, wait=30):
+    with writer(registry_store, wait=30, busy="another bf register is updating the registry; retry after it finishes"):
         registry, header = _registry()
         for other, entry in registry.brains.items():
             if other != name and _identity(entry) == store.identity:
@@ -211,21 +232,32 @@ def register(store: Store) -> dict[str, object]:
                     "bf register again"
                 )
         replaced = ""
-        if (existing := registry.brains.get(name)) and existing.path != str(store.root):
+        # Locations, not spellings: a `~` path, which a dotfiles-managed registry may need, stays as written.
+        if (existing := registry.brains.get(name)) and _location(existing) != store.root:
+            unreachable = (
+                f"cannot reach the brain registered as {name} at {existing.path}; restore access to it, or remove "
+                f"that entry from {path}"
+            )
             try:
                 registered = _registered(existing)
             except Error as error:
-                raise Error(
-                    f"cannot reach the brain registered as {name} at {existing.path}; restore access to it, or "
-                    f"remove that entry from {path}"
-                ) from error
+                raise Error(unreachable) from error
+            if registered is not None:
+                try:
+                    registered.mode("bf.yaml")
+                except FileNotFoundError:
+                    # A folder without bf.yaml holds no brain, such as one a move left or an empty mount point.
+                    registered = None
+                except OSError as error:
+                    raise Error(unreachable) from error
             if registered is not None and registered.identity != store.identity:
                 raise Error(
                     f"another brain is already registered as {name} at {existing.path}; remove that entry from "
                     f"{path}, or rename one of the brains in its bf.yaml"
                 )
             replaced = existing.path
-        registry.brains[name] = Registration(path=str(store.root))
+        if existing is None or replaced:
+            registry.brains[name] = Registration(path=str(store.root))
         document = {"brains": {key: value.model_dump() for key, value in sorted(registry.brains.items())}}
         registry_store.write(
             path.name,

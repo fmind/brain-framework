@@ -20,7 +20,7 @@ A second brain for you, your team and your AI agents, on your own computer. Gath
 <a href="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg">
   <img
     src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg"
-    alt="The Brain Framework loop: sensors gather evidence from your tools into a brain folder; bf.yaml declares the ontology, sensors, routines and watch; memories, projects, concepts and actions form a knowledge graph; agents read that context, act through the same CLIs, APIs, MCP servers and browsers, and write outcomes back."
+    alt="The Brain Framework loop: sensors gather evidence from your tools into a brain folder; bf.yaml declares the ontology, sensors, routines, prompts and watch settings; memories, projects, concepts and actions form a knowledge graph; agents read that context, act through the same CLIs, APIs, MCP servers and browsers, and write outcomes back."
     width="960"
   >
 </a>
@@ -67,7 +67,7 @@ Hosted personal agents run on someone else's computer, connect the sources their
 
 ### What one brain can gather
 
-The author's own brain runs more than 50 sensors and holds over 60,000 records (counted on 2026-10-04):
+The author's own brain runs more than 80 sensors and holds about 50,000 records (counted on 2026-10-16):
 
 | Area          | Collected evidence                                                                                                                   |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -76,7 +76,7 @@ The author's own brain runs more than 50 sensors and holds over 60,000 records (
 | Agents        | Claude Code, Codex, Copilot and other agent sessions and memories, so a past conclusion is one search away.                          |
 | Your stack    | Release notes, security bulletins and advisories of the tools you use, model retirements and provider outages.                       |
 | Your presence | Mentions on GitHub, Hacker News and Bluesky; domain expiry, mail security and certificate transparency; site and repository traffic. |
-| Reading       | RSS feeds, newsletters, bookmarks, highlights and Hacker News.                                                                       |
+| Reading       | RSS feeds, newsletters, bookmarks and Hacker News.                                                                                   |
 
 These are personal sensors, not bundled connectors. The repository ships [reviewed starting points](https://github.com/fmind/brain-framework#bring-your-tools), and the `bf-setup` skill helps your agent connect a new source.
 

@@ -106,6 +106,22 @@ def test_write_rejects_invalid_arguments_and_input(brain: Store, tmp_path: Path)
     assert not leftovers(brain)
 
 
+def test_write_keeps_the_note_within_what_bf_reads(brain: Store) -> None:
+    # bf skips a note above 4 MiB, and every search then reports it among its problems: never write one.
+    original = (brain.root / NOTE).read_bytes()
+    digest = str(retrieve.read([brain], NOTE)["sha256"])
+    result = write(brain, digest, "x" * ((4 << 20) + 1))
+    assert (result.returncode, result.stdout) == (1, "")
+    assert "1 byte to 4194304 bytes" in result.stderr
+    assert (brain.root / NOTE).read_bytes() == original
+    largest = "# Large\n\n" + "x" * ((4 << 20) - 10) + "\n"
+    result = write(brain, digest, largest)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["sha256"] == retrieve.read([brain], NOTE)["sha256"]
+    assert (brain.root / NOTE).stat().st_size == 4 << 20
+    assert not leftovers(brain)
+
+
 def test_write_follows_no_symlink_in_the_brain(brain: Store, tmp_path: Path) -> None:
     # A linked folder could redirect the write outside the brain between the read and the rename.
     original = (brain.root / NOTE).read_bytes()

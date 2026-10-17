@@ -72,6 +72,8 @@ For scheduled window sensors, `refresh` controls the regular cadence and `overla
 
 GitHub history documents its scope and limits in [its guide](github-history.md#evidence-and-limits).
 
+The limits below also bound the time of each call to a provider or converter, while BF's [`timeout`](../../docs/docs/sensors.md#sensor-settings), 300 seconds by default and at most 3,600, bounds the whole run. When a large `ROOT`, many PDFs or a busy inbox fails with `program timed out after 300s`, narrow the folder or the window, or raise that sensor's `timeout`.
+
 ### Git history
 
 - Requires Git 2.37 or later, for `git log --since-as-filter`. With an older or missing `git` on PATH, the run fails before reading any repository: `Git 2.37 or later is required`.
@@ -82,18 +84,18 @@ GitHub history documents its scope and limits in [its guide](github-history.md#e
 - Skips folders it cannot read, or whose names are not UTF-8 or contain control characters, with a count on stderr. Window mode keeps records already saved.
 - Fails the run and names the repository when Git fails or times out there, such as a worktree whose repository moved, damaged objects, another owner's checkout or a stalled mount. Repair it or add `--skip RELATIVE_REPO`.
 - Links GitHub remotes as lowercase `repo:github.com/owner/name` and author emails as lowercase `person:email/` identities. Identities are case-sensitive: write note aliases the same way.
-- Limits: 200 repositories, 10,000 commits per window and 16 MiB of output.
+- Limits: 200 repositories, 10,000 commits per window and 16 MiB of output; 30 seconds per `git log` and 10 per remote lookup.
 
 ### Local documents
 
-- Supports text, Markdown, HTML, PDF (with `pdftotext`), Word, Excel and PowerPoint, without OCR. Unsupported, hidden and common dependency files stay outside the snapshot, as do the owner files (`~$name.docx`) Office writes beside an open document.
-- Refuses symlinks and special files, bounds Office archive expansion and converts PDFs in a private temporary directory.
+- Supports text (`.txt`, `.md`, `.rst`, `.org`, `.csv`, `.tsv`), HTML, PDF (with `pdftotext`), Word (`.docx`), Excel (`.xlsx`) and PowerPoint (`.pptx`), without OCR; other files, such as legacy `.doc`, `.xls` and `.ppt`, stay outside the snapshot. So do hidden files and folders, common dependency folders and the owner files (`~$name.docx`) Office writes beside an open document.
+- Fails the snapshot on any other symbolic link or special file, even one with an unsupported suffix, and names its root-relative path: exclude it with `--exclude`. Bounds Office archive expansion and converts PDFs in a private temporary directory.
 - `ROOT` and every parent folder must be real directories. When `{{home}}` or a parent such as `Documents` is a link, the run fails saying so: configure the path `realpath` prints.
 - Keeps at most 64 KiB of text per document and sets `attributes.partial` when it cuts the text.
 - Also sets `attributes.partial` for text that is not valid UTF-8, such as a legacy CSV kept with replacement characters, and for an Office XML part beyond 100,000 elements or 64 nesting levels: parsing stops at that bound and keeps the text read so far.
 - Skips names that are not UTF-8, contain control characters or exceed the record id limit, with a count on stderr.
 - Fails the snapshot on an unreadable or damaged document and names its root-relative path, so its saved record is not silently removed: fix or exclude it.
-- Limits: 10,000 entries, 20 folder levels, 16 MiB per file and 64 MiB in total.
+- Limits: 10,000 entries, 20 folder levels, 16 MiB per file and 64 MiB in total; 60 seconds per PDF conversion.
 
 ### Highlights
 
@@ -108,7 +110,7 @@ GitHub history documents its scope and limits in [its guide](github-history.md#e
 - Keeps cancellations, titled `Cancelled: SUMMARY`, so they overwrite records collected earlier.
 - An invitee entry means the person was listed, not that they attended. Participant emails become lowercase `person:email/` links.
 - Keeps at most BF's 1,000 links per event: organizer, source, attachment and agenda links first, then invitees in email order. A cut sets `attributes.participants_truncated`; `attributes.participants` keeps every address.
-- Limits: 10,000 events and 20 pages.
+- Limits: 10,000 events and 20 pages; 60 seconds per `gws` call.
 
 `--agenda-days N`, from 1 to 366, turns a run into an agenda of the events from two days before `END` through N days after it; `START` must still precede `END` but does not bound the agenda. Add it as a separate `mode: snapshot` source beside `google-calendar-events`:
 
@@ -128,15 +130,16 @@ Preview it with `bf collect google-calendar-agenda --dry-run`. Expected result: 
 - Lists every My Drive and shared-with-me folder (`corpora: user`); shared drives are excluded. It ignores the time-window arguments.
 - As a `mode: snapshot` source, it removes missing folders after a successful nonempty replacement.
 - A folder's `time` is its creation and `attributes.updated` its last modification.
-- Limits: 10,000 folders and 20 pages.
+- Limits: 10,000 folders and 20 pages; 120 seconds per `gws` call.
 
 ### Gmail headers
 
-- Saves each message's `From`, `To` and `Cc` addresses, subject, labels and receipt time, never its body or attachments: it requests Gmail's `metadata` format only. A subject can still hold private text; keep the brain private.
+- Saves each message's `From`, `To` and `Cc` addresses, subject, label ids (`INBOX`, `IMPORTANT`, or `Label_N` for your own labels) and receipt time, never its body or attachments: it requests Gmail's `metadata` format only. A subject can still hold private text; keep the brain private.
 - Selects messages received in `[START, END)`; `--query=SEARCH` adds a [Gmail search](https://support.google.com/mail/answer/7190), such as `--query=-category:promotions` or `--query=label:work`. Write it with `=` so a leading `-` stays its value.
+- Authorize gws with `gmail.readonly` and without `gmail.metadata`: the window is a Gmail search (`q`), which Gmail rejects for any token that holds the `gmail.metadata` scope, so every run would fail. The sensor still requests only the `metadata` format.
 - Links each address as a lowercase `person:email/` identity and every message of a conversation to `gmail-thread:THREAD`, so `bf read gmail-thread:THREAD` lists the thread. Its alias `mid:MESSAGE-ID` ([RFC 2392](https://www.rfc-editor.org/rfc/rfc2392)) lets another tool's record name the same message.
 - `url` opens the thread in the browser's default Gmail account.
-- Limits: 1,000 messages and 10 pages per window, one `gws` call per message: keep `refresh` short so windows stay small.
+- Limits: 1,000 messages and 10 pages per window, one `gws` call per message and 60 seconds per call: keep `refresh` short so windows stay small. A message's text names every address; its `links` and each of `from_refs`, `to_refs` and `cc_refs` keep at most 1,000, in address order.
 
 Preview it with `bf collect gmail --since 1d --dry-run`. Expected result: each sample's `text` starts with `Subject:`, then the `From:` and `To:` addresses, and its `links` hold `person:email/` and `gmail-thread:` identities.
 
@@ -175,6 +178,6 @@ Preview it with `bf collect gmail --since 1d --dry-run`. Expected result: each s
 
 ## Adapt a sensor
 
-Each script needs only Python 3.11 or later and calls its provider CLI, which owns the credentials, without a shell. It prints one JSON array in the [record format](../../docs/docs/schema.md#mapping-rules), keeping each record within BF's limits, or, when anything fails or a page is missing, exits nonzero with nothing on stdout and one content-free line on stderr, so BF keeps the saved records. Keep both behaviors when you adapt a script, and test them with fake provider output. `{{start}}` and `{{end}}` are timezone-aware bounds of a half-open window. A sensor never prints `fields`: BF computes them from your mappings, and `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/schema.md#record-revisions-and-provenance), such as Drive's `modifiedTime` mapped to `updated`.
+Each script needs only Python 3.11 or later and calls its provider CLI, which owns the credentials, without a shell and from `/`: `gws` loads a `.env` file from its working directory or any parent folder, so one in the brain or above it could change the account a sensor collects from. It prints one JSON array in the [record format](../../docs/docs/schema.md#mapping-rules), keeping each record within BF's limits, or, when anything fails or a page is missing, exits nonzero with nothing on stdout and one content-free line on stderr, so BF keeps the saved records. Keep these behaviors when you adapt a script, and test them with fake provider output. `{{start}}` and `{{end}}` are timezone-aware bounds of a half-open window. A sensor never prints `fields`: BF computes them from your mappings, and `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/schema.md#record-revisions-and-provenance), such as Drive's `modifiedTime` mapped to `updated`.
 
-For typed relations, map Git's `/attributes/author_refs` and `/attributes/repository_refs`, or Calendar's `/attributes/organizer_refs`, `/attributes/attendee_refs` and `/attributes/participant_refs`. Declare each target field with `type: identity`, `cardinality: many` and `relation: true`; see the [field mappings](../../docs/docs/schema.md#shared-fields-and-sensor-mappings).
+For typed relations, map Git's `/attributes/author_refs` and `/attributes/repository_refs`, Calendar's `/attributes/organizer_refs`, `/attributes/attendee_refs` and `/attributes/participant_refs`, or Gmail's `/attributes/from_refs`, `/attributes/to_refs` and `/attributes/cc_refs`. Declare each target field with `type: identity`, `cardinality: many` and `relation: true`; see the [field mappings](../../docs/docs/schema.md#shared-fields-and-sensor-mappings).

@@ -29,7 +29,7 @@ A brain is a folder of plain files: `projects/` and `concepts/` hold authored no
 1. **Qualify** before concluding.
    - Exit 2 names the invalid argument: fix it.
    - `problems` (skipped files) and `stale` (a busy cache) make a result incomplete: retry. An incomplete or empty result never proves absence.
-   - A source `overdue`, `never` collected or `failed` may lack evidence; collecting it needs `bf-maintain` and the user's authority.
+   - A source `overdue`, `never` collected, `failed` or `silent` may lack evidence; collecting it needs `bf-maintain` and the user's authority.
 1. **Answer** with the conclusion, its refs and the remaining uncertainty; distinguish what the brain records from what is true now.
 
 For the fictional [first decision](https://fmind.github.io/brain-framework/docs/getting-started/):

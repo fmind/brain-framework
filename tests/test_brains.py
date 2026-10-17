@@ -408,6 +408,22 @@ def test_absent_registered_brains_make_answers_incomplete(tmp_path: Path, monkey
         select()
 
 
+def test_a_registered_folder_that_lost_bf_yaml_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    kept, emptied = make(tmp_path / "kept", "kept"), make(tmp_path / "emptied", "emptied")
+    for store in (kept, emptied):
+        register(store)
+    # A move can leave the folder behind, as an unmounted share leaves its mount point: it once read as inaccessible.
+    emptied.delete("bf.yaml")
+    monkeypatch.chdir(tmp_path)
+    missing = {"brain": "emptied", "error": "bf.yaml is missing; restore it, or select the brain's root directory"}
+    found = cast(dict, search(select(), Query(text="durable")))
+    assert {item["brain"] for item in found["items"]} == {"kept"}
+    assert found["problems"] == [missing]
+    result = CliRunner().invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert {**missing, "path": str(emptied.root)} in json.loads(result.stdout)["brains"]
+
+
 def test_a_newer_referenced_format_is_named(tmp_path: Path) -> None:
     first = make(tmp_path / "first", "first", {"team": "../team"})
     team = make(tmp_path / "team", "team")

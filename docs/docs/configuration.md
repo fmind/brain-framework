@@ -12,7 +12,7 @@ cd ~/brain
 bf read projects/new-website.md#decision
 ```
 
-Each brain's `bf.yaml` holds its format `version`, its `name` and optional `brains`, [`fields`](schema.md#shared-fields-and-sensor-mappings), [`sensors`](sensors.md#sensor-settings), [`routines`](routines.md#routine-settings), [`assistants`](prompts.md#assistant-settings), [`channels`](channels.md) and [`watch`](schedule.md#watch-preferences) sections. Unknown keys, duplicate keys and invalid values fail with the file and field named. An optional section left empty, such as `sensors:` with every entry commented out, holds nothing, and an empty `watch:` keeps its defaults. The [JSON Schema](../bf.schema.json) describes the format; see [editor schemas](schema.md#editor-schemas).
+Each brain's `bf.yaml` holds its format `version`, its `name` and optional `brains`, [`fields`](schema.md#shared-fields-and-sensor-mappings), [`sensors`](sensors.md#sensor-settings), [`routines`](routines.md#routine-settings), [`assistants`](prompts.md#assistant-settings), [`channels`](channels.md) and [`watch`](schedule.md#watch-preferences) sections. Unknown keys and invalid values fail naming the file and field; duplicate keys and YAML syntax errors name the file, line and column. An optional section left empty, such as `sensors:` with every entry commented out, holds nothing, and an empty `watch:` keeps its defaults. The [JSON Schema](../bf.schema.json) describes the format; see [editor schemas](schema.md#editor-schemas).
 
 | File                       | Purpose                                             | Needed when…                                     |
 | -------------------------- | --------------------------------------------------- | ------------------------------------------------ |
@@ -37,7 +37,7 @@ Retrieval also includes each selected brain's direct `brains:` references: `sear
 - **A selected brain** is a folder holding `bf.yaml`. Selecting a subfolder such as `projects/`, or a parent, fails before anything runs, naming the selection as given: `PATH has no bf.yaml; pass the brain's root directory, or create a brain with bf init`, or `registered brain NAME has no bf.yaml`.
 - **An empty `--brain`** is invalid input (exit 2), never a request for the default; omit the option instead. An empty `BF_BRAIN` counts as unset.
 - **The enclosing brain** counts only when you own its folder and its `bf.yaml` is a regular file, as Git requires. Otherwise commands fail naming it from the working directory, such as `../bf.yaml is not a regular file owned by you`.
-- **Absent registered brains** are reported under `problems` by search and read, and fail `bf status --check`. Selecting one by name fails: restore it, run `bf register` at its new place, or remove its entry. A registered folder that exists but cannot be reached, such as a locked folder, is reported the same way as `registered brain directory exists but cannot be reached; restore access to it`.
+- **Absent registered brains** are reported under `problems` by search and read, and fail `bf status --check`. Selecting one by name fails: restore it, run `bf register` at its new place, or remove its entry. A registered folder that exists but cannot be reached, such as a locked folder, is reported the same way as `registered brain directory exists but cannot be reached; restore access to it`, and one that no longer holds a `bf.yaml`, as a move can leave it, as `bf.yaml is missing`.
 
 For example, this selects the team brain from anywhere, even inside `~/brain`:
 
@@ -87,9 +87,9 @@ brains:
     path: /home/me/team-brain
 ```
 
-Paths are absolute or start with `~`. Writes are atomic, owner-only and keep leading comments. The registry must be a regular file of at most 1 MiB; a dotfiles manager should link its parent folder, not the file. `bf schema --kind registry` prints its JSON Schema.
+Paths are absolute or start with `~`; `bf register` keeps an entry that already names the brain's folder as written. Writes are atomic, owner-only and keep leading comments. The registry must be a regular file of at most 1 MiB; a dotfiles manager should link its parent folder, not the file. `bf schema --kind registry` prints its JSON Schema.
 
-Names are unique. After moving a brain, run `bf register` at its new place: it takes over the name when the registered path no longer exists, as after a move or while a network share is not mounted, or reaches the same brain through another path. The reply names the old path:
+Names are unique. After moving a brain, run `bf register` at its new place: it takes over the name when the registered path no longer exists or no longer holds a `bf.yaml`, as after a move or while a network share is not mounted, or reaches the same brain through another path. The reply names the old path:
 
 ```json
 {
@@ -106,7 +106,7 @@ Registration never runs a brain's programs. Before running a cloned brain's sens
 
 ## Local state
 
-Run history, locks and usage counts stay on this machine, in the `bf/` folder of the state folder: `XDG_STATE_HOME`, by default `~/.local/state`. Writers also lock the brain folder itself, so processes with different state folders, or accounts sharing a brain, never write at once; a network filesystem that cannot lock a folder, such as NFS, relies on the state lock alone, so keep one `XDG_STATE_HOME` for every process there. `XDG_CONFIG_HOME` (default `~/.config`) holds the registry. Empty and relative values are ignored. Program logs live in the brain's own `logs/` folder instead, ignored by Git.
+Run history, locks and usage counts stay on this machine, in the `bf/` folder of the state folder: `XDG_STATE_HOME`, by default `~/.local/state`. Writers also lock the brain folder itself, so processes with different state folders never write at once; a network filesystem that cannot lock a folder, such as NFS, relies on the state lock alone, so keep one `XDG_STATE_HOME` for every process there. BF creates files and folders only your account can read (modes 600 and 700), so one brain folder cannot serve several accounts: give each person a Git clone, as in [Team setup](team.md). `XDG_CONFIG_HOME` (default `~/.config`) holds the registry. Empty and relative values are ignored. Program logs live in the brain's own `logs/` folder instead, ignored by Git.
 
 The state folder must be outside the brain. BF creates `bf/` with mode 700 and fails when another account owns it; set `XDG_STATE_HOME` to a writable folder if needed. The state folder, its `bf/` folder and everything below must be real folders: a symbolic link there makes every command fail with `state directory may not contain symlinks`. Links above them, such as `/home` pointing to `/var/home`, are fine.
 

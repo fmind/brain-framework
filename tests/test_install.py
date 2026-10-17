@@ -51,7 +51,8 @@ def test_skills_install_update_and_never_replace_edits(tmp_path: Path) -> None:
     assert statuses(run(str(destination), "--check", code=1))["bf-setup"] == "outdated"
     assert statuses(run(str(destination)))["bf-setup"] == "updated"
     assert not (destination / "bf-setup/retired.md").exists()
-    # Even --force keeps an edited file the new version dropped, as it keeps every file BF does not ship.
+    # Even --force keeps an edited file the new version dropped, as it keeps every file BF does not ship, and still
+    # lists it under `edited`.
     recorded = json.loads(manifest.read_text())
     (destination / "bf-setup/retired.md").write_text("old, then edited\n")
     recorded["files"]["retired.md"] = hashlib.sha256(b"old\n").hexdigest()
@@ -61,22 +62,28 @@ def test_skills_install_update_and_never_replace_edits(tmp_path: Path) -> None:
         "status": "modified",
         "edited": ["retired.md"],
     }
-    assert statuses(run(str(destination), "--force"))["bf-setup"] == "updated"
+    assert run(str(destination), "--force")["skills"][SKILLS.index("bf-setup")] == {
+        "name": "bf-setup",
+        "status": "updated",
+        "edited": ["retired.md"],
+    }
     assert (destination / "bf-setup/retired.md").read_text() == "old, then edited\n"
     (destination / "bf-setup/retired.md").unlink()
-    # A person's edit is kept and reported; --force replaces it.
+    # A person's edit is kept and reported; --force replaces it and still lists it.
     skill = destination / "bf-use/SKILL.md"
     skill.write_text(skill.read_text() + "\nLocal rule.\n")
     edited = run(str(destination), code=1)
     assert edited["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["SKILL.md"]}
     assert skill.read_text().endswith("Local rule.\n")
-    assert statuses(run(str(destination), "--force"))["bf-use"] == "updated"
+    forced = run(str(destination), "--force")
+    assert forced["skills"][0] == {"name": "bf-use", "status": "updated", "edited": ["SKILL.md"]}
     assert not skill.read_text().endswith("Local rule.\n")
     # A deleted file leaves the skill incomplete: it is reported like an edit, and --force restores it.
     (destination / "bf-use/scripts/evidence.py").unlink()
     deleted = run(str(destination), "--check", code=1)
     assert deleted["skills"][0] == {"name": "bf-use", "status": "modified", "edited": ["scripts/evidence.py"]}
-    assert statuses(run(str(destination), "--force"))["bf-use"] == "updated"
+    restored = run(str(destination), "--force")
+    assert restored["skills"][0] == {"name": "bf-use", "status": "updated", "edited": ["scripts/evidence.py"]}
     assert (destination / "bf-use/scripts/evidence.py").is_file()
     # A file a person added where a newer version ships one is kept; the unchanged copy updates silently.
     manifest = destination / "bf-use" / MANIFEST

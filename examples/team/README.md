@@ -36,7 +36,7 @@ From the framework checkout after `uv sync --locked`, run this subshell. It isol
     git switch --quiet --create "$person" main
     printf '[{"id": "%s", "title": "Independent evidence from %s"}]\n' "$person" "$person" > inputs/issues.json
     bf collect issues
-    session="actions/2026-09-27_review-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    session="actions/2026-09-27_review-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
     mkdir "$session"
     printf -- '---\ntype: action\nstatus: draft\n---\n\n# Review\n\n%s reviews the evidence.\n' "$person" > "$session/ACTION.md"
     git add --all
@@ -60,4 +60,4 @@ From the framework checkout after `uv sync --locked`, run this subshell. It isol
 
 Each collection reports `"records":1`. After the independent merge, validation returns `{"notes":4,"problems":[],"records":3,"valid":true}`: the `shared`, `alice` and `bob` records, the two starter concepts and both action sessions. The same-record merge prints `CONFLICT (content): Merge conflict in memories/issues/SHA256.json`, where `SHA256` is the digest of the `shared` id. Validation then returns `"valid":false` with the problem `{"error":"invalid JSON document","file":"memories/issues/SHA256.json"}` and exits 1.
 
-Each record has one stable source/ID-derived JSON filename, so different ids never collide. Each session here gets its own `actions/YYYY-MM-DD_topic-SUFFIX/ACTION.md` folder, with a random suffix, so independent sessions on the same topic and day never share one. Only competing revisions require judgment: preserve both sides, reconcile them from evidence, then validate. See the [team guide](../../docs/docs/team.md) and the [resolution procedure](../../src/bf/skills/bf-maintain/references/conflicts.md).
+Each record has one stable source/ID-derived JSON filename, so different ids never collide. Each session here gets its own `actions/YYYY-MM-DD_topic-SUFFIX/ACTION.md` folder, with a 12-character random suffix, the shape the `bf-action` new-action helper's `--unique` creates, so independent sessions on the same topic and day never share one. Only competing revisions require judgment: preserve both sides, reconcile them from evidence, then validate. See the [team guide](../../docs/docs/team.md) and the [resolution procedure](../../src/bf/skills/bf-maintain/references/conflicts.md).

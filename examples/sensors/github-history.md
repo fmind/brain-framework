@@ -29,7 +29,7 @@ sensors:
     reconcile: { refresh: 86400, lookback: 604800 }
 ```
 
-Each source belongs to one repository. Use distinct sensor names for additional repositories. The branch defaults to literal `main`, including commits reachable through merged branches; it is not a first-parent-only log. Append `--branch, master` to the commit command for a repository whose selected branch is `master`. A missing branch fails visibly rather than falling back to another branch.
+Each source belongs to one repository, which its records link as lowercase `repo:github.com/OWNER/REPO`: identities are case-sensitive, so name it that way in a project's `aliases`. Use distinct sensor names for additional repositories. The branch defaults to literal `main`, including commits reachable through merged branches; it is not a first-parent-only log. Append `--branch, master` to the commit command for a repository whose selected branch is `master`. A missing branch fails visibly rather than falling back to another branch.
 
 ## Backfill, then refresh
 
@@ -86,4 +86,4 @@ From the framework checkout:
 uv run --locked pytest -q tests/test_adapters_github.py tests/test_adapters_limits.py
 ```
 
-Expected result: passing tests with fake GitHub responses, including an old closed issue updated today, merged and closed PRs, an issue modified during collection that hides no other, branch selection, pagination and a failed second page that leaves saved evidence unchanged. These are fictional fixtures, not live account or completeness proof.
+Expected result: passing tests with fake GitHub responses, including an old closed issue updated within the window, merged and closed PRs, an issue modified during collection that hides no other, branch selection, pagination and a failed second page that leaves saved evidence unchanged. These are fictional fixtures, not live account or completeness proof.

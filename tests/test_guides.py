@@ -12,31 +12,16 @@ from pathlib import Path
 
 import yaml
 
+from conftest import BLOCK, FRAGMENT, anywhere
+
 ROOT = Path(__file__).parents[1]
 DOCS = ROOT / "docs" / "docs"
-BLOCK = re.compile(r"^```(\w*)\n(.*?)^```$", re.MULTILINE | re.DOTALL)
 SAVE = re.compile(r"(?:Save|Create) `([^`]+)`")
 ABSENT = re.compile(r"has no `([^`]+):` key")
 REPLACE = re.compile(r"replace the `([^`]+)` entry under `([^`]+):`")
 POINT = re.compile(r"In `([^`]+)`, point the (\w+) line")
-FRAGMENT = re.compile(r'`("[a-z_]+":[^`]+)`')  # An inline reply fragment such as `"score":"3/3"`.
 INSTALL = "uv tool install --python 3.14 brain-framework"
 REPOSITORY = "https://raw.githubusercontent.com/fmind/brain-framework/"
-
-
-def _within(actual: object, expected: object) -> bool:
-    """Whether every documented key and value is present; documented lists and scalars match exactly."""
-    if isinstance(expected, dict):
-        return isinstance(actual, dict) and all(k in actual and _within(actual[k], v) for k, v in expected.items())
-    return actual == expected
-
-
-def _anywhere(actual: object, expected: object) -> bool:
-    """Whether the documented object matches the reply or one object nested in it, such as a search item."""
-    if _within(actual, expected):
-        return True
-    children = actual.values() if isinstance(actual, dict) else actual if isinstance(actual, list) else []
-    return any(_anywhere(child, expected) for child in children)
 
 
 def _merge(config: Path, fragment: str, prose: str) -> None:
@@ -81,7 +66,7 @@ def _follow(text: str, home: Path, env: dict[str, str], release: str) -> None:
         for index, (language, body, start, _) in enumerate(blocks[1:], 1):
             before = segment[blocks[index - 1][3] : start]
             if language == "json":
-                assert any(_anywhere(reply, json.loads(body)) for reply in replies), f"{commands} did not return {body}"
+                assert any(anywhere(reply, json.loads(body)) for reply in replies), f"{commands} did not return {body}"
             elif language == "yaml":
                 _merge(brain / "bf.yaml", body, before)
             elif saved := SAVE.findall(before):

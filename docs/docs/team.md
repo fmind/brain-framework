@@ -55,7 +55,7 @@ bf validate
 bf eval
 ```
 
-Use `git pull` to receive changes; BF refreshes its search cache on its own. Review reminders follow each file's modification time on your machine, so a pull that rewrites a note restarts them: set `stale_after` for a deadline the team shares. To search the team brain from anywhere, register it with `bf register ~/team-brain`, then pass `--brain team-brain`. Registration and reading never run the brain's programs. Review `bf.yaml`, `sensors/`, `routines/` and any [runtime pin](upgrades.md#pin-a-brains-runtime) before running them inside the clone, as with `bf update --brain ~/team-brain`.
+Use `git pull` to receive changes; BF refreshes its search cache on its own. Review reminders follow each file's modification time on your machine, so a pull that rewrites a note restarts them: set `stale_after` for a deadline the team shares. To search the team brain from anywhere, register it with `bf register ~/team-brain`, then pass `--brain team-brain`. Registration and reading never run the brain's programs. Review `bf.yaml`, `sensors/`, `routines/`, `prompts/` and any [runtime pin](upgrades.md#pin-a-brains-runtime) before running them inside the clone, as with `bf update --brain ~/team-brain`: unlike sensors and routines, an enabled prompt is scheduled by default, every 30 minutes, so that update runs its harness command. The harness starts in the clone and loads its agent configuration, so review `.claude/`, `.mcp.json` and changes to `AGENTS.md` or `CLAUDE.md` too. Register agent host hooks, such as `hooks/`, only from a reviewed copy outside the clone: the host runs them at every session, so a pulled change would run unreviewed.
 
 ## Collect on a laptop
 
@@ -82,7 +82,7 @@ git add .gitignore memories/github-issues
 git diff --cached
 ```
 
-Commit after review. Git history keeps committed evidence. A sleeping laptop does not collect, so set freshness expectations accordingly. `bf status` reports this machine's run history: a teammate's clone shows `never` for sources it did not collect, while holding their records.
+Commit after review. Git history keeps committed evidence. A sleeping laptop does not collect, so set freshness expectations accordingly. `bf status` reports this machine's run history: on a teammate's clone, a scheduled source it did not collect shows `never` under `attention`, so `bf status --check` fails there, while a manual one shows `manual`; the records are still shared. Check health on the collecting laptop.
 
 ## Contribute without overwriting each other
 

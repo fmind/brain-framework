@@ -83,6 +83,23 @@ def test_routine_help_never_runs_a_routine(
     assert marker.exists()
 
 
+def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only the program name must be text: refusing other bytes, such as a hook's Git arguments, could block a push.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    (tmp_path / "brain").mkdir()
+    store = Store(tmp_path / "brain")
+    received = tmp_path / "received"
+    store.write("bf.yaml", b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [routines/review.sh]\n")
+    store.write("routines/review.sh", f"#!/bin/sh\nprintf %s \"$1\" > '{received}'\n".encode())
+    (store.root / "routines/review.sh").chmod(0o700)
+    # Python passes an undecodable argument byte, such as a Latin-1 é, as a lone surrogate.
+    result = CliRunner().invoke(app, ["run", "review", "caf\udce9", "--brain", str(store.root)])
+    assert result.exit_code == 0, result.output
+    assert received.read_bytes() == b"caf\xe9"
+
+
 @pytest.mark.parametrize(
     ("arguments", "option"),
     [
@@ -123,11 +140,15 @@ def test_routine_help_never_runs_a_routine(
         (["run", ""], "PROGRAM"),
         (["update", "--sensor", "calendar", "--sensor", ""], "--sensor"),
         (["schedule", "--routine", " "], "--routine"),
+        # Checked before a brain is selected, and quoted like Click's choices: an empty kind used to read as a blank.
+        (["update", "--kind", ""], "--kind: '' is not one of 'sensor', 'routine', 'assistant'"),
         # A suite path is relative to the brain, never the working directory: it keeps its own reason.
         (["eval", "--path", ""], "--path: expected a normalized brain-relative path"),
         # Python passes undecodable argument bytes, such as a Latin-1 é, as lone surrogates. Before 18 the read
         # failed binding them into the cache and blamed a brain file; the same bytes as a QUERY were invalid input.
         (["read", "caf\udce9"], "REF: expected UTF-8 text"),
+        # Run's variadic arguments used to skip that check: the name failed later as an unknown routine, exit 1.
+        (["run", "caf\udce9"], "PROGRAM: expected UTF-8 text"),
     ],
 )
 def test_invalid_options_name_the_option_without_a_selected_brain(

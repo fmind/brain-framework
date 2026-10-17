@@ -11,7 +11,7 @@ import tempfile
 import termios
 import time
 import tty
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -71,7 +71,7 @@ class Row:
     log: str = ""
     action: str = ""
     records: int | None = None
-    # A prompt's successful runs and the record its latest run wrote.
+    # An assistant's successful runs and the record its latest run wrote.
     runs: int | None = None
     record: str = ""
 
@@ -190,6 +190,14 @@ def duration(seconds: float) -> str:
     return f"{seconds // 86400}d"
 
 
+def period(seconds: int) -> str:
+    """A configured period in its largest exact unit: unlike an age, 90 seconds is 90s, never 1m."""
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size and not seconds % size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
 class Sort(StrEnum):
     NAME = "name"
     UPDATED = "last OK"
@@ -269,10 +277,10 @@ class Dashboard:
     attention: bool = False
     help: bool = False
     running: bool = False
-    # A prompt cycle runs in its own process beside the collection cycle.
+    # Assistant work runs in the watcher's dispatcher beside the collection cycle.
     assisting: bool = False
     message: str = "Ready"
-    # Why the check interval runs a selected program late, shown in the summary and the guide.
+    # Why the check interval runs a selected program late, shown in the header and the guide.
     late: str = ""
     next_check: float = 0
     preferences: WatchSettings = field(default_factory=WatchSettings)
@@ -355,7 +363,7 @@ class Dashboard:
             ]
         else:
             mode = [
-                f"Check: {duration(self.preferences.interval)} · history: {poll} · alerts: "
+                f"Check: {period(self.preferences.interval)} · history: {poll} · alerts: "
                 + self.preferences.notifications,
                 *([self.late + "."] if self.late else []),
                 "Configure watch in bf.yaml; restart to apply.",
@@ -364,17 +372,17 @@ class Dashboard:
                 "Selection, refresh and backoff apply; assistants run beside collection.",
                 "Space pauses future checks; q cancels an active update.",
             ]
+        # The footer stays visible below the guide and lists every key. At 80 by 24 these lines fill the panel, so the
+        # freshness boundary precedes the mode lines, whose late warning can wrap onto a third line.
         lines = [
             "s cycles: " + ", ".join(Sort) + ".",
-            "n name · t last OK · i items · r reverse · g/G first/last",
-            "j/k or arrows select · Tab attention · ? close guide · q quit",
             "Newest/largest first; name, state, due, refresh and kind ascend.",
             "Unknown values stay last; ties use name. Sorting is session-only.",
             "Items: records the last committed collection returned, not total stored.",
             "+ added / ~ updated / - removed; changes = sum. * routine, @ assistant",
             "Failed runs keep prior counts. — means unknown or not applicable.",
-            *mode,
             "Fresh is local success, not proof the provider is unchanged.",
+            *mode,
         ]
         return Text("\n".join(lines))
 
@@ -398,17 +406,20 @@ class Dashboard:
             detail.append(f"Runs: {row.runs:,}\n")
         if row.record and not row.error:
             detail.append("Latest record: " + clean(row.record) + "\n")
-        detail.append(f"Refresh: {duration(row.refresh) if row.refresh else 'manual only'}\n")
+        detail.append(f"Refresh: {period(row.refresh) if row.refresh else 'manual only'}\n")
         detail.append("Last OK: " + (local(row.success) if row.success else "never") + "\n")
         detail.append("Last run items: " + ("—" if row.records is None else f"{row.records:,}") + "\n")
         if row.elapsed_seconds is not None and row.output_bytes is not None:
             detail.append(f"Last run: {row.elapsed_seconds:.2f}s · {row.output_bytes:,} bytes\n")
             if row.reconcile:
                 detail.append("Wider reconciliation window\n", style="cyan")
-        if row.kind == "assistant" and not row.error:
+        # An observer suggests no executing command, and neither bf collect nor bf run runs a disabled program.
+        if row.kind == "assistant" and not (self.observe or row.error) and row.status is not State.DISABLED:
             detail.append("Inputs, named schedules and triggers queue work. Use bf run NAME to ask now.")
-        elif not row.error and not row.action:
-            detail.append("Only due programs run. Use bf collect for an intentional manual collection.")
+        elif not (self.observe or row.error or row.action) and row.status is not State.DISABLED:
+            # bf collect runs only sensors and bf run routines.
+            command = "bf collect" if row.kind == "sensor" else "bf run"
+            detail.append(f"Only due programs run here; {command} {row.name} runs it now.")
         detail.rstrip()
         return detail
 
@@ -416,7 +427,17 @@ class Dashboard:
         """Responsive table, selected-program details, and always-visible operating boundaries."""
         now = now or datetime.now(UTC)
         mode = "OBSERVE · no execution" if self.observe else "PAUSED" if self.paused else "WATCH · collection enabled"
-        working = "Updating…" if self.running else f"Next check in {duration(self.next_check - time.monotonic())}"
+        if self.late:
+            # The header keeps the hint whole at 80 columns, where the summary's counts and countdown fill the line.
+            mode += " · interval too slow, press ?"
+        # A paused watcher starts no check, so a countdown would claim one that waits for Space.
+        working = (
+            "Updating…"
+            if self.running
+            else "Checks paused"
+            if self.paused
+            else f"Next check in {duration(self.next_check - time.monotonic())}"
+        )
         if self.assisting:
             working += " · assistant running"
         header = Text.assemble(
@@ -426,12 +447,12 @@ class Dashboard:
             no_wrap=True,
             overflow="ellipsis",
         )
+        count, needing = len(self.rows), sum(row.status in ATTENTION for row in self.rows)
         summary = Text(
-            f"{len(self.rows)} programs   "
+            f"{count} program{'' if count == 1 else 's'}   "
             + ("" if self.observe else f"{sum(row.included for row in self.rows)} selected   ")
-            + f"{sum(row.status in ATTENTION for row in self.rows)} need attention   "
-            + ("Reading local history" if self.observe else working)
-            + ("   Interval too slow; press ?" if self.late else ""),
+            + f"{needing} need{'s' if needing == 1 else ''} attention   "
+            + ("Reading local history" if self.observe else working),
             style="dim",
             no_wrap=True,
             overflow="ellipsis",
@@ -473,7 +494,8 @@ class Dashboard:
                 Text("—" if due is None else "now" if due <= now else duration((due - now).total_seconds())),
                 Text("—" if row.records is None else str(row.records)),
                 Text("/".join("—" if value is None else str(value) for value in (row.added, row.updated, row.removed))),
-                style="on #183040" if index == self.cursor else "",
+                # A light theme's dark default text would be unreadable on this background.
+                style="white on #183040" if index == self.cursor else "",
             )
         if not visible:
             table.add_row("No matching programs", "", "", "", "", "")
@@ -487,7 +509,12 @@ class Dashboard:
         elif visible:
             detail = self.details(visible[self.cursor])
         else:
-            detail = Text("Add a reviewed sensor, routine or assistant in bf.yaml. Press ? for controls and timing.")
+            # An attention filter that hides every program is the healthy case, not a brain without programs.
+            detail = Text(
+                "Nothing needs attention; press Tab to show every program."
+                if self.attention and self.rows
+                else "Add a reviewed sensor, routine or assistant in bf.yaml. Press ? for controls and timing."
+            )
         keys = (
             "s sort  r reverse  n name  t last OK  i items  ? help  q quit\nj/k ↑/↓ select  g/G first/last  Tab attention  "
             + ("u reread" if self.observe else "f refresh  Space pause")
@@ -597,27 +624,36 @@ class Job:
             self.stopping = True
             self.process.terminate()
 
-    def close(self) -> None:
+    def close(self, deadline: float | None = None, *, announce: bool = True) -> bool:
+        """Stop a running update by `deadline`, STOP seconds from now by default; True when it took over a second.
+
+        Without `announce`, a slow stop says nothing: updates stopping together explain the wait once.
+        """
+        slow = False
         if self.process is not None and self.process.poll() is None:
             self.terminate()
+            end = time.monotonic() + STOP if deadline is None else deadline
             try:
                 try:
-                    self.process.wait(timeout=1)
+                    self.process.wait(timeout=max(0, min(1, end - time.monotonic())))
                 except subprocess.TimeoutExpired:
+                    slow = True
                     # The dashboard is gone: say why the terminal waits instead of seeming to hang. A closed
                     # terminal must not skip the wait and kill below, which would leave the update unsupervised.
-                    with suppress(OSError, ValueError):
-                        sys.stderr.write(f"bf: stopping the active update; this can take up to {STOP} seconds\n")
-                        sys.stderr.flush()
-                    self.process.wait(timeout=STOP - 1)
+                    if announce:
+                        with suppress(OSError, ValueError):
+                            sys.stderr.write(f"bf: stopping the active update; this can take up to {STOP} seconds\n")
+                            sys.stderr.flush()
+                    self.process.wait(timeout=max(0, end - time.monotonic()))
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
         self.discard()
+        return slow
 
 
 @contextmanager
-def keyboard(stream: TextIO) -> Iterator[int]:
+def keyboard(stream: TextIO) -> Generator[int]:
     descriptor = stream.fileno()
     previous = termios.tcgetattr(descriptor)
     try:
@@ -669,13 +705,6 @@ def watch(
     dashboard = Dashboard(
         load(store).name, observe=observe, rows=snapshot(store, sensors, routines, assistants), preferences=preferences
     )
-    if not observe and (
-        reason := late(load(store), preferences.interval, sensors, routines, assistants, include_assistants=False)
-    ):
-        # Due programs run only at checks: a slower check runs them late, so status reports them overdue.
-        dashboard.late = f"{reason}; lower the watch interval"
-        if json_output:
-            sys.stderr.write(f"bf: {printable(dashboard.late)}\n")
     selected = (sensors, routines, assistants)
     job = Job(store, *selected, kinds=frozenset({"sensor", "routine"}))
     with ExitStack() as stack:
@@ -687,12 +716,21 @@ def watch(
                     raise Error("another watcher owns this brain; open bf watch in a terminal to observe it") from None
                 dashboard.observe = True
                 dashboard.message = "Observing an active watcher; its selection and settings control collection"
-        stack.callback(job.close)
+        # Due programs run only at checks: a slower check runs them late, so status reports them overdue. Only the
+        # collecting watcher's interval matters.
+        if not dashboard.observe and (
+            reason := late(load(store), preferences.interval, sensors, routines, assistants, include_assistants=False)
+        ):
+            dashboard.late = f"{reason}; lower the watch interval"
+            if json_output:
+                sys.stderr.write(f"bf: {printable(dashboard.late)}\n")
+        stack.callback(_stop, job)
         dispatcher = (
             stack.enter_context(Dispatcher(store, selection(load(store), *selected)[2]))
             if not dashboard.observe and selection(load(store), *selected)[2]
             else None
         )
+        # Signal the update first, so it stops while the dispatcher stops its streams and workers.
         stack.callback(job.terminate)
         if json_output:
             _loop(store, dashboard, job, *selected, dispatcher=dispatcher)
@@ -708,11 +746,27 @@ def watch(
 
 
 def _stop(*jobs: Job) -> None:
-    """Signal every running update first, then wait for each: they stop together within one STOP bound."""
-    for job in jobs:
-        job.terminate()
-    for job in jobs:
-        job.close()
+    """Signal every running update first, then wait for each: they stop together within one STOP bound.
+
+    A cancellation arriving meanwhile, such as a second Ctrl-C or the hangup of a closing terminal, is raised once
+    every update stopped or was killed.
+    """
+    with starting():
+        for job in jobs:
+            job.terminate()
+        deadline, announced = time.monotonic() + STOP, False
+        for job in jobs:
+            announced = job.close(deadline, announce=not announced) or announced
+
+
+def _finished(job: Job, code: int, done: str, failed: str) -> tuple[str, int]:
+    """A finished cycle's message and exit code, 0 when only the search cache failed: its programs all ran."""
+    skipped = job.skipped() if code else 0
+    job.discard()
+    if skipped:
+        # Programs ran; the search cache skipped files, which bf validate names. No program failed.
+        return f"Search cache skipped {skipped} file{'' if skipped == 1 else 's'}; run bf validate", 0
+    return failed if code else done, code
 
 
 def _loop(
@@ -741,18 +795,12 @@ def _loop(
             dashboard.assisting = bool({"reactive", "proactive"} & dispatcher.tasks.keys())
         if dashboard.running and (code := job.poll()) is not None:
             dashboard.running = False
-            skipped = job.skipped() if code else 0
-            job.discard()
-            dashboard.message = (
-                "Update complete"
-                if code == 0
-                # Programs ran; the search cache skipped files, which bf validate names. No collection failed.
-                else f"Search cache skipped {skipped} files; run bf validate"
-                if skipped
-                else "Update failed; inspect program details or run bf update for diagnostics"
+            dashboard.message, code = _finished(
+                job, code, "Update complete", "Update failed; inspect program details or run bf update for diagnostics"
             )
+            # A failure not reported yet stays a failure.
+            completed = completed or code
             dashboard.next_check = now + preferences.interval
-            completed = 0 if skipped else code
             next_read = 0
         if now >= next_read:
             try:
@@ -802,7 +850,16 @@ def _loop(
                 and not dashboard.running
                 and (refresh_requested or now >= dashboard.next_check)
             ):
-                previous = {(row.kind, row.name): row.success for row in dashboard.rows}
+                # A collection start resets only its own rows: an assistant success recorded while its work still
+                # finishes counts at the next completion. A row not seen yet, such as an assistant with no due work,
+                # starts from its current success.
+                previous.update(
+                    {
+                        (row.kind, row.name): row.success
+                        for row in dashboard.rows
+                        if row.kind != "assistant" or (row.kind, row.name) not in previous
+                    }
+                )
                 job.start()
                 refresh_requested = False
                 dashboard.running = True

@@ -20,9 +20,9 @@ MAX_PAGES = 10
 MAX_BYTES = 16 << 20
 # One message's metadata: its headers are bounded by Gmail, far below this.
 MAX_MESSAGE_BYTES = 1 << 20
-# BF record bounds: an id fits a BF address once percent-encoded; links and URLs are bounded single lines.
-MAX_ID, MAX_ENCODED, MAX_REF, MAX_TITLE = 4096, 7988, 8192, 4096
-# A record holds at most 1,000 links.
+# BF record bounds: links, aliases and titles are bounded single lines.
+MAX_REF, MAX_TITLE = 8192, 4096
+# A record holds at most 1,000 links, and a mapped `many` field at most 1,000 values.
 MAX_LINKS = 1000
 # C0 and C1 control characters, which BF rejects in ids, titles, URLs and identities.
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -35,8 +35,10 @@ class InvalidError(ValueError):
 
 def run(argv: list[str], limit: int, timeout: int) -> bytes:
     """Bound provider output while it runs; inherit Brain Framework's cancellable process group."""
-    # Only literal provider commands reach this helper; no shell interprets argv.
-    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    # Only literal provider commands reach this helper; no shell interprets argv. It starts them from /, so none depends
+    # on the folder BF runs the sensor from: gws, for one, loads a `.env` file from its working directory or any parent,
+    # and one in the brain could switch its account.
+    child = subprocess.Popen(argv, cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     output = bytearray()
     deadline = time.monotonic() + timeout
     try:
@@ -198,7 +200,7 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
         "attributes": {
             "thread": thread,
             "labels": sorted(labels),
-            "from_refs": [ref for ref in map(person, people["from"]) if ref],
+            "from_refs": [ref for ref in map(person, people["from"]) if ref][:MAX_LINKS],
             "to_refs": [ref for ref in map(person, people["to"]) if ref][:MAX_LINKS],
             "cc_refs": [ref for ref in map(person, people["cc"]) if ref][:MAX_LINKS],
         },

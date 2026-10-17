@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import importlib.util
 import re
+import shutil
+import sys
 import tomllib
 from pathlib import Path
+from types import ModuleType
 from typing import cast
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 _PLATFORM_MARKERS = {
@@ -134,3 +140,48 @@ def test_distribution_packages_both_project_and_third_party_licenses() -> None:
     assert project["license-files"] == ["LICENSE", "THIRD_PARTY_NOTICES.md"]
     assert notices.startswith("# Third-party notices\n\nBrain Framework depends on ")
     assert re.search(r"\bBrain Framework v?\d+\.\d+\.\d+\b", notices) is None
+
+
+def _notices() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("notices", ROOT / "scripts/notices.py")
+    assert spec is not None
+    assert spec.loader is not None
+    notices = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(notices)
+    return notices
+
+
+def test_site_notices_fail_when_a_version_row_stops_matching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A relabeled row would otherwise keep its old version on the page while the check passes.
+    notices = _notices()
+    page = tmp_path / "third-party-notices.md"
+    text = (ROOT / "docs/third-party-notices.md").read_text(encoding="utf-8")
+    page.write_text(text.replace("Zensical browser bundle", "Zensical JavaScript"), encoding="utf-8")
+    monkeypatch.setattr(notices, "SITE", page)
+    with pytest.raises(SystemExit, match="expected the Zensical and browser bundle version rows, found 1"):
+        notices.site()
+
+
+@pytest.mark.parametrize("damage", ["changed", "missing"])
+def test_site_notices_refuse_a_damaged_npm_license_copy_even_when_writing(
+    damage: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No synced distribution holds these copies, so --write can neither restore nor drop one.
+    notices = _notices()
+    files = tmp_path / "third-party"
+    shutil.copytree(ROOT / "docs/third-party", files)
+    copy = files / "clsx-LICENSE.txt"
+    if damage == "changed":
+        copy.write_bytes(copy.read_bytes().replace(b"Luke Edwards", b"Someone Else"))
+    else:
+        copy.unlink()
+    for name, path in [("NOTICES", ROOT / "THIRD_PARTY_NOTICES.md"), ("SITE", ROOT / "docs/third-party-notices.md")]:
+        shutil.copy(path, tmp_path / path.name)
+        monkeypatch.setattr(notices, name, tmp_path / path.name)
+    monkeypatch.setattr(notices, "SITE_FILES", files)
+    monkeypatch.setattr(sys, "argv", ["notices.py", "--write"])
+    with pytest.raises(SystemExit) as stopped:
+        notices.main()
+    assert stopped.value.code == 1
+    assert "changed npm license copies (clsx-LICENSE.txt)" in capsys.readouterr().err
+    assert copy.exists() == (damage == "changed")

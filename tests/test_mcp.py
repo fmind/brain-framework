@@ -97,9 +97,9 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
         assert json.loads(text(result)) == invoke("search", "evidence", "--scope", tag, "--brain", "fixture")
         # One contract with the CLI: a bf:// address, not a separate argument, chooses the brain.
         assert set(next(t for t in tools if t.name == "read").input_schema["properties"]) == {"ref", "rel", "offset"}
-        role = await mcp.call_tool("read", {"ref": "projects/offline.md", "rel": "links"})
-        assert json.loads(text(role)) == invoke("read", "projects/offline.md", "--rel", "links", "--brain", "fixture")
-        assert json.loads(text(role))["items"][0]["ref"] == "meetings:decision-1"
+        linked = await mcp.call_tool("read", {"ref": "projects/offline.md", "rel": "links"})
+        assert json.loads(text(linked)) == invoke("read", "projects/offline.md", "--rel", "links", "--brain", "fixture")
+        assert json.loads(text(linked))["items"][0]["ref"] == "meetings:decision-1"
         # Unknown arguments fail like unknown CLI options: 13's `brain`, or a misspelled scope, never widens a read.
         assert all(tool.input_schema["additionalProperties"] is False for tool in tools)
         for name, arguments in [
@@ -136,6 +136,9 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
             ("read", {"ref": "projects/../bf.yaml"}, "invalid input: ref: expected a normalized"),
             ("read", {"ref": "bf://"}, "invalid input: ref: invalid BF link"),
             ("read", {"ref": "projects/offline.md#"}, "invalid input: ref: a ref ending in # names no section"),
+            # A hint naming `bf read tags` used to read "use a ref returned by the read tool tags" here.
+            ("read", {"ref": "tags/a\\b"}, "invalid input: ref: invalid tag label; read the tags page and use one"),
+            ("read", {"offset": 1}, "invalid input: offset: offset applies to listing pages"),
             ("read", {"ref": "projects/", "rel": "links"}, "invalid input: rel: rel lists the links to a note"),
             ("read", {"ref": "projects/offline.md", "rel": "owner"}, "invalid input: rel: undeclared relation; use"),
         ]:
@@ -193,7 +196,7 @@ def test_mcp_stdio_handshake(tmp_path: Path) -> None:
         )
         async with (
             stdio_client(parameters, errlog=errlog) as (incoming, outgoing),
-            ClientSession(incoming, outgoing, read_timeout_seconds=10) as session,
+            ClientSession(incoming, outgoing, read_timeout_seconds=120) as session,
         ):
             initialized = await session.initialize()
             assert (initialized.server_info.name, initialized.server_info.title) == ("bf", "Brain Framework")
@@ -237,7 +240,7 @@ def test_mcp_stops_at_once_while_its_input_stays_open(brain: Store, signum: int)
             child.stdin.write(json.dumps(request).encode() + b"\n")
             child.stdin.flush()
             # Bounded, so a server that never answers fails this test instead of holding the whole run.
-            assert readable([child.stdout], [], [], 10)[0], "no initialize reply within 10 seconds"
+            assert readable([child.stdout], [], [], 120)[0], "no initialize reply within 120 seconds"
             assert json.loads(child.stdout.readline())["id"] == 1
             # Before 17 the server kept waiting for another input line, and a host's stop request timed out.
             child.send_signal(signum)

@@ -14,7 +14,7 @@ from bf import links, ontology, pages, records
 from bf.config import load
 from bf.markdown import Note, authored, broken, editor_lock, note, okf, parse, resolve, scheme, validate_okf
 from bf.models import AUTHORED, IDENTITY, MAX_NOTE, MAX_PROMPT, Config, Error, Knowledge
-from bf.storage import UNNAMED, Store, relative, temporary, unnamed
+from bf.storage import Store, relative, temporary, unread
 
 _ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
 # A reply lists at most this many problems, warnings and unresolved targets; a `*_truncated` flag marks the rest.
@@ -298,21 +298,6 @@ class _Validation:
                     self.written.setdefault(claim.target, set()).add(name)
             self.spellings.add({*map(links.target, record.aliases), *(claim.target for claim in claims)})
 
-    def _unread(self, name: str) -> str:
-        """Why the scan left a path out: its name, an unreadable folder, or a link or special file."""
-        if unnamed(name):
-            return UNNAMED
-        try:
-            folder = stat.S_ISDIR((self.store.root / name).lstat().st_mode)
-        except PermissionError:
-            # A folder above it cannot be searched, such as a memories/ of mode 600: the advice is the same.
-            folder = True
-        except OSError:
-            folder = False
-        if folder:
-            return "unreadable folder; grant read and search permission or move it out of the brain"
-        return "symlinks and special files are not read; replace it with a regular file"
-
     def notes(self) -> None:
         store, config = self.store, self.config
         # Editor locks beside authored files, such as Emacs `.#note.md` links, come and go with an open editor. A
@@ -325,7 +310,7 @@ class _Validation:
             for directory, names in found.items()
         }
         self.problems.extend(
-            _problem(name, self._unread(name))
+            _problem(name, unread(store, name))
             for name in sorted(self.skipped)
             if not (name.split("/")[0] in AUTHORED and editor_lock(name))
         )

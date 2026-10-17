@@ -39,11 +39,22 @@ _STARTUP = (
     "PHP_INI_SCAN_DIR",
     "PHPRC",
     "PS4",
-    "R_PROFILE_USER",
     "SHELLOPTS",
     "ZDOTDIR",
 )
-_PREFIXES = ("LD_", "DYLD_", "BASH_FUNC_", "PYTHON", "LUA_INIT", "LUA_PATH", "LUA_CPATH")
+# R_ENVIRON* name files that can set R_PROFILE*; CORECLR_* loads a .NET profiler library.
+_PREFIXES = (
+    "LD_",
+    "DYLD_",
+    "BASH_FUNC_",
+    "PYTHON",
+    "LUA_INIT",
+    "LUA_PATH",
+    "LUA_CPATH",
+    "R_PROFILE",
+    "R_ENVIRON",
+    "CORECLR_",
+)
 
 
 class _Run(Model):

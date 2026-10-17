@@ -60,11 +60,11 @@ Keep decision, action and learning conventions in the existing skills and their 
 Non-obvious constraints:
 
 - `README.md` is also the PyPI page, so its links must be absolute (`tests/test_readme.py`).
-- `tests/test_guides.py` follows `docs/docs/getting-started.md` and `sensors.md#your-first-sensor`: each code block must be a command, a documented reply or a file change its prose names. `tests/test_context_hub.py` runs `context-hub.md`, and `tests/test_example_walkthroughs.py` the example READMEs' walkthroughs.
+- `tests/test_guides.py` follows `docs/docs/getting-started.md` and `sensors.md#your-first-sensor`: each code block must be a command, a documented reply or a file change its prose names. `tests/test_context_hub.py` runs `context-hub.md` and checks its inline reply fragments and JSON blocks against the output; `tests/test_example_walkthroughs.py` runs the example READMEs' walkthroughs.
 - `src/bf/skills/*/scripts/*.py` and the scripts under `examples/` run with the agent's or the user's `python3`: standard library only, checked against Python 3.11 (`tests/test_skills.py`, `tests/test_adapters_compatibility.py`).
 - `tests/contract/` keeps the major release's schemas: a minor release may only add optional fields, widen what configuration files accept and narrow what replies return ([keep the contract](CONTRIBUTING.md#keep-the-contract)); a major release refreshes it from `docs/*.schema.json`.
 - `docs/*.schema.json` describe brain (including watch), registry and evaluation configuration, generated from the runtime models, and `search`/`read` replies, declared in `src/bf/replies.py`; `generate:schema` refreshes them and `check:schema` fails on drift. `tests/conftest.py` validates every search and read reply the suite produces against the reply schemas: describe a new reply field there first.
-- `THIRD_PARTY_NOTICES.md` and the site's license copies come from the synced environment; `generate:notices` refreshes them after a dependency change and `check:notices` fails on drift.
+- `THIRD_PARTY_NOTICES.md` and the site's license copies come from the synced environment; `generate:notices` refreshes them after a dependency change and `check:notices` fails on drift. The npm license copies of the libraries Zensical's prebuilt search client bundles but its license file omits are pinned by SHA-256 in `scripts/notices.py` instead.
 - The search cache is reused while `index.SCHEMA` is unchanged. When indexing output or the cache's tables or indexes change, bump it once per release and record the `PROJECTION` that `tests/test_cache_version.py` prints.
 - `.ignore` keeps generated and duplicated files out of editor search. Ruff, ty and lychee read it too: never list Python sources or Markdown with local links there.
 

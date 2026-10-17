@@ -39,6 +39,7 @@ dependencies = [
 ]
 
 [project.urls]
+Changelog = "https://fmind.github.io/brain-framework/changelog/"
 Documentation = "https://fmind.github.io/brain-framework/"
 Issues = "https://github.com/fmind/brain-framework/issues"
 Repository = "https://github.com/fmind/brain-framework"
@@ -47,7 +48,7 @@ Repository = "https://github.com/fmind/brain-framework"
 bf = "bf:main"
 
 [build-system]
-requires = ["uv_build>=0.12.10,<0.13"]
+requires = ["uv_build>=0.12.10,<0.14"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
@@ -56,8 +57,9 @@ module-name = "bf"
 [dependency-groups]
 dev = [
   "jsonschema>=4.26.0,<5",
-  # Imported directly by tests/test_readme.py, as Zensical renders headings, and scripts/notices.py.
+  # Imported directly by tests/test_readme.py: Zensical slugs headings with Python-Markdown.
   "markdown>=3.11",
+  # Imported directly by scripts/notices.py to parse requirements and normalize names.
   "packaging>=26.3",
   "pytest-cov>=7.1.0",
   "pytest-watcher>=0.6.3",

@@ -3,13 +3,14 @@
   --md-code-font: "Google Sans Code", ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
-/* Brand colors per scheme; dark values are lighter shades of the same hues, both above 6:1 contrast. */
+/* Brand colors per scheme: the logo's dark blue and the Fmind palette's purple in light mode, lighter blue and purple
+   shades in dark mode; every text color exceeds 7:1 contrast. */
 [data-md-color-scheme="default"] {
-  --md-primary-fg-color: #3d59a1;
-  --md-primary-fg-color--light: #526fb8;
-  --md-primary-fg-color--dark: #3d59a1;
-  --md-accent-fg-color: #654a9e;
-  --md-typeset-a-color: #3d59a1;
+  --md-primary-fg-color: #174ea6;
+  --md-primary-fg-color--light: #4285f4;
+  --md-primary-fg-color--dark: #174ea6;
+  --md-accent-fg-color: #681da8;
+  --md-typeset-a-color: #174ea6;
 }
 
 [data-md-color-scheme="slate"] {

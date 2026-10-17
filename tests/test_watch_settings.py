@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Literal
 
 import pytest
@@ -165,9 +166,14 @@ def test_unavailable_desktop_warns_once_and_does_not_stop_collection(monkeypatch
 
 @pytest.mark.parametrize(("platform", "tool"), [("darwin", "osascript"), ("linux", "notify-send"), ("linux", "gdbus")])
 def test_native_delivery_uses_literal_bounded_argv(monkeypatch: pytest.MonkeyPatch, platform: str, tool: str) -> None:
-    calls = []
+    calls, lookups = [], []
     monkeypatch.setattr("bf.watch_settings.sys.platform", platform)
-    monkeypatch.setattr("bf.watch_settings.shutil.which", lambda name: f"/usr/bin/{name}" if name == tool else None)
+    # Every lookup uses the sanitized PATH the tool runs with, never the relative entry.
+    monkeypatch.setenv("PATH", ".:/usr/bin")
+    monkeypatch.setattr(
+        "bf.watch_settings.shutil.which",
+        lambda name, path=None: lookups.append(path) or (f"/usr/bin/{name}" if name == tool else None),
+    )
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -175,11 +181,13 @@ def test_native_delivery_uses_literal_bounded_argv(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr("bf.watch_settings.subprocess.run", run)
     assert desktop("Literal title", "Literal body")
+    assert set(lookups) == {"/usr/bin"}
     argv, kwargs = calls[0]
     assert argv[0] == f"/usr/bin/{tool}"
     assert "Literal title" in argv
     assert "Literal body" in argv
     assert kwargs["timeout"] == 5
+    assert kwargs["env"]["PATH"] == "/usr/bin"
     assert not kwargs.get("shell")
     if tool == "gdbus":
         assert "uint32 0" in argv
@@ -189,19 +197,44 @@ def test_native_delivery_uses_literal_bounded_argv(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.parametrize("failure", [OSError(), subprocess.TimeoutExpired("tool", 5)])
 def test_native_delivery_errors_are_nonfatal(monkeypatch: pytest.MonkeyPatch, failure: Exception) -> None:
-    monkeypatch.setattr("bf.watch_settings.shutil.which", lambda _: "/tool")
+    monkeypatch.setattr("bf.watch_settings.shutil.which", lambda *_, **__: "/tool")
 
     def fail(*_args, **_kwargs):
         raise failure
 
     monkeypatch.setattr("bf.watch_settings.subprocess.run", fail)
     assert not desktop("title", "body")
-    monkeypatch.setattr("bf.watch_settings.shutil.which", lambda _: None)
+    monkeypatch.setattr("bf.watch_settings.shutil.which", lambda *_, **__: None)
     assert not desktop("title", "body")
 
 
+def test_native_delivery_never_runs_a_tool_found_through_a_relative_path_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Watch can start in the brain root, where `.` on PATH would find a notify-send the brain supplies.
+    monkeypatch.setattr("bf.watch_settings.sys.platform", "linux")
+    for folder in ("brain", "bin"):
+        tool = tmp_path / folder / "notify-send"
+        tool.parent.mkdir()
+        tool.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{tmp_path / folder}.ran'\n")
+        tool.chmod(0o700)
+    monkeypatch.chdir(tmp_path / "brain")
+    monkeypatch.setenv("PATH", f".:{tmp_path / 'bin'}")
+    assert desktop("title", "body")
+    assert not (tmp_path / "brain.ran").exists()
+    assert (tmp_path / "bin.ran").read_text() == "--app-name=Brain Framework\n--\ntitle\nbody\n"
+    # With only relative entries, no tool is found and nothing runs.
+    monkeypatch.setenv("PATH", ".")
+    assert not desktop("title", "body")
+    assert not (tmp_path / "brain.ran").exists()
+
+
+# A 30-second sensor, which a watcher checking every 300 seconds or more would run late.
+FAST = b"version: 8\nname: fixture\nsensors:\n  calendar:\n    command: [echo]\n    refresh: 30\n"
+
+
 def test_second_watcher_observes_without_running(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    write_watch(brain, b"poll_interval: 1\n")
+    brain.write("bf.yaml", FAST + b"watch:\n  poll_interval: 1\n")
     observed = []
     monkeypatch.setattr("bf.watch.sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("bf.watch.sys.stdout.isatty", lambda: True)
@@ -210,18 +243,24 @@ def test_second_watcher_observes_without_running(brain: Store, monkeypatch: pyte
     monkeypatch.setattr(
         "bf.watch._loop",
         lambda _store, dashboard, *_args, **_kwargs: observed.append(
-            (dashboard.observe, dashboard.preferences.poll_interval)
+            (dashboard.observe, dashboard.preferences.poll_interval, dashboard.late)
         ),
     )
     monkeypatch.setattr(Job, "start", lambda _: pytest.fail("second watcher executed"))
     with collecting(brain, ".watch"):
-        watch(brain)
-    assert observed == [(True, 1)]
+        watch(brain, interval=7200)
+    # The active watcher's settings control collection: this one's interval runs nothing late.
+    assert observed == [(True, 1, "")]
 
 
-def test_noninteractive_watcher_fails_when_busy_for_supervisor_retry(brain: Store) -> None:
+def test_noninteractive_watcher_fails_when_busy_for_supervisor_retry(
+    brain: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    brain.write("bf.yaml", FAST)
     with collecting(brain, ".watch"), pytest.raises(Error, match="another watcher"):
-        watch(brain, json_output=True)
+        watch(brain, interval=300, json_output=True)
+    # A watcher that never collects warns about no interval.
+    assert "refreshes every" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("command", [["watch", "--json", "--interval", "10", "--notify", "off"], ["watch", "--json"]])

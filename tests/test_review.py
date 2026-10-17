@@ -259,7 +259,7 @@ def test_links_through_a_name_another_item_claims_are_not_newer(brain: Store) ->
     groups = cast("list[dict[str, list[dict[str, object]]]]", whole["backlinks"])
     assert [item["ref"] for group in groups for item in group["items"]] == ["mail:n"]
     problems = cast("list[dict[str, object]]", whole["problems"])
-    assert {"error": "2 aliases are also claimed elsewhere and were not expanded"} in problems
+    assert {"error": "aliases also claimed elsewhere were not expanded: 2"} in problems
     assert (whole["new_links"], whole["newer"], whole["review_reasons"]) == (1, ["mail:n"], ["newer_evidence"])
     assert entry(brain, path, now)["newer"] == ["mail:n"]
 

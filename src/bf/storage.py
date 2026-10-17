@@ -1,4 +1,4 @@
-"""Confined, bounded filesystem access and one physical-brain writer lock."""
+"""Confined, bounded filesystem access, private state and the locks that follow each physical brain."""
 
 from __future__ import annotations
 
@@ -8,15 +8,15 @@ import os
 import re
 import stat
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import ExitStack, contextmanager, suppress
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from bf.models import MAX_FILE, MAX_FILES, Error, digest
 
 
 class BusyError(Error):
-    """Another process holds the brain writer lock or runs the same program."""
+    """Another process holds a lock this operation needs, such as the brain writer lock or a program's lock."""
 
 
 class FileAncestorError(Error):
@@ -28,6 +28,8 @@ _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _TEMPORARY = re.compile(r"\.write-[0-9a-f]{32}")
 # A scanned name BF cannot address: its bytes are not UTF-8, or it holds a backslash, which relative() rejects.
 UNNAMED = "file name is not valid UTF-8 or contains a backslash; rename it"
+# A link BF never follows, to a file or to a folder such as memories/: its owner puts the real one in its place.
+LINKED = "symlinks are not followed; replace the link with the file or folder itself"
 
 
 def temporary(path: str) -> bool:
@@ -53,9 +55,10 @@ def _shown(name: str) -> str | None:
 
 
 def relative(value: str) -> tuple[str, ...]:
-    path = PurePosixPath(value)
+    """A normalized brain-relative path's parts; absolute paths, empty, `.` or `..` parts, NUL and backslashes fail."""
     parts = value.split("/")
-    if path.is_absolute() or any(p in {"", ".", ".."} for p in parts) or "\x00" in value or "\\" in value:
+    # An absolute path starts with an empty part.
+    if any(p in {"", ".", ".."} for p in parts) or "\x00" in value or "\\" in value:
         raise Error("expected a normalized brain-relative path")
     return tuple(parts)
 
@@ -75,7 +78,7 @@ class Store:
         self.identity = f"{info.st_dev}-{info.st_ino}"
 
     @contextmanager
-    def parent(self, name: str, *, create: bool = False) -> Iterator[tuple[int, str]]:
+    def parent(self, name: str, *, create: bool = False) -> Generator[tuple[int, str]]:
         parts = relative(name)
         descriptor = os.open(self.root, _DIR)
         try:
@@ -115,7 +118,7 @@ class Store:
                 fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
             except OSError as error:
                 if error.errno == errno.ELOOP:
-                    raise Error(f"{name}: symlinks are not followed; replace it with a regular file") from error
+                    raise Error(f"{name}: {LINKED}") from error
                 # A Unix socket fails to open before the type check below: ENXIO on Linux, EOPNOTSUPP on macOS.
                 if error.errno in {errno.ENXIO, errno.EOPNOTSUPP} and not stat.S_ISREG(
                     os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode
@@ -197,7 +200,7 @@ class Store:
                 os.fsync(parent)
 
     @contextmanager
-    def _directory(self, name: str) -> Iterator[int]:
+    def _directory(self, name: str) -> Generator[int]:
         """A descriptor of one directory, reached and opened without following links."""
         with self.parent(name) as (parent, leaf):
             descriptor = os.open(leaf, _DIR, dir_fd=parent)
@@ -367,9 +370,12 @@ class Store:
             raise Error(f"{name}: expected a regular file")
         return info
 
-    def fingerprint(self, name: str) -> tuple[int, int, int, int]:
-        """Size, mtime, ctime and inode: ctime catches an edit whose mtime was preserved."""
-        return _fingerprint(self.lstat(name))
+    def fingerprint(self, name: str, *, regular: bool = True) -> tuple[int, int, int, int]:
+        """Size, mtime, ctime and inode: ctime catches an edit whose mtime was preserved.
+
+        `regular=False` states a link, special file or folder as itself instead of refusing it.
+        """
+        return _fingerprint(self.lstat(name) if regular else self._status(name))
 
 
 def _listed(entry: os.DirEntry[str]) -> int:
@@ -389,6 +395,30 @@ def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
     return info.st_size, info.st_mtime_ns, info.st_ctime_ns, inode
 
 
+def unread(store: Store, name: str) -> str:
+    """Why a scan left a path out: its name, an unreadable folder, a link, a special file or a file in a folder's
+    place."""
+    if unnamed(name):
+        return UNNAMED
+    try:
+        mode = (store.root / name).lstat().st_mode
+    except PermissionError:
+        # A folder above it cannot be searched, such as a memories/ of mode 600: the advice is the same.
+        mode = stat.S_IFDIR
+    except OSError:
+        mode = 0
+    if stat.S_ISDIR(mode):
+        return "unreadable folder; grant read and search permission or move it out of the brain"
+    # A linked folder, such as a synced one, is as common as a linked file.
+    if stat.S_ISLNK(mode):
+        return LINKED
+    # The scan reads regular files below a folder, so a skipped one stands in a scanned folder's place, such as
+    # projects; so does a special file at the top of the brain.
+    if stat.S_ISREG(mode) or "/" not in name:
+        return "expected a folder; replace the file with a folder"
+    return "special files are not read; replace it with a regular file"
+
+
 def _crowded(tree: str) -> str:
     """How to bring a tree back under the scan limit."""
     if tree.split("/")[0] == "memories":
@@ -401,7 +431,9 @@ def expand(path: Path) -> Path:
     try:
         return path.expanduser()
     except RuntimeError as error:
-        raise Error("a path's ~ or ~user home directory cannot be resolved; check the user name") from error
+        # A bare ~ needs HOME, or a passwd entry, which some container users lack.
+        hint = "set HOME" if path.parts[:1] == ("~",) else "check the user name"
+        raise Error(f"a path's ~ or ~user home directory cannot be resolved; {hint}") from error
 
 
 def xdg_setting(name: str) -> Path | None:
@@ -457,7 +489,7 @@ def _private(*parts: str, root: Path) -> Store:
 
 
 def state_store(root: Path) -> Store:
-    """Private run history and logs stay outside the evidence brain, keyed by its resolved path."""
+    """Private run history and usage counts stay outside the evidence brain, keyed by its resolved path."""
     return _private(digest(os.fsencode(root)), root=root)
 
 
@@ -484,7 +516,7 @@ def _lock(
     *,
     shared: bool = False,
     busy: str = "another writer is active for this brain; retry after it finishes",
-) -> Iterator[None]:
+) -> Generator[None]:
     # The writer lock also holds the brain directory; other locks order work that only this state directory sees.
     whole = name == "write.lock"
     state, name = lock_file(store, name)
@@ -522,12 +554,12 @@ def _flock(fd: int, *, shared: bool, deadline: float, busy: str) -> None:
 
 
 @contextmanager
-def _brain_lock(store: Store, *, shared: bool, deadline: float, busy: str) -> Iterator[None]:
-    """Also lock the brain directory itself: processes with different state directories, or accounts sharing the
-    brain, keep separate lock files, which alone would let two writers commit at once.
+def _brain_lock(store: Store, *, shared: bool, deadline: float, busy: str) -> Generator[None]:
+    """Also lock the brain directory itself: processes with different state directories keep separate lock files,
+    which alone would let two writers commit at once.
 
     Some network filesystems cannot lock a directory, such as NFS for an exclusive lock: the state lock then stands
-    alone, as it did before.
+    alone.
     """
     fd = os.open(store.root, _DIR)
     try:
@@ -542,28 +574,35 @@ def _brain_lock(store: Store, *, shared: bool, deadline: float, busy: str) -> It
 
 
 @contextmanager
-def writer(store: Store, wait: float = 0) -> Iterator[None]:
-    """Serialize writers of one physical brain; wait up to `wait` seconds for another writer."""
-    with _lock(store, "write.lock", wait):
+def writer(
+    store: Store,
+    wait: float = 0,
+    *,
+    # Readers, such as a long bf validate, block a writer as another writer does.
+    busy: str = "another process is reading or changing this brain's records; retry after it finishes",
+) -> Generator[None]:
+    """Serialize writers of one physical brain, or of another directory such as the registry's; wait up to `wait`
+    seconds for other writers and readers to finish."""
+    with _lock(store, "write.lock", wait, busy=busy):
         yield
 
 
 @contextmanager
-def reader(store: Store, wait: float = 120) -> Iterator[None]:
+def reader(store: Store, wait: float = 120) -> Generator[None]:
     """Keep record files stable during one consistent read; readers can run concurrently."""
     with _lock(store, "write.lock", wait, shared=True):
         yield
 
 
 @contextmanager
-def building(store: Store, wait: float = 0) -> Iterator[None]:
+def building(store: Store, wait: float = 0) -> Generator[None]:
     """Serialize full search-cache builds, which read the brain without holding its writer lock."""
     with _lock(store, "build.lock", wait, busy="another search cache build is active; retry after it finishes"):
         yield
 
 
 @contextmanager
-def generation(store: Store, *, shared: bool, wait: float) -> Iterator[None]:
+def generation(store: Store, *, shared: bool, wait: float) -> Generator[None]:
     """Search-cache readers hold this shared while connected; replacing the cache file holds it exclusively.
 
     SQLite finds a database's -wal file by name, so no connection to a replaced cache may outlive its rename.
@@ -586,7 +625,7 @@ def generation(store: Store, *, shared: bool, wait: float) -> Iterator[None]:
 
 
 @contextmanager
-def appending(store: Store, name: str, wait: float = 10) -> Iterator[None]:
+def appending(store: Store, name: str, wait: float = 10) -> Generator[None]:
     """Serialize writers of one program's log: a direct prompt run takes no program lock."""
     relative(name)
     with _lock(store, f"log-{name}.lock", wait, busy=f"another run of {name} is writing its log"):
@@ -594,7 +633,7 @@ def appending(store: Store, name: str, wait: float = 10) -> Iterator[None]:
 
 
 @contextmanager
-def collecting(store: Store, sensor: str, wait: float = 0) -> Iterator[None]:
+def collecting(store: Store, sensor: str, wait: float = 0) -> Generator[None]:
     """Order runs of one sensor without blocking offline reads while its provider is running."""
     relative(sensor)
     with _lock(store, f"collect-{sensor}.lock", wait, busy=f"{sensor} is already running for this brain; retry later"):

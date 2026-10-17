@@ -93,10 +93,14 @@ def failure(error: Error | OSError | UnicodeError | sqlite3.DatabaseError) -> st
     return f"inaccessible file or directory{cause}; check the brain and path"
 
 
-def suggest(value: str, known: Iterable[str]) -> str:
-    """A `; did you mean …?` hint naming up to three close known names, or nothing."""
+def suggest(value: str, known: Iterable[str], *, prefix: str = "") -> str:
+    """A `; did you mean …?` hint naming up to three close known names, or nothing.
+
+    `prefix` precedes each name shown, such as `memories/` before a source, without counting toward its closeness: a
+    shared prefix would make unrelated names look close.
+    """
     close = difflib.get_close_matches(value, list(known), n=3, cutoff=0.6)
-    return f"; did you mean {' or '.join(close)}?" if close else ""
+    return f"; did you mean {' or '.join(prefix + name for name in close)}?" if close else ""
 
 
 class FormatError(Error):
@@ -162,16 +166,21 @@ _FORMAT = (
     "\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f"
 )
 _INVISIBLE = re.compile(f"[{_FORMAT}]")
-# DEL and C1 controls, which JSON leaves raw and some terminals obey, such as U+009B CSI, and format characters.
-_TERMINAL = re.compile(f"[\x7f-\x9f{_FORMAT}]")
+# LINE and PARAGRAPH SEPARATOR, which JSON leaves raw but str.splitlines() and JavaScript read as line breaks: a file
+# name holding one would split a JSON line or a diagnostic.
+_SEPARATORS = "\u2028\u2029"
+# DEL and C1 controls, which JSON leaves raw and some terminals obey, such as U+009B CSI, the separators and format
+# characters.
+_TERMINAL = re.compile(f"[\x7f-\x9f{_SEPARATORS}{_FORMAT}]")
 # Diagnostics are text, not JSON: C0 controls, including a newline that would forge another `bf:` line, too.
-_UNPRINTABLE = re.compile(f"[\x00-\x1f\x7f-\x9f{_FORMAT}]")
+_UNPRINTABLE = re.compile(f"[\x00-\x1f\x7f-\x9f{_SEPARATORS}{_FORMAT}]")
 # The canonical UTC instant that files, run history and the cache store.
 _CANONICAL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z")
 # Reply keys holding instants; record `fields` keep their stored values.
 _INSTANTS = frozenset(
     {
         "at",
+        "changed",
         "end",
         "last_collected",
         "last_success",
@@ -194,9 +203,16 @@ _INSTANTS = frozenset(
 
 
 def local(value: str) -> str:
-    """A canonical UTC instant as an ISO 8601 date-time in the local timezone, with its offset, to the second."""
+    """A canonical UTC instant as an ISO 8601 date-time in the local timezone, with its offset, to the second.
+
+    An instant from before the zone adopted standard time stays in UTC: its local mean time offset has seconds.
+    """
     try:
-        return datetime.fromisoformat(value).astimezone().isoformat(timespec="seconds")
+        instant = datetime.fromisoformat(value).astimezone()
+        if (offset := instant.utcoffset()) and offset % timedelta(minutes=1):
+            # RFC 3339 date-times, as the reply schemas declare them, take only whole-minute offsets.
+            instant = instant.astimezone(UTC)
+        return instant.isoformat(timespec="seconds")
     except ValueError, OverflowError:
         return value
 
@@ -236,8 +252,8 @@ def _escape(match: re.Match[str]) -> str:
 
 
 def terminal(value: object) -> bytes:
-    """`encode` for a terminal: DEL, C1 controls and Unicode format characters become JSON escapes, so the decoded
-    value is unchanged.
+    """`encode` for a terminal: DEL, C1 controls, line and paragraph separators and Unicode format characters become
+    JSON escapes, so the decoded value is unchanged.
 
     JSON structure is ASCII, so these characters only occur inside strings, where an escape is equivalent.
     """
@@ -250,7 +266,8 @@ def terminal(value: object) -> bytes:
 def printable(text: str) -> str:
     """A diagnostic as a terminal shows it: brain file names and keys are data, never terminal instructions.
 
-    C0, DEL and C1 controls and Unicode format characters become the same `\\uXXXX` escapes replies use.
+    C0, DEL and C1 controls, line and paragraph separators and Unicode format characters become the same `\\uXXXX`
+    escapes replies use.
     """
     return _UNPRINTABLE.sub(_escape, text)
 
@@ -591,8 +608,12 @@ class SchemaField(Model):
         },
     )
 
-    description: Annotated[str, Field(min_length=1, max_length=4096)]
-    type: Literal["string", "integer", "number", "boolean", "timestamp", "identity"]
+    description: Annotated[str, Field(min_length=1, max_length=4096)] = Field(
+        description="What a value of this field means, such as the account explicitly credited as the author."
+    )
+    type: Literal["string", "integer", "number", "boolean", "timestamp", "identity"] = Field(
+        description="Strict value type; a relation requires identity."
+    )
     cardinality: Literal["one", "optional", "many"] = Field(
         default="optional",
         description=(
@@ -1096,7 +1117,8 @@ class Config(Model):
     routines: dict[Slug, Routine] = Field(
         default_factory=dict,
         json_schema_extra=_nullable,
-        description="Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ from sensors.",
+        description="Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ "
+        "from sensors and prompts.",
     )
     # A prompt name is the source of the records its runs write.
     channels: dict[Name, Channel] = Field(default_factory=dict, max_length=64, json_schema_extra=_nullable)
@@ -1176,6 +1198,8 @@ class Config(Model):
 
 
 class Registration(Model):
+    """A registered brain's location on this machine."""
+
     path: Annotated[str, Field(min_length=1, max_length=4096)] = Field(
         description="Machine-local absolute or home-relative path to the brain."
     )

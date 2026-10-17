@@ -93,7 +93,16 @@ The atlas budget review needs [Ada](bf://fixture/concepts/ada.md?rel=owner).
 - [ ] Draft the atlas budget.
 - [x] Collect zircon samples.
 """
-QUERIES = ("atlas budget", "zircon", "offline retrieval", "person:ada", "project:atlas", "repo:example/project")
+# The misspelled word compares `suggestions`, whose spelling must not depend on the order files were indexed in.
+QUERIES = (
+    "atlas budget",
+    "zircon",
+    "offline retrieval",
+    "person:ada",
+    "project:atlas",
+    "repo:example/project",
+    "provders",
+)
 PAGES = (
     "projects",
     "tasks",
@@ -174,10 +183,10 @@ def snapshot(store: Store) -> dict[str, object]:
 def test_incremental_refreshes_match_a_full_rebuild(
     brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, trusted: bool
 ) -> None:
-    if trusted:
-        # Each listed source folder is trusted at once, and each check ends by ageing them: only the folders the next
-        # step changes are listed again.
-        monkeypatch.setattr(index, "_SETTLE", -(1 << 62))
+    # Listed: no source folder is ever trusted, however slow the runner, so every check lists them all. Trusted: each
+    # listed source folder is trusted at once, and each check ends by ageing them: only the folders the next step
+    # changes are listed again.
+    monkeypatch.setattr(index, "_SETTLE", -(1 << 62) if trusted else 1 << 62)
     index.refresh(brain)
     fills: list[tuple[bool, int, int]] = []
     filling = index._fill  # noqa: SLF001 - observe what each refresh indexes
@@ -244,8 +253,10 @@ def test_incremental_refreshes_match_a_full_rebuild(
     edited = ATLAS.replace(b"# Atlas\n", b"# Atlas program\n").replace(b"[ ] Draft", b"[x] Draft")
     edited = edited.replace(b"owner: person:ada", b"owner: person:carol").replace(b"[atlas, retention]", b"[atlas]")
     brain.write("projects/atlas.md", edited.replace(edited[edited.index(b"## Budget") : edited.index(b"## Next")], b""))
+    # Indexed again after projects/offline.md, its "providers" now has the later passage number of the two spellings.
     brain.write(
-        "concepts/evidence.md", b"---\ntype: concept\nstatus: stable\n---\n\n# Durable evidence\n\nZircon audits.\n"
+        "concepts/evidence.md",
+        b"---\ntype: concept\nstatus: stable\n---\n\n# Durable evidence\n\nZircon audits outlive providers.\n",
     )
     check("edit notes", (False, 2, 0))
     records_file(
@@ -524,6 +535,26 @@ def test_a_source_holding_a_folder_is_listed_at_every_check(brain: Store) -> Non
     }
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+@pytest.mark.usefixtures("settled")
+def test_restoring_the_permissions_of_a_folder_in_a_source_is_seen(brain: Store) -> None:
+    brain.write("memories/meetings/nested/stray.json", b"{}")
+    nested = brain.root / "memories/meetings/nested"
+    nested.chmod(0o000)
+    try:
+        # An unreadable folder counts as a skipped entry, so its source is trusted although it holds a folder.
+        age(brain)
+        assert listed(brain) == set()
+        # Restoring its permissions changes only its own times, which each check states.
+        nested.chmod(0o700)
+        problems = cast("list[dict[str, str]]", index.status(brain)["problems"])
+    finally:
+        nested.chmod(0o700)
+    assert problems == [
+        {"file": "memories/meetings/nested/stray.json", "error": "expected memories/<source>/<sha256-id>.json"}
+    ]
+
+
 def test_reads_remove_the_file_a_killed_build_left_once_no_build_holds_it(brain: Store) -> None:
     index.refresh(brain)
     before = sorted(path.name for path in (brain.root / ".bf").iterdir())
@@ -711,6 +742,41 @@ def test_replies_find_skipped_files_through_their_own_index(brain: Store) -> Non
             assert "files_problems" in plan, plan
 
 
+def test_source_totals_read_only_their_index(brain: Store) -> None:
+    index.refresh(brain, full=True)
+    statements: list[str] = []
+    with index.database(brain) as (connection, _state):
+        connection.set_trace_callback(statements.append)
+        assert index.sources(connection)["meetings"]["records"] == 2
+        connection.set_trace_callback(None)
+        # Unscoped searches, source pages and home count every record per source, with its latest event and change:
+        # reading each record's row cost more than the rest of most replies on a large brain.
+        [statement] = statements
+        plan = " ".join(row[3] for row in connection.execute(f"EXPLAIN QUERY PLAN {statement}"))
+    assert "COVERING INDEX items_kind_source_time" in plan, plan
+
+
+def test_a_link_or_special_file_named_like_a_record_names_its_own_problem(brain: Store) -> None:
+    (brain.root / "projects/data.json").symlink_to(brain.root / "bf.yaml")
+    (brain.root / "memories/meetings/export.json").symlink_to(brain.root / "bf.yaml")
+    os.mkfifo(brain.root / "memories/meetings/pipe.json")
+    brain.write("memories/meetings/raw.json", b"{}")
+    reported = cast("list[dict[str, str]]", index.status(brain)["problems"])
+    problems = {problem["file"]: problem["error"] for problem in reported}
+    # Such an entry used to be sent to rename a record under memories/, even from projects/.
+    assert problems.keys() == {
+        "memories/meetings/export.json",
+        "memories/meetings/pipe.json",
+        "memories/meetings/raw.json",
+        "projects/data.json",
+    }
+    for link in ("memories/meetings/export.json", "projects/data.json"):
+        assert problems[link].startswith("symlinks are not followed"), link
+    assert problems["memories/meetings/pipe.json"] == "expected a regular file"
+    # A misnamed regular file is still rejected by its name, without being read.
+    assert problems["memories/meetings/raw.json"] == "expected memories/<source>/<sha256-id>.json"
+
+
 def test_one_reply_compares_files_with_the_cache_once_per_brain(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     checked: list[Path] = []
     original = index.fresh
@@ -865,6 +931,35 @@ def test_concurrent_first_search_waits_for_a_complete_cache(
     ]
 
 
+def test_a_search_that_builds_the_cache_answers_with_a_collection_committed_meanwhile(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without a cache, as after an upgrade or a structural bf.yaml edit, the first search builds one.
+    indexing, paused, resume = index._index, Event(), Event()  # noqa: SLF001 - commit while the build indexes
+
+    def pausing(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
+        # The build indexes files in path order: both meeting records are already in its generation.
+        if path == "projects/offline.md" and not paused.is_set():
+            paused.set()
+            assert resume.wait(10)
+        indexing(connection, store, path, config)
+
+    monkeypatch.setattr(index, "_index", pausing)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        query = executor.submit(search, [brain], Query(text="osmium lunch"), counted=False)
+        try:
+            assert paused.wait(10)
+            # The build reads the brain without the writer lock, so a snapshot collection commits meanwhile.
+            with writer(brain):
+                records.upsert(brain, "meetings", [Record(id="late", title="Osmium review")], snapshot=True)
+        finally:
+            resume.set()
+        reply = query.result(timeout=10)
+    # Served as ready, the build answered with the removed lunch record and without the new one.
+    assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == ["meetings:late"]
+    assert "stale" not in reply
+
+
 def test_failed_or_abandoned_full_rebuilds_keep_the_live_cache(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     index.refresh(brain)
     live = cache_file(brain)
@@ -889,7 +984,8 @@ def test_failed_or_abandoned_full_rebuilds_keep_the_live_cache(brain: Store, mon
         assert connection.execute("SELECT count(*) FROM items").fetchone()[0] == 4
     assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
     # A killed build leaves its partial file and journal beside the cache; the next build replaces them. A read
-    # would remove them first (tests/test_cache.py), so the build runs next.
+    # would remove them first (test_reads_remove_the_file_a_killed_build_left_once_no_build_holds_it), so the
+    # build runs next.
     for suffix in ("", "-journal"):
         (brain.root / (index.BUILD + suffix)).write_bytes(b"abandoned build")
     assert index.refresh(brain, full=True)["files"] == 4
@@ -965,6 +1061,24 @@ def test_a_build_publishes_after_readers_close_the_generation_it_replaces(
     assert not (brain.root / index.BUILD).exists()
     assert cache_file(brain) == live
     assert refs(brain, "offline retrieval")[0] == "projects/offline.md"
+
+
+def test_a_first_build_publishes_by_its_rename_alone(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    live = brain.root / index.CACHE
+    replace = os.replace
+    present: list[bool] = []
+
+    def observed(source: str, target: str, **descriptors: int) -> None:
+        if target == live.name:
+            present.append(live.exists())
+        replace(source, target, **descriptors)
+
+    monkeypatch.setattr(os, "replace", observed)
+    assert index.refresh(brain)["changed"] == 4
+    # Without an old generation to take out of WAL mode, nothing stood at the live path before the rename: not even
+    # an empty file, which a crash would leave behind.
+    assert present == [False]
+    assert stat.S_IMODE(live.stat().st_mode) == 0o600
 
 
 def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
@@ -1072,9 +1186,13 @@ def test_read_only_brains_name_the_cache_they_need(brain: Store) -> None:
     folders = [brain.root / ".bf", brain.root]
     for folder in folders:
         folder.chmod(0o500)
+    # The message names what needs the access, not search and read, whichever command refreshes the cache.
+    message = r"^the search cache needs write access to the brain.s \.bf directory;"
     try:
-        with pytest.raises(Error, match=r"write access to the brain.s \.bf cache"):
+        with pytest.raises(Error, match=message):
             search([brain], Query(text="offline"))
+        with pytest.raises(Error, match=message):
+            index.status(brain)
     finally:
         for folder in folders:
             folder.chmod(0o700)

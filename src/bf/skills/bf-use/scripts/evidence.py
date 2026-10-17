@@ -11,7 +11,7 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TypeAlias, cast
 
 # Agents run this helper with whatever python3 is on PATH: keep it compatible with Python 3.11.
@@ -21,12 +21,15 @@ MAX_REPLY = 4 << 20  # UTF-8 bytes of one bf reply, and characters of one assemb
 PAGING = ("offset", "next_offset", "total_characters", "outline", "outline_truncated")
 # Any page can report an incomplete read: the assembled reply keeps every page's, once each.
 LIMITS = ("problems", "stale")
-MAX_INPUT = 9 << 20  # Two bounded bf replies, plus the small capture envelope.
+# Standard input per assembled reply or capture: 4 Mi characters of up to 4 UTF-8 bytes each, 2 MiB of other record
+# fields and the envelope. compare reads two.
+MAX_INPUT = 4 * MAX_REPLY + (3 << 20)
 # The set bf replies escape: DEL and C1 controls, which JSON leaves raw and some terminals obey, such as U+009B CSI,
-# and every Unicode format character (category Cf), such as bidi controls and zero-width and tag characters.
+# the line and paragraph separators U+2028 and U+2029, which str.splitlines() reads as line breaks, and every
+# Unicode format character (category Cf), such as bidi controls and zero-width and tag characters.
 CONTROLS = re.compile(
-    "[\x7f-\x9f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064"
-    "\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
+    "[\x7f-\x9f\u2028\u2029\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e"
+    "\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
     "\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]"
 )
 
@@ -170,6 +173,19 @@ def fingerprint(value: dict[str, JSON]) -> str:
     return hashlib.sha256(encode(value)).hexdigest()
 
 
+def comparable(value: dict[str, JSON]) -> dict[str, JSON]:
+    """Replies state a record's `time` with the reader's offset: compare the instant, not its spelling."""
+    record = value.get("record")
+    moment = record.get("time") if isinstance(record, dict) else None
+    if not isinstance(record, dict) or not isinstance(moment, str):
+        return value
+    try:
+        instant = datetime.fromisoformat(moment).astimezone(UTC).isoformat(timespec="seconds")
+    except (ValueError, OverflowError):
+        return value
+    return {**value, "record": {**record, "time": instant}}
+
+
 def limitations(reply: dict[str, JSON]) -> list[JSON]:
     result: list[JSON] = []
     if reply.get("problems") or reply.get("stale"):
@@ -214,7 +230,8 @@ def compare(before: dict[str, JSON], after: dict[str, JSON]) -> dict[str, JSON]:
     previous, current = body(before), body(after)
     if before.get("sha256") != fingerprint(previous):
         raise ValueError("capture content does not match its digest")
-    changed = fingerprint(previous) != fingerprint(current)
+    # The digest covers the time as captured; a read in another time zone spells the same instant differently.
+    changed = fingerprint(comparable(previous)) != fingerprint(comparable(current))
     # Old source freshness does not decide whether a new read is current. A partial baseline does.
     reasons = limitations(after)
     if "record" in previous and object_value(object_value(previous["record"]).get("attributes", {})).get("partial"):
@@ -247,14 +264,16 @@ def main() -> int:
     if len(arguments) != 1 or arguments[0] not in {"capture", "compare"}:
         sys.stderr.write("usage: evidence.py read REF --brain BRAIN | evidence.py capture|compare < JSON\n")
         return 2
+    count = 1 if arguments[0] == "capture" else 2
+    limit = count * MAX_INPUT
     try:
-        data = sys.stdin.buffer.read(MAX_INPUT + 1)
-        if len(data) > MAX_INPUT:
-            raise ValueError("input exceeds 9 MiB")
+        data = sys.stdin.buffer.read(limit + 1)
+        if len(data) > limit:
+            sys.stderr.write(f"evidence: input exceeds {limit >> 20} MiB; capture a note section or a smaller record\n")
+            return 1
         remaining = data.decode().strip()
         decoder = json.JSONDecoder(object_pairs_hook=unique)
         values: list[dict[str, JSON]] = []
-        count = 1 if sys.argv[1] == "capture" else 2
         for _ in range(count):
             value, end = decoder.raw_decode(remaining)
             values.append(object_value(cast("JSON", value)))

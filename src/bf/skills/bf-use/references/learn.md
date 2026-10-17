@@ -28,6 +28,8 @@ Expect `{"written":"projects/new-website.md","sha256":"..."}`: that digest guard
 - `the old text does not occur` or `occurs several times`: copy the passage exactly, or include surrounding text until it is unique.
 - `another guarded write of this file is still running`: read it again and retry.
 
+`Written, but its directory could not be synced` also exits 1, yet the file did change: check the file system, then read the file again for its new `sha256` before another edit.
+
 Helpers lock the file while they check, write and rename it, so of two sessions that read the same digest only one succeeds; an editor that takes no lock can still save between the last check and the rename. The helper replaces only an existing regular file, atomically, following no symbolic link inside the brain; delete a `.write-HEX` file an interrupted edit left.
 
 ## Author notes

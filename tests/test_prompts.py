@@ -15,7 +15,7 @@ from bf import assistants, pages, records
 from bf.cli import app
 from bf.collect import parse_reply, reply_title
 from bf.health import report
-from bf.history import ASSISTANTS, state
+from bf.history import ASSISTANTS, log_path, state
 from bf.models import Assistant, Config, Error, Program, Record
 from bf.retrieve import read
 from bf.runtime import Queue
@@ -277,6 +277,22 @@ def test_retention_keeps_foreign_records_and_does_not_fail_saved_runs(
     assert len(names) == 2
     assert "legacy" in names
     assert configured.read("memories/assistant/stray.json") == b"not a record"
-    monkeypatch.setattr(records, "prune", lambda *_: (_ for _ in ()).throw(Error("unreadable old run")))
+    monkeypatch.setattr(records, "prune", lambda *_, **__: (_ for _ in ()).throw(Error("unreadable old run")))
     result = ask(configured, end=(NOW + timedelta(minutes=4)).isoformat())
     assert result["record"]
+    # The run is recorded: the pruning failure is logged and never fails it.
+    assert "kept older runs: unreadable old run" in configured.read(log_path("assistant")).decode()
+
+
+def test_keep_never_removes_the_run_it_just_recorded(configured: Store) -> None:
+    configured.write("bf.yaml", CONFIG.replace(b"    text: /response\n", b"    text: /response\n    keep: 2\n", 1))
+    # Two runs recorded while the clock ran a day ahead.
+    ahead = [
+        Record(id=f"20260926T0{hour}0000Z-0000000{hour}", title="Ahead", time=f"2026-09-26T0{hour}:00:00Z")
+        for hour in (1, 2)
+    ]
+    records.upsert(configured, "assistant", ahead, snapshot=False)
+    result = ask(configured)
+    # Before, its earlier time made the run's own record the oldest: it was removed while the reply named it.
+    kept = sorted(str(record.id) for record in stored(configured))
+    assert kept == sorted([result["record"].removeprefix("assistant:"), "20260926T020000Z-00000002"])

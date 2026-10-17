@@ -128,6 +128,9 @@ def test_invalid_batch_writes_nothing_and_does_not_leak(brain: Store) -> None:
         ("identity", "Alice", False),
         ("identity", "person:ali\u200bce", False),
         ("identity", "person:alice\ufeff", False),
+        # A BF address decodes its path, so a percent-encoded invisible character counts; another URI keeps it.
+        ("identity", "bf://fixture/people/ali%E2%80%8Bce", False),
+        ("identity", "https://example.test/ali%E2%80%8Bce", True),
         ("string", "", False),
         ("string", "a" * 8193, False),
         ("string", {}, False),
@@ -213,7 +216,7 @@ def test_schema_edits_keep_every_stored_identity_edge(brain: Store) -> None:
     assert "field label" in str(validate(brain)["problems"])
 
 
-def test_cli_mcp_and_evaluation_share_relationship_pages(brain: Store) -> None:
+def test_cli_mcp_and_evaluation_share_relation_pages(brain: Store) -> None:
     brain.write("bf.yaml", CONFIG)
     ingest(brain, [{"id": "one", "title": "Mail", "attributes": {"from": "person:alice"}}])
     cli = invoke("read", "person:alice")

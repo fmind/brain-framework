@@ -9,7 +9,7 @@ Use only for an explicitly authorized release. [CD](../../../../.github/workflow
    git grep -nE '(Brain Framework|bf`?) 17\b|\b17\.[0-9]+\.[0-9]+' -- src/bf/skills examples docs/docs README.md
    ```
 
-   Move `Unreleased` entries into `## [vX.Y.Z](https://github.com/fmind/brain-framework/releases/tag/vX.Y.Z) - YYYY-MM-DD`, including breaking changes and manual upgrade steps, leaving an empty `## Unreleased` above it. Open the section with one paragraph naming what stays unchanged and the upgrade step, such as `bf skills DIR` when a packaged skill changed: “A documentation release. The brain format (`version: 7`), `bf.yaml`, the reply schemas and the search cache are unchanged; no upgrade step is needed.” Confirm `scripts/release-notes.sh vX.Y.Z` returns only that section: `check:changelog` catches a missing, duplicate or empty section, not another heading, such as `## Unreleased`, placed below it.
+   Move `Unreleased` entries into `## [vX.Y.Z](https://github.com/fmind/brain-framework/releases/tag/vX.Y.Z) - YYYY-MM-DD`, including breaking changes and manual upgrade steps, leaving an empty `## Unreleased` above it. Open the section with one paragraph naming what stays unchanged and the upgrade step, such as `bf skills DIR` when a packaged skill changed: “A documentation release. The brain format (`version: 7`), `bf.yaml`, the reply schemas and the search cache are unchanged; no upgrade step is needed.” Confirm `scripts/release-notes.sh vX.Y.Z` returns only that section, which ends at the next level-2 heading: `check:changelog` catches a missing, duplicate or empty section.
 1. **Contract.** A major release refreshes the contract after `mise run generate:schema`, with `cp docs/*.schema.json tests/contract/`, so `tests/test_contract.py` guards the new contract. A minor or patch release keeps `tests/contract/` unchanged, so the gate rejects [any incompatible schema change](../../../../CONTRIBUTING.md#keep-the-contract). A patch or documentation release skips this step and the previous-major search.
 1. **Qualify.** Follow the [contribution verification procedure](../../../../CONTRIBUTING.md#set-up-and-check-a-change), including applicable generated files, then run the full gate as CI does, after `uv sync --locked`: `GITHUB_ACTIONS=true mise run all`. GitHub Actions makes Typer color its errors, which once failed a tag's gate that had passed locally. When task settings change, [check them with the pinned mise](#check-tasks-with-the-pinned-mise). Run `dot agent context --check` when available. Ask for an independent review of `git diff --cached -M`, such as a second agent with read-only instructions: it catches overclaims and stale references that tests miss. Inspect the final diff and qualify the exact release candidate; never weaken checks to publish.
 1. **Publish.** Check that the primary checkout still matches the patch, then commit the authorized scope on `main` in the worktree with Conventional Commits and hooks enabled. [Push and tag](#push-and-tag) with `scripts/push-and-tag.sh X.Y.Z`: it pushes `main`, waits for CI on that commit across all four platforms, then tags that same commit. Wait for CD to rerun the shared gate and publish its tested artifacts to PyPI and GitHub without rebuilding them:
@@ -19,7 +19,7 @@ Use only for an explicitly authorized release. [CD](../../../../.github/workflow
    ```
 
    Then [sync the primary checkout](#sync-the-primary-checkout).
-1. **Verify.** Run `scripts/verify-release.sh X.Y.Z` from the checkout. It checks that origin holds the annotated tag, reporting its commit, then a non-draft GitHub release holding exactly the wheel and source archive, PyPI SHA-256 digests matching them and their build attestations, then installs that verified wheel in a temporary folder and runs version, initialization, validation, search and exact read. Installing the downloaded wheel sidesteps PyPI's index, which can refuse a version for minutes after its JSON API lists it; `tests/test_release.py` checks a draft release, the asset list, a missing PyPI version, digest and attestation mismatches and a failed install. Confirm CI's Pages deployment separately.
+1. **Verify.** Run `scripts/verify-release.sh X.Y.Z` from the checkout. It checks that origin holds the annotated tag, reporting its commit, then a non-draft, non-prerelease GitHub release holding exactly the wheel and source archive, PyPI listing just those two files with matching SHA-256 digests, and their build attestations from CD at the tag's commit, then installs that verified wheel in a temporary folder and runs version, initialization, validation, search and exact read. Installing the downloaded wheel sidesteps PyPI's index, which can refuse a version for minutes after its JSON API lists it; `tests/test_release.py` checks a draft or prerelease, the asset list, a missing PyPI version or an extra PyPI file, digest and attestation mismatches, a failed install and an installed `bf` reporting another version. Confirm CI's Pages deployment separately.
 1. **Report.** Provide the release URL, version, commit, [verified boundaries and remaining limits](../../../../CONTRIBUTING.md#release). Release tests use synthetic data and fake providers; provider freshness and native host routing require separate evidence.
 
 ## Build the release worktree
@@ -41,7 +41,7 @@ Committing in the worktree moves `main` under the primary checkout, whose index 
 
 ## Check tasks with the pinned mise
 
-The workflows pin mise beside `jdx/mise-action` in `.github/workflows/verify.yml`. A newer global configuration can break that version, so parse the tasks with the pinned binary and an empty configuration (Linux x64 shown; pick the archive matching your platform):
+The workflows pin mise beside `jdx/mise-action` in `.github/workflows/verify.yml` and `security.yml`, and `tests/test_release.py` keeps every pin equal. A newer global configuration can break that version, so parse the tasks with the pinned binary and an empty configuration (Linux x64 shown; pick the archive matching your platform):
 
 ```bash
 version=$(sed -nE 's/^ *version: (20[0-9.]+)( *#.*)?$/\1/p' .github/workflows/verify.yml | head -n 1)
@@ -58,7 +58,7 @@ rm -rf "$pinned"
 
 ## Push and tag
 
-From the clean release worktree on `main`, run the script file itself, never an inline copy of its commands. As its own process, its `set -euo pipefail` holds whatever shell calls it, so `cd ~/.cache/bf-release && scripts/push-and-tag.sh X.Y.Z` is safe, whereas `set -e` inside an inline `( … )` after `&&` is ignored and once let a failed CI run be tagged:
+From the clean release worktree on `main`, run the script file itself, never an inline copy of its commands. As its own process, its `set -euo pipefail` holds whatever shell calls it, so `cd ~/.cache/bf-release && scripts/push-and-tag.sh X.Y.Z` is safe. An inline copy is not: bash ignores `set -e`, even inside `( … )`, within any command whose status `if`, `&&` or `||` tests, and an agent's shell may wrap each command that way (`eval '…' && pwd`), which once let a failed CI run be tagged:
 
 ```bash
 scripts/push-and-tag.sh X.Y.Z

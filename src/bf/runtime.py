@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from threading import Lock
@@ -116,7 +116,7 @@ class Queue:
         return True
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def connect(self) -> Generator[sqlite3.Connection]:
         try:
             # Never open/close a live SQLite inode ourselves: POSIX close drops this process's locks,
             # including another thread's transaction. Serialize creation before SQLite can see the file.

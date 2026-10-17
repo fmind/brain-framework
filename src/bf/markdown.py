@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import posixpath
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import date
@@ -21,6 +21,7 @@ from bf.models import AUTHORED, IDENTITY, MAX_ENCODED, Error, Knowledge, address
 
 if TYPE_CHECKING:
     from markdown_it import MarkdownIt
+    from markdown_it.rules_inline import StateInline
     from markdown_it.token import Token
 
 LEAD = 320
@@ -30,8 +31,8 @@ MAX_TITLE = 4096
 # An id holds no `[`: each citation scan then stops at the next one, so a long run of `[^` parses in linear time.
 _FOOTNOTE = re.compile(r"([ \t>]*)\[\^([^\[\]\s]+)\]:")
 _CITATION = re.compile(r"\[\^([^\[\]\s]+)\]")
-# A footnote's continuation line: indented by four spaces or a tab, which it loses in the parsed copy.
-_CONTINUED = re.compile(r" {4}|\t")
+# A setext underline: below a rewritten definition it would make that paragraph a phantom heading.
+_UNDERLINE = re.compile(r" {0,3}(?:=+|-+)[ \t]*")
 # A top-level code fence: its lines are literal, so a footnote-looking example inside it defines nothing.
 _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 _TASK = re.compile(r"\[([ xX])\]\s+(\S.*)")
@@ -122,7 +123,26 @@ def _parser() -> MarkdownIt:
             # decodes relative paths once, so percent-encoding here would change identities and record refs.
             return url
 
-    return Parser()
+        def validateLink(self, url: str) -> bool:  # noqa: ARG002,N802 - markdown-it's hook
+            # BF renders no HTML: the XSS filter would drop record refs of sources named file, data, javascript or
+            # vbscript, such as [Notes](file:notes.txt). Inline data images still name no target (see parse).
+            return True
+
+    parser = Parser()
+    parser.inline.ruler.before("text", "bf_pending", _pending)
+    return parser
+
+
+def _pending(state: StateInline, silent: bool) -> bool:
+    """Flush a long run of pending text as its own token; match nothing.
+
+    markdown-it appends each text run to one string, copying it every time, so one long line dense in punctuation,
+    such as pasted JSON, would parse in quadratic time. fragments_join and core text_join merge the pieces back. A
+    newline keeps its pending text: its rule strips the trailing spaces there and tells a hard break from a soft one.
+    """
+    if not silent and len(state.pending) >= 1024 and state.src[state.pos] != "\n":
+        state.pushPending()
+    return False
 
 
 def parse(path: str, data: bytes) -> Markdown:
@@ -164,6 +184,9 @@ def parse(path: str, data: bytes) -> Markdown:
     # case-insensitively, as on GitHub.
     definitions: dict[int, str] = {}
     label = fence = ""
+    # The columns a continuation line needs, and the block quote markers an underline right below a definition or its
+    # continuation starts with: None when the copy's last line holds neither, or a definition indented like code.
+    indent, under = 4, None
     for number, line in enumerate(source_lines[offset:], offset + 1):
         if fence:
             # Only a bare run of the same character, at least as long, closes the fence.
@@ -172,16 +195,44 @@ def parse(path: str, data: bytes) -> Markdown:
                 fence = ""
             copy.append(line)
             continue
+        lead = line[: len(line) - len(line.lstrip(" \t"))]
         definition = _FOOTNOTE.match(line)
         if definition:
             definitions[number] = definition[2].casefold()
             copy.append(definition[1] + "^:" + line[definition.end() :])
+            columns = len(definition[1].expandtabs(4))
+            # Continuations need four columns, as on GitHub, or four more under a definition indented like code, such
+            # as an example in an indented code block or a definition in a nested list item. A definition inside an
+            # open footnote's continuation, such as an example in its fence, keeps that footnote's indentation.
+            if not (label and columns >= indent):
+                indent = columns + 4 if columns >= 4 else 4
             # Only a definition outside a block quote continues on indented lines.
             label = "" if ">" in definition[1] else definitions[number]
-        elif label and (continued := _CONTINUED.match(line)):
+            # In a block quote, the underline repeats the markers, and code starts five columns past the last one.
+            quote = definition[1][: definition[1].rfind(">") + 1]
+            coded = len(definition[1][len(quote) :].expandtabs(4)) > 4 if quote else indent != 4
+            under = None if coded else quote
+        elif label and line.strip() and len(lead.expandtabs(4)) >= indent:
             definitions[number] = label
-            copy.append(line[continued.end() :])
+            # The copy keeps the columns beyond the four a continuation loses, so its code stays code.
+            copy.append(" " * (len(lead.expandtabs(4)) - 4) + line[len(lead) :])
+            under = "" if indent == 4 else None
+        elif (
+            under is not None
+            and line.startswith(under)
+            # A block quote marker takes one space after it.
+            and _UNDERLINE.fullmatch((rest := line[len(under) :]).removeprefix(" " if under else "").rstrip("\r\n"))
+        ):
+            # Below a definition, GitHub reads `---` as a rule ending it and other underlines as its text: written as
+            # `***` or escaped, the line underlines no phantom heading. A definition indented like code stays as it
+            # is: it may be code, or text continuing the paragraph above, which the underline makes a heading.
+            if "---" in rest:
+                copy.append(under + rest.replace("-", "*"))
+                label, under = "", None
+            else:
+                copy.append(under + "\\" + rest.lstrip(" "))
         else:
+            under = None
             # A blank line may separate a footnote's paragraphs; any other unindented line ends it.
             label = label if not line.strip() else ""
             if (opening := _FENCE.fullmatch(line.rstrip("\r\n"))) and not (opening[1][0] == "`" and "`" in opening[2]):
@@ -365,7 +416,7 @@ def scheme(path: str, target: str) -> str:
 
 
 @contextmanager
-def _at(path: str, where: str) -> Iterator[None]:
+def _at(path: str, where: str) -> Generator[None]:
     """Name where the note writes a failing value, such as `line 12` or a frontmatter key, rather than quoting it."""
     try:
         yield
@@ -409,13 +460,25 @@ def _task(path: str, markdown: str) -> str:
 
 
 def _plain(markdown: str) -> str:
-    """A compact, readable lead: drop headings markers, rules, emphasis and link targets.
+    """A compact, readable lead: drop heading markers, rules, emphasis and link targets.
 
-    Callers keep at most LEAD characters; a bounded prefix keeps the link pattern's cost independent of note size.
+    Callers preview it in LEAD characters. A bounded prefix keeps the link pattern's cost independent of note size;
+    a lead it cuts short ends with `…` too, even when its words fit.
     """
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", markdown[: 8 * LEAD])
+    prefix = markdown[: 8 * LEAD]
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", prefix)
     text = re.sub(r"^#+\s*|^ {0,3}(?:-[ \t]*){3,}$", "", text, flags=re.MULTILINE)
-    return re.sub(r"\s+", " ", _unmarked(text)).strip()
+    plain = re.sub(r"\s+", " ", _unmarked(text)).strip()
+    return plain + "…" if plain and len(prefix) < len(markdown) else plain
+
+
+def preview(text: str, size: int = LEAD) -> str:
+    """At most `size` characters of a one-line text: a longer one is cut at a word when one is near, then `…`."""
+    if len(text) <= size:
+        return text
+    cut = text[: size - 1]
+    space = cut.rfind(" ")
+    return (cut[:space] if space >= size // 2 else cut).rstrip() + "…"
 
 
 def _unmarked(text: str) -> str:
@@ -529,7 +592,7 @@ def note(path: str, data: bytes | Markdown) -> Note:
         path=path,
         title=title,
         knowledge=knowledge,
-        lead=lead[:LEAD],
+        lead=preview(lead),
         passages=passages,
         slugs={h.slug for h in markdown.headings},
         targets=targets,

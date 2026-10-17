@@ -494,6 +494,14 @@ def test_git_history_drops_an_author_link_beyond_the_reference_bound(provider: P
     assert [(record.links, record.attributes["author_refs"]) for record in records] == [(["repo:local/project"], [])]
 
 
+def test_git_history_reads_a_relative_root_below_the_brain_folder(provider: Provider, tmp_path: Path) -> None:
+    # BF runs the sensor from the brain folder, but Git starts from /, where `git -C code/project` would miss it.
+    (tmp_path / "code/project/.git").mkdir(parents=True)
+    provider.install("git", [GIT_VERSION, {"match": ["log"], "stdout": ""}, {"match": ["remote"], "code": 2}])
+    assert provider.records("git-history.py", "code", "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z") == []
+    assert [call[1] for call in provider.calls("git") if call[0] == "-C"] == [str(tmp_path / "code/project")] * 2
+
+
 def test_git_history_does_not_follow_linked_ancestor_directories(provider: Provider, tmp_path: Path) -> None:
     root = tmp_path / "code"
     root.mkdir()

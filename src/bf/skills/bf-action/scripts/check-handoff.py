@@ -84,13 +84,9 @@ def check(action: str, brain: str) -> dict[str, object]:
                 if isinstance(text, int)
                 else {"words": len(text.split()), "bytes": len(text.encode("utf-8"))}
             )
-        except (ValueError, UnicodeError) as error:
+        except ValueError as error:
             # Only our fixed diagnostics leave the helper; never quote decoder or provider failures.
-            message = (
-                str(error)
-                if isinstance(error, ValueError) and not isinstance(error, UnicodeError)
-                else "invalid section encoding"
-            )
+            message = "invalid section encoding" if isinstance(error, UnicodeError) else str(error)
             return {"checked": False, "passed": False, "sections": sections, "error": message}
         okay = "characters" not in counts and all(counts[key] <= limit for key, limit in limits.items())
         path = action.removeprefix(f"bf://{name}/")

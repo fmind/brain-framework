@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Verify a published release from the outside after CD succeeded: the remote tag's commit, a non-draft GitHub release
-# holding exactly the wheel and source archive, PyPI digests matching them, their build attestations and a clean install
-# of that verified wheel that initializes, validates, searches and reads a brain. It changes nothing but its own
-# temporary folder.
+# holding exactly the wheel and source archive, PyPI digests matching them, their build attestations from CD at that tag
+# and commit and a clean install of that verified wheel that initializes, validates, searches and reads a brain. It
+# changes nothing but its own temporary folder.
 set -euo pipefail
 
 version=${1:?usage: scripts/verify-release.sh X.Y.Z}
@@ -28,8 +28,10 @@ sha256() {
   fi
 }
 
-# A disk-backed cache, not /tmp: the installed tool and its environment can be large for a RAM-backed /tmp.
-cache="${XDG_CACHE_HOME:-${HOME}/.cache}"
+# A disk-backed cache, not /tmp: the installed tool and its environment can be large for a RAM-backed /tmp. As bf
+# does, ignore a relative XDG_CACHE_HOME: bf would ignore the relative settings below and use the caller's own.
+cache="${XDG_CACHE_HOME:-}"
+[[ ${cache} == /* ]] || cache="${HOME}/.cache"
 mkdir -p "${cache}"
 work="$(mktemp -d "${cache}/bf-verify-release.XXXXXX")"
 trap 'rm -rf -- "${work}"' EXIT
@@ -58,8 +60,10 @@ for name in "${wheel}" "${sdist}"; do
   expected="$(printf '%s\n' "${pypi}" | awk -v name="${name}" '$1 == name { print $2 }')"
   [[ -n ${expected} ]] || fail "PyPI does not list ${name}"
   [[ "$(sha256 "${work}/assets/${name}")" == "${expected}" ]] || fail "${name} on GitHub does not match PyPI's SHA-256"
-  gh attestation verify "${work}/assets/${name}" --repo "${repository}" >/dev/null ||
-    fail "${name} has no valid build attestation from ${repository}"
+  # Only CD's run for this tag and commit attests a release asset, not another workflow or ref of the repository.
+  gh attestation verify "${work}/assets/${name}" --repo "${repository}" --source-ref "refs/tags/${tag}" \
+    --source-digest "${commit}" --signer-workflow "${repository}/.github/workflows/cd.yml" >/dev/null ||
+    fail "${name} has no valid build attestation from CD at ${tag} in ${repository}"
 done
 
 # The wheel whose digest PyPI just confirmed: PyPI's index can refuse a minutes-old version that its JSON API already

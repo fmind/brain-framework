@@ -42,7 +42,7 @@ EOF
 )
 ```
 
-The dry run lists the due sensor and routine. The update collects one fictional record, then reports the routine with `"status":"ran"` and an `action` at `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, where `XXXXXXXX` is a random suffix. The action lists projects as plain bullets, overdue reviews first and earliest deadline first, plus open-task counts and source refs; validation returns `"valid":true`. A second update within the week creates nothing. Read the returned action to continue the review: the routine completes no task for you.
+The dry run lists the due sensor and routine. The update collects one fictional record, then reports the routine with `"status":"ran"` and an `action` at `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, where `XXXXXXXX` is a random suffix. The action counts the seven open tasks across three notes and lists each with its section ref and line, then counts the period's records by source: `records by source: demo 1`. It says `No project note is due for review.`: the copied project is newer than the demo record it links, and its `stale_after` falls due on 2026-12-18, after which the action lists it with `review due 2026-12-18`. [Prepare a weekly review](../../docs/docs/routines.md#prepare-a-weekly-review) describes the full layout and ordering. Validation returns `"valid":true`. A second update within the week creates nothing. Read the returned action to continue the review: the routine completes no task for you.
 
 ## Validate before each commit
 
@@ -86,3 +86,5 @@ Git shows the hook's reply. The first commit passes with `{"dry_run":false,"hook
 ## Use the weekly review in your brain
 
 [Prepare a weekly review](../../docs/docs/routines.md#prepare-a-weekly-review) copies the routine into your brain, configures it and previews its action. The routine only reads pages: it never edits notes and links nothing, naming items by their `uri` or ref, because a link from a dated action would count as newer evidence for its target. An incomplete page makes it write nothing, and BF retries after the [failure backoff](../../docs/docs/schedule.md#timing-and-health).
+
+BF records a run only after the routine exits, so the review leaves its own run out of the programs needing attention. It recognizes that run by its file name: name the routine `weekly-review` in `bf.yaml`, after its file. When the brain declares others under `brains:`, it also asks `bf status` for its brain's name, so another brain's `weekly-review` stays listed. Its changed notes, recent actions and coming week come from the home page: recent actions are those whose folder date falls within the last seven days, up to today. When the 20-item preview of changed notes or upcoming items is full, or the 10 newest actions all began within the period or later, the action names the `bf read` page that lists them all.

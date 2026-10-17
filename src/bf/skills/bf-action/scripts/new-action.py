@@ -28,6 +28,10 @@ SUFFIX = 12
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
+class NotBrainError(Exception):
+    """--brain names no directory holding a regular bf.yaml."""
+
+
 def create(actions: int, topic: str, today: str, *, unique: bool) -> str:
     """The folder created exclusively below `actions`: exclusive creation is the collision guard."""
     names = [] if unique else [f"{today}_{topic}"]
@@ -66,12 +70,18 @@ def write(actions: int, folder: str, text: str) -> None:
 def start(brain: Path, topic: str, *, unique: bool) -> str:
     """The new action's folder name; a failure removes only the folders this call created."""
     # Like bf, follow a linked brain root once; nothing below it is followed.
-    root = os.open(brain, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        config = os.open("bf.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        root = os.open(brain, os.O_RDONLY | os.O_DIRECTORY)
+    except (FileNotFoundError, NotADirectoryError) as error:
+        raise NotBrainError from error
+    try:
+        try:
+            config = os.open("bf.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        except FileNotFoundError as error:
+            raise NotBrainError from error
         try:
             if not stat.S_ISREG(os.fstat(config).st_mode):
-                raise OSError("expected regular brain configuration")
+                raise NotBrainError
         finally:
             os.close(config)
         made = False
@@ -110,7 +120,8 @@ def main() -> int:
         "--unique", action="store_true", help="always add the 12-hex suffix, for a brain that several clones share"
     )
     args = parser.parse_args()
-    if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", args.topic) or len(args.topic) > 64:
+    # The topics bf validates in action folder names.
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", args.topic) or len(args.topic) > 64:
         parser.error("topic must be lowercase words joined by single hyphens, at most 64 characters")
     try:
         brain = args.brain.expanduser()
@@ -118,9 +129,15 @@ def main() -> int:
         parser.error("the brain path's ~ or ~user home directory cannot be resolved")
     try:
         folder = start(brain, args.topic, unique=args.unique)
+    except NotBrainError:
+        parser.exit(
+            1,
+            "Could not create an action: --brain must be the brain directory holding bf.yaml, the path bf status "
+            "reports.\n",
+        )
     except OSError:
         parser.exit(1, "Could not create an action safely; inspect permissions and existing paths, then retry.\n")
-    sys.stdout.write(json.dumps({"action": f"actions/{folder}/ACTION.md"}) + "\n")
+    sys.stdout.write(json.dumps({"action": f"actions/{folder}/ACTION.md"}, separators=(",", ":")) + "\n")
     return 0
 
 

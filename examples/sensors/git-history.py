@@ -39,8 +39,10 @@ class InvalidError(ValueError):
 
 def run(argv: list[str], limit: int, timeout: int) -> bytes:
     """Bound provider output while it runs; inherit Brain Framework's cancellable process group."""
-    # Only literal provider commands reach this helper; no shell interprets argv.
-    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    # Only literal provider commands reach this helper; no shell interprets argv. It starts them from /, so none depends
+    # on the folder BF runs the sensor from: gws, for one, loads a `.env` file from its working directory or any parent,
+    # and one in the brain could switch its account.
+    child = subprocess.Popen(argv, cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     output = bytearray()
     deadline = time.monotonic() + timeout
     try:
@@ -313,7 +315,8 @@ if __name__ == "__main__":
         options = sys.argv[4:]
         if len(sys.argv) < 4 or len(options) % 2 or any(flag != "--skip" for flag in options[::2]):
             raise InvalidError("expected ROOT START END [--skip RELATIVE_REPO]...")
-        result, skipped = collect(Path(sys.argv[1]), sys.argv[2], sys.argv[3], frozenset(options[1::2]))
+        # Git starts from /: a relative ROOT names a folder below the brain, where BF runs this sensor.
+        result, skipped = collect(Path(sys.argv[1]).absolute(), sys.argv[2], sys.argv[3], frozenset(options[1::2]))
         payload = json.dumps(result, ensure_ascii=False, allow_nan=False)
         if len(payload.encode()) > MAX_BYTES:
             raise InvalidError("normalized history exceeds 16 MiB; narrow the window")

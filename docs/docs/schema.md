@@ -48,7 +48,7 @@ Their `title` values are `Config`, `UserConfig` and `Suite`. `--kind search-repl
 | Machine registry `bf/config.yaml` | [Registry](../registry.schema.json) |
 | `evals/*.yaml`                    | [Evaluation](../eval.schema.json)   |
 
-The schemas check names, types, limits and structure. BF also checks meanings that depend on the brain, such as declared fields, distinct program names and valid identities: run `bf validate` and `bf update --dry-run`. YAML parsing rejects duplicate keys, anchors, aliases, unsafe tags and oversized documents. Configuration and frontmatter follow the YAML 1.2 core schema: only `true` and `false` are booleans, so `on` and `no` are strings, and `1:30` is text.
+The schemas check names, types, limits and structure. BF also checks meanings that depend on the brain, such as declared fields, distinct program names and valid identities: run `bf validate` and `bf update --dry-run`. YAML parsing rejects duplicate keys, anchors, aliases, unsafe tags and oversized documents. Configuration and frontmatter follow the YAML 1.2 core schema: only `true` and `false`, also spelled `True`, `TRUE`, `False` or `FALSE`, are booleans, so `on` and `no` are strings, `017` is decimal and `1:30` is text.
 
 ## Note format
 
@@ -60,7 +60,7 @@ Projects, concepts and `ACTION.md` notes are OKF notes. [Write notes and actions
 - `stale_after` is an ISO 8601 date-time with a timezone; a date alone is invalid.
 - `aliases` are namespaced `scheme:value` identities, never display names. A URI in `resource` is an identity too. Entities, aliases and resources follow the [identity rules](link-reference.md#identity-rules); `aliases`, `links` and `tags` hold at most 1,000 items each.
 - `fields` holds values of fields declared in `bf.yaml`, checked like a record's: an invalid value claims nothing and fails `bf validate`, while the note stays searchable. A declared relation written at the top level instead is reported, because OKF ignores unknown keys.
-- `sources` entries need a nonempty `resource`, which may also describe a population; `verified` events need `by` and `at`.
+- `sources` entries need a nonempty `resource`. Only one written as a [link](link-reference.md#relation-links), without spaces, is cited and checked; other text may describe a population. `verified` events need `by` and `at`.
 
 In `projects/` and `concepts/`, `index.md` lists a folder's notes and permits only `okf_version` at a folder root; `log.md` groups changes under `YYYY-MM-DD` headings without frontmatter. Neither gets reminders or tasks.
 
@@ -79,7 +79,7 @@ A source keeps one record per id. Collecting the same id again replaces it; its 
 | `attributes.observed` | When BF first collected this revision.           | BF received the edit 15 minutes later.     |
 | `attributes.partial`  | `true` when the text is deliberately incomplete. | The sensor kept only an excerpt.           |
 
-These timestamps need a timezone. The edited message stays in its event period and appears in the `changed` list of the day it was modified. Like a new event, an upstream edit made after a linked note's last edit flags that note for [review](retrieval.md#ordering-and-review-signals); `observed` never does. Collection keeps `observed` while the content is unchanged. When both revisions declare `updated`, an older revision cannot replace a newer one.
+These timestamps need a timezone. The edited message stays in its event period and appears in the `changed` list of the day it was modified. Like a new event, an upstream edit made after a linked note's last edit flags that note for [review](retrieval.md#ordering-and-review-signals); `observed` never does. Collection keeps `observed` while the content is unchanged. When both revisions declare `updated`, an older revision cannot replace a newer one, unless the stored revision's `updated` is later than its `observed`, as from a clock or file date in the future: such a revision never freezes the record.
 
 `updated`, `observed` and `partial` are reserved: BF validates their types and sets `observed`. Map provider fields to them explicitly, such as Drive's `modifiedTime` to `updated`, rather than passing a raw payload.
 
@@ -115,7 +115,7 @@ sensors:
       kind: { value: commit }
 ```
 
-The reviewed [Git history sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/git-history.py) prints `"attributes": {"author_refs": ["person:email/alice@example.test"]}`. BF stores `"fields": {"author": ["person:email/alice@example.test"], "kind": "commit"}` in the record, and `author` becomes a relation from the commit to Alice's identity.
+For a commit by Alice, the reviewed [Git history sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/git-history.py) prints `"attributes": {"author_refs": ["person:email/alice@example.test"]}`; the address is fictional, since the sensor itself skips commits by authors at reserved test domains such as `example.test`. BF stores `"fields": {"author": ["person:email/alice@example.test"], "kind": "commit"}` in the record, and `author` becomes a relation from the commit to Alice's identity.
 
 ### Types and cardinality
 
@@ -211,6 +211,6 @@ bf build --reproject git-commits
 
 For example, after renaming `author` to `creator` in `fields:` and in the sensor's mapping, `bf validate` reports `field author is not declared in bf.yaml fields` for each stored commit. The preview counts the changes without writing, such as `{"sensor":"git-commits","dry_run":true,"records":2,"changed":2,"unchanged":0,"failed":0}`. The second command rewrites those records' `fields` and refreshes the cache; validation then passes and `bf read person:email/alice@example.test --rel creator` lists the commits.
 
-Reprojection reads each record as its sensor printed it and keeps every other value, including `observed`; it never removes a record. It cannot map a value the sensor never printed: a record the mappings reject keeps its fields, counts as `failed` and appears under `problems` (up to 200), and the command exits 1.
+Reprojection reads each record as its sensor printed it and keeps every other value, including `observed`; it never removes a record. It cannot map a value the sensor never printed: a record the mappings reject keeps its fields, counts as `failed` and appears under `problems` (up to 200, then `"problems_truncated":true`), and the command exits 1.
 
 Recollect those records after updating the sensor. Changes commit in transactions of up to 1,000 records; after an interruption, `bf build` recovers and a rerun completes the reprojection.

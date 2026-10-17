@@ -33,7 +33,7 @@ Run from the Brain Framework checkout after `uv sync --locked`. This subshell co
 
 Expect, in order:
 
-1. Validation returns `"valid":true`: the prompt file exists and the command is on PATH.
+1. Validation returns `"valid":true`: the prompt file exists. Validation does not look up `cat` or your harness on PATH, which varies by machine: a run whose command is missing fails with `COMMAND is not on PATH` and writes no record.
 1. The dry run runs nothing: this assistant has no inputs, schedules or triggers. Only `bf run` starts it.
 1. The run returns `"status":"ran"`, the `record` it wrote, such as `assistant:20261014T090000Z-1a2b3c4d`, and its reply as `text`. Here the reply is the expanded prompt: the brain's absolute path, a window ending now and `Owner message: What changed in the launch?`.
 1. The source page lists that one record, titled `Brain assistant`, the reply's first line without its heading mark.
@@ -41,4 +41,4 @@ Expect, in order:
 
 ## Use your harness
 
-Replace `[cat]` with your harness, such as `[claude, --print, --output-format, json, --allowedTools, "Bash(bf read *),Bash(bf search *)"]` with `text: /result`, then add `schedules: {review: {every: 1800}}` to run it every 30 minutes. [Pass the prompt to the harness](../../docs/docs/prompts.md#pass-the-prompt-to-the-harness) lists the harness settings; [prompt troubleshooting](../../docs/docs/troubleshooting.md#a-prompt-fails) covers failed runs. Swapping a harness back to `[cat]` is a quick way to check what it receives.
+Replace `[cat]` with your harness, such as `[claude, --print, --output-format, json, --tools, "Read,Grep,Glob,Bash", --allowedTools, "Bash(bf read *),Bash(bf search *)", --permission-mode, dontAsk]` with `text: /result`, then add `schedules: {review: {every: 1800}}` to run it every 30 minutes. [Pass the prompt to the harness](../../docs/docs/prompts.md#pass-the-prompt-to-the-harness) lists the harness settings; [prompt troubleshooting](../../docs/docs/troubleshooting.md#a-prompt-fails) covers failed runs. Swapping a harness back to `[cat]`, without `text`, is a quick way to check what it receives.

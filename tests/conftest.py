@@ -25,8 +25,20 @@ from bf.records import path as record_path
 from bf.storage import Store
 
 ROOT = Path(__file__).resolve().parents[1]
-# Host terminal settings that change Rich and Typer output: width, color and forced terminal behavior.
-TERMINAL = ("COLUMNS", "LINES", "FORCE_COLOR", "NO_COLOR", "TTY_COMPATIBLE", "TTY_INTERACTIVE", "GITHUB_ACTIONS")
+# Host settings that change Rich and Typer output: width, color, forced terminal behavior and Typer's Rich switch.
+TERMINAL = (
+    "COLUMNS",
+    "LINES",
+    "FORCE_COLOR",
+    "NO_COLOR",
+    "PY_COLORS",
+    "TERMINAL_WIDTH",
+    "TTY_COMPATIBLE",
+    "TTY_INTERACTIVE",
+    "GITHUB_ACTIONS",
+    "TYPER_USE_RICH",
+    "_TYPER_FORCE_DISABLE_TERMINAL",
+)
 
 
 def assert_linear_time(operation: Callable[[int], object], size: int) -> None:
@@ -46,6 +58,9 @@ def assert_linear_time(operation: Callable[[int], object], size: int) -> None:
 
 def pytest_configure() -> None:
     """Run every test in UTC on any host; tests of local dates choose their own zone in a subprocess."""
+    # Typer reads TYPER_USE_RICH once, when test modules import bf.cli, before `isolated` could unset it. The other
+    # TERMINAL names stay for pytest's own report: `isolated` clears them in each test, where Typer and Rich read them.
+    os.environ.pop("TYPER_USE_RICH", None)
     os.environ["TZ"] = "UTC"
     if hasattr(time, "tzset"):
         time.tzset()
@@ -57,6 +72,32 @@ def pytest_configure() -> None:
 def plain(text: str) -> str:
     """Terminal text without ANSI styles, which Typer and Rich emit when a terminal or CI forces colors."""
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+# Walkthrough tests compare a page's documented replies with its commands' output.
+BLOCK = re.compile(r"^```(\w*)\n(.*?)^```$", re.MULTILINE | re.DOTALL)  # A fenced block's language and body.
+FRAGMENT = re.compile(r'`("[a-z_]+":[^`]+)`')  # An inline reply fragment such as `"score":"3/3"`.
+
+
+def within(actual: object, expected: object) -> bool:
+    """Whether every documented key and value is present; lists match item by item, so lists of scalars exactly."""
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(k in actual and within(actual[k], v) for k, v in expected.items())
+    if isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and len(actual) == len(expected)
+            and all(within(a, e) for a, e in zip(actual, expected, strict=True))
+        )
+    return actual == expected
+
+
+def anywhere(actual: object, expected: object) -> bool:
+    """Whether the documented object matches the reply or one object nested in it, such as a search item."""
+    if within(actual, expected):
+        return True
+    children = actual.values() if isinstance(actual, dict) else actual if isinstance(actual, list) else []
+    return any(anywhere(child, expected) for child in children)
 
 
 _FAKE = '''#!{python}
@@ -142,29 +183,25 @@ def provider(tmp_path: Path) -> Provider:
     return Provider(tmp_path / "bin", state)
 
 
-# Every reply a test produces must match its strict declaration, which rejects undeclared fields, and the
-# published schema a client validates against, as MCP clients do with `outputSchema`.
-_REPLY = Draft202012Validator(
-    {
-        "$defs": replies.SEARCH["$defs"],
-        "anyOf": [
-            {key: value for key, value in schema.items() if key != "$defs"} for schema in (replies.SEARCH, replies.READ)
-        ],
-    }
-)
-_PUBLISHED = [Draft202012Validator(schemas.document(kind)) for kind in ("search-reply", "read-reply")]
+# Every reply a test produces must match the strict declaration of its kind, which rejects undeclared fields, and
+# that kind's published schema a client validates against, as MCP clients do with `outputSchema`. The open search
+# schema alone would also accept many read pages.
+_STRICT = {"search-reply": Draft202012Validator(replies.SEARCH), "read-reply": Draft202012Validator(replies.READ)}
+_PUBLISHED = {kind: Draft202012Validator(schemas.document(kind)) for kind in ("search-reply", "read-reply")}
 
 
 @pytest.fixture(autouse=True)
 def published_replies(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Search and read replies return through `bounded`: validate each one against the reply schemas."""
+    """Search and read replies return through `bounded`: validate each one against its kind's reply schemas."""
     bounded = retrieve.bounded
 
     def checked(value: dict[str, object], limit: int = MAX_REPLY) -> dict[str, object]:
         result = bounded(value, limit)
-        error = best_match(_REPLY.iter_errors(result))
+        # Every read shape requires `page` or `sha256`, which the strict search declaration forbids.
+        kind = "read-reply" if "page" in result or "sha256" in result else "search-reply"
+        error = best_match(_STRICT[kind].iter_errors(result))
         assert error is None, f"{list(error.absolute_path)}: {error.message[:300]}"
-        assert any(validator.is_valid(result) for validator in _PUBLISHED), "no published reply schema accepts it"
+        assert _PUBLISHED[kind].is_valid(result), f"the published {kind} schema rejects it"
         return result
 
     monkeypatch.setattr(retrieve, "bounded", checked)

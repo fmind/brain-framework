@@ -33,7 +33,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: python-package-distributions
       - name: Verify distribution hashes
@@ -59,6 +59,7 @@ jobs:
         # PyPI's JSON API can lag an upload by minutes: retry for about three minutes before failing.
         run: curl --fail --silent --show-error --retry 12 --retry-delay 15 --retry-all-errors --max-time 30 "https://pypi.org/pypi/brain-framework/${GITHUB_REF_NAME#v}/json" --output "$RUNNER_TEMP/pypi.json"
       - name: Extract published distribution hashes
+        shell: bash # Adds pipefail: a jq failure fails here instead of reading as a hash mismatch below.
         run: jq -r '.urls[] | "\(.digests.sha256)  dist/\(.filename)"' "$RUNNER_TEMP/pypi.json" | sort > published.sha256
       - name: Sort expected distribution hashes
         run: sort python-package.sha256 > expected.sha256
@@ -77,7 +78,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: python-package-distributions
       - name: Verify distribution hashes

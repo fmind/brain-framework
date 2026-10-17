@@ -15,7 +15,7 @@ from bf.models import CACHE, Assistant, Config, Error, Program, Sensor
 from bf.runtime import Queue
 from bf.storage import Store
 
-# Counters of the last successful collection, reported apart from indexed totals.
+# Counters of the last committed collection, reported apart from indexed totals.
 _COUNTERS = (
     "records",
     "added",
@@ -34,8 +34,13 @@ _COUNTERS = (
 _LATE = frozenset({"overdue", "never"})
 
 
-def _freshness(program: Program, success: str, now: datetime) -> str:
-    """Scheduled programs are fresh within twice their refresh, based on local run history."""
+def _freshness(program: Program | None, success: str, now: datetime) -> str:
+    """Scheduled programs are fresh within twice their refresh, based on local run history.
+
+    A disabled or undeclared program, such as a historical source, is unknown.
+    """
+    if program is None or not program.enabled:
+        return "unknown"
     if not program.refresh:
         return "manual"
     if not success:
@@ -75,16 +80,16 @@ def source_health(
     result: dict[str, dict[str, object]] = {}
     for name in sorted({*config.sensors, *config.assistants, *names}):
         if name in config.assistants:
-            # A prompt's records are its runs: the prompt is their source.
-            prompt = config.assistants[name]
+            # An assistant's records are its runs: the assistant is their source.
+            assistant = config.assistants[name]
             entry = asked.get(name, {})
             success = str(entry.get("success", ""))
-            item: dict[str, object] = {"state": "active" if prompt.enabled else "disabled", "freshness": "unknown"}
+            item: dict[str, object] = {"state": "active" if assistant.enabled else "disabled", "freshness": "unknown"}
             if success:
                 item["last_collected"] = success
             if entry.get("error"):
                 item["failed"] = True
-            if prompt.enabled:
+            if assistant.enabled:
                 item["freshness"] = assistant_states[name]["freshness"]
             result[name] = item
             continue
@@ -93,7 +98,7 @@ def source_health(
         success = str(entry.get("success", ""))
         item: dict[str, object] = {
             "state": "historical" if settings is None else "active" if settings.enabled else "disabled",
-            "freshness": "unknown",
+            "freshness": _freshness(settings, success, now),
         }
         if success:
             # Run history already holds canonical UTC instants.
@@ -104,8 +109,6 @@ def source_health(
             item["window"] = {"since": entry["start"], "until": entry["end"]}
         if entry.get("error"):
             item["failed"] = True
-        if settings is not None and settings.enabled:
-            item["freshness"] = _freshness(settings, success, now)
         if _silent(settings, success, changed.get(name, ""), now):
             item["silent"] = True
         result[name] = item
@@ -134,7 +137,7 @@ def routine_health(store: Store, *, now: datetime | None = None) -> dict[str, di
         success = str(entry.get("success", ""))
         item: dict[str, object] = {
             "state": "active" if settings.enabled else "disabled",
-            "freshness": _freshness(settings, success, now) if settings.enabled else "unknown",
+            "freshness": _freshness(settings, success, now),
         }
         if success:
             item["last_success"] = success
@@ -145,7 +148,7 @@ def routine_health(store: Store, *, now: datetime | None = None) -> dict[str, di
 
 
 def assistant_health(store: Store, *, now: datetime | None = None) -> dict[str, dict[str, object]]:
-    """Each configured prompt's state, freshness, last scheduled success, runs, latest record and failure."""
+    """Each configured assistant's state, freshness, last scheduled success, runs, latest record and failure."""
     now = now or datetime.now(UTC)
     config, history = load(store), state(store, ASSISTANTS)
     result: dict[str, dict[str, object]] = {}
@@ -203,14 +206,14 @@ def _attention(
     config: Config,
     sources: dict[str, dict[str, object]],
     routines: dict[str, dict[str, object]],
-    assistants: dict[str, dict[str, object]] | None = None,
+    assistants: dict[str, dict[str, object]],
 ) -> list[dict[str, object]]:
     """Scheduled programs this machine runs that failed, have not succeeded recently or, for a source, fell silent."""
     result: list[dict[str, object]] = []
     for kind, healths, programs in (
         ("sensor", {name: health for name, health in sources.items() if name not in config.assistants}, config.sensors),
         ("routine", routines, config.routines),
-        ("assistant", assistants or {}, config.assistants),
+        ("assistant", assistants, config.assistants),
     ):
         for name, health in healths.items():
             settings, failed = programs.get(name), health.get("failed")
@@ -236,15 +239,22 @@ def _attention(
     return result
 
 
-def attention(store: Store, now: datetime | None = None) -> list[dict[str, object]]:
-    """Scheduled sensors, routines and assistants this machine runs that failed, are late or fell silent."""
+def attention(
+    store: Store, now: datetime | None = None, counts: Mapping[str, Mapping[str, object]] | None = None
+) -> list[dict[str, object]]:
+    """Scheduled sensors, routines and assistants this machine runs that failed, are late or fell silent.
+
+    `counts` are the indexed counts per source, as `index.sources` gives them, from a caller holding the cache open:
+    opening it again would wait behind a publish that waits for that caller.
+    """
     now = now or datetime.now(UTC)
-    try:
-        with index.database(store) as (connection, _):
-            counts = index.sources(connection)
-    except Error, OSError, sqlite3.DatabaseError:
-        # Silence needs the cache; failures and lateness come from run history alone.
-        counts = {}
+    if counts is None:
+        try:
+            with index.database(store) as (connection, _):
+                counts = index.sources(connection)
+        except Error, OSError, sqlite3.DatabaseError:
+            # Silence needs the cache; failures and lateness come from run history alone.
+            counts = {}
     return _attention(
         load(store),
         source_health(store, counts, now=now),
@@ -257,7 +267,8 @@ def _pinned(store: Store) -> str:
     """The brain-framework version a brain's uv.lock pins, read as data and never run; empty without one."""
     try:
         lock = tomllib.loads(store.read("uv.lock").decode("utf-8"))
-    except Error, OSError, UnicodeError, tomllib.TOMLDecodeError:
+    except Error, OSError, ValueError, RecursionError:
+        # A shared brain supplies its lock: deep nesting or an overlong integer pins nothing, like any parse error.
         return ""
     packages = lock.get("package")
     for package in packages if isinstance(packages, list) else ():
@@ -283,18 +294,19 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             queue = Queue(store)
             messaging = queue.report() if config.assistants or config.channels or queue.exists() else None
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
-            if len(stores) == 1:
+            # Status diagnoses brains: among registered ones, even beside only unavailable ones, one that cannot load
+            # is reported, and the others still are. A brain selected alone fails with its own error.
+            if len(stores) == 1 and not unavailable:
                 if isinstance(error, sqlite3.DatabaseError):
                     raise Error(CACHE) from error
                 raise
-            # Status diagnoses brains: one that cannot load is reported, and the others still are.
             message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; check its path"
             brains.append({"brain": brain_name(store), "path": str(store.root), "error": message})
             healthy = False
             continue
         sources: dict[str, dict[str, object]] = {}
         for name in sorted({*config.sensors, *config.assistants, *counts}):
-            # A prompt's run counters belong to its prompts entry.
+            # An assistant's run counters belong to its assistants entry.
             run = {} if name in config.assistants else history.get(name, {})
             # One shape shared with retrieval coverage, plus indexed totals and local run diagnostics.
             entry: dict[str, object] = {**coverage[name], **counts.get(name, {"records": 0, "bytes": 0})}

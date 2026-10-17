@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 from bf import index, records
 from bf.cli import app
 from bf.collect import collect, routine
-from bf.config import register
+from bf.config import ABSENT, register
 from bf.health import report, source_health
 from bf.history import log_path
 from bf.models import Error, Query, encode
@@ -152,14 +152,6 @@ def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> 
     assert source_health(brain, now=datetime(2026, 9, 23, 15, tzinfo=UTC))["current"]["freshness"] == "overdue"
 
 
-def test_init_quotes_yaml_names_and_keeps_private_evidence_out_of_git(tmp_path) -> None:
-    result = CliRunner().invoke(app, ["init", str(tmp_path / "brain"), "--name", "on"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["brain"] == "on"
-    assert "memories/" in (tmp_path / "brain" / ".gitignore").read_text()
-    assert CliRunner().invoke(app, ["validate", "--brain", str(tmp_path / "brain")]).exit_code == 0
-
-
 def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store) -> None:
     brain.write("bf.yaml", b"version: 8\nname: fixture\nsensors:\n  current:\n    command: [echo]\n")
     brain.write(
@@ -232,6 +224,24 @@ def test_status_reports_a_broken_brain_and_still_reports_the_others(tmp_path: Pa
     alone = CliRunner().invoke(app, ["status", "--brain", str(other.root)])
     assert alone.exit_code == 1
     assert "bf.yaml: invalid YAML at line 3" in str(alone.exception)
+
+
+def test_status_reports_a_broken_brain_beside_an_unavailable_one(tmp_path: Path) -> None:
+    # Of two registered brains, one moved away and the other's bf.yaml broke: neither hides the other.
+    for name in ("moved", "broken"):
+        (tmp_path / name).mkdir()
+        Store(tmp_path / name).write("bf.yaml", f"version: 8\nname: {name}\n".encode())
+        register(Store(tmp_path / name))
+    broken = Store(tmp_path / "broken")
+    broken.write("bf.yaml", b"version: 8\nname: [broken\n")
+    (tmp_path / "moved").rename(tmp_path / "elsewhere")
+    result = CliRunner().invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["brains"] == [
+        {"brain": "moved", "error": ABSENT},
+        {"brain": "broken", "path": str(broken.root), "error": "bf.yaml: invalid YAML at line 3, column 1"},
+    ]
+    assert CliRunner().invoke(app, ["status", "--check"]).exit_code == 1
 
 
 def test_status_warns_without_failing_when_a_scanned_tree_nears_the_scan_limit(
@@ -342,6 +352,8 @@ def test_status_names_the_installed_and_pinned_runtime(brain: Store) -> None:
         b'[[package]]\nname = "other"\nversion = "1.0"\n',
     )
     assert cast("dict", report([brain]))["brains"][0]["runtime"]["pinned"] == "17.2.0"
-    # A lock that does not parse pins nothing: status never fails on it.
-    brain.write("uv.lock", b"[[package\n")
-    assert "pinned" not in cast("dict", report([brain]))["brains"][0]["runtime"]
+    # A lock that does not parse pins nothing: status never fails on it, even nested past the recursion limit or
+    # holding an integer past Python's digit limit.
+    for lock in (b"[[package\n", b"a = " + b"[" * 100_000 + b"]" * 100_000, b"a = " + b"1" * 5000):
+        brain.write("uv.lock", lock)
+        assert "pinned" not in cast("dict", report([brain]))["brains"][0]["runtime"]

@@ -102,7 +102,14 @@
   "additionalProperties": false,
   "description": "A bounded collection of retrieval assertions; evaluated offline without executing programs.",
   "properties": {
-    "cases": { "items": { "$ref": "#/$defs/Case" }, "maxItems": 200, "minItems": 1, "title": "Cases", "type": "array" },
+    "cases": {
+      "description": "One to 200 retrieval cases with unique names.",
+      "items": { "$ref": "#/$defs/Case" },
+      "maxItems": 200,
+      "minItems": 1,
+      "title": "Cases",
+      "type": "array"
+    },
     "version": {
       "const": 8,
       "description": "Brain format, shared with bf.yaml; independent of the package version.",

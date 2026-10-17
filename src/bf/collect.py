@@ -10,7 +10,7 @@ import signal
 import stat
 import subprocess
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import ExitStack, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -67,6 +67,8 @@ RUN_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
 _TEMPLATE = re.compile(r"\{\{(brain|home|start|end|input)\}\}")
 # A record title shows the reply's first line, shortened.
 _TITLE = 120
+# A routine's error quotes at most this many characters of its first broken link.
+_QUOTE = 200
 
 
 class Runner(Protocol):
@@ -89,7 +91,7 @@ def enabled[P: Program | Assistant](programs: Mapping[str, P], kind: str, name: 
 
 
 @contextmanager
-def starting() -> Iterator[None]:
+def starting() -> Generator[None]:
     """Defer cancellation until the caller owns the child and can clean up its process group."""
     if current_thread() is not main_thread():
         yield
@@ -134,7 +136,7 @@ def executable(store: Store, command: str, env: Mapping[str, str]) -> str:
 
 def run(
     argv: list[str],
-    sensor: Command,
+    program: Command,
     store: Store,
     name: str,
     stdin: bytes = b"",
@@ -143,7 +145,8 @@ def run(
     cancelled: Callable[[], bool] | None = None,
     overrides: Mapping[str, str] | None = None,
 ) -> bytes:
-    """Execute one sensor or routine from the brain root, feeding it `stdin`; returns its stdout.
+    """Execute one sensor, routine, assistant harness or channel command from the brain root, feeding it `stdin`;
+    returns its stdout.
 
     Its stderr, and a `log` routine's stdout, go to the program's bounded log in logs/, never to errors.
     """
@@ -156,8 +159,8 @@ def run(
     child: subprocess.Popen[bytes] | None = None
     output, errors = bytearray(), bytearray()
     # A log routine's stdout only feeds its log: keep a rolling tail, as for stderr, instead of failing at max_bytes.
-    logged = isinstance(sensor, Routine) and sensor.output == "log"
-    deadline = started + sensor.timeout
+    logged = isinstance(program, Routine) and program.output == "log"
+    deadline = started + program.timeout
     exited: float | None = None
     outcome = "failed"
     try:
@@ -204,7 +207,7 @@ def run(
                         "program exited but a background process kept its stdout open; redirect its descendants' output"
                     )
                 if now >= deadline:
-                    raise Error(f"program timed out after {sensor.timeout}s")
+                    raise Error(f"program timed out after {program.timeout}s")
                 if stdout not in selector.get_map():
                     with suppress(subprocess.TimeoutExpired):
                         child.wait(timeout=0.05)
@@ -228,7 +231,7 @@ def run(
                     key.data.extend(chunk)
                     if logged:
                         del output[:-_LOG]
-                    elif len(output) > sensor.max_bytes:
+                    elif len(output) > program.max_bytes:
                         raise Error("program output exceeded max_bytes")
                     del errors[:-_LOG]
         # Keep diagnostics written before the exit; a bounded read never waits for descendants.
@@ -378,7 +381,6 @@ def collect(
     sensor = enabled(config.sensors, "sensor", name)
     if reconcile and sensor.reconcile is None:
         raise Error("reconciliation requires the sensor's reconcile setting")
-    argv = arguments(store, sensor, start, end)
     with collecting(store, name):
         started = clock()
         observed = timestamp(started.isoformat())
@@ -389,7 +391,8 @@ def collect(
                 raise Error("reconciliation must cover its lookback through the current run")
         committed = False
         try:
-            raw = runner(argv, sensor, store, name, b"")
+            # A {{home}} that cannot resolve fails the run in its history, as for routines and prompts.
+            raw = runner(arguments(store, sensor, start, end), sensor, store, name, b"")
             printed = decode(raw)
             for position, item in enumerate(printed if isinstance(printed, list) else ()):
                 # Collection maps fields itself. Checked before validation, which would name invalid keys or the
@@ -529,11 +532,25 @@ def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, ob
     }
 
 
+def home_folder() -> str:
+    """The folder {{home}} names, resolved only for a program that uses it: a container user without HOME or a passwd
+    entry still runs the others."""
+    try:
+        return str(Path.home())
+    except RuntimeError as error:
+        raise Error("cannot find the home directory for {{home}}; set HOME") from error
+
+
 def arguments(store: Store, program: Command, start: str, end: str, prompt: str = "") -> list[str]:
-    values = {"brain": str(store.root), "home": str(Path.home()), "start": start, "end": end, "prompt": prompt}
+    values = {"brain": str(store.root), "start": start, "end": end, "prompt": prompt}
     # One pass: an expanded prompt that mentions a placeholder keeps it as text.
     return [
-        re.sub(r"\{\{(brain|home|start|end|prompt)\}\}", lambda match: values[match[1]], arg) for arg in program.command
+        re.sub(
+            r"\{\{(brain|home|start|end|prompt)\}\}",
+            lambda match: home_folder() if match[1] == "home" else values[match[1]],
+            arg,
+        )
+        for arg in program.command
     ]
 
 
@@ -561,33 +578,44 @@ def _prune_reports(store: Store, name: str, keep: int, written: dict[str, str]) 
 
     `written` maps each action this machine wrote to the SHA-256 of its bytes; it returns the entries still worth
     checking and how many folders were removed. An edited action, one holding other files and one written before
-    `keep` was set or on another machine stay: they are a person's work, not a disposable report.
+    `keep` was set or on another machine stay: they are a person's work, not a disposable report. A folder BF cannot
+    read or change stays too, and the routine's log names it.
     """
     reports = {**cast(dict[str, str], state(store, ROUTINES).get(name, {}).get("reports", {})), **written}
     pattern = re.compile(rf"actions/\d{{4}}-\d{{2}}-\d{{2}}_{re.escape(name)}-[0-9a-f]{{8}}/ACTION\.md")
     try:
         found = store.files("actions")
-    except Error, OSError:
+    except (Error, OSError) as error:
+        # An incomplete listing could miscount the newest actions: remove none this run.
+        with suppress(Error, OSError):
+            append_log(store, name, f"{_now()} kept older actions: {error}")
         return reports, 0
-    actions = sorted(file for file in found if pattern.fullmatch(file))
+    # Folder dates order the actions, but the ones this run wrote are the newest whatever their date: another clone
+    # in a time zone ahead, or a clock that ran ahead, can date a folder after today.
+    actions = sorted((file for file in found if pattern.fullmatch(file)), key=lambda file: (file in written, file))
     removed = 0
     for path in actions[: max(0, len(actions) - keep)]:
+        # Only an action this machine wrote can be a disposable report: never read the others.
+        if (expected := reports.pop(path, None)) is None:
+            continue
         folder = path.removesuffix("/ACTION.md")
         try:
             # Exactly one entry: an empty inputs/ folder or another file makes it the owner's.
             data = store.read(path, MAX_NOTE) if store.entries(folder) == ["ACTION.md"] else b""
-        except Error, OSError:
-            data = b""
-        if data and reports.get(path) == digest(data):
-            store.delete(path)
-            try:
-                store.rmdir(folder)
-                removed += 1
-            except Error, OSError:
-                # An entry appeared meanwhile: put the report back rather than leave a folder without it.
-                store.write(path, data)
-        reports.pop(path, None)
-    return {path: value for path, value in reports.items() if path in actions}, removed
+            if data and digest(data) == expected:
+                store.delete(path)
+                try:
+                    store.rmdir(folder)
+                    removed += 1
+                except Error, OSError:
+                    # An entry appeared meanwhile: put the report back rather than leave a folder without it.
+                    store.write(path, data)
+        except (Error, OSError) as error:
+            # The new action is written: a report BF cannot read or remove stays, and never fails the run.
+            with suppress(Error, OSError):
+                append_log(store, name, f"{_now()} kept {folder}: {error}")
+    listed = set(actions)
+    return {path: value for path, value in reports.items() if path in listed}, removed
 
 
 def routine(
@@ -635,7 +663,10 @@ def routine(
                     ontology.note_claims(action, config, strict=True)
                     validate_okf(path, markdown)
                     if broken := broken_links(store, action):
-                        raise Error(broken[0] + (f" and {len(broken) - 1} more" if len(broken) > 1 else ""))
+                        # Run history and status keep this error: quote only the start of a link, which can carry
+                        # evidence from the output.
+                        first = broken[0] if len(broken[0]) <= _QUOTE else broken[0][: _QUOTE - 1] + "…"
+                        raise Error(first + (f" and {len(broken) - 1} more" if len(broken) > 1 else ""))
             if dry_run:
                 # A preview predicts the skip, but names no action: the real run draws its own folder suffix.
                 if text.strip() and _written(store, f"{day}_{name}-"):

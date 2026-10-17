@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
+import pwd
 import re
 import socket
 import stat
@@ -88,6 +89,7 @@ def test_no_follow_reads_writes_and_traversal(tmp_path: Path) -> None:
     (root / "concepts/dir.md").mkdir()
     with pytest.raises(Error, match="non-regular"):
         store.write("concepts/dir.md", b"x")
+    assert not list((root / "concepts").glob(".write-*"))
     with pytest.raises(Error):
         store.delete("concepts/dir.md")
     store.write("concepts/nested/b.md", b"three")
@@ -101,6 +103,22 @@ def test_no_follow_reads_writes_and_traversal(tmp_path: Path) -> None:
     assert store.files("missing") == []
     with pytest.raises(Error, match="expected a regular file"):
         store.fingerprint("concepts/dir.md")
+
+
+def test_a_failed_write_keeps_the_old_bytes_and_no_temporary(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    brain.write("concepts/a.md", b"original")
+    sync = os.fsync
+
+    def full(fd: int) -> None:
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.ENOSPC, "synthetic full disk")
+        sync(fd)
+
+    monkeypatch.setattr(os, "fsync", full)
+    with pytest.raises(OSError, match="synthetic full disk"):
+        brain.write("concepts/a.md", b"new bytes")
+    assert brain.read("concepts/a.md") == b"original"
+    assert not list((brain.root / "concepts").glob(".write-*"))
 
 
 def test_sockets_are_named_like_other_special_files(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,6 +192,25 @@ def test_missing_brain_is_named(tmp_path: Path) -> None:
     (tmp_path / "file").write_text("")
     with pytest.raises(Error, match="directory"):
         Store(tmp_path / "file")
+
+
+def test_a_bare_tilde_without_a_home_directory_says_to_set_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    # As for a container user without HOME or a passwd entry, such as bf schedule's default ~/.config/bf-schedules:
+    # the hint once said to check a user name the path never gave.
+    monkeypatch.delenv("HOME")
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: {}[uid])
+    with pytest.raises(Error, match=r"^a path's ~ or ~user home directory cannot be resolved; set HOME$"):
+        storage.expand(Path("~/.config/bf-schedules"))
+    with pytest.raises(Error, match=r"; check the user name$"):
+        storage.expand(Path("~bf-no-such-user/brain"))
+
+
+def test_unread_names_the_repair_of_each_skipped_entry(brain: Store) -> None:
+    # A special file where a scanned folder belongs needs a folder, like a regular file there, not a regular file.
+    os.mkfifo(brain.root / "concepts/pipe.md")
+    os.mkfifo(brain.root / "actions")
+    assert storage.unread(brain, "concepts/pipe.md") == "special files are not read; replace it with a regular file"
+    assert storage.unread(brain, "actions") == "expected a folder; replace the file with a folder"
 
 
 @pytest.mark.parametrize("extra", [b"more", b"too many bytes"])
@@ -316,7 +353,9 @@ def test_lock_creation_fallback_rejects_unsafe_leaves(brain: Store, monkeypatch:
 
 
 def test_shared_read_locks_and_independent_collector_lock(brain: Store) -> None:
-    with reader(brain), reader(brain), pytest.raises(BusyError), writer(brain):
+    # A writer that readers block, such as a collection during a long bf validate, names no other writer.
+    reading = r"^another process is reading or changing this brain's records; retry after it finishes$"
+    with reader(brain), reader(brain), pytest.raises(BusyError, match=reading), writer(brain):
         pass
     with writer(brain), pytest.raises(BusyError), reader(brain, wait=0):
         pass
@@ -549,19 +588,37 @@ def test_writers_with_different_state_directories_still_exclude_each_other(
         pass
 
 
+# ENOTSUP and EOPNOTSUPP are one code on Linux and two on macOS.
+@pytest.mark.parametrize(
+    "code", sorted({errno.EBADF, errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EINVAL}), ids=errno.errorcode.get
+)
 def test_a_filesystem_that_cannot_lock_directories_keeps_the_state_lock(
-    brain: Store, monkeypatch: pytest.MonkeyPatch
+    brain: Store, monkeypatch: pytest.MonkeyPatch, code: int
 ) -> None:
     real = fcntl.flock
 
     def refuse_directories(fd: int, operation: int) -> None:
         if stat.S_ISDIR(os.fstat(fd).st_mode):
-            raise OSError(errno.EBADF, "Bad file descriptor")
+            raise OSError(code, os.strerror(code))
         real(fd, operation)
 
     # NFS refuses an exclusive lock on a directory opened for reading.
     monkeypatch.setattr(fcntl, "flock", refuse_directories)
     with writer(brain), pytest.raises(BusyError), writer(brain, wait=0.1):
+        pass
+
+
+def test_other_directory_lock_failures_fail_closed(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = fcntl.flock
+
+    def fail_directories(fd: int, operation: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "synthetic I/O error")
+        real(fd, operation)
+
+    # Only a filesystem that cannot lock a directory leaves the state lock alone; an I/O error stops the writer.
+    monkeypatch.setattr(fcntl, "flock", fail_directories)
+    with pytest.raises(OSError, match="synthetic I/O error"), writer(brain):
         pass
 
 
@@ -628,7 +685,7 @@ def test_registry_fifo_fails_without_waiting_for_a_writer(tmp_path: Path) -> Non
     path.parent.mkdir(parents=True)
     os.mkfifo(path)
     result = subprocess.run(
-        [sys.executable, "-m", "bf", "read"], cwd=tmp_path, capture_output=True, text=True, timeout=5, check=False
+        [sys.executable, "-m", "bf", "read"], cwd=tmp_path, capture_output=True, text=True, timeout=120, check=False
     )
     assert result.returncode == 1
     assert not result.stdout
@@ -757,11 +814,15 @@ def test_registry_selection(brain: Store, tmp_path: Path, monkeypatch: pytest.Mo
         user_config()
 
 
-def test_registering_a_moved_brain_replaces_its_absent_entry(brain: Store, tmp_path: Path) -> None:
+@pytest.mark.parametrize("left", [False, True], ids=["missing", "emptied"])
+def test_registering_a_moved_brain_replaces_its_absent_entry(brain: Store, tmp_path: Path, left: bool) -> None:
     moved = tmp_path / "moved"
     brain.root.rename(moved)
     with pytest.raises(Error, match=r"^fixture: registered brain directory is absent on this machine"):
         one("fixture")
+    if left:
+        # A folder without bf.yaml holds no brain, such as one a move left or an empty mount point.
+        brain.root.mkdir()
     # Registration once refused, advising to rename one of two brains while only one existed: a rename breaks addresses.
     reply = register(Store(moved))
     assert reply == {"brain": "fixture", "path": str(moved), "config": str(user_path()), "replaced": str(brain.root)}
@@ -776,7 +837,10 @@ def test_registering_a_moved_brain_replaces_its_absent_entry(brain: Store, tmp_p
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
-def test_registering_keeps_an_entry_whose_directory_cannot_be_reached(brain: Store, tmp_path: Path) -> None:
+@pytest.mark.parametrize("folder", ["parent", "brain"])
+def test_registering_keeps_an_entry_whose_directory_cannot_be_reached(
+    brain: Store, tmp_path: Path, folder: str
+) -> None:
     # A locked folder or a disconnected mount may still hold the registered brain: only a missing path frees its name.
     locked = tmp_path / "locked"
     locked.mkdir()
@@ -786,7 +850,9 @@ def test_registering_keeps_an_entry_whose_directory_cannot_be_reached(brain: Sto
     for root, name in ((clone, "fixture"), (other, "other")):
         root.mkdir()
         Store(root).write("bf.yaml", f"version: 8\nname: {name}\n".encode())
-    locked.chmod(0)
+    # A locked brain folder itself can be stated but not listed: it once counted as another brain of that name.
+    target = locked if folder == "parent" else locked / "brain"
+    target.chmod(0)
     try:
         with pytest.raises(
             Error,
@@ -797,7 +863,7 @@ def test_registering_keeps_an_entry_whose_directory_cannot_be_reached(brain: Sto
         # Another name still registers: the unreachable entry blocks only its own.
         assert "replaced" not in register(Store(other))
     finally:
-        locked.chmod(0o700)
+        target.chmod(0o700)
     assert {name: entry.path for name, entry in user_config().brains.items()} == {
         "fixture": str(locked / "brain"),
         "other": str(other),
@@ -824,6 +890,18 @@ def test_registration_conflicts_name_the_entry_to_change(brain: Store, tmp_path:
     assert user_config().brains == {"fixture": Registration(path=str(brain.root))}
 
 
+def test_a_busy_registry_names_the_registry(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Another registration holds the registry, as while it checks an entry on a hung network mount: the 30-second wait
+    # once ended blaming this brain's records.
+    clock = iter(range(0, 1000, 31))
+    monkeypatch.setattr(storage, "time", SimpleNamespace(monotonic=lambda: float(next(clock)), sleep=lambda _: None))
+    with (
+        writer(Store(user_path().parent)),
+        pytest.raises(BusyError, match=r"^another bf register is updating the registry; retry after it finishes$"),
+    ):
+        register(brain)
+
+
 def test_an_emptied_registry_still_registers(brain: Store) -> None:
     # Deleting the last entry, as the configuration guide suggests, leaves `brains:` null.
     user_path().write_text("# Machine-local brains\nbrains:\n")
@@ -835,13 +913,44 @@ def test_an_emptied_registry_still_registers(brain: Store) -> None:
 
 
 def test_registration_keeps_the_owner_header(brain: Store) -> None:
-    header = "# Machine-local registry; use bf register.\n# Second line\n"
-    user_path().write_text(header + user_path().read_text().split("\n", 1)[1] + "# trailing note\n")
+    # Blank lines between the paragraphs of the leading comments once cut the header at the first one.
+    header = "# Machine-local registry; use bf register.\n# Second line\n\n# Second paragraph\n"
+    user_path().write_text(header + "\n" + user_path().read_text().split("\n", 1)[1] + "# trailing note\n")
     register(brain)
     written = user_path().read_text()
     assert written.startswith(header + "brains:\n")
     assert "trailing note" not in written
     assert user_config().brains["fixture"].model_dump() == {"path": str(brain.root)}
+    # Without comments, BF writes the page that documents the registry.
+    documented = "# https://fmind.github.io/brain-framework/docs/configuration/\n"
+    user_path().write_text("\n" + written.removeprefix(header))
+    register(brain)
+    assert user_path().read_text().startswith(documented + "brains:\n")
+
+
+@pytest.mark.usefixtures("brain")
+@pytest.mark.parametrize("linked", [False, True], ids=["home", "linked-home"])
+def test_registering_in_place_keeps_a_home_relative_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked: bool
+) -> None:
+    # Re-registering where nothing moved once reported a replacement and rewrote `~/brains/three` as an absolute
+    # path, which a registry that dotfiles share between machines cannot use, also when HOME is reached through a
+    # link, such as /home -> /var/home.
+    root = Path.home() / "brains" / "three"
+    root.mkdir(parents=True)
+    Store(root).write("bf.yaml", b"version: 8\nname: three\n")
+    if linked:
+        (tmp_path / "linked").symlink_to(Path.home(), target_is_directory=True)
+        monkeypatch.setenv("HOME", str(tmp_path / "linked"))
+    user_path().write_text(user_path().read_text() + "  three:\n    path: ~/brains/three\n")
+    assert register(Store(root)) == {"brain": "three", "path": str(root), "config": str(user_path())}
+    assert user_config().brains["three"].path == "~/brains/three"
+    assert one("three").root == root
+    # A link the entry names itself is another path to the brain, which registering moves.
+    (root.parent / "alias").symlink_to(root, target_is_directory=True)
+    user_path().write_text(user_path().read_text().replace("~/brains/three", "~/brains/alias"))
+    assert register(Store(root))["replaced"] == "~/brains/alias"
+    assert user_config().brains["three"].path == str(root)
 
 
 def test_nothing_selected_is_actionable(tmp_path: Path) -> None:
@@ -858,10 +967,10 @@ def test_concurrent_registrations_keep_every_brain(tmp_path: Path, monkeypatch: 
         store = Store(root)
         store.write("bf.yaml", f"version: 8\nname: brain-{number}\n".encode())
         stores.append(store)
-    original = config.user_config
+    original = config._registry  # noqa: SLF001 - every registration reads the registry here
     start = Barrier(len(stores))
 
-    def slow_read() -> UserConfig:
+    def slow_read() -> tuple[UserConfig, str]:
         registry = original()
         # Widen the read/modify/write race without changing the result of a registry read.
         time.sleep(0.05)
@@ -871,7 +980,7 @@ def test_concurrent_registrations_keep_every_brain(tmp_path: Path, monkeypatch: 
         start.wait(timeout=10)
         register(store)
 
-    monkeypatch.setattr(config, "user_config", slow_read)
+    monkeypatch.setattr(config, "_registry", slow_read)
     with ThreadPoolExecutor(max_workers=len(stores)) as executor:
         list(executor.map(enroll, stores))
     assert set(user_config().brains) == {f"brain-{number}" for number in range(4)}

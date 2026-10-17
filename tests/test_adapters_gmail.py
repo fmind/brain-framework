@@ -71,6 +71,14 @@ def test_gmail_headers_collect_participants_threads_and_message_ids(provider: Pr
     ]
     assert launch.aliases == ["mid:launch.1@example.test"]
     assert launch.url == "https://mail.google.com/mail/#all/f1"
+    # The refs a `cardinality: many` identity field can map to typed relations; labels are Gmail label ids.
+    assert launch.attributes == {
+        "thread": "f1",
+        "labels": ["IMPORTANT", "INBOX"],
+        "from_refs": ["person:email/alice@example.test"],
+        "to_refs": ["person:email/bob@example.test", "person:email/carol@example.test"],
+        "cc_refs": [],
+    }
     # Both messages link their thread: reading gmail-thread:f1 lists the conversation.
     assert "gmail-thread:f1" in reply.links
     assert reply.title == "(no subject)"
@@ -112,3 +120,66 @@ def test_gmail_headers_save_nothing_from_an_incomplete_listing(provider: Provide
     assert (result.returncode, result.stdout) == (1, "")
     assert result.stderr.startswith("Gmail collection failed")
     assert "example.test" not in result.stderr
+
+
+LISTED = {"match": ["list"], "stdout": {"messages": [{"id": "a1"}]}}
+
+
+@pytest.mark.parametrize(
+    ("responses", "arguments", "diagnostic"),
+    [
+        (
+            [
+                {"match": ["list", '"pageToken": "next"'], "stdout": {"messages": [{"id": "a1"}]}},
+                {"match": ["list"], "stdout": {"messages": [{"id": "a1"}, {"id": "b2"}], "nextPageToken": "next"}},
+            ],
+            [],
+            "gws listed a message twice",
+        ),
+        (
+            [{"match": ["list"], "stdout": {"messages": [{"id": "A!"}]}}],
+            [],
+            "gws returned an invalid message or thread id",
+        ),
+        ([{"match": ["list"], "stdout": {"messages": {}}}], [], "gws returned an invalid message list"),
+        (
+            [LISTED, {"match": ["get"], "stdout": message("b2", "f1", 1788256800000, {})}],
+            [],
+            "gws returned another message than the one requested",
+        ),
+        (
+            [LISTED, {"match": ["get"], "stdout": {**message("a1", "f1", 0, {}), "internalDate": 1788256800000}}],
+            [],
+            "gws returned invalid message metadata",
+        ),
+        (
+            [{"match": ["list"], "stdout": {"messages": [{"id": f"{n:x}"} for n in range(1001)]}}],
+            [],
+            "the window has more than 1000 messages; narrow it or the query",
+        ),
+        # No gws response is scripted: the query fails before any call.
+        ([], ["--query=label:work\nfrom:x@example.test"], "the query must be one line of at most 1024 characters"),
+    ],
+    ids=["duplicate", "invalid-id", "invalid-list", "other-message", "numeric-date", "too-many", "multiline-query"],
+)
+def test_gmail_headers_reject_inconsistent_replies_and_queries(
+    provider: Provider, responses: list[dict[str, object]], arguments: list[str], diagnostic: str
+) -> None:
+    provider.install("gws", responses)
+    result = provider.run("gmail-headers.py", START, END, *arguments)
+    # The exact diagnostic: an unscripted gws call would fail with the generic authentication hint instead.
+    assert (result.returncode, result.stdout, result.stderr) == (1, "", f"Gmail collection failed: {diagnostic}.\n")
+
+
+def test_gmail_headers_keep_each_address_list_within_the_mapped_field_bound(provider: Provider) -> None:
+    # A mapped `cardinality: many` field holds at most 1,000 values: 18.5.0 kept every sender, so one message from
+    # 1,001 addresses failed each collection that mapped `from_refs`, and its window never advanced.
+    senders = [f"sender{index:04d}@example.test" for index in range(1001)]
+    headers = {"From": ", ".join(senders), "To": "bob@example.test"}
+    provider.install("gws", [LISTED, {"match": ["get"], "stdout": message("a1", "f1", 1788256800000, headers)}])
+    [record] = provider.records("gmail-headers.py", START, END)
+    assert record.attributes["from_refs"] == [f"person:email/{sender}" for sender in senders[:1000]]
+    assert record.attributes["to_refs"] == ["person:email/bob@example.test"]
+    assert (len(record.links), record.links[0]) == (1000, "gmail-thread:f1")
+    # The text still names every address.
+    assert record.text.count("@example.test") == 1002

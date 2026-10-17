@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import shlex
 import signal
@@ -15,18 +16,18 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import pytest
 from typer.testing import CliRunner
 
 from bf import records
-from bf.cli import app
+from bf.cli import app, main
 from bf.collect import Runner, collect, due, run
 from bf.health import source_health
 from bf.history import LOG_LIMIT, SENSORS, environment, log_path, remember, state
 from bf.models import MAX_FIELDS, Command, Error, Record, Sensor, encode, timestamp
-from bf.storage import BusyError, Store, state_store, writer
+from bf.storage import BusyError, Store, collecting, state_store, writer
 from bf.update import update
 from bf.watch import snapshot
 
@@ -461,6 +462,42 @@ def test_placeholders_are_expanded_once(configured: Store, monkeypatch: pytest.M
     assert collect(configured, "sample", start=START, end=END, dry_run=True, runner=fake)["records"] == 0
 
 
+def test_only_a_program_using_home_needs_a_home_directory(
+    configured: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configured.write(
+        "bf.yaml",
+        CONFIG
+        + b"assistants:\n  ask:\n    prompt: prompts/ask.md\n    command: [cat]\n    schedules: {review: {every: 1800}}\n",
+    )
+    configured.write("prompts/ask.md", b"Read {{home}}.\n")
+
+    def unknown(uid: int) -> NoReturn:
+        raise KeyError(uid)
+
+    # As for a container user without HOME or a passwd entry: before, every program failed with a traceback.
+    monkeypatch.delenv("HOME")
+    monkeypatch.setattr(pwd, "getpwuid", unknown)
+    report = update(configured, now=NOW, runner=lambda *_: b"[]")
+    sensors = {item["sensor"]: item for item in cast("list[dict[str, object]]", report["sensors"])}
+    assert sensors["folders"]["status"] == "collected"
+    missing = "cannot find the home directory for {{home}}; set HOME"
+    failed = f"sample: {missing}; nothing was written; see logs/sample.log"
+    assert (sensors["sample"]["status"], sensors["sample"]["error"]) == ("failed", failed)
+    # Run history records it, as for an assistant or routine: bf status used to show the sensor only as late.
+    assert (state(configured)["sample"]["failures"], state(configured)["sample"]["error"]) == (
+        1,
+        f"{missing}; nothing was written",
+    )
+    [asked] = cast("list[dict[str, object]]", report["assistants"])
+    assert asked["status"] == "failed"
+    assert missing in str(asked["error"])
+    monkeypatch.setattr(sys, "argv", ["bf", "collect", "sample", "--brain", str(configured.root)])
+    with pytest.raises(SystemExit) as exited:
+        main()
+    assert (exited.value.code, *capsys.readouterr()) == (1, "", f"bf: {failed}\n")
+
+
 def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
     configured.write(
         "bf.yaml",
@@ -610,12 +647,24 @@ def test_overlapping_source_run_cannot_overwrite_newer_snapshot(configured: Stor
     assert records.find(configured, "folders", "one") is not None
 
 
+def test_update_skips_a_sensor_another_process_is_collecting(configured: Store) -> None:
+    # Such as a manual bf collect during bf watch: that run covers this cycle, so the cycle neither fails nor waits.
+    with collecting(configured, "sample"):
+        report = update(configured, now=NOW, sensors=("sample",), runner=lambda *_: pytest.fail("ran"))
+    assert report["ok"] is True
+    [skipped] = cast("list[dict[str, object]]", report["sensors"])
+    assert (skipped["status"], skipped["skipped"]) == ("skipped", "another run of this sensor is still active")
+
+
 def test_environment_removes_documented_startup_variables(monkeypatch: pytest.MonkeyPatch) -> None:
     # The documented contract, not the implementation's list: removing an entry must fail here.
     startup = (
         "BASH_ENV",
         "BASHOPTS",
         "BASH_FUNC_x%%",
+        "CORECLR_ENABLE_PROFILING",
+        "CORECLR_PROFILER_PATH",
+        "DOTNET_STARTUP_HOOKS",
         "DYLD_INSERT_LIBRARIES",
         "ENV",
         "GCONV_PATH",
@@ -623,7 +672,11 @@ def test_environment_removes_documented_startup_variables(monkeypatch: pytest.Mo
         "JDK_JAVA_OPTIONS",
         "_JAVA_OPTIONS",
         "LD_PRELOAD",
+        "LUA_CPATH",
+        "LUA_CPATH_5_4",
         "LUA_INIT_5_4",
+        "LUA_PATH",
+        "LUA_PATH_5_4",
         "NODE_OPTIONS",
         "NODE_PATH",
         "PERL5LIB",
@@ -633,6 +686,10 @@ def test_environment_removes_documented_startup_variables(monkeypatch: pytest.Mo
         "PHPRC",
         "PS4",
         "PYTHONSTARTUP",
+        "R_ENVIRON",
+        "R_ENVIRON_USER",
+        "R_PROFILE",
+        "R_PROFILE_USER",
         "RUBYLIB",
         "RUBYOPT",
         "SHELLOPTS",
@@ -642,7 +699,8 @@ def test_environment_removes_documented_startup_variables(monkeypatch: pytest.Mo
         monkeypatch.setenv(key, "startup-injection")
     monkeypatch.setenv("EXAMPLE_PROVIDER_ACCOUNT", "ordinary-value")
     env = environment()
-    assert not set(startup) & env.keys()
+    # Name only the leaked variables: a failure must not print the environment's values.
+    assert sorted(set(startup) & env.keys()) == []
     assert env["EXAMPLE_PROVIDER_ACCOUNT"] == "ordinary-value"
 
 

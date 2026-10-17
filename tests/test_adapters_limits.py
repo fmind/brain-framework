@@ -32,7 +32,8 @@ def test_provider_output_is_bounded_and_child_is_reaped(adapter: str, mode: str,
     run = runpy.run_path(str(ROOT / "examples/sensors" / adapter))["run"]
     pid = tmp_path / "pid"
     # A shell starts within the one-second timeout even on a loaded runner, where a Python producer once did not
-    # write its pid in time; `exec` keeps that pid for the sleep the adapter must kill.
+    # write its pid in time; `exec` keeps that pid for the sleep the adapter must kill. Overflow ends at the byte
+    # limit, so only the timeout case keeps the one-second budget it must wait out.
     producer = tmp_path / "producer.sh"
     producer.write_text(
         f'echo $$ > "{pid}"\n'
@@ -41,6 +42,17 @@ def test_provider_output_is_bounded_and_child_is_reaped(adapter: str, mode: str,
     )
     expected = ValueError if mode == "overflow" else TimeoutError
     with pytest.raises(expected):
-        run(["/bin/sh", str(producer)], limit=1024, timeout=1)
+        run(["/bin/sh", str(producer)], limit=1024, timeout=30 if mode == "overflow" else 1)
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid.read_text()), 0)
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS)
+def test_providers_start_outside_the_brain(adapter: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # BF runs a sensor from the brain folder, and gws loads a `.env` file from its working directory or any parent:
+    # one in the brain, or above it, could switch the account the sensor collects from.
+    brain = tmp_path / "brain"
+    brain.mkdir()
+    monkeypatch.chdir(brain)
+    run = runpy.run_path(str(ROOT / "examples/sensors" / adapter))["run"]
+    assert run(["/bin/pwd"], limit=1024, timeout=30) == b"/\n"

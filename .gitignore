@@ -6,7 +6,6 @@
 /.coverage.*
 /.env
 /.env.*
-!/.env.example
 /.pytest_cache/
 /.ruff_cache/
 /.venv/

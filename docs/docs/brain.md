@@ -49,7 +49,8 @@ Start with a single product page because visitors need a clear explanation befor
 | `tags`                          | Exact topic labels; see [tag rules](link-reference.md#tag-rules).                                               |
 | `stale_after`                   | A date-time with an offset, such as `2026-10-13T00:00:00+02:00`: the note needs review from then on.            |
 | `aliases`, `entity`, `resource` | Exact identities of the note's subject; see [identities](links.md#give-a-subject-a-stable-identity).            |
-| `sources`                       | OKF provenance: each `resource` is a note, file, record or URL the note derives from.                           |
+| `links`                         | Link targets written as in body links, `?rel=` included, with the whole note as origin; see [links](links.md).  |
+| `sources`                       | OKF provenance: the note derives from each `resource` written as a [link](link-reference.md#relation-links).    |
 | `fields`                        | Values of fields declared in `bf.yaml`, such as an `owner`; see [typed fields](links.md#set-typed-fields).      |
 
 Use `draft` while an idea is under review, `stable` for reviewed knowledge and `deprecated` when it no longer applies. A deprecated note ranks last and leaves home, reminders and the task list. [Note format rules](schema.md#note-format) cover edge cases such as invalid frontmatter.
@@ -178,7 +179,7 @@ The draft describes the product but does not name its intended audience. We have
 Next: describe who the product helps, then test the explanation with a visitor.
 ```
 
-Keep session evidence in the action's `inputs/` and deliverables in `outputs/`; both are searchable, so keep them within the brain's audience. Reading the action folder returns `ACTION.md`, its files, linked projects and backlinks. Context, TODO, Decision, Resume and Outcome follow the `bf-action` skill's [action template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/templates/action.md); they are conventions, not required headings.
+Keep session evidence in the action's `inputs/` and deliverables in `outputs/`, within the brain's audience: their Markdown files are searchable, and other files, such as `inputs/request.txt`, are only listed with the action; open them directly. Reading the action folder returns `ACTION.md`, its files, linked projects and backlinks. Context, TODO, Decision, Resume and Outcome follow the `bf-action` skill's [action template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/templates/action.md); they are conventions, not required headings.
 
 ## Records
 

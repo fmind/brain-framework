@@ -27,8 +27,12 @@ def settings(store: Store, **overrides: object) -> WatchSettings:
 
 def desktop(title: str, body: str) -> bool:
     """Use native local notifications, fixed scripts and literal argv; never a shell."""
+    env = environment()
+    # Look tools up on the sanitized PATH they run with: a relative entry would find a program in the working
+    # directory, such as the brain root.
+    path = env.get("PATH")
     if sys.platform == "darwin":
-        executable = shutil.which("osascript")
+        executable = shutil.which("osascript", path=path)
         argv = [
             executable or "osascript",
             "-e",
@@ -40,10 +44,10 @@ def desktop(title: str, body: str) -> bool:
             title,
             body,
         ]
-    elif executable := shutil.which("notify-send"):
+    elif executable := shutil.which("notify-send", path=path):
         argv = [executable, "--app-name=Brain Framework", "--", title, body]
     else:
-        executable = shutil.which("gdbus")
+        executable = shutil.which("gdbus", path=path)
         argv = [
             executable or "gdbus",
             "call",
@@ -72,7 +76,7 @@ def desktop(title: str, body: str) -> bool:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                env=environment(),
+                env=env,
                 timeout=5,
                 check=False,
             ).returncode

@@ -76,8 +76,10 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
     # No brain can place more than this many items up to the end of the requested window.
     bound = query.offset + query.limit + 1
     scoped = query.prefix.split("/")[1] if query.prefix.startswith("memories/") else ""
-    # Coverage describes the sources searched, including those without matches; notes are not collected.
-    collected = query.prefix.split("/")[0] in {"", "memories"}
+    # Coverage describes the sources searched, including those without matches; notes are not collected, and tags
+    # hold only notes. A memories scope still names its source, which must exist even for a tag search.
+    tagged = links.tag(query.target) is not None or (shaped and links.tag(text) is not None)
+    collected = query.prefix.split("/")[0] == "memories" or (not query.prefix and not tagged)
 
     def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
         local_targets = graph.local_refs(connection, targets, name)
@@ -92,15 +94,17 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
             limit=bound,
             low=pages.low(store),
         )
-        # Counting sources reads every record row: only a search that can return records needs them.
-        known = set(pages.sources(store, connection)) if collected else set()
+        # Counting sources scans every record's index entry: only a search that can return records needs them. Their
+        # `changed` tells whether a source fell silent.
+        counts = pages.sources(store, connection) if collected else {}
         return {
             "store": store,
             "connection": connection,
             "exact": exact,
             "explain": (local_targets if query.target else local_identities) if exact or query.target else None,
             "rows": (pages.label(name, row) for row in rows),
-            "sources": ({scoped} & known if scoped else known) if collected else set(),
+            "sources": {source: count for source, count in counts.items() if not scoped or source == scoped},
+            "known": set(counts),
         }
 
     parts, extra = pages.brains(stores, build, counted=False, stack=stack)
@@ -109,7 +113,9 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
         raise Error("no unambiguous brain could be searched; check bf.yaml brain references")
     if scoped and not any(part["sources"] for _, part in parts):
         # Like the source page: a source no brain indexes or configures is unknown, never an empty answer.
-        raise pages.absent({**extra, "problems": problems}, "unknown source; read memories to list sources")
+        known = {source for _, part in parts for source in cast("set[str]", part["known"])}
+        hint = suggest(scoped, known, prefix="memories/")
+        raise pages.absent({**extra, "problems": problems}, f"unknown source; read memories to list sources{hint}")
     identity = any(part["exact"] for _, part in parts)
     # A brain that does not know a known identity ranked its words instead: that is not an identity answer.
     ranked = [cast("Iterator[dict[str, object]]", part["rows"]) for _, part in parts if part["exact"] or not identity]
@@ -152,12 +158,12 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
         store = cast("Store", part["store"])
         if counted:
             usage.note(store, "search", sum(item["brain"] == name for item in selected))
-        if names := cast("set[str]", part["sources"]):
+        if counts := cast("dict[str, dict[str, object]]", part["sources"]):
             try:
                 coverage.extend(
                     {"brain": name, "source": source, **health}
-                    for source, health in source_health(store, names).items()
-                    if source in names
+                    for source, health in source_health(store, counts).items()
+                    if source in counts
                 )
             except Error, OSError, UnicodeError:
                 problems.append({"brain": name, "error": "collection coverage is unavailable; run bf status"})
@@ -187,6 +193,7 @@ def _coverage(coverage: list[dict[str, object]], items: list[dict[str, object]],
         if whole
         or (entry["brain"], entry["source"]) in returned
         or entry.get("failed")
+        or entry.get("silent")
         or entry.get("freshness") in _ATTENTION
     ]
     omitted = len(coverage) - len(kept)
@@ -392,13 +399,17 @@ def _lookup(
     if len(found) > 1:
         raise Error("reference exists in several brains; use a brain-qualified bf:// address")
     store, value = found[0]
-    # A later page carries only its text slice. A text past the page budget on its own is paged whatever its graph
-    # context adds, so that page does not build the context the first page returns.
+    # A later page carries only its text slice and the read's own signals: the graph context's problems and stale
+    # brains stay on the first page. A text past the page budget on its own is paged whatever that context adds, so
+    # that page does not build it; otherwise the context decides, as on the first page, whether the reply is paged.
     later = offset and len(encode({k: v for k, v in value.items() if k != "_source"})) > pages.BUDGET
     extra = {} if later else pages.context(stores, store, str(value["brain"]), value)
     stale = [*cast("list[str]", value.get("stale", [])), *cast("list[str]", extra.get("stale", []))]
     marked = {"stale": list(dict.fromkeys(stale))} if stale else {}
     reply = _exact_reply({**value, **extra, **marked, "notice": NOTICE, **_problems(problems, extra)}, offset)
+    if offset:
+        own = {**({"stale": value["stale"]} if "stale" in value else {}), **_problems(problems, {})}
+        reply = {key: item for key, item in reply.items() if key not in {"problems", "stale"}} | own
     if counted:
         usage.note(store, "read", 1)
     return reply

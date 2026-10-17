@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import suppress
 from pathlib import Path
 
 from bf import index, links
 from bf.config import brain_name, load
+from bf.markdown import preview
 from bf.models import Error
 from bf.storage import Store
 
@@ -58,7 +60,7 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
     if links.tag(value) is not None:
         return {value}, []
     parsed = links.parse(value)
-    matches: list[tuple[Store, int, set[str], str]] = []
+    matches: list[tuple[Store, str, set[str], str]] = []
     problems: list[dict[str, object]] = []
     labels: dict[Path, str] = {}
     failed: set[Path] = set()
@@ -83,19 +85,19 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
                     }
                     if len(names) > NAMES:
                         raise Error(f"identity expansion exceeds {NAMES} aliases")
-                    matches.append((store, item, names, ref if kind == "record" else ""))
+                    matches.append((store, ref, names, ref if kind == "record" else ""))
         except (Error, OSError, sqlite3.DatabaseError) as error:
             # Named and worded as the page reports the same brain, so a reply lists an unloadable brain once.
             problems.append(problem(store, name, error))
             failed.add(store.root)
     if len(matches) > 1:
-        problems.append(
-            {"error": "ambiguous identity across selected evidence; read the owning note's bf://NAME/path.md"}
-        )
+        # The owners may be notes or records, such as one record two brains collect.
+        problems.append({"error": "ambiguous identity across selected evidence; read an owner's bf://NAME/... address"})
         return {value}, problems
     if not matches:
         return {value}, problems
-    owner, item, names, bare = matches[0]
+    # Each pass reads its own snapshot, and a concurrent re-index renumbers an edited note: its ref names the owner.
+    owner, ref, names, bare = matches[0]
     # Another brain never holds a name in the owner's namespace: like local_refs, ignore a cache built before a rule
     # rejected one. The owner's claim to another brain's address still counts as shared.
     namespace = links.address(labels[owner.root], "")
@@ -114,10 +116,11 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
                 found = {
                     row[0]
                     for row in connection.execute(
-                        "SELECT name FROM names WHERE name IN (SELECT value FROM json_each(?1)) AND NOT (?2 AND item=?3) "
+                        "SELECT name FROM names WHERE name IN (SELECT value FROM json_each(?1)) "
+                        "AND NOT (?2 AND item IN (SELECT id FROM items WHERE ref=?3)) "
                         "UNION SELECT ref FROM items WHERE ref IN (SELECT value FROM json_each(?1)) "
-                        "AND NOT (?2 AND id=?3)",
-                        (json.dumps(candidates), own, item),
+                        "AND NOT (?2 AND ref=?3)",
+                        (json.dumps(candidates), own, ref),
                     )
                 }
         except (Error, OSError, sqlite3.DatabaseError) as error:
@@ -129,7 +132,7 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
             bare = ""
         shared |= found
     if shared:
-        problems.append({"error": f"{len(shared)} aliases are also claimed elsewhere and were not expanded"})
+        problems.append({"error": f"aliases also claimed elsewhere were not expanded: {len(shared)}"})
     return {value} | (names - shared) | ({bare} if bare else set()), problems
 
 
@@ -183,14 +186,29 @@ def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> tuple[list[d
 
 
 def _owners(connection: sqlite3.Connection, targets: set[str]) -> dict[str, tuple[str, str]]:
-    """The one local item each target names, by its ref or a name no other item claims, so a reader can follow a
-    claim without searching; a target several items claim names none."""
+    """The one local item each target names, by its ref or a name, so a reader can follow a claim without searching;
+    a target several items claim, by ref or name, names none. A note section's address names its note: the claim's
+    target keeps the section, which `bf read` opens. Titles are previews, as in listings."""
+    wholes: dict[str, str] = {}
+    for target in targets:
+        parsed = None
+        with suppress(Error):
+            parsed = links.parse(target)
+        wholes[target] = links.address(parsed.brain, parsed.path) if parsed and parsed.fragment else target
     rows = connection.execute(
-        f"""SELECT i.ref AS target,i.ref,i.title FROM items i WHERE i.ref IN (SELECT value FROM json_each(:names))
-           UNION ALL SELECT o.name,i.ref,i.title FROM ({index.OWNED}) o JOIN items i ON i.id=o.item""",  # noqa: S608
-        {"names": json.dumps(sorted(targets))},
+        """SELECT target,min(ref) AS ref,min(title) AS title,min(kind) AS kind FROM (
+             SELECT ref AS target,ref,title,kind FROM items WHERE ref IN (SELECT value FROM json_each(:names))
+             UNION ALL SELECT n.name,i.ref,i.title,i.kind FROM names n JOIN items i ON i.id=n.item
+               WHERE n.name IN (SELECT value FROM json_each(:names)))
+           GROUP BY target HAVING count(DISTINCT ref)=1""",
+        {"names": json.dumps(sorted(set(wholes.values())))},
     ).fetchall()
-    return {row["target"]: (row["ref"], row["title"]) for row in rows}
+    owned = {row["target"]: row for row in rows}
+    return {
+        target: (row["ref"], preview(row["title"], index.TITLE))
+        for target, whole in wholes.items()
+        if (row := owned.get(whole)) is not None and (whole == target or row["kind"] == "note")
+    }
 
 
 def _claims(rows: list[sqlite3.Row]) -> list[dict[str, object]]:

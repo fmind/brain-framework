@@ -9,7 +9,7 @@ from typing import cast
 import pytest
 
 from bf import index, links, pages
-from bf.models import Error, Query
+from bf.models import Error, InputError, Query
 from bf.retrieve import read, search
 from bf.storage import Store
 from bf.validate import validate
@@ -94,15 +94,37 @@ def test_tag_addresses_preserve_literal_labels(brain: Store, tag: str) -> None:
     address = links.address("fixture", f"tags/{tag}")
     assert read([brain], address)["total"] == 1
     assert len(items(search([brain], Query(text="literal", **pages.scope(address))))) == 1
+    if "#" in tag:
+        # Only the address encodes the label's `#`: dropping the plain form's fragment would read the label C.
+        with pytest.raises(InputError, match="for a label holding #, read the tags page and use its ref"):
+            read([brain], f"tags/{tag}")
+    else:
+        assert read([brain], f"tags/{tag}")["total"] == 1
 
 
 @pytest.mark.parametrize("tag", ["", " padded ", ".", "..", "a/b", "a\\b", "a\nb", "x" * 129])
 def test_invalid_tags_fail_validation_without_leaking_content(brain: Store, tag: str) -> None:
     brain.write("projects/bad.md", f"---\ntags: [{json.dumps(tag)}]\n---\n# Bad\n".encode())
-    assert not validate(brain)["valid"]
+    result = validate(brain)
+    assert not result["valid"]
     reply = read([brain], "tags")
     assert reply["problems"]
     assert len(items(reply)) == 1
+    # Problems name the file and the rule, never the label; "", "." and ".." occur in any reply.
+    if len(tag) > 2:
+        assert json.dumps(tag)[1:-1] not in str(result["problems"]) + str(reply)
+
+
+def test_tag_searches_cover_no_collected_source(brain: Store) -> None:
+    brain.write("bf.yaml", b'version: 8\nname: fixture\nsensors:\n  mail:\n    command: ["fake"]\n    refresh: 3600\n')
+    tag = "bf://fixture/tags/retention"
+    # Tags hold notes alone: neither a tag scope nor a tag search covers a source, even a never-collected one.
+    for query in (Query(text="zzabsent", **pages.scope(tag)), Query(text=tag)):
+        assert not {"sources", "sources_omitted"} & set(search([brain], query))
+    # A memories scope still names a source, which must exist.
+    scoped = search([brain], Query(text=tag, **pages.scope("memories/mail")))
+    assert items(scoped) == []
+    assert [source["source"] for source in cast("list[dict[str, object]]", scoped["sources"])] == ["mail"]
 
 
 def test_tag_pages_preserve_incomplete_evidence_signals(brain: Store) -> None:

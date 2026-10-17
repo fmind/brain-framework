@@ -1,6 +1,7 @@
 """The documented example runs offline through the same CLI users invoke."""
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -27,7 +28,9 @@ def test_example_collects_searches_and_resumes(tmp_path: Path) -> None:
     assert invoke("validate")["valid"]
     assert invoke("eval")["passed"]
     context = invoke("read", "actions/2026-09-25_retention-review/ACTION.md#context")
+    # The README's three refs, within the bf-action Context budget: 300 words, six evidence refs and 4 KiB.
     assert len(context["text"].split()) <= 300
+    assert len(re.findall(r"\]\(", context["text"])) == 3
     assert len(context["text"].encode()) <= 4096
     assert "backlinks" not in context
     evidence = invoke("read", "demo:retention")
@@ -45,8 +48,9 @@ def test_example_collects_searches_and_resumes(tmp_path: Path) -> None:
 
 def test_example_suites_link_to_the_suite_reference() -> None:
     # Editors open the header URL; it must be the page `bf init` links, which owns the suite fields.
-    suites = sorted((Path(__file__).parents[1] / "examples").glob("*/evals/*.yaml"))
-    assert len(suites) >= 3
+    root = Path(__file__).parents[1]
+    suites = [*sorted((root / "examples").glob("*/evals/*.yaml")), root / "src/bf/starter/evals/retrieval.yaml"]
+    assert len(suites) >= 4
     for suite in suites:
         assert suite.read_text().startswith("# https://fmind.github.io/brain-framework/docs/checks/\n"), suite
 

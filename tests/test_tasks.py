@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import cast
@@ -100,6 +100,16 @@ def test_task_page_identity_cannot_be_claimed_by_notes_or_records(brain: Store) 
     assert "problems" not in read([brain], "tasks")
 
 
+def test_task_items_preview_a_long_note_title(brain: Store) -> None:
+    tasks = "\n".join(f"- [ ] Task {n}." for n in range(pages.PAGE))
+    # A whole-message title would crowd the page: each task shows its note's title as listings preview it.
+    brain.write("projects/long.md", f"# {'word ' * 800}\n\n## Next\n\n{tasks}\n".encode())
+    result = read([brain], "tasks")
+    titles = [str(item["title"]) for item in cast("list[dict[str, object]]", result["items"])]
+    assert (len(titles), "next_offset" in result) == (pages.PAGE, False)
+    assert all(len(title) <= index.TITLE and title.endswith("…") for title in titles)
+
+
 def test_task_page_has_no_sections(brain: Store) -> None:
     # Invalid input before any brain is read, as a section of any other page.
     for ref in ("bf://fixture/tasks#section", "tasks#section"):
@@ -125,7 +135,7 @@ def test_task_counts_and_items_share_a_cache_snapshot(brain: Store, monkeypatch:
     changed = False
 
     @contextmanager
-    def concurrent(store: Store) -> Iterator[tuple[sqlite3.Connection, str]]:
+    def concurrent(store: Store) -> Generator[tuple[sqlite3.Connection, str]]:
         with original(store) as (connection, state):
 
             def rewrite(statement: str) -> None:

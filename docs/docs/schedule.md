@@ -33,7 +33,7 @@ bf watch
 
 Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. The assistant dispatcher supervises persistent streams, due batch reads, named schedules, queued events and deliveries beside collection; the dashboard marks assistants with `@`. A long proactive review leaves separate capacity for incoming messages. It can contact providers. Closing watch stops all owned process groups. Restart after changing channel commands or input subscriptions. See [assistant timing and recovery](prompts.md#schedule-and-overlap).
 
-The dashboard shows each program's state, last success, next due time, returned items and record changes. `never` means no success on this machine, such as a sensor that only backfilled older windows; `failed` means the last attempt failed. Items counts the records the last completed collection returned, even a backfill, not the stored total. Manual and disabled programs stay visible without running. Use `bf status --check` for full health.
+The dashboard shows each program's state, last success, next due time, returned items and record changes. `never` means no success on this machine, such as a sensor that only backfilled older windows; `failed` means the last attempt failed. Items counts the records the last committed collection returned, even a backfill, not the stored total. Manual and disabled programs stay visible without running. Use `bf status --check` for full health.
 
 [![Watch dashboard for the fictional offline demo: five sensors sorted by state, with a failed sensor's details beside their last success, next due time, item count and record changes.](../assets/watch.svg)](../assets/watch.svg)
 
@@ -91,7 +91,7 @@ watch:
 | `notifications`         | `failure` | `off`, `failure`, `success` or `all`.                     |
 | `notification_cooldown` | 300       | Seconds between alerts, 0–86400.                          |
 
-Command-line options override `bf.yaml`, then defaults apply. Every command loading `bf.yaml` validates the section, even when an option overrides it. `failure` alerts on new failures and recoveries; `success` on recoveries and on cycles that completed work, even while another program keeps failing; `all` on all three. Alerts never name sources or quote provider text. Desktop alerts need `osascript` on macOS, or `notify-send` or `gdbus` on Linux; a delivery failure warns once and collection continues.
+Command-line options override `bf.yaml`, then defaults apply. Every command loading `bf.yaml` validates the section, even when an option overrides it. `failure` alerts on new failures and recoveries; `success` on recoveries and on cycles that completed work, even while another program keeps failing; `all` on all three. Alerts never name sources or quote provider text. Desktop alerts need `osascript` on macOS, or `notify-send` or `gdbus` on Linux, found through an absolute `PATH` entry and run without the [variables BF removes](limits.md#processes-and-logs); a delivery failure warns once and collection continues.
 
 ## Select programs
 
@@ -103,7 +103,7 @@ bf watch --sensor git-commits --routine weekly-review
 bf schedule --sensor git-commits --name git-only
 ```
 
-With no selector, every configured program is eligible, including programs added later (restart watch to activate new stream subscriptions). `bf update --kind KIND`, repeatable, keeps only sensors, routines or assistants. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run.
+With no selector, every configured program is eligible, including programs added later (restart watch to activate new stream subscriptions). `bf update --kind KIND`, repeatable, keeps only sensors, routines or assistants. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run. To keep a long prompt from delaying a native schedule's collection, [give prompts their own job](prompts.md#schedule-and-overlap).
 
 ## Generate a native schedule
 
@@ -111,9 +111,9 @@ With no selector, every configured program is eligible, including programs added
 bf schedule --every 15 --output ~/.config/bf-schedules
 ```
 
-The reply lists the generated `files`, the `written` paths and literal argument lists to `install`, check the `status` of and `remove` the job. BF runs none of them. Without `--output`, the reply previews the files and warns that nothing was written; its install commands copy from `~/.config/bf-schedules`, where the suggested rerun writes them. A relative `--output` resolves against the brain folder. Differing existing files are kept and generation fails, so your edits survive.
+The reply lists the generated `files`, the `written` paths and literal argument lists to `install`, check the `status` of and `remove` the job. BF runs none of them. Without `--output`, the reply previews the files and warns that nothing was written; its install commands copy from `~/.config/bf-schedules`, where the suggested rerun writes them. A relative `--output` resolves against the brain folder. Differing existing files are kept and generation fails naming the first one, so your edits survive.
 
-The files hold home and brain paths and the `PATH` that `bf schedule` runs with: keep them out of a shared brain's Git history. Credentials and other environment variables are not copied. Sensors and routines find commands such as `uv` through that `PATH`: when it lists version-specific tool folders, such as those of mise, asdf, pyenv or nvm, put stable shims in their place or regenerate the schedule after upgrading those tools. In a brain that [pins its runtime](upgrades.md#pin-a-brains-runtime), generate them with `uv run --locked bf schedule ...`, so jobs and nested `bf` calls use the pinned release.
+The files hold home and brain paths and the `PATH` that `bf schedule` runs with, plus its `XDG_CONFIG_HOME` and `XDG_STATE_HOME` when set: keep them out of a shared brain's Git history. Credentials and other environment variables are not copied. Sensors and routines find commands such as `uv` through that `PATH`: when it lists version-specific tool folders, such as those of mise, asdf, pyenv or nvm, put stable shims in their place or regenerate the schedule after upgrading those tools. In a brain that [pins its runtime](upgrades.md#pin-a-brains-runtime), generate them with `uv run --locked bf schedule ...`, so jobs and nested `bf` calls use the pinned release.
 
 | Option or default   | Meaning                                                                                               |
 | ------------------- | ----------------------------------------------------------------------------------------------------- |
@@ -147,7 +147,7 @@ A sensor or routine failure lets the other programs continue and makes `bf updat
 
 A scheduled program is `fresh` when it succeeded on this machine within twice its `refresh`, `overdue` when it has succeeded but not within that time, and `never` when it has no local success. A sensor succeeds only with a collection reaching the moment it runs: one that only [backfilled](sensors.md#backfills-and-coverage) older windows stays `never`. A program with `refresh: 0` is `manual`; a disabled program or historical source is `unknown`. `bf status --check` exits 1 for an enabled scheduled program that is `overdue`, `never` succeeded, last failed or, for a source, [fell silent](#silent-sources). Run it on the collecting machine: run history is local, even when records are shared.
 
-### Silent sources {#silent-sources}
+### Silent sources
 
 Freshness proves that a sensor succeeded, not that it found anything: after a changed filter, an expired account or a provider change, a sensor can keep succeeding with nothing new. Give a source that always brings news within a known delay a `silent_after`, in seconds:
 
@@ -160,6 +160,6 @@ sensors:
     silent_after: 172800 # new mail arrives at least every two days
 ```
 
-`bf status` gives each source's `changed`: the newest time this brain gained a new or changed record of it, whatever the records' event times. An enabled scheduled source whose `changed` is older than its `silent_after` is `"silent": true`, joins `attention` and the home page, and fails `bf status --check`, while its freshness stays as it is. Collecting a new or changed record ends the silence. A source without any record is never silent: its count already shows it. Set `silent_after` above the longest quiet spell the source really has, such as a weekend for a daily feed.
+`bf status` gives each source's `changed`: the newest time this brain gained a new or changed record of it, whatever the records' event times. An enabled scheduled source whose `changed` is older than its `silent_after` is `"silent": true` in `bf status`, `memories` pages and search [coverage](retrieval.md#source-coverage), joins `attention` and the home page, and fails `bf status --check`, while its freshness stays as it is. Collecting a new or changed record ends the silence. A source without any record is never silent: its count already shows it. Set `silent_after` above the longest quiet spell the source really has, such as a weekend for a daily feed.
 
-Choose a timer interval shorter than the smallest nonzero `refresh`: `bf schedule` warns, naming that program, when `--every` reaches it, and so does `bf watch` for its `interval`, in the dashboard summary and guide or as one `bf:` line on stderr with `--json`. With an hourly sensor and a 15-minute timer, a check 59 minutes after the last success skips the sensor, and the next check, at 74 minutes, runs it. A success timestamp in the future, after a clock correction, makes the program due at once. Long pauses catch up at most 30 days.
+Choose a timer interval shorter than the smallest nonzero `refresh`: `bf schedule` warns, naming that program, when `--every` reaches it, and so does `bf watch` for its `interval`, in the dashboard header and guide or as one `bf:` line on stderr with `--json`. With an hourly sensor and a 15-minute timer, a check 59 minutes after the last success skips the sensor, and the next check, at 74 minutes, runs it. A success timestamp in the future, after a clock correction, makes the program due at once. Long pauses catch up at most 30 days.

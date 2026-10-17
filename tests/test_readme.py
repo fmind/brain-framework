@@ -13,6 +13,8 @@ ROOT = Path(__file__).parent.parent
 DOCS = "https://fmind.github.io/brain-framework/docs/"
 HOME = "https://github.com/fmind/brain-framework"
 REPOSITORY = re.compile(r"https://github\.com/fmind/brain-framework/(?:blob|tree)/main/(?P<path>[^#)]+)")
+RAW = re.compile(r"https://raw\.githubusercontent\.com/fmind/brain-framework/main/(?P<path>[^?#]+)")
+WORKFLOW = re.compile(r"https://github\.com/fmind/brain-framework/actions/workflows/(?P<file>[^/?#]+)(?:/badge\.svg)?")
 
 
 def github_slug(title: str) -> str:
@@ -45,18 +47,31 @@ def test_anchor_rules_follow_each_renderer(tmp_path: Path) -> None:
 
 
 def test_readme_links_are_absolute_and_resolve_to_this_checkout() -> None:
+    tokens = MarkdownIt().parse((ROOT / "README.md").read_text())
     links = [
-        str(child.attrGet("href"))
-        for token in MarkdownIt().parse((ROOT / "README.md").read_text())
+        str(child.attrGet("src" if child.type == "image" else "href"))
+        for token in tokens
         for child in token.children or []
-        if child.type == "link_open"
+        if child.type in {"link_open", "image"}
+    ]
+    # The logo and diagrams are HTML blocks, whose image and link targets the Markdown tokens do not expose.
+    links += [
+        link
+        for token in tokens
+        if token.type == "html_block"
+        for link in re.findall(r'\b(?:href|src)="([^"]+)"', token.content)
     ]
     assert links
     for link in links:
         assert link.startswith("https://"), f"PyPI cannot resolve relative README link {link}"
         address, _, fragment = link.partition("#")
+        bare = address.partition("?")[0]
         target = None
-        if link.startswith(DOCS):
+        if match := RAW.fullmatch(bare):
+            assert (ROOT / match["path"]).is_file(), link
+        elif match := WORKFLOW.fullmatch(bare):
+            assert (ROOT / ".github/workflows" / match["file"]).is_file(), link
+        elif link.startswith(DOCS):
             page = address.removeprefix(DOCS).strip("/") or "index"
             target = ROOT / "docs/docs" / f"{page}.md"
             assert target.is_file(), link

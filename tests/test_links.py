@@ -4,19 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sqlite3
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
 
 import pytest
 from mcp.types import CallToolResult
 
-from bf import index, links, ontology, pages
+from bf import graph, index, links, ontology, pages
 from bf.collect import collect
 from bf.config import load
 from bf.evaluate import evaluate
 from bf.markdown import note, section
 from bf.mcp import server
-from bf.models import Error, InputError, NotFoundError, Query, Record, encode
+from bf.models import CACHE, Error, InputError, NotFoundError, Query, Record, encode
 from bf.records import path as record_path
 from bf.retrieve import read, search
 from bf.storage import Store, writer
@@ -99,7 +102,7 @@ def test_bf_links_percent_encode_spaces_and_percent_signs() -> None:
         "bf://brain/a?rel=friend&weight=%zz",
         "bf://brain/a%FF",
         "bf://brain/a?rel=friend&x",
-        # Only the relationship is a link query: subjects, evidence and attributes are not claims a link makes.
+        # Only the relation is a link query: subjects, evidence and attributes are not claims a link makes.
         "bf://brain/a?rel=friend&weight=1",
         "bf://brain/a?subject=person:alice&rel=friend",
         "bf://brain/a?rel=friend&asserted-by=person:alice",
@@ -125,8 +128,19 @@ def test_component_encoding_and_external_urls() -> None:
         links.identity("bf://team/people/marc?rel=friend")
 
 
+def test_an_invalid_tag_address_names_its_mistake() -> None:
+    # An invalid label used to be reported as a section or relation the address does not have.
+    for label in ("a/b", "a%2Fb", "%20x", "x" * 129):
+        with pytest.raises(Error, match=r"^invalid tag address; .*surrounding whitespace, slashes"):
+            links.tag("bf://fixture/tags/" + label)
+    for value in ("bf://fixture/tags/x#part", "bf://fixture/tags/a/b?rel=friend"):
+        with pytest.raises(Error, match=r"^use a tag address without a section or relation"):
+            links.tag(value)
+    assert links.tag("bf://fixture/tags/x") == "x"
+
+
 def group(reply: dict, relation: str = "links") -> dict:
-    """One relationship group of a read's backlinks; `links` groups untyped links."""
+    """One relation group of a read's backlinks; `links` groups untyped links."""
     return next(g for g in cast(list[dict], reply["backlinks"]) if g["relation"] == relation)
 
 
@@ -245,7 +259,8 @@ def test_an_okf_source_naming_an_undeclared_relation_still_cites(brain: Store) -
     )
     # Retrieval keeps the claim the source makes; validation still reports the relation it misspells.
     assert "concepts/typo.md" in {item["ref"] for item in group(read([brain], "person:bob"), "cites")["items"]}
-    assert any("typo" in str(problem) for problem in cast(list, validate(brain)["problems"]))
+    undeclared = "link relation typo is undeclared; declare it in bf.yaml fields with type: identity and relation: true"
+    assert problems(brain) == [f"concepts/typo.md: sources: {undeclared}"]
 
 
 def test_links_with_removed_attributes_are_reported(brain: Store) -> None:
@@ -316,10 +331,20 @@ def test_validation_and_skip_invalid_links(brain: Store) -> None:
 
 
 @pytest.mark.parametrize("record_id", ["a/b#c?d", "https://example.test/a//../b\\name#? "])
-def test_record_ids_preserve_delimiters_and_require_no_cache_for_exact_read(brain: Store, record_id: str) -> None:
+def test_record_ids_preserve_delimiters_and_require_no_cache_for_exact_read(
+    brain: Store, record_id: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     records_file(brain, "mail", [Record(id=record_id, title="Exact")])
     ref = links.address("fixture", "mail:" + record_id)
-    assert cast(dict, read([brain], ref)["record"])["id"] == record_id
+
+    def unavailable(*_: object) -> None:
+        raise Error(CACHE)
+
+    # The record's own file answers; only its backlinks need the cache.
+    monkeypatch.setattr(index, "database", unavailable)
+    reply = read([brain], ref)
+    assert cast(dict, reply["record"])["id"] == record_id
+    assert {"brain": "fixture", "error": CACHE} in cast(list, reply["problems"])
     with pytest.raises(Error, match="Markdown"):
         read([brain], ref + "#part")
 
@@ -398,6 +423,28 @@ def test_same_brain_ambiguity_does_not_expand_and_qualified_refs_still_work(brai
     assert not validate(brain)["valid"]
 
 
+def test_identity_expansion_survives_a_concurrent_reindex(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    people(brain)
+    expanded = ({"person:bob", "bf://fixture/people/bob", "bf://fixture/projects/bob.md"}, [])
+    assert graph.expand([brain], "person:bob") == expanded
+    database, opened = index.database, 0
+
+    @contextmanager
+    def racing(store: Store) -> Generator[tuple[sqlite3.Connection, str]]:
+        nonlocal opened
+        opened += 1
+        if opened == 2:
+            # Another process, such as bf watch, re-indexes Bob's note between the owner lookup and the alias check:
+            # the note's row is renumbered, while no other item claims its aliases.
+            brain.write("projects/bob.md", brain.read("projects/bob.md") + b"Edited.\n")
+            index.refresh(brain)
+        with database(store) as snapshot:
+            yield snapshot
+
+    monkeypatch.setattr(index, "database", racing)
+    assert graph.expand([brain], "person:bob") == expanded
+
+
 def test_shared_aliases_never_merge_backlinks_and_entity_sections_link(brain: Store, tmp_path: Path) -> None:
     people(brain)
     brain.write("projects/about.md", b"# About\nSee [Bob's profile](bf://fixture/people/bob#about).\n")
@@ -413,7 +460,7 @@ def test_shared_aliases_never_merge_backlinks_and_entity_sections_link(brain: St
     reply = read([brain, team], "bf://fixture/projects/bob.md")
     linked = {(i["brain"], i["ref"]) for g in cast(list[dict], reply["backlinks"]) for i in g["items"]}
     assert ("team", "projects/talk.md") not in linked
-    assert "claimed elsewhere" in str(reply["problems"])
+    assert {"error": "aliases also claimed elsewhere were not expanded: 1"} in cast(list, reply["problems"])
 
 
 def test_canonical_record_backlinks_keep_evidence(brain: Store) -> None:
@@ -564,6 +611,25 @@ def test_a_note_alias_repeating_a_record_ref_is_ambiguous(brain: Store) -> None:
     assert not launch.get("backlinks")
 
 
+def test_a_claim_names_the_one_item_owning_its_target(brain: Store) -> None:
+    people(brain)
+    records_file(brain, "jira", [Record(id="PROJ-1", title="Launch issue")])
+    brain.write("projects/launch.md", b"---\ntype: project\naliases: [jira:PROJ-1]\n---\n# Launch\n")
+    brain.write(
+        "projects/plan.md",
+        b"---\ntype: plan\nfields:\n  author: [jira:PROJ-1]\n---\n# Plan\n\n"
+        b"[Bob](bf://fixture/people/bob?rel=friend#about) [Bob](bf://fixture/projects/bob.md?rel=author#about)\n",
+    )
+    claims = cast(list[dict], read([brain], "projects/plan.md")["claims"])
+    # A section's target keeps the section, which a read opens, and names its note. A record's ref that a note also
+    # claims as an alias is ambiguous, as validation reports: it names neither item.
+    assert [(c["target"], c.get("target_ref"), c.get("target_title")) for c in claims] == [
+        ("bf://fixture/projects/bob.md#about", "projects/bob.md", "Bob"),
+        ("jira:PROJ-1", None, None),
+        ("bf://fixture/people/bob#about", "projects/bob.md", "Bob"),
+    ]
+
+
 def test_the_same_record_in_two_brains_keeps_qualified_reads_exact(brain: Store, tmp_path: Path) -> None:
     root = tmp_path / "team"
     root.mkdir()
@@ -575,6 +641,10 @@ def test_the_same_record_in_two_brains_keeps_qualified_reads_exact(brain: Store,
     reply = read([brain, team], "bf://fixture/jira:PROJ-1")
     assert "problems" not in reply
     assert [i["ref"] for i in group(reply)["items"]] == ["projects/launch.md"]
+    # Searching the bare ref expands neither copy and says how to read one: an owner may be a record, not a note.
+    assert search([brain, team], Query(text="jira:PROJ-1"))["problems"] == [
+        {"error": "ambiguous identity across selected evidence; read an owner's bf://NAME/... address"}
+    ]
 
 
 def test_page_addresses_are_link_targets(brain: Store) -> None:
@@ -747,6 +817,18 @@ def test_okf_sources_cite_their_resources(brain: Store) -> None:
         load(brain)
 
 
+def test_only_an_okf_resource_written_as_a_link_cites(brain: Store) -> None:
+    # A bare file name describes a population, as OKF allows: only `./brief.txt` names the sibling file, and
+    # validation checks it.
+    sources = b"sources:\n  - resource: brief.txt\n  - resource: ./brief.txt\n"
+    brain.write("concepts/brief.md", b"---\ntype: concept\n" + sources + b"---\n# Brief\n")
+    claims = cast(list[dict], read([brain], "concepts/brief.md")["claims"])
+    assert [(c["relation"], c["target"]) for c in claims] == [("cites", "concepts/brief.txt")]
+    assert problems(brain) == ["concepts/brief.md: broken link: ./brief.txt"]
+    brain.write("concepts/brief.txt", b"The brief.\n")
+    assert validate(brain)["valid"]
+
+
 def test_an_okf_resource_names_its_note(brain: Store) -> None:
     url = "https://github.com/example/site/pull/42"
     brain.write("concepts/pull.md", f"---\ntype: change\nresource: {url}\n---\n# Pull 42\n\nMerged.\n".encode())
@@ -807,6 +889,9 @@ def test_record_aliases_must_reach_their_record(brain: Store) -> None:
         f"{record_path('mail', 'x')}: BF aliases name a whole subject; remove the #section",
         f"{record_path('mail', 'y')}: {note}; link to the note instead",
     }
+    # Search skips such a record, while an exact read still returns it.
+    assert search([brain], Query(text="X"))["items"] == []
+    assert read([brain], "mail:x")["ref"] == "mail:x"
 
 
 def hijacking(brain: Store, tmp_path: Path, resource: str) -> Store:

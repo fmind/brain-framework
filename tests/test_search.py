@@ -20,13 +20,14 @@ from pydantic import ValidationError
 
 from bf import index, pages, records, retrieve, usage
 from bf.cli import main
+from bf.collect import collect
 from bf.config import register, user_path
-from bf.markdown import LEAD, entry_note
+from bf.markdown import entry_note, preview
 from bf.mcp import server
 from bf.models import Error, NotFoundError, Query, Record, digest, encode, timestamp
 from bf.pages import scope
 from bf.retrieve import read, search
-from bf.storage import UNNAMED, Store, state_store, writer
+from bf.storage import LINKED, UNNAMED, Store, state_store, writer
 from bf.update import update
 from bf.validate import validate
 from conftest import records_file
@@ -264,7 +265,9 @@ def test_foreign_frontmatter_keeps_ordinary_markdown_searchable(brain: Store) ->
     assert [p["file"] for p in cast(list, validate(brain)["problems"])] == ["projects/strict.md"]
 
 
-def test_links_and_special_files_are_reported_without_hiding_the_brain(brain: Store, tmp_path: Path) -> None:
+def test_links_and_special_files_are_reported_without_hiding_the_brain(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     outside = tmp_path / "outside.md"
     outside.write_text("# Outside\n\nExfiltrated secret.\n")
     brain.write("actions/2026-09-26_demo/ACTION.md", b"---\ntype: action\n---\n# Demo\n\nResume the offline import.\n")
@@ -286,12 +289,18 @@ def test_links_and_special_files_are_reported_without_hiding_the_brain(brain: St
     assert index.status(brain)["cache"] == "ready"
     assert "projects" in read([brain])
     action = read([brain], "actions/2026-09-26_demo")
-    assert "actions/2026-09-26_demo/inputs/dataset.bin" not in cast(list, action["files"])
-    assert {
-        "brain": "fixture",
-        "file": "actions/2026-09-26_demo/inputs/dataset.bin",
-        "error": "symlinks and special files are not listed",
-    } in cast(list, action["problems"])
+    linked = "actions/2026-09-26_demo/inputs/dataset.bin"
+    assert linked not in cast(list, action["files"])
+    # Named once, with the cause the cache found: the action's listing used to name it again as a special file.
+    issues = cast("list[dict[str, str]]", action["problems"])
+    [named] = [issue for issue in issues if issue.get("file") == linked]
+    assert named["error"].startswith("symlinks are not followed")
+    with monkeypatch.context() as patched:
+        # One the cache did not report, such as past its 200 problems, the action still names, with its cause: it
+        # once called an unreadable folder a link or special file.
+        patched.setattr(index, "problems", lambda _connection: [])
+        unreported = {"brain": "fixture", "file": linked, "error": LINKED}
+        assert unreported in cast(list, read([brain], "actions/2026-09-26_demo")["problems"])
     # The cache names the record file, and a skipped file keeps an absent record from looking absent.
     assert cast(dict, read([brain], "meetings:decision-1")["record"])["id"] == "decision-1"
     with pytest.raises(Error, match="unreadable records"):
@@ -303,6 +312,28 @@ def test_links_and_special_files_are_reported_without_hiding_the_brain(brain: St
         "concepts/linked.md",
         "memories/meetings/pipe.json",
     ]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+def test_an_action_names_the_cause_of_an_unreported_unreadable_folder(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    brain.write("actions/2026-09-26_demo/ACTION.md", b"---\ntype: action\n---\n# Demo\n\nResume the import.\n")
+    locked = brain.root / "actions/2026-09-26_demo/outputs"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        # Past the cache's 200 problems, the action names it as bf validate does: it once called it a link or a
+        # special file.
+        monkeypatch.setattr(index, "problems", lambda _connection: [])
+        problem = {
+            "brain": "fixture",
+            "file": "actions/2026-09-26_demo/outputs",
+            "error": "unreadable folder; grant read and search permission or move it out of the brain",
+        }
+        assert problem in cast(list, read([brain], "actions/2026-09-26_demo")["problems"])
+    finally:
+        locked.chmod(0o700)
 
 
 def test_search_says_when_results_exist_beyond_the_limit(brain: Store) -> None:
@@ -321,10 +352,13 @@ def test_search_says_when_results_exist_beyond_the_limit(brain: Store) -> None:
         "\u00a0\u2003word\x1c" * 400,
         "x" * 2000,
         "a" * 1279 + " tail" * 200,
+        # A prefix collapsing to exactly the lead's length does not show whether the text goes on: here it does.
+        "w" * 320 + " " * 1000 + " more",
     ],
 )
 def test_record_leads_collapse_whitespace_of_a_prefix_like_the_whole_text(text: str) -> None:
-    assert index.lead(Record(id="x", title="T", text=text)) == re.sub(r"\s+", " ", text).strip()[:LEAD]
+    # Like a note's, a record's lead is a preview: a cut one ends with an ellipsis.
+    assert index.lead(Record(id="x", title="T", text=text)) == preview(re.sub(r"\s+", " ", text).strip())
 
 
 def plant(store: Store, *statements: str) -> None:
@@ -704,8 +738,11 @@ def test_search_reports_omitted_files_and_isolates_unavailable_brains(brain: Sto
 def test_evaluation_names_missing_retrieval_cases(brain: Store) -> None:
     from bf.evaluate import evaluate
 
-    with pytest.raises(Error, match="evals has no suites"):
+    with pytest.raises(Error, match=r"^evals holds no \.yaml or \.yml suites; add one, such as evals/retrieval\.yaml,"):
         evaluate(brain)
+    # Another folder's advice names that folder, not evals/.
+    with pytest.raises(Error, match=r"^projects holds no \.yaml or \.yml suites; add one, such as projects/retrieval"):
+        evaluate(brain, "projects")
     brain.write(
         "evals/retrieval.yaml", b"version: 8\ncases:\n  - name: later\n    query: x\n    scope: soon\n    empty: true\n"
     )
@@ -752,6 +789,21 @@ def test_search_refs_keep_hash_characters_in_note_filenames(brain: Store) -> Non
     assert str(read([brain], part)["text"]).startswith("## Decision")
 
 
+def test_whole_note_cases_match_the_sections_of_a_note_whose_name_holds_a_hash(brain: Store) -> None:
+    from bf.evaluate import evaluate
+
+    brain.write("projects/C# guide.md", b"# Sharpneedle\n\n## Decision\n\nUniquesection keeps the full path.\n")
+    brain.write(
+        "evals/retrieval.yaml",
+        b"version: 8\ncases:\n  - name: expected\n    query: uniquesection\n    expect: ['projects/C# guide.md']\n"
+        b"  - name: forbidden\n    query: uniquesection\n    forbid: ['projects/C# guide.md']\n    text: [keeps]\n",
+    )
+    expected, forbidden = cast("list[dict[str, object]]", evaluate(brain)["cases"])
+    # A `#` in the file name used to make the ref match only itself: a missing expectation and a false pass.
+    assert (expected["passed"], expected["rank"]) == (True, {"projects/C# guide.md": 1})
+    assert (forbidden["passed"], forbidden["forbidden"]) == (False, ["projects/C# guide.md"])
+
+
 def test_retrieval_cases_distinguish_record_ids_from_note_sections(brain: Store) -> None:
     from bf.evaluate import evaluate
 
@@ -761,6 +813,36 @@ def test_retrieval_cases_distinguish_record_ids_from_note_sections(brain: Store)
         b"version: 8\ncases:\n  - name: exact-record\n    query: hashneedle\n    expect: [issues:item]\n",
     )
     assert not evaluate(brain)["passed"]
+    # An exact read names the record by its address too, its id's `#` encoded rather than read as a section.
+    brain.write(
+        "evals/retrieval.yaml",
+        b"version: 8\ncases:\n  - name: read-record\n    read: 'issues:item#comment'\n"
+        b"    expect: ['bf://fixture/issues:item%23comment']\n",
+    )
+    assert evaluate(brain)["passed"]
+
+
+def test_evaluation_ignores_editor_locks_beside_suites_and_names_other_entries(brain: Store) -> None:
+    from bf.evaluate import evaluate
+
+    brain.write(
+        "evals/retrieval.yaml",
+        b"version: 8\ncases:\n  - name: offline\n    query: offline\n    expect: [projects/offline.md]\n",
+    )
+    # Emacs keeps a dangling `.#NAME` link, or a small file, beside a suite while its buffer has unsaved edits.
+    (brain.root / "evals/.#retrieval.yaml").symlink_to("owner@host.12345:1790000000")
+    brain.write("evals/.#other.yaml", b"owner@host.12345:1790000000")
+    assert evaluate(brain)["score"] == "1/1"
+    # Any other link is never followed, and fails the run by name.
+    (brain.root / "evals/linked.yaml").symlink_to(brain.root / "evals/retrieval.yaml")
+    with pytest.raises(Error, match=r"^evals/linked\.yaml: symlinks are not followed; replace the link with the file"):
+        evaluate(brain)
+    brain.write("evals/README.md", b"# Suites\n")
+    with pytest.raises(Error, match=r"^evals/README\.md: name a folder of suites or a \.yaml or \.yml suite file$"):
+        evaluate(brain, "evals/README.md")
+    # A path below a file names no folder either: it once said to replace the note with a folder.
+    with pytest.raises(Error, match=r"^projects/offline\.md/sub: name a folder of suites or a \.yaml or \.yml suite"):
+        evaluate(brain, "projects/offline.md/sub")
 
 
 def test_one_ranked_query_keeps_notes_above_long_records_that_happen_to_hold_every_word(brain: Store) -> None:
@@ -841,8 +923,9 @@ def test_search_names_query_words_that_match_nothing(brain: Store, tmp_path: Pat
     # Dropped function words are not reported; a scope does not make a word unknown to the brain.
     assert search([brain], Query(text="what is the zzabsent"))["unmatched"] == ["zzabsent"]
     assert "unmatched" not in search([brain], Query(text="lunch offline", **scope("concepts")))
-    # Identities, known or not, are never checked as words.
+    # A known identity is never checked as words; an unknown one searches its words, unmatched included.
     assert "unmatched" not in search([brain], Query(text="repo:example/project"))
+    assert search([brain], Query(text="zz:qqq"))["unmatched"] == ["zz", "qqq"]
     # A misspelling gets the close words the brain holds, spelled as a passage spells them; a word close to none,
     # a phrase or a prefix gets none.
     reply = search([brain], Query(text='retreival zzabsent "retrieval offline" retrievl*'))
@@ -861,6 +944,27 @@ def test_search_names_query_words_that_match_nothing(brain: Store, tmp_path: Pat
     team.write("bf.yaml", b"version: 8\nname: team\n")
     team.write("concepts/budget.md", b"# Budjet\n\nA misspelled title.\n")
     assert "unmatched" not in search([brain, team], Query(text="offline budjet"))
+
+
+def test_a_frequent_stem_is_spelled_from_its_first_passage_by_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Sorting every passage holding a stem that most records hold took about 5 ms per suggestion at 20,000 records:
+    # such a stem is first looked for among the items whose refs sort first, which must find the same passage.
+    root = tmp_path / "spelled"
+    root.mkdir()
+    store = Store(root)
+    store.write("bf.yaml", b"version: 8\nname: spelled\n")
+    store.write("concepts/a.md", b"# Alpha\n\nNothing to see.\n")
+    store.write("concepts/c.md", b"# Gamma\n\nThe policy.\n")
+    assert search([store], Query(text="polcy"))["suggestions"] == {"polcy": ["policy"]}
+    # Indexed later, b's passages are numbered after c's, but its ref sorts first.
+    store.write("concepts/b.md", b"# Beta\n\nThe policies.\n")
+    monkeypatch.setattr(index, "SPREAD", 0)
+    # The first items by ref miss it, hold b, hold b and c, or are fewer than the walk.
+    for walk in (1, 2, 3, 4):
+        monkeypatch.setattr(index, "WALK", walk)
+        assert search([store], Query(text="polcy"))["suggestions"] == {"polcy": ["policies"]}
 
 
 def test_tags_rank_like_headings_above_passing_mentions(brain: Store) -> None:
@@ -1207,6 +1311,28 @@ def test_search_coverage_names_the_sources_it_returned_or_that_need_attention(br
     assert len(cast("list[dict]", scoped["sources"])) == 3
     # Authored-folder scopes search no source.
     assert not {"sources", "sources_omitted"} & set(search([brain], Query(text="offline", **scope("projects"))))
+
+
+def test_search_coverage_keeps_a_source_that_fell_silent(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nsensors:\n  papers:\n    command: [echo]\n    refresh: 86400\n    silent_after: 345600\n",
+    )
+    one = b'[{"id":"one","title":"One","time":"2026-09-10T00:00:00Z"}]'
+    now = datetime.now(UTC).replace(microsecond=0)
+    seen = now - timedelta(days=5)
+    # Runs keep succeeding with the record first collected five days ago: fresh, but past the four days allowed.
+    for start, end in ((seen - timedelta(days=1), seen), (seen, now)):
+        collect(
+            brain, "papers", start=start.isoformat(), end=end.isoformat(), runner=lambda *_: one, clock=lambda t=end: t
+        )
+    empty = search([brain], Query(text="zzabsent"))
+    papers = next(source for source in cast("list[dict]", empty["sources"]) if source["source"] == "papers")
+    assert (papers["freshness"], papers["silent"]) == ("fresh", True)
+    # Only a meetings record returns, yet the silent source is listed instead of counted in sources_omitted.
+    reply = search([brain], Query(text="lunch"))
+    assert [source["source"] for source in cast("list[dict]", reply["sources"])] == ["meetings", "papers"]
+    assert "sources_omitted" not in reply
 
 
 def test_source_scopes_cover_only_brains_that_hold_the_source(brain: Store, tmp_path: Path) -> None:

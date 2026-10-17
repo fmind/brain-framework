@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 from bf.markdown import note, validate_okf
 from conftest import Provider
 
@@ -49,7 +51,7 @@ LAUNCH = {
 EMPTY_TASKS = {"page": "tasks", "total": 0, "summary": {"open": 0, "done": 0, "notes": 0}, "items": []}
 
 
-def pages(provider: Provider, home: dict, week: dict, tasks: dict | None = None) -> None:
+def pages(provider: Provider, home: dict, week: dict, tasks: dict | None = None, status: object = None) -> None:
     provider.install(
         "bf",
         [
@@ -57,6 +59,7 @@ def pages(provider: Provider, home: dict, week: dict, tasks: dict | None = None)
             {"match": ["read", "projects", "--brain"], "stdout": {"items": home.get("projects", [])}},
             {"match": ["read", "7d", "--brain"], "stdout": week},
             {"match": ["read", "--brain"], "stdout": home},
+            *([{"match": ["status", "--brain"], "stdout": status}] if status is not None else []),
         ],
     )
 
@@ -291,6 +294,21 @@ def test_weekly_review_qualifies_empty_sections_while_a_sensor_needs_attention()
     validate_okf("actions/2026-09-25_weekly-review/ACTION.md", text.encode())
 
 
+def test_weekly_review_says_why_a_silent_source_needs_attention() -> None:
+    # A silent source still succeeds, so its freshness alone left "needs attention" unexplained.
+    attention = [
+        {"sensor": "mail", "freshness": "fresh", "silent": True},
+        {"sensor": "feed", "freshness": "overdue", "silent": True},
+    ]
+    home = {"projects": [], "tasks": EMPTY_TASKS, "upcoming": [], "attention": attention}
+    text = "\n".join(weekly_review().render("2026-09-25", home, {"total": 0}))
+    lines = text.splitlines()
+    assert "- Sensor `mail`: no new or changed record within its `silent_after`." in lines
+    assert "- Sensor `feed`: overdue; no new or changed record within its `silent_after`." in lines
+    assert "- 0 items in the period, and a sensor needing attention may have missed some" in lines
+    validate_okf("actions/2026-09-25_weekly-review/ACTION.md", text.encode())
+
+
 def test_weekly_review_states_empty_sections_plainly_when_every_sensor_is_current() -> None:
     # A late routine collects no evidence: the empty sections need no qualification.
     home = {"projects": [], "tasks": EMPTY_TASKS, "attention": [{"routine": "backup", "freshness": "overdue"}]}
@@ -307,3 +325,122 @@ def test_weekly_review_reports_programs_needing_attention_alone(provider: Provid
     assert result.returncode == 0, result.stderr
     assert "- Sensor `mail`: overdue." in result.stdout.splitlines()
     validate_okf("actions/2026-09-25_weekly-review/ACTION.md", result.stdout.encode())
+
+
+def test_weekly_review_leaves_its_own_run_out_of_attention(provider: Provider) -> None:
+    # BF records a routine's run only after it exits: on its first run, after its own failure or after a pause, the
+    # home page lists the running review itself. 18.5.0 wrote an action about only that on an otherwise empty brain.
+    alone = [{"routine": "weekly-review", "freshness": "never"}]
+    pages(provider, {"page": "", "projects": [], "attention": alone}, {"page": "7d", "total": 0})
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert (result.returncode, result.stdout) == (0, "")
+    others = [*alone, {"routine": "weekly-review", "freshness": "overdue", "failed": True}]
+    others.append({"routine": "backup", "freshness": "overdue"})
+    pages(provider, {"page": "", "projects": [], "attention": others}, {"page": "7d", "total": 0})
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert [line for line in lines if line.startswith("- Routine")] == ["- Routine `backup`: overdue."]
+
+
+def test_weekly_review_keeps_another_brains_routine_of_its_name(provider: Provider) -> None:
+    # A brain declaring another under `brains:` lists that brain's programs too: the review once dropped every
+    # `weekly-review` entry, hiding a failure in the other brain, and wrote nothing when that was all to review.
+    own = {"brain": "main", "routine": "weekly-review", "freshness": "never"}
+    other = {"brain": "team", "routine": "weekly-review", "freshness": "never", "failed": True}
+    named = {"brains": [{"brain": "main", "path": "/brains/main"}], "healthy": True}
+    pages(provider, {"page": "", "projects": [], "attention": [own, other]}, {"page": "7d", "total": 0}, status=named)
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert result.returncode == 0, result.stderr
+    assert [line for line in result.stdout.splitlines() if line.startswith("- Routine")] == [
+        "- Routine `weekly-review` in brain `team`: never succeeded on this machine; last attempt failed."
+    ]
+    assert ["status", "--brain", "/brains/main"] in provider.calls("bf")
+    pages(provider, {"page": "", "projects": [], "attention": [own]}, {"page": "7d", "total": 0}, status=named)
+    result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert (result.returncode, result.stdout) == (0, "")
+    # Without its own brain's name, the review cannot tell its run from another brain's: it writes nothing.
+    for unnamed in ({"brains": []}, {"brains": [{"path": "/brains/main"}]}, []):
+        pages(provider, {"page": "", "projects": [], "attention": [own]}, {"page": "7d", "total": 0}, status=unnamed)
+        result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+        assert (result.returncode, result.stdout) == (1, "")
+        assert result.stderr == "weekly-review: could not name this brain; run bf status\n"
+
+
+def test_weekly_review_lists_only_actions_begun_in_the_period() -> None:
+    # The home page lists the 10 latest actions of any date: 18.5.0 listed month-old actions as this week's work, and
+    # a planned action, which sorts first, would read as begun this week.
+    titles = {
+        "2026-09-24_new": "New",
+        "2026-09-18_first-day": "First day",
+        "2026-09-26_later": "Later",
+        "2026-09-17_old": "Old",
+        "undated": "Undated",
+    }
+    actions = [
+        {"ref": f"actions/{folder}/ACTION.md", "kind": "note", "title": title} for folder, title in titles.items()
+    ]
+    home = {"projects": [], "tasks": EMPTY_TASKS, "actions": actions}
+    lines = list(weekly_review().render("2026-09-25", home, {"total": 2}))
+    assert (
+        "- Recent actions: New (`actions/2026-09-24_new/ACTION.md`), "
+        "First day (`actions/2026-09-18_first-day/ACTION.md`)"
+    ) in lines
+    home["actions"] = actions[2:]
+    assert not [line for line in weekly_review().render("2026-09-25", home, {"total": 0}) if "Recent actions" in line]
+
+
+@pytest.mark.parametrize(
+    ("days", "notice"),
+    [
+        (["2026-09-24"] * 9, False),
+        (["2026-09-24"] * 10, True),
+        # A planned action takes a preview slot: the period's earlier actions may lie beyond the preview.
+        (["2026-10-01", *["2026-09-24"] * 9], True),
+        # An action begun before the period ends the preview: no action of the period lies beyond it.
+        ([*["2026-09-24"] * 9, "2026-09-17"], False),
+    ],
+)
+def test_weekly_review_says_when_the_action_preview_may_hide_actions(days: list[str], notice: bool) -> None:
+    # The home page previews the 10 newest actions, without a total: a busy week's earlier actions left the review
+    # without notice.
+    actions = [
+        {"ref": f"actions/{day}_a{9 - n}/ACTION.md", "kind": "note", "title": f"Action {9 - n}"}
+        for n, day in enumerate(days)
+    ]
+    home = {"projects": [], "tasks": EMPTY_TASKS, "actions": actions}
+    text = "\n".join(weekly_review().render("2026-09-25", home, {"total": len(days)}))
+    lines = text.splitlines()
+    hint = "- Showing the period's actions among the newest 10; use `bf read actions` and follow `next_offset`."
+    assert (hint in lines) is notice
+    validate_okf("actions/2026-09-25_weekly-review/ACTION.md", text.encode())
+    assert note("actions/2026-09-25_weekly-review/ACTION.md", text.encode()).targets == []
+
+
+@pytest.mark.parametrize("count", [19, 20])
+def test_weekly_review_says_when_a_home_preview_may_hide_items(count: int) -> None:
+    # The home page previews at most 20 changed notes and 20 upcoming items, without a total: a busy week's later
+    # items left the review without notice.
+    notes = [{"ref": f"concepts/n{n}.md", "kind": "note", "title": f"Note {n}"} for n in range(count)]
+    events = [{"ref": f"calendar:e{n}", "kind": "record", "time": "2026-09-26T09:00:00+00:00"} for n in range(count)]
+    home = {"projects": [], "tasks": EMPTY_TASKS, "changed": notes, "upcoming": events}
+    text = "\n".join(weekly_review().render("2026-09-25", home, {"total": count}))
+    lines = text.splitlines()
+    changed = "- Showing the newest 20 changed notes; use `bf read 2026-09-18..2026-09-25` and follow `next_offset`."
+    upcoming = "Showing the first 20 upcoming items; use `bf read 2026-09-25..2026-10-02` and follow `next_offset`."
+    assert (changed in lines, upcoming in lines) == (count == 20, count == 20)
+    validate_okf("actions/2026-09-25_weekly-review/ACTION.md", text.encode())
+    assert note("actions/2026-09-25_weekly-review/ACTION.md", text.encode()).targets == []
+
+
+def test_weekly_review_counts_one_in_the_singular() -> None:
+    task = {"text": "Draft", "ref": "projects/archive.md#next", "line": 9}
+    tasks = {"page": "tasks", "total": 1, "summary": {"open": 1, "done": 0, "notes": 1}, "items": [task]}
+    home = {"projects": [{**PROJECT, "new_links": 1}], "tasks": tasks}
+    text = "\n".join(weekly_review().render("2026-09-25", home, {"total": 1}))
+    lines = text.splitlines()
+    assert "1 open task; 0 completed across 1 note with checkboxes." in lines
+    assert "- 1 item in the period" in lines
+    assert "(draft, edited 2026-09-01, 1 newer linked item). Next:" in text
+    # The action names every page it was generated from.
+    assert "from `bf read`, `bf read projects`, `bf read tasks` and `bf read 7d`." in text

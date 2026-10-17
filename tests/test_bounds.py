@@ -100,8 +100,13 @@ def test_replies_list_200_skipped_files_then_a_count(brain: Store) -> None:
     problems = cast("list[dict[str, str]]", search([brain], Query(text="offline"))["problems"])
     assert [problem.get("file") for problem in problems[:200]] == [f"projects/broken-{n:03}.md" for n in range(200)]
     assert "file" not in problems[200]
-    assert "3 more" in problems[200]["error"]
+    assert problems[200]["error"] == "3 more files were skipped; run bf validate"
     assert len(problems) == 201
+    for number in (201, 202):
+        (brain.root / f"projects/broken-{number:03}.md").unlink()
+    # It once read "1 more files were skipped".
+    problems = cast("list[dict[str, str]]", search([brain], Query(text="offline"))["problems"])
+    assert problems[200]["error"] == "1 more file was skipped; run bf validate"
 
 
 def test_evaluation_runs_at_most_100_suites(brain: Store) -> None:

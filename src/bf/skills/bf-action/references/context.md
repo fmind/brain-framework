@@ -14,7 +14,7 @@ Draft a product page that explains the service before asking visitors to sign up
 The objective and project decision are recorded. No draft exists yet. Next: read the decision and outline the page; leave pricing as an explicit open question.
 ```
 
-With several brains, keep refs brain-qualified (`uri`). Name external evidence by ref and say why it matters instead of copying it; incomplete or stale evidence belongs in the unknowns. Refresh both sections in place only when the outcome, constraints, evidence or next step change. The [handoff checker](handoff.md) measures them; count the refs and judge readiness yourself.
+With several brains, keep refs brain-qualified (`uri`). Name external evidence by ref and say why it matters instead of copying it; incomplete or outdated evidence belongs in the unknowns. Refresh both sections in place only when the outcome, constraints, evidence or next step change. The [handoff checker](handoff.md) measures them; count the refs and judge readiness yourself.
 
 ## Read on resume
 

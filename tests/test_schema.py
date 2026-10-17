@@ -93,7 +93,7 @@ def test_editor_and_runtime_reject_invalid_structure(value: dict) -> None:
     [
         *(
             ("brain", f"version: 8\nname: brain\n{key}:\n  # demo: {{}}\n".encode(), {"version": 8, "name": "brain"})
-            for key in ("brains", "fields", "sensors", "watch", "routines")
+            for key in ("brains", "fields", "sensors", "watch", "routines", "channels", "assistants")
         ),
         (
             "brain",
@@ -212,7 +212,7 @@ for value in [b"!!bool PRIVATE", b'!!int ""', b'!!float ""', b"!!map [PRIVATE]"]
     assert not result.stdout
 
 
-def test_starter_keeps_roles_without_serializing_redundant_defaults(tmp_path: Path) -> None:
+def test_starter_keeps_relations_without_serializing_redundant_defaults(tmp_path: Path) -> None:
     root = tmp_path / "new"
     result = CliRunner().invoke(app, ["init", str(root), "--name", "new"])
     assert result.exit_code == 0, result.output

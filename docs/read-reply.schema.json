@@ -83,7 +83,7 @@
       "properties": {
         "brain": { "type": "string" },
         "changed": {
-          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "description": "When this brain last gained a new or changed record of the source.",
           "format": "date-time",
           "type": "string"
         },
@@ -102,7 +102,10 @@
         "mode": { "enum": ["window", "snapshot"] },
         "page": { "type": "string" },
         "records": { "minimum": 0, "type": "integer" },
-        "silent": { "const": true },
+        "silent": {
+          "const": true,
+          "description": "The scheduled source gained no new or changed record within its `silent_after`."
+        },
         "source": { "type": "string" },
         "state": { "enum": ["active", "disabled", "historical"] },
         "window": {
@@ -251,7 +254,11 @@
               "failed": { "const": true },
               "freshness": { "type": "string" },
               "routine": { "type": "string" },
-              "sensor": { "type": "string" }
+              "sensor": { "type": "string" },
+              "silent": {
+                "const": true,
+                "description": "The source gained no new or changed record within its `silent_after`, whatever its freshness."
+              }
             },
             "required": ["freshness"],
             "type": "object"
@@ -554,7 +561,10 @@
               "type": "string"
             },
             "mode": { "enum": ["window", "snapshot"] },
-            "silent": { "const": true },
+            "silent": {
+              "const": true,
+              "description": "The scheduled source gained no new or changed record within its `silent_after`."
+            },
             "state": { "enum": ["active", "disabled", "historical"] },
             "window": {
               "properties": {

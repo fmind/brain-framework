@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 from bf import graph, health, index, pages, retrieve
 from bf.cli import app
 from bf.collect import collect
-from bf.config import user_path
+from bf.config import ABSENT, register, select, user_path
 from bf.evaluate import evaluate
 from bf.mcp import server
 from bf.models import MAX_OFFSET, Error, InputError, NotFoundError, Query, Record, digest, encode
@@ -129,6 +129,15 @@ def test_skipped_directories_are_visible_without_following_them(brain: Store, tm
     assert f"projects/{name}" in str(reply["problems"])
     assert str(outside) not in str(reply)
     assert not validate(brain)["valid"]
+    # Its page names the skipped link: not found would claim the folder absent.
+    with pytest.raises(Error, match=f"^projects/{name}: expected a directory; symlinks") as raised:
+        retrieve.read([brain], f"projects/{name}")
+    assert not isinstance(raised.value, NotFoundError)
+    # So does the page of a folder below it, which once read as `reference not found`.
+    (outside / "sub").mkdir()
+    with pytest.raises(Error, match=f"^projects/{name}: expected a directory; symlinks") as raised:
+        retrieve.read([brain], f"projects/{name}/sub")
+    assert not isinstance(raised.value, NotFoundError)
 
 
 def test_oversized_record_text_reads_in_pages(brain: Store) -> None:
@@ -303,6 +312,21 @@ def test_claim_preview_keeps_every_relation_and_reports_truncation(brain: Store)
     assert reply["claims_truncated"] is True
 
 
+def test_claims_preview_the_title_of_their_target(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nfields:\n  depends-on:\n    description: A dependency.\n    type: identity\n"
+        b"    cardinality: many\n    relation: true\n",
+    )
+    # A title can hold a whole message: a claim names its target as listings preview it.
+    brain.write("concepts/long.md", f"# {'word ' * 800}\n".encode())
+    brain.write("projects/plan.md", b"# Plan\n\n[Long](bf://fixture/concepts/long.md?rel=depends-on)\n")
+    [claim] = cast("list[dict[str, str]]", retrieve.read([brain], "projects/plan.md")["claims"])
+    assert claim["target_ref"] == "concepts/long.md"
+    assert len(claim["target_title"]) <= index.TITLE
+    assert claim["target_title"].endswith("…")
+
+
 def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -367,6 +391,33 @@ def test_every_page_of_a_mid_sized_exact_read_is_reachable_through_cli_and_mcp(
     brain.write("projects/mid.md", data + b"<<<<<<< ours\n")
     conflicted = retrieve.read([brain], "projects/mid.md", counted=False)
     assert (conflicted["total_characters"], "outline" in conflicted) == (len(data) + 13, False)
+
+
+@pytest.mark.parametrize("paged", ["context", "text"])
+def test_later_text_pages_leave_the_context_problems_to_the_first(brain: Store, tmp_path: Path, paged: str) -> None:
+    # Another note claims the same alias: the read's graph context reports it.
+    brain.write("concepts/twin.md", b'---\naliases: ["topic:twin"]\n---\n# Twin\n')
+    # A registered brain moved away leaves every answer incomplete: the read's own problem, which each page keeps.
+    (tmp_path / "moved").mkdir()
+    moved = Store(tmp_path / "moved")
+    moved.write("bf.yaml", b"version: 8\nname: moved\n")
+    register(moved)
+    moved.root.rename(tmp_path / "elsewhere")
+    absent = {"brain": "moved", "error": ABSENT}
+    head = '---\naliases: ["topic:twin"]\n---\n# Long\n\n'
+    brain.write("concepts/long.md", head.encode())
+    whole = retrieve.read(select(), "concepts/long.md")
+    assert "aliases also claimed elsewhere were not expanded" in str(whole["problems"])
+    # One byte past the page budget with those problems: the text alone fits, so the context decides the paging. Or
+    # a text past the budget on its own, whose later pages never build the context.
+    text = head + "x" * (pages.BUDGET + 1 - (len(encode(whole)) if paged == "context" else 0))
+    brain.write("concepts/long.md", text.encode())
+    first = retrieve.read(select(), "concepts/long.md")
+    assert absent in cast("list[dict]", first["problems"])
+    assert "aliases also claimed elsewhere were not expanded" in str(first["problems"])
+    later = retrieve.read(select(), "concepts/long.md", offset=cast("int", first["next_offset"]))
+    assert later["problems"] == [absent]
+    assert (cast("str", first["text"]) + cast("str", later["text"]), "next_offset" in later) == (text, False)
 
 
 def test_typed_links_read_their_unowned_target_identity(brain: Store) -> None:
@@ -474,8 +525,8 @@ def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> N
     [
         # A read-only checkout: bf build would fail with the same cause, so the read names it.
         (
-            Error("search and read need write access to the brain's .bf cache directory; grant it or use a copy"),
-            "search and read need write access to the brain's .bf cache directory; grant it or use a copy",
+            Error("the search cache needs write access to the brain's .bf directory; grant it or use a writable copy"),
+            "the search cache needs write access to the brain's .bf directory; grant it or use a writable copy",
         ),
         (sqlite3.DatabaseError("database disk image is malformed"), "run bf build to resolve identities"),
     ],
@@ -523,6 +574,8 @@ def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
         (lambda: pages.query("x", "projects/" + "a" * 5000), "scope", "String should have at most 4096"),
         # Items carry note paths: a section ref, as search returns it, would scope nothing.
         (lambda: pages.query("x", "projects/offline.md#decision"), "scope", "whole note without its #section"),
+        # A section is never an identity: its address, as a result's uri, would scope only links naming it.
+        # A page has no sections: no source name, period or record file holds `#`.
         # A page's address is never a link target: it would scope nothing, a complete-looking empty reply.
         *(
             (lambda page=page: pages.query("x", page), "scope", "scope accepts a folder")
@@ -536,3 +589,6 @@ def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
     assert pages.scope("projects/x#y") == {"prefix": "projects/x#y"}
     assert pages.scope("projects/offline.md") == {"prefix": "projects/offline.md"}
     assert pages.scope("bf://fixture/tags/x") == {"target": "bf://fixture/tags/x"}
+    # An empty fragment names the whole note, and a record id may hold `#`.
+    assert pages.scope("bf://fixture/projects/offline.md#") == {"target": "bf://fixture/projects/offline.md"}
+    assert pages.scope("mail:thread#2") == {"target": "mail:thread#2"}

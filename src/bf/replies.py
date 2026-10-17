@@ -34,7 +34,10 @@ _HEALTH: dict[str, object] = {
         "additionalProperties": False,
     },
     "failed": {"const": True},
-    "silent": {"const": True},
+    "silent": {
+        "const": True,
+        "description": "The scheduled source gained no new or changed record within its `silent_after`.",
+    },
 }
 
 # An item's fields; a whole note read and a section read repeat some of them about the note.
@@ -164,7 +167,10 @@ _DEFS: dict[str, object] = {
             **_HEALTH,
             "records": _COUNT,
             "latest": _INSTANT,
-            "changed": _INSTANT,
+            "changed": {
+                **_INSTANT,
+                "description": "When this brain last gained a new or changed record of the source.",
+            },
             "page": _STRING,
         },
         "additionalProperties": False,
@@ -282,7 +288,6 @@ def _shape(title: str, required: list[str], properties: dict[str, object]) -> di
 
 
 SEARCH: dict[str, object] = {
-    "title": "bf search reply",
     "$defs": _DEFS,
     **_shape(
         "bf search reply",
@@ -345,6 +350,11 @@ READ: dict[str, object] = {
                             "assistant": _STRING,
                             "freshness": _STRING,
                             "failed": {"const": True},
+                            "silent": {
+                                "const": True,
+                                "description": "The source gained no new or changed record within its `silent_after`, "
+                                "whatever its freshness.",
+                            },
                             "brain": _STRING,
                         },
                         "additionalProperties": False,

@@ -127,7 +127,10 @@ def _launchd(job: _Job, store: Store) -> _Plan:
         # Seconds between the stop request and SIGKILL: time to roll back an interrupted record commit.
         "ExitTimeOut": 60,
     }
-    target = Path.home() / "Library/LaunchAgents" / filename
+    try:
+        target = Path.home() / "Library/LaunchAgents" / filename
+    except RuntimeError as error:
+        raise Error("cannot find the home directory for ~/Library/LaunchAgents; set HOME") from error
     domain = f"gui/{os.getuid()}"
     return _Plan(
         {filename: plistlib.dumps(plist, sort_keys=False).decode()},
@@ -185,7 +188,8 @@ def _save(store: Store, source: Path, files: dict[str, str]) -> list[str]:
                 continue
             if existing != content.encode():
                 raise Error(
-                    "schedule file already exists with different content; review it or choose another output directory"
+                    f"{prefix + filename} already exists with different content; review it or choose another "
+                    "output directory"
                 )
         for filename, content in files.items():
             destination.write(prefix + filename, content.encode())

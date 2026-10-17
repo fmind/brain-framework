@@ -9,13 +9,13 @@ from typing import cast
 import pytest
 
 from bf import markdown
-from bf.markdown import note, parse, reference, section, validate_okf
+from bf.markdown import note, parse, reference, validate_okf
 from bf.models import MAX_PROMPT, Error, Query, Record, encode
 from bf.records import path as record_path
 from bf.retrieve import read, search
-from bf.storage import Store
+from bf.storage import LINKED, Store
 from bf.validate import validate
-from conftest import assert_linear_time, records_file
+from conftest import records_file
 from test_guarded_write import HELPER
 
 
@@ -176,39 +176,6 @@ def test_okf_concept_structure() -> None:
             validate_okf(path, data)
 
 
-def test_note_projection_sections_and_titles() -> None:
-    projection = note(
-        "projects/p.md",
-        b"---\nsummary: Short summary.\ntags: [x]\n---\n# Title\n\nIntro [link](other.md).\n\n## Same\n\nA\n\n### Same\n\nB\n\n## Last\n\nC\n",
-    )
-    assert projection.title == "Title"
-    assert projection.knowledge.type == "project"
-    assert projection.lead == "Short summary."
-    assert [p.fragment for p in projection.passages] == ["", "same", "same-1", "last"]
-    assert projection.links == ["projects/other.md"]
-    assert note("concepts/some-name.md", b"No heading at all.\n").title == "some name"
-    footnoted = note(
-        "concepts/f.md", b"---\ntags: [2026, x]\n---\n# F\n\nClaim.[^a]\n\n[^a]: [Source](other.md#part).\n"
-    )
-    assert footnoted.targets == ["other.md#part"]
-    assert footnoted.knowledge.tags == ["2026", "x"]
-    assert note("actions/t/ACTION.md", b"# T\n\n## Only\n\nFirst section text.\n").lead == "First section text."
-    data = "# T\r\n\r\n## A\r\n\r\nx\u2028y\r\n\r\n## B\r\n".encode()
-    assert section("concepts/t.md", data, "a") == "## A\r\n\r\nx\u2028y\r\n\r\n"
-    for bad in [b"---\ntitle: x\n", b"\xff", b"---\ntags: x\n---\n", f"# {'x' * 4097}\n".encode()]:
-        with pytest.raises(Error):
-            note("concepts/x.md", bad)
-
-
-@pytest.mark.parametrize("frontmatter", ["", "---\ntype: concept\n---\n"])
-def test_a_rule_below_the_title_is_not_frontmatter(frontmatter: str) -> None:
-    data = f"{frontmatter}# Title\n---\nIntro text.\n\n---\n\n## Next\n\nBody\n".encode()
-    projection = note("concepts/x.md", data)
-    assert projection.title == "Title"
-    assert projection.lead == "Intro text."
-    assert [p.fragment for p in projection.passages] == ["", "next"]
-
-
 def test_a_byte_order_mark_does_not_hide_frontmatter(brain: Store) -> None:
     data = b"\xef\xbb\xbf---\ntype: project\nstatus: draft\ntags: [beta]\n---\n# Bom project\n\nOkapi notes.\n"
     assert note("projects/bom.md", data).knowledge.tags == ["beta"]
@@ -216,27 +183,6 @@ def test_a_byte_order_mark_does_not_hide_frontmatter(brain: Store) -> None:
     assert validate(brain)["valid"]
     assert [i["ref"] for i in cast("list[dict]", search([brain], Query(text="okapi"))["items"])] == ["projects/bom.md"]
     assert cast("dict", read([brain], "bf://fixture/tags/beta"))["total"] == 1
-
-
-def test_indented_conflict_markers_are_literal_examples() -> None:
-    example = b"# Git\n\n```text\n <<<<<<< HEAD\n ours\n =======\n theirs\n >>>>>>> feature\n```\n"
-    assert note("concepts/git.md", example).title == "Git"
-    with pytest.raises(Error, match=r"line 4: unresolved merge conflict marker; .* indent a literal example"):
-        note("concepts/git.md", example.replace(b" <<<", b"<<<"))
-
-
-@pytest.mark.parametrize(
-    ("prefix", "unit", "suffix", "size"),
-    [
-        (b"# Links\n\n", b"[", b"]\n", 100_000),
-        (b"# Links\n\n- [ ] ", b"[](", b"\n", 30_000),
-        (b"# Heading\n\n## a", b" ", b"b\n", 100_000),
-    ],
-    ids=["brackets", "links", "heading"],
-)
-def test_adversarial_markdown_parses_in_linear_time(prefix: bytes, unit: bytes, suffix: bytes, size: int) -> None:
-    # Measure each former backtracking case separately: a slow linear case must not mask a quadratic one.
-    assert_linear_time(lambda n: note("concepts/adversarial.md", prefix + unit * n + suffix), size)
 
 
 def test_images_are_checked_links(brain: Store) -> None:
@@ -320,7 +266,7 @@ def test_a_link_to_an_alias_a_later_note_declares_is_no_missing_record(brain: St
 
 
 @pytest.mark.parametrize("path", ["projects/new.md", "concepts/new.md", "actions/2026-09-27_new/ACTION.md"])
-def test_okf_source_relationships_must_be_declared(brain: Store, path: str) -> None:
+def test_okf_source_relations_must_be_declared(brain: Store, path: str) -> None:
     brain.write(
         path,
         b"---\ntype: note\nsources:\n  - resource: bf://fixture/projects/offline.md?rel=undeclared\n---\n# Source\n",
@@ -751,6 +697,18 @@ def test_scripts_run_through_an_interpreter_must_exist(brain: Store) -> None:
     brain.write("sensors/news/pyproject.toml", b"[project]\nname = 'news'\n")
     brain.write("routines/review.py", b"print('')\n")
     assert validate(brain)["valid"]
+
+
+def test_a_linked_folder_is_told_to_become_a_regular_folder(brain: Store) -> None:
+    # Linking a synced folder into concepts/ is the common case: a regular file is not the only remedy.
+    shared = brain.root.parent / "shared"
+    shared.mkdir()
+    (shared / "note.md").write_text("# Shared\n")
+    (brain.root / "concepts/shared").symlink_to(shared, target_is_directory=True)
+    assert located(validate(brain)) == [f"concepts/shared: {LINKED}"]
+    assert {"brain": "fixture", "file": "concepts/shared", "error": LINKED} in cast(
+        "list[dict[str, str]]", search([brain], Query(text="offline"))["problems"]
+    )
 
 
 def test_record_refs_are_case_sensitive(brain: Store) -> None:

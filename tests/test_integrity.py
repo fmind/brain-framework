@@ -235,9 +235,6 @@ def test_update_reports_skipped_evidence_as_failure(brain: Store) -> None:
 
 
 def test_malformed_yaml_scalar_does_not_hide_healthy_evidence(brain: Store) -> None:
-    from bf.models import Query
-    from bf.retrieve import search
-
     brain.write("projects/oversized.md", b"---\nprivate-field: " + b"9" * 5000 + b"\n---\n# Broken\n")
     reply = search([brain], Query(text="offline"), counted=False)
     assert reply["items"]
@@ -284,9 +281,6 @@ def test_missing_identity_in_skipped_evidence_is_not_proven_absent(brain: Store)
 
 @pytest.mark.parametrize("path", ["memories/orphan.json", "memories/Bad/item.json", "memories/mail/2026-99.json"])
 def test_invalid_record_paths_never_produce_unreadable_refs(brain: Store, path: str) -> None:
-    from bf.models import Query
-    from bf.retrieve import search
-
     brain.write(path, b'{"id":"item","title":"Misplacedneedle"}\n')
     reply = search([brain], Query(text="misplacedneedle"), counted=False)
     assert reply["items"] == []
@@ -295,9 +289,6 @@ def test_invalid_record_paths_never_produce_unreadable_refs(brain: Store, path: 
 
 
 def test_unreadable_note_is_skipped_without_hiding_healthy_files(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    from bf.models import Query
-    from bf.retrieve import search
-
     brain.write("projects/denied.md", b"# Restricted\n")
     original = Store.read
 

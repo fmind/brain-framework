@@ -5,7 +5,7 @@ description: Find saved evidence, read exact sources and check whether results a
 
 # Search and read
 
-Use `bf search` to find evidence and `bf read` to open it. Both work offline and notice file edits automatically. Run them inside your brain.
+Use `bf search` to find evidence and `bf read` to open it. Both work offline and notice note edits and new collections automatically; after editing a record file by hand, run `bf build`. Run them inside your brain.
 
 **Search a few words → read the returned ref → check that the reply is complete.** Use [pages](#pages) to browse instead.
 
@@ -71,18 +71,18 @@ For the New website project, `bf read projects` shows `"next":"Draft the product
 
 ## Check that a reply is complete
 
-Before concluding that evidence is absent, look for `problems`, `stale`, sources that failed or are late, and `next_offset`: [incomplete answers](retrieval.md#incomplete-answers-and-freshness) says what each means and what to do. No match for today's meeting can mean the meeting was never collected.
+Before concluding that evidence is absent, look for `problems`, `stale`, sources that failed, are late or fell silent, and `next_offset`: [incomplete answers](retrieval.md#incomplete-answers-and-freshness) says what each means and what to do. No match for today's meeting can mean the meeting was never collected.
 
 ## Continue a listing
 
 When a reply contains `next_offset`, repeat the request with that value:
 
 ```bash
-bf search "product" --limit 1
-bf search "product" --limit 1 --offset 1
+bf search "project" --limit 1
+bf search "project" --limit 1 --offset 1
 ```
 
-Keep the query, scope, limit and brain selection unchanged, and stop when `next_offset` is absent. Listings and large exact reads continue the same way; see [continuations](retrieval.md#continuations).
+The first reply returns `concepts/welcome.md` with `"next_offset":1`; the second returns `projects/new-website.md` without `next_offset`, which ends the listing. Keep the query, scope, limit and brain selection unchanged, and stop when `next_offset` is absent. Listings and large exact reads continue the same way; see [continuations](retrieval.md#continuations).
 
 ## Keep answers findable
 

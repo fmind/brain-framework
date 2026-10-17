@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import cast
 
@@ -105,6 +106,26 @@ def test_attachments_keep_their_own_status_words(brain: Store) -> None:
     assert validate(brain)["problems"] == [
         {"file": "projects/finished.md", "error": "OKF status must be draft, stable or deprecated"}
     ]
+
+
+def test_skipped_links_and_special_files_name_their_own_repair(brain: Store, tmp_path: Path) -> None:
+    # A memories/ moved to another disk and linked back was once told to become a regular file.
+    moved = tmp_path / "moved"
+    (brain.root / "memories").rename(moved)
+    (brain.root / "memories").symlink_to(moved, target_is_directory=True)
+    os.mkfifo(brain.root / "concepts/pipe.md")
+    # A regular file where a scanned folder belongs is neither a link nor a special file.
+    (brain.root / "actions").write_text("Draft actions.\n")
+    linked = "symlinks are not followed; replace the link with the file or folder itself"
+    reply = search([brain], Query(text="offline"), counted=False)
+    assert [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])] == ["projects/offline.md"]
+    found = {p["file"]: p["error"] for p in cast("list[dict[str, str]]", reply["problems"])}
+    assert found["memories"] == linked
+    reasons = {p["file"]: p["error"] for p in cast("list[dict[str, str]]", validate(brain)["problems"])}
+    assert reasons["memories"] == linked
+    assert reasons["concepts/pipe.md"] == "special files are not read; replace it with a regular file"
+    # Search names it as validation does: it once read `expected memories/<source>/<sha256-id>.json`.
+    assert reasons["actions"] == found["actions"] == "expected a folder; replace the file with a folder"
 
 
 def test_disabled_sensor_keeps_source_identity_and_memories_readable(brain: Store) -> None:

@@ -21,7 +21,7 @@ import yaml
 from markdown_it import MarkdownIt
 from typer.core import TyperGroup
 
-from bf import __version__, cli, retrieve
+from bf import __version__, cli, replies, retrieve
 from bf.install import BLOCKED
 from bf.install import SKILLS as INSTALLED
 from bf.storage import Store
@@ -191,6 +191,36 @@ def test_blocking_skill_statuses_are_explained_where_bf_skills_is_run() -> None:
         assert {status for status in BLOCKED if f"`{status}`" not in TEXTS[name]} == set(), name
 
 
+def test_attention_reasons_are_explained_where_bf_status_is_read() -> None:
+    # An attention entry the guide never names leaves an agent without a recovery step, as a fresh but `silent` source
+    # once did: every flag a source's coverage raises, and both late freshness values.
+    coverage = cast("dict[str, dict[str, dict[str, object]]]", replies.SEARCH["$defs"])["Coverage"]["properties"]
+    # A flag's schema may carry a description too, which once left `silent` out of the reasons.
+    reasons = {name for name, schema in coverage.items() if isinstance(schema, dict) and schema.get("const") is True}
+    assert {"failed", "silent"} <= reasons
+    reasons |= {"overdue", "never"}
+    text = TEXTS["src/bf/skills/bf-maintain/references/operations.md"]
+    assert {reason for reason in reasons if f"`{reason}`" not in text} == set()
+
+
+def test_the_skill_configures_the_assistant_guides_claude_code_command() -> None:
+    # The skill once kept `--tools "Read,Grep,Glob"` after the guide's fix: a harness without Bash cannot run bf read.
+    def commands(text: str) -> set[str]:
+        # Formatting wraps a long YAML command over several lines, with a trailing comma.
+        found = re.findall(r"\[\s*claude,[^\]]*\]", text)
+        return {re.sub(r"\s+", " ", command).replace("[ ", "[").replace(", ]", "]") for command in found}
+
+    guide = commands((ROOT / "docs/docs/prompts.md").read_text(encoding="utf-8"))
+    assert len(guide) == 1
+    assert commands(TEXTS["src/bf/skills/bf-maintain/references/integrations.md"]) == guide
+    assert commands((ROOT / "examples/prompts/README.md").read_text(encoding="utf-8")) == guide
+    # An assistant reads untrusted evidence: only the listed tools exist, and a call that needs approval is refused, even
+    # when the owner's settings accept edits.
+    (command,) = guide
+    assert '--tools, "Read,Grep,Glob,Bash"' in command
+    assert "--permission-mode, dontAsk" in command
+
+
 def test_packaged_skills_are_the_installed_ones() -> None:
     assert {entry.parent.name for entry in ENTRIES} == set(INSTALLED)
     assert {path.name for path in SKILLS.iterdir() if path.is_dir()} == set(INSTALLED)
@@ -204,7 +234,8 @@ def test_helpers_are_standalone_python311_scripts(helper: Path) -> None:
     assert source.startswith("#!/usr/bin/env python3\n")
     assert os.access(helper, os.X_OK)
     modules = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    modules |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
+    # A relative import keeps its dots, so it names no standard-library module: a helper run by its path has no package.
+    modules |= {"." * node.level + (node.module or "") for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
     assert {module.partition(".")[0] for module in modules} <= sys.stdlib_module_names | {"__future__"}
 
 
@@ -257,7 +288,10 @@ def test_action_helper_writes_the_template_sections(brain: Store) -> None:
         check=True,
         timeout=10,
     )
-    created = brain.read(json.loads(reply.stdout)["action"]).decode()
+    action = json.loads(reply.stdout)["action"]
+    # Compact JSON, like bf's replies and the other helpers.
+    assert reply.stdout == json.dumps({"action": action}, separators=(",", ":")) + "\n"
+    created = brain.read(action).decode()
     template = (SKILLS / "bf-action/templates/action.md").read_text(encoding="utf-8")
     assert re.findall(r"^## .*", created, re.MULTILINE) == re.findall(r"^## .*", template, re.MULTILINE)
     assert validate(brain)["valid"]
@@ -271,6 +305,45 @@ def test_action_helper_writes_the_template_sections(brain: Store) -> None:
     )
     assert (unknown.returncode, "Traceback" in unknown.stderr) == (2, False)
     assert "home directory cannot be resolved" in unknown.stderr
+
+
+def test_action_helper_takes_the_topics_bf_validates(brain: Store) -> None:
+    helper = SKILLS / "bf-action/scripts/new-action.py"
+
+    def start(topic: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
+            [sys.executable, str(helper), topic, "--brain", str(brain.root)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+
+    # A topic may start with a digit, as bf's own pattern for action folders allows.
+    reply = start("3d-printing")
+    assert reply.returncode == 0, reply.stderr
+    assert re.fullmatch(r"actions/\d{4}-\d\d-\d\d_3d-printing/ACTION\.md", json.loads(reply.stdout)["action"])
+    assert validate(brain)["valid"]
+    for topic in ("Website", "web--review", "web_review", "review-", "a" * 65):
+        assert start(topic).returncode == 2, topic
+
+
+def test_action_helper_names_a_brain_path_that_is_not_one(brain: Store, tmp_path: Path) -> None:
+    # A subfolder, a missing path or bf.yaml itself is the likely mistake, never a permissions problem.
+    helper = SKILLS / "bf-action/scripts/new-action.py"
+    for path in (brain.root / "projects", tmp_path / "missing", brain.root / "bf.yaml"):
+        result = subprocess.run(  # noqa: S603 - the bundled helper, refused before any write
+            [sys.executable, str(helper), "review", "--brain", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        assert result.returncode == 1
+        assert "--brain must be the brain directory holding bf.yaml" in result.stderr
+        assert str(path) not in result.stderr
+    assert not (brain.root / "actions").exists()
+    assert not (brain.root / "projects/actions").exists()
 
 
 def test_action_helper_removes_only_what_a_failed_write_created(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:

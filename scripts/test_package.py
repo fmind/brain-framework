@@ -46,7 +46,7 @@ async def check() -> None:
         note = await session.call_tool("read", {"ref": "concepts/welcome.md"})
         assert not note.is_error
         assert note.structured_content["text"]
-        # The starter index links to the welcome note without a declared relationship.
+        # The starter index links to the welcome note without a declared relation.
         linked = await session.call_tool("read", {"ref": "concepts/welcome.md", "rel": "links"})
         assert not linked.is_error
         assert [item["ref"] for item in linked.structured_content["items"]] == ["concepts/index.md"]
@@ -106,7 +106,7 @@ def main() -> None:
             run(UV, "venv", "--python", args.python, str(venv), cwd=home, env=env)
             python = str(venv / "bin/python")
             if args.unlocked:
-                # A new Python can lack dependency wheels, such as pydantic-core's on 3.15, as users would find: allow a
+                # A new Python can lack dependency wheels, such as PyYAML's on 3.15, as users would find: allow a
                 # source build, which the second artifact reuses from the cache, within the job's 15 minutes.
                 run(UV, "pip", "install", "--python", python, str(artifact), cwd=home, env=env, timeout=600)
             else:

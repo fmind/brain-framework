@@ -6,7 +6,7 @@ import errno
 import os
 import re
 import stat
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import ExitStack, contextmanager, suppress
 from typing import Annotated, Literal
 
@@ -18,6 +18,7 @@ from bf.storage import BusyError, Store, reader
 
 _PENDING = "memories/.pending"
 _MANIFEST = _PENDING + "/manifest.json"
+# Bounds reading an untrusted manifest: a commit's own, of at most MAX_FILES - 1 changes, stays below 10 MB.
 _MANIFEST_LIMIT = 16 << 20
 # Link failures of filesystems or mounts without hard links: backups and restores copy the bytes instead.
 _UNLINKABLE = frozenset({errno.EXDEV, errno.EPERM, errno.EMLINK, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS})
@@ -79,10 +80,12 @@ def _clear(store: Store) -> None:
     # A full journal holds MAX_FILES entries; a write killed while completing it leaves one more than a scan lists.
     store.sweep(_PENDING)
     names = store.files(_PENDING)
-    if any(
-        not re.fullmatch(r"memories/\.pending/(?:manifest\.json|[0-9]+\.before|\.write-[0-9a-f]{32})", n) for n in names
-    ):
-        raise Error("unexpected file in memories/.pending; preserve it and repair the pending transaction")
+    pattern = re.compile(r"memories/\.pending/(?:manifest\.json|[0-9]+\.before|\.write-[0-9a-f]{32})")
+    if unexpected := next((name for name in names if not pattern.fullmatch(name)), ""):
+        # Named, so the owner knows which file to move out.
+        raise Error(
+            f"{unexpected}: unexpected file in memories/.pending; preserve it and repair the pending transaction"
+        )
     # The completion marker remains until every staged file is gone. Removing the directory syncs its
     # parent once: a crash before then leaves staged files that the next recovery clears again.
     for name in sorted(names, key=lambda name: name == _MANIFEST):
@@ -107,7 +110,7 @@ def recover(store: Store) -> None:
         return
     try:
         journal = _Journal.model_validate(decode(raw))
-    except ValidationError as error:
+    except (Error, ValidationError) as error:
         raise Error("invalid memories/.pending manifest; preserve it and repair the pending transaction") from error
     if len({change.name for change in journal.changes}) != len(journal.changes):
         raise Error("duplicate paths in memories/.pending manifest")
@@ -115,8 +118,18 @@ def recover(store: Store) -> None:
     if not journal.complete:
         # Check all backups before restoring any source file.
         for number, change in enumerate(journal.changes):
-            if change.existed and store.lstat(f"{_PENDING}/{number}.before").st_size > MAX_RECORD:
-                raise Error(f"{_PENDING}/{number}.before: file exceeds {MAX_RECORD} bytes")
+            if not change.existed:
+                continue
+            backup = f"{_PENDING}/{number}.before"
+            try:
+                size = store.lstat(backup).st_size
+            except FileNotFoundError:
+                # A commit makes every backup durable before its manifest names it.
+                raise Error(
+                    f"{backup} is missing; preserve memories/.pending and repair the pending transaction"
+                ) from None
+            if size > MAX_RECORD:
+                raise Error(f"{backup}: file exceeds {MAX_RECORD} bytes")
         # Only files the commit reached change back, as their backups were made; one directory sync then makes
         # every restored entry durable before the completion marker.
         for number, change in enumerate(journal.changes):
@@ -178,7 +191,7 @@ def require_ready(store: Store) -> None:
 
 
 @contextmanager
-def reading(store: Store) -> Iterator[None]:
+def reading(store: Store) -> Generator[None]:
     """Read a consistent set of records without changing durable evidence."""
     with reader(store):
         require_ready(store)
@@ -218,8 +231,6 @@ def _commit(
         )
     journal = _Journal(source=source, changes=changes, event=event)
     manifest = encode(journal.model_dump())
-    if len(manifest) > _MANIFEST_LIMIT:
-        raise Error("record transaction exceeds its manifest limit")
     try:
         # Each file's bytes are synced as it is written; one sync per directory then makes its entries
         # durable. Backups are durable before the manifest names them, and records before completion. A backup
@@ -363,11 +374,13 @@ def upsert(
     return counts
 
 
-def prune(store: Store, source: str, keep: int, ids: re.Pattern[str]) -> int:
+def prune(store: Store, source: str, keep: int, ids: re.Pattern[str], *, newest: str = "") -> int:
     """Remove a source's oldest records whose id `ids` matches beyond the newest `keep`, in one transaction.
 
-    Records are ordered by time, then id. A file that does not load, or a record with another id, is left alone and
-    not counted. The caller holds the writer lock, as for `upsert`; it returns how many records were removed.
+    Records are ordered by time, then id; the record whose id is `newest`, such as the one a run just wrote, counts as
+    the newest whatever its time, so a clock that ran ahead never makes it the oldest. A file that does not load, or a
+    record with another id, is left alone and not counted. The caller holds the writer lock, as for `upsert`; it
+    returns how many records were removed.
     """
     recover(store)
     names = files(store, source)
@@ -377,10 +390,10 @@ def prune(store: Store, source: str, keep: int, ids: re.Pattern[str]) -> int:
     for name in names:
         try:
             record = load(store, name)
-        except Error:
+        except Error, OSError:
             continue
         if ids.fullmatch(record.id):
-            loaded.append((record.time or record.observed, record.id, name))
+            loaded.append((record.id == newest, record.time or record.observed, record.id, name))
     doomed = [name for *_, name in sorted(loaded)[: max(0, len(loaded) - keep)]]
     if not doomed:
         return 0

@@ -16,12 +16,12 @@ import re
 import stat
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
 # Skills use the host's python3; this helper needs only the Python 3.11 standard library.
-MAX_BYTES = 16 << 20  # bf reads authored files up to 16 MiB.
+MAX_BYTES = 4 << 20  # bf reads a note up to 4 MiB: a larger one leaves every search incomplete.
 # Another helper holds a file's lock for one bounded read, write and rename: seconds, not minutes.
 LOCK_WAIT = 10.0
 
@@ -208,7 +208,7 @@ def same(first: os.stat_result, second: os.stat_result) -> bool:
 
 
 @contextmanager
-def lock(directory: int, name: str, wait: float) -> Iterator[None]:
+def lock(directory: int, name: str, wait: float) -> Generator[None]:
     """Serialize the check, write, second check and rename of one file among cooperating helpers.
 
     The lock file is named after the file's device and inode, so every path or mount reaching it shares one lock. A

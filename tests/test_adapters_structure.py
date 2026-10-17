@@ -188,15 +188,15 @@ def test_drive_snapshot_rejects_unknown_responses_and_accepts_verified_empty(pro
 
 
 @pytest.mark.parametrize("token", [None, False, 0, [], {}])
-@pytest.mark.parametrize("adapter", ["google-calendar.py", "google-drive-folders.py"])
+@pytest.mark.parametrize("adapter", ["google-calendar.py", "google-drive-folders.py", "gmail-headers.py"])
 def test_catalogs_reject_non_string_continuations(provider: Provider, adapter: str, token: object) -> None:
-    page = (
-        {"kind": "calendar#events", "items": []}
-        if adapter == "google-calendar.py"
-        else {"kind": "drive#fileList", "files": []}
-    )
+    page, arguments = {
+        "google-calendar.py": ({"kind": "calendar#events", "items": []}, ["primary", START, END]),
+        "google-drive-folders.py": ({"kind": "drive#fileList", "files": []}, []),
+        "gmail-headers.py": ({"messages": []}, [START, END]),
+    }[adapter]
     provider.install("gws", [{"match": [], "stdout": {**page, "nextPageToken": token}}])
-    result = provider.run(adapter, "primary", START, END) if adapter == "google-calendar.py" else provider.run(adapter)
+    result = provider.run(adapter, *arguments)
     assert result.returncode == 1
     assert not result.stdout
     assert "collection failed" in result.stderr

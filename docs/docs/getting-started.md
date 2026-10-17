@@ -46,7 +46,7 @@ bf init ~/brain
 cd ~/brain
 ```
 
-Commands use the brain around your working directory, unless your shell exports `BF_BRAIN`, which takes precedence: check with `echo "$BF_BRAIN"`, and `unset BF_BRAIN` if it names another brain. The new folder holds `bf.yaml` (the brain's configuration), `AGENTS.md` (instructions for agents), `projects/`, `concepts/` with a welcome note, `actions/` and `evals/retrieval.yaml` (saved questions that `bf eval` checks). No global configuration is needed. Run `git init` here if you want Git history.
+Commands use the brain around your working directory, unless your shell exports `BF_BRAIN`, which takes precedence: check with `echo "$BF_BRAIN"`, and `unset BF_BRAIN` if it names another brain. The new folder holds `bf.yaml` (the brain's configuration), `AGENTS.md` (instructions for agents), `projects/`, `concepts/` with a welcome note, `actions/`, `evals/retrieval.yaml` (saved questions that `bf eval` checks) and `.gitignore`, which keeps the search cache, logs and private evidence (`memories/`, `inputs/`, `originals/`) out of Git. No global configuration is needed. Run `git init` here if you want Git history.
 
 ## Save a decision
 

@@ -28,7 +28,7 @@ On this disposable copy, expect `bf validate` to return `"valid":true` and `bf e
 
 `update` runs the configured `sensors/demo.py` in this copy; the wrapper keeps the demo's configuration and state in its temporary directory. A second update within the hour runs nothing. The fake sensor emits one fictional event inside each requested window, always with the same id, so later collections update the same JSON record file in `memories/demo/`.
 
-`bf read` shows the example project with its first open task, and `bf read actions/2026-09-19_retention` returns the action with its request file and the project that links to it. Continue that action by writing its answer with the record ref, then find it again:
+`bf read` shows the example project with its first open task. Continue `actions/2026-09-19_retention` by writing its answer with the record ref, then find it again:
 
 ```bash
 cat > actions/2026-09-19_retention/outputs/answer.md <<'EOF'
@@ -93,14 +93,14 @@ bf read projects/example.md#unknown
 bf read concepts/selected-evidence.md
 ```
 
-| Workflow        | Where it lives                                                  | What to notice                                                                             |
-| --------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Working context | `actions/2026-09-25_retention-review/ACTION.md#context`         | The next step fits in a few sentences and six refs, without a transcript.                  |
-| Dependency      | `concepts/archive-policy.md`, read whole                        | Its `depends-on` backlink names the decision to review when the policy changes.            |
-| Supersession    | `actions/2026-09-25_retention-review/outputs/prior-decision.md` | The old decision keeps its failed prediction and a `supersedes` backlink from the new one. |
-| Intention       | `projects/example.md#intention`                                 | It waits for a policy change and names its owner, condition and expiry.                    |
-| Unknown         | `projects/example.md#unknown`                                   | The storage-cost question names the observation that would resolve it.                     |
-| Draft procedure | `concepts/selected-evidence.md`                                 | It stays draft until tried on a separate case.                                             |
+| Workflow        | Where it lives                                                  | What to notice                                                                                                |
+| --------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Working context | `actions/2026-09-25_retention-review/ACTION.md#context`         | The next step fits in a few sentences and three refs, within the Context budget of six, without a transcript. |
+| Dependency      | `concepts/archive-policy.md`, read whole                        | Its `depends-on` backlink names the decision to review when the policy changes.                               |
+| Supersession    | `actions/2026-09-25_retention-review/outputs/prior-decision.md` | The old decision keeps its failed prediction and a `supersedes` backlink from the new one.                    |
+| Intention       | `projects/example.md#intention`                                 | It waits for a policy change and names its owner, condition and expiry.                                       |
+| Unknown         | `projects/example.md#unknown`                                   | The storage-cost question names the observation that would resolve it.                                        |
+| Draft procedure | `concepts/selected-evidence.md`                                 | It stays draft until tried on a separate case.                                                                |
 
 These reads expose the evidence; an agent or person performs the review. The example project sets `stale_after: 2026-12-18T09:00:00+01:00`: from that instant, `bf read projects` marks it `"review":true` with `"review_source":"stale_after"`, whatever its file's modification time. `bf read tasks` lists the open project, concept and canonical-action checkboxes with their sections and counts; it excludes action attachments and deprecated notes.
 

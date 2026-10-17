@@ -1,15 +1,16 @@
 # https://mise.jdx.dev/configuration.html
 [tools]
 actionlint = "1.7.12"
-dprint = "0.60.1"
+dprint = "0.63.0"
 gitleaks = "8.30.1"
-jq = "1.8.2"
-lefthook = "2.1.16"
+lefthook = "2.2.2"
 lychee = "0.24.2"
+# Held below 3.15.0: PyYAML 6.0.3 ships no cp315 wheels, so 3.15 builds it from source, usually without libyaml,
+# whose pure-Python fallback is slower and rejects some YAML that libyaml accepts.
 python = "3.14.8"
 shellcheck = "0.11.0"
-trivy = "0.75.0"
-"aqua:astral-sh/uv" = "0.12.23"
+trivy = "0.76.0"
+"aqua:astral-sh/uv" = "0.13.1"
 # 1.30 requires GitHub's new $/ self-reference, which actionlint 1.7.12 cannot parse yet
 # (rhysd/actionlint#711). Keep both strict gates warning-free rather than suppressing either.
 zizmor = "1.29.0"
@@ -111,8 +112,8 @@ description = "Scan the staged snapshot for secrets"
 run = "gitleaks git --staged --redact=100 --verbose --no-banner"
 
 [tasks."check:links"]
-description = "Check repository Markdown links; check:docs owns documentation links"
-run = "lychee --offline --no-progress --hidden --extensions md --exclude-path '(^|/)docs/' ."
+description = "Check repository Markdown links and anchors; check:docs owns documentation links"
+run = "lychee --offline --include-fragments --no-progress --hidden --extensions md --exclude-path '(^|/)docs/' ."
 
 [tasks."check:lint"]
 alias = "cl"
@@ -145,7 +146,7 @@ description = "Verify the published watch screenshot matches the dashboard"
 run = "uv run --locked python scripts/render_watch.py"
 
 [tasks."check:shell"]
-description = "Lint every shipped and release shell helper"
+description = "Lint the release shell scripts"
 run = "shellcheck -S warning scripts/push-and-tag.sh scripts/release-notes.sh scripts/verify-release-tag.sh scripts/verify-release.sh"
 
 [tasks."check:types"]
@@ -187,26 +188,26 @@ run = ["mise run format:imports", "mise run format:python", "mise run format:dpr
 description = "Format JSON, Markdown, TOML, and YAML"
 run = "dprint fmt --allow-no-files"
 
-[tasks."format:python"]
-description = "Format Python sources"
-run = "uv run --locked ruff format --force-exclude"
-
 [tasks."format:imports"]
 description = "Sort Python imports"
 run = "uv run --locked ruff check --select=I --fix --force-exclude"
 
-[tasks."generate:schema"]
-description = "Generate and format all configuration and reply schemas"
-run = [
-  "uv run --locked python scripts/schemas.py --write",
-  "dprint fmt docs/*.schema.json",
-]
+[tasks."format:python"]
+description = "Format Python sources"
+run = "uv run --locked ruff format --force-exclude"
 
 [tasks."generate:notices"]
 description = "Regenerate third-party notices and site license copies from the synced dependencies"
 run = [
   "uv run --locked python scripts/notices.py --write",
   "dprint fmt THIRD_PARTY_NOTICES.md docs/third-party-notices.md",
+]
+
+[tasks."generate:schema"]
+description = "Generate and format all configuration and reply schemas"
+run = [
+  "uv run --locked python scripts/schemas.py --write",
+  "dprint fmt docs/*.schema.json",
 ]
 
 [tasks."generate:screenshot"]
@@ -218,6 +219,10 @@ alias = "i"
 description = "Sync locked dependencies and install Git hooks"
 run = ["uv sync --locked", "lefthook install"]
 
+[tasks."report:coverage"]
+description = "Show per-file coverage and missing lines from the last test run"
+run = "uv run --locked coverage report --show-missing"
+
 [tasks.test]
 alias = "t"
 description = "Run isolated tests with at least 95% branch coverage"
@@ -225,10 +230,6 @@ description = "Run isolated tests with at least 95% branch coverage"
 env.TZ = "UTC"
 # Auto workers, capped: past eight, a shared host spends its time switching between cold interpreter starts.
 run = "uv run --locked pytest -q --numprocesses=auto --maxprocesses=8 --cov --cov-report="
-
-[tasks."report:coverage"]
-description = "Show per-file coverage and missing lines from the last test run"
-run = "uv run --locked coverage report --show-missing"
 
 [tasks."test:package"]
 description = "Smoke-test the wheel and source distribution outside the checkout"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -403,9 +404,35 @@ def test_untrusted_manifests_are_refused_without_changing_evidence(
     assert {name: brain.read(name) for name in brain.files("memories")} == before
 
 
+@pytest.mark.parametrize(
+    ("manifest", "problem"),
+    [
+        (b'{"source": "meetings", ', r"^invalid memories/\.pending manifest; preserve it"),
+        (
+            json.dumps(
+                {"source": "meetings", "changes": [{"name": DECISION.rsplit("/", 1)[1], "existed": True}]}
+            ).encode(),
+            r"^memories/\.pending/0\.before is missing; preserve memories/\.pending",
+        ),
+    ],
+    ids=["not-json", "missing-backup"],
+)
+def test_a_refused_journal_recovery_names_memories_pending(brain: Store, manifest: bytes, problem: str) -> None:
+    # Every read waits for this recovery: its refusal once read `invalid JSON document`, as a sensor's bad output
+    # does, or reported an inaccessible file, without naming the journal to repair.
+    brain.write("memories/.pending/manifest.json", manifest)
+    before = {name: brain.read(name) for name in brain.files("memories")}
+    with pytest.raises(Error, match=problem):
+        index.refresh(brain, full=True)
+    with pytest.raises(Error, match=problem), writer(brain):
+        records.upsert(brain, "meetings", [Record(id="new", title="New")], snapshot=False)
+    assert {name: brain.read(name) for name in brain.files("memories")} == before
+
+
 def test_unexpected_pending_files_are_preserved_for_repair(brain: Store) -> None:
     brain.write("memories/.pending/notes.txt", b"an operator's note")
-    with pytest.raises(Error, match=r"unexpected file in memories/\.pending"):
+    # Named, so the owner knows which file to move out of the brain.
+    with pytest.raises(Error, match=r"^memories/\.pending/notes\.txt: unexpected file in memories/\.pending"):
         index.refresh(brain, full=True)
     assert brain.read("memories/.pending/notes.txt") == b"an operator's note"
     assert brain.read(DECISION)
@@ -573,6 +600,22 @@ def test_collection_replaces_its_own_records_that_break_current_rules(brain: Sto
     assert records.load(brain, kept).aliases == ["person:alice"]
     assert records.upsert(brain, "legacy", corrected, snapshot=True)["removed"] == 1
     assert records.files(brain, "legacy") == [kept]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+def test_pruning_passes_over_a_record_it_cannot_read(brain: Store) -> None:
+    # One unreadable run once stopped a prompt's keep from pruning anything, so its source grew with every run.
+    runs = [Record(id=f"run-{day}", title="Run", time=f"2026-09-2{day}T00:00:00Z") for day in range(1, 6)]
+    records_file(brain, "assistant", runs)
+    locked = brain.root / records.path("assistant", "run-2")
+    locked.chmod(0)
+    try:
+        with writer(brain):
+            assert records.prune(brain, "assistant", 2, re.compile(r"run-[0-9]")) == 2
+    finally:
+        locked.chmod(0o600)
+    left = sorted(records.load(brain, name).id for name in records.files(brain, "assistant"))
+    assert left == ["run-2", "run-4", "run-5"]
 
 
 ATTENDED = (

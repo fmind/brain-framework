@@ -26,7 +26,7 @@ Invoking this skill with a topic, or asking to start or track a session, is the 
    python3 "$SKILL_DIR/scripts/new-action.py" website-review --brain ~/brain
    ```
 
-   Expect `{"action": "actions/2026-09-29_website-review/ACTION.md"}` with today's date. Pass `--unique` in a brain several people or clones share.
+   Expect `{"action":"actions/2026-09-29_website-review/ACTION.md"}` with today's date. Pass `--unique` in a brain several people or clones share.
 1. Fill Context, TODO and Resume from the request and the project's current decision ([action guide](references/actions.md#start-a-session), [template](templates/action.md)). Run `bf validate` and report the action ref.
 
 ## Resume, hand off or close

@@ -136,6 +136,13 @@ def _breaks(old: dict, new: dict, old_root: dict, new_root: dict, path: str, *, 
     # Exactly one alternative of a file's `oneOf` may match, so a new one that also matches an old value rejects it.
     if not reply and len(new.get("oneOf", [])) > len(old.get("oneOf", [])):
         problems.append(f"{path}: new oneOf alternatives")
+    # So does a released one that accepts more: compared backwards, it must still accept all its new form does.
+    if not reply:
+        problems.extend(
+            f"{path}.alternative[{index}]: oneOf alternative widened"
+            for index, (was, now) in enumerate(zip(old.get("oneOf", []), new.get("oneOf", []), strict=False))
+            if _breaks(now, was, new_root, old_root, path, reply=False)
+        )
     # Readers accept a reply that fits one released alternative, so each new one, or the value itself once it has none,
     # must fit one; a titled one is compared with its namesake below. Alternatives a value gains beside other keywords
     # only narrow it.
@@ -316,6 +323,10 @@ def test_files_keep_every_accepted_bound_pattern_and_condition() -> None:
     assert _breaks(either, overlapping, {}, {}, "s", reply=False) == ["s: new oneOf alternatives"]
     assert _breaks({"anyOf": either["oneOf"]}, either, {}, {}, "s", reply=False) == ["s: new oneOf alternatives"]
     assert _breaks(either, {"anyOf": either["oneOf"]}, {}, {}, "s", reply=False) == []
+    # A widened alternative overlaps another the same way: "abcd" matched only the second, then both.
+    short = {"oneOf": [{"type": "string", "maxLength": 3}, {"type": "string", "minLength": 4}]}
+    longer = {"oneOf": [{**short["oneOf"][0], "maxLength": 5}, short["oneOf"][1]]}
+    assert _breaks(short, longer, {}, {}, "s", reply=False) == ["s.alternative[0]: oneOf alternative widened"]
 
 
 @pytest.mark.parametrize(

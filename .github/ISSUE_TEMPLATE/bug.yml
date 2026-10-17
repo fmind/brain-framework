@@ -17,10 +17,10 @@ body:
     validations:
       required: true
   - type: textarea
-    id: behaviour
+    id: behavior
     attributes:
       label: What happened?
-      description: The observed and the expected behaviour, with synthetic examples.
+      description: The observed and the expected behavior, with synthetic examples.
     validations:
       required: true
   - type: textarea

@@ -745,15 +745,15 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## mcp 2.2.0
+## mcp 2.3.0
 
 Source: <https://github.com/modelcontextprotocol/python-sdk>
 
 License: `MIT`
 
-Evidence: `mcp-2.2.0.dist-info/licenses/LICENSE`
+Evidence: `mcp-2.3.0.dist-info/licenses/LICENSE`
 
-### mcp-2.2.0.dist-info/licenses/LICENSE
+### mcp-2.3.0.dist-info/licenses/LICENSE
 
 ```text
 MIT License
@@ -779,15 +779,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## mcp-types 2.2.0
+## mcp-types 2.3.0
 
 Source: <https://github.com/modelcontextprotocol/python-sdk>
 
 License: `MIT`
 
-Evidence: `mcp_types-2.2.0.dist-info/licenses/LICENSE`
+Evidence: `mcp_types-2.3.0.dist-info/licenses/LICENSE`
 
-### mcp_types-2.2.0.dist-info/licenses/LICENSE
+### mcp_types-2.3.0.dist-info/licenses/LICENSE
 
 ```text
 MIT License
@@ -872,15 +872,15 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
 ```
 
-## opentelemetry-api 1.45.0
+## opentelemetry-api 1.45.1
 
 Source: <https://github.com/open-telemetry/opentelemetry-python>
 
 License: `Apache-2.0`
 
-Evidence: `opentelemetry_api-1.45.0.dist-info/licenses/LICENSE`
+Evidence: `opentelemetry_api-1.45.1.dist-info/licenses/LICENSE`
 
-### opentelemetry_api-1.45.0.dist-info/licenses/LICENSE
+### opentelemetry_api-1.45.1.dist-info/licenses/LICENSE
 
 ```text
                                  Apache License
@@ -1086,20 +1086,20 @@ Evidence: `opentelemetry_api-1.45.0.dist-info/licenses/LICENSE`
    limitations under the License.
 ```
 
-## pycparser 3.0
+## pycparser 3.11
 
 Source: <https://github.com/eliben/pycparser>
 
 License: `BSD-3-Clause`
 
-Evidence: `pycparser-3.0.dist-info/licenses/LICENSE`
+Evidence: `pycparser-3.11.dist-info/licenses/LICENSE`
 
-### pycparser-3.0.dist-info/licenses/LICENSE
+### pycparser-3.11.dist-info/licenses/LICENSE
 
 ```text
 pycparser -- A C parser in Python
 
-Copyright (c) 2008-2022, Eli Bendersky
+Copyright (c) 2008-2027, Eli Bendersky
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification,
@@ -1126,15 +1126,15 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## pydantic 2.13.5
+## pydantic 2.14.1
 
 Source: <https://github.com/pydantic/pydantic>
 
 License: `MIT`
 
-Evidence: `pydantic-2.13.5.dist-info/licenses/LICENSE`
+Evidence: `pydantic-2.14.1.dist-info/licenses/LICENSE`
 
-### pydantic-2.13.5.dist-info/licenses/LICENSE
+### pydantic-2.14.1.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -1160,15 +1160,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## pydantic-core 2.46.5
+## pydantic-core 2.50.1
 
 Source: <https://github.com/pydantic/pydantic/tree/main/pydantic-core>
 
 License: `MIT`
 
-Evidence: `pydantic_core-2.46.5.dist-info/licenses/LICENSE`
+Evidence: `pydantic_core-2.50.1.dist-info/licenses/LICENSE`
 
-### pydantic_core-2.46.5.dist-info/licenses/LICENSE
+### pydantic_core-2.50.1.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -1577,15 +1577,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## rpds-py 2026.6.3
+## rpds-py 2026.9.1
 
 Source: <https://github.com/crate-py/rpds>
 
 License: `MIT`
 
-Evidence: `rpds_py-2026.6.3.dist-info/licenses/LICENSE`
+Evidence: `rpds_py-2026.9.1.dist-info/licenses/LICENSE`
 
-### rpds_py-2026.6.3.dist-info/licenses/LICENSE
+### rpds_py-2026.9.1.dist-info/licenses/LICENSE
 
 ```text
 Copyright (c) 2023 Julian Berman
@@ -1675,15 +1675,15 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## starlette 1.7.0
+## starlette 1.8.0
 
 Source: <https://github.com/Kludex/starlette>
 
 License: `BSD-3-Clause`
 
-Evidence: `starlette-1.7.0.dist-info/licenses/LICENSE.md`
+Evidence: `starlette-1.8.0.dist-info/licenses/LICENSE.md`
 
-### starlette-1.7.0.dist-info/licenses/LICENSE.md
+### starlette-1.8.0.dist-info/licenses/LICENSE.md
 
 ```text
 Copyright © 2018, [Encode OSS Ltd](https://www.encode.io/).
@@ -1715,15 +1715,15 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## truststore 0.10.4
+## truststore 0.10.5
 
 Source: <https://github.com/sethmlarson/truststore>
 
 License: `MIT`
 
-Evidence: `truststore-0.10.4.dist-info/licenses/LICENSE`
+Evidence: `truststore-0.10.5.dist-info/licenses/LICENSE`
 
-### truststore-0.10.4.dist-info/licenses/LICENSE
+### truststore-0.10.5.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -1749,7 +1749,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## typer 0.27.2
+## typer 0.27.3
 
 Source: <https://github.com/fastapi/typer>
 
@@ -1757,9 +1757,9 @@ License: `MIT`
 
 The distribution vendors code adapted from Click in `typer/_click/`; its bundled `BSD-3-Clause` license is included below.
 
-Evidence: `typer-0.27.2.dist-info/licenses/LICENSE`
+Evidence: `typer-0.27.3.dist-info/licenses/LICENSE`
 
-### typer-0.27.2.dist-info/licenses/LICENSE
+### typer-0.27.3.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)

@@ -18,9 +18,9 @@ from typing import cast
 
 from bf import records
 from bf.index import refresh
-from bf.models import Query, Record
+from bf.models import MAX_FILES, Query, Record
 from bf.retrieve import read, search
-from bf.storage import Store, writer
+from bf.storage import Store, writer, xdg
 from bf.validate import validate
 
 
@@ -31,17 +31,21 @@ def main() -> None:
     parser.add_argument("--notes", type=int, default=100)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--batch", type=int, default=200, help="Records added, updated and removed per write sample.")
-    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    # As for bf's own directories, an empty or relative XDG_CACHE_HOME is ignored.
+    cache = xdg("XDG_CACHE_HOME", ".cache")
     parser.add_argument("--dir", type=Path, default=cache / "bf-benchmark", help="Parent of the temporary brain.")
     args = parser.parse_args()
+    # One collection writes the corpus, and a collection changes fewer than MAX_FILES records.
     if not (
-        1 <= args.records <= 100_000
+        1 <= args.records < MAX_FILES
         and 64 <= args.body_chars <= 4096
         and 0 <= args.notes <= 1000
         and 1 <= args.repeats <= 20
         and 1 <= args.batch <= 10_000
     ):
-        parser.error("limits: records 1-100000, body-chars 64-4096, notes 0-1000, repeats 1-20, batch 1-10000")
+        parser.error(
+            f"limits: records 1-{MAX_FILES - 1}, body-chars 64-4096, notes 0-1000, repeats 1-20, batch 1-10000"
+        )
     args.batch = min(args.batch, args.records)
     args.dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="bf-benchmark-", dir=args.dir) as temporary:
@@ -61,7 +65,8 @@ def main() -> None:
             )
             for n in range(args.records)
         ]
-        records.upsert(store, "benchmark", items, snapshot=False)
+        with writer(store):
+            records.upsert(store, "benchmark", items, snapshot=False)
         for n in range(args.notes):
             store.write(
                 f"concepts/{n}.md",
@@ -106,6 +111,8 @@ def main() -> None:
                 valid = refs == ({"benchmark:0", "concepts/0.md"} if args.notes else {"benchmark:0"})
             elif name in {"common", "question"}:
                 valid = len(found) == min(10, args.records + max(0, args.notes - 1))
+            elif name == "typo":
+                valid = not found and result.get("suggestions") == {"evidnce": ["evidence"]}
             elif name == "timeline":
                 since, until = str(result.get("since", "")), str(result.get("until", ""))
                 expected = sum(since <= item.time < until for item in items)
@@ -156,6 +163,8 @@ def main() -> None:
             ("common", lambda: search([store], Query(text="evidence"))),
             # Several common terms: each is also counted per passage and checked for a match on its own.
             ("question", lambda: search([store], Query(text="Why retain the decision evidence?"))),
+            # A misspelled word: the stem it suggests is in every passage, which must not all be sorted.
+            ("typo", lambda: search([store], Query(text="evidnce"))),
             ("timeline", lambda: read([store], "2026-06")),
             ("home", lambda: read([store])),
             ("exact_read", lambda: read([store], "decision:0")),

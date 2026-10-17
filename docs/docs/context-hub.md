@@ -20,7 +20,7 @@ cp -R "$context_demo/source/examples/context-hub" "$context_demo/brain"
 cd "$context_demo/brain"
 ```
 
-The brain holds a minimal project note, `bf.yaml` and a small sensor, `sensors/demo.py`, that prints `fixtures/TOOL.json` as if each tool had returned it. Review both before running anything. From a source checkout, copy `examples/context-hub` instead and run each `bf` command as `uv run --project CHECKOUT bf`, where `CHECKOUT` is the checkout's path.
+The brain holds a minimal project note, `bf.yaml` and a small sensor, `sensors/demo.py`, that prints `fixtures/TOOL.json` as if each tool had returned it. Review `bf.yaml` and `sensors/demo.py` before running anything. From a source checkout, copy `examples/context-hub` instead and run each `bf` command as `uv run --project CHECKOUT bf`, where `CHECKOUT` is the checkout's path.
 
 ## Collect four tools
 
@@ -32,7 +32,7 @@ bf collect gcloud
 bf read project:new-website
 ```
 
-Each collection reports `"records":1`. `project:new-website` is the project note's alias, so the read opens the note. Its `backlinks` group the four records under the shared `project` relation, each with its `fields` side by side:
+Each collection reports `"records":1`. `project:new-website` is the project note's alias, so the read opens the note. Its `backlinks` group the four records under the shared `project` relation, each with its `fields` side by side (trimmed here to refs, kinds and statuses):
 
 ```json
 {

@@ -441,7 +441,13 @@
           "title": "Cardinality",
           "type": "string"
         },
-        "description": { "maxLength": 4096, "minLength": 1, "title": "Description", "type": "string" },
+        "description": {
+          "description": "What a value of this field means, such as the account explicitly credited as the author.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
         "examples": {
           "description": "Complete field values checked against type and cardinality; never defaults.",
           "items": { "$ref": "#/$defs/JsonValue" },
@@ -475,6 +481,7 @@
           "title": "Targets"
         },
         "type": {
+          "description": "Strict value type; a relation requires identity.",
           "enum": ["string", "integer", "number", "boolean", "timestamp", "identity"],
           "title": "Type",
           "type": "string"
@@ -824,7 +831,7 @@
         },
         { "type": "null" }
       ],
-      "description": "Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ from sensors.",
+      "description": "Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ from sensors and prompts.",
       "title": "Routines"
     },
     "sensors": {

@@ -38,7 +38,8 @@ NOTE = re.compile(
 def query(prompt: str) -> str:
     """The prompt's first distinct content words, as plain words: no phrase, prefix or identity syntax."""
     found: dict[str, str] = {}
-    for word in re.findall(r"[^\W_]+", prompt):
+    # bf search splits words in NFKC form: decomposed accents would otherwise split words at their combining marks.
+    for word in re.findall(r"[^\W_]+", unicodedata.normalize("NFKC", prompt)):
         if word.lower() not in STOP or (len(word) > 1 and word.isupper() and word not in OPERATORS):
             found.setdefault(word.lower(), word)
     return " ".join(list(found.values())[:WORDS])
@@ -72,9 +73,11 @@ def search(words: str, brain: str) -> dict | None:
 
 
 def visible(text: str) -> str:
-    """Escape controls and invisible format characters, which bf replies escape and JSON decoding restored."""
+    """Escape controls, line and paragraph separators and invisible format characters, which bf replies escape and
+    JSON decoding restored."""
     return "".join(
-        char.encode("unicode_escape").decode() if unicodedata.category(char) in {"Cc", "Cf"} else char for char in text
+        char.encode("unicode_escape").decode() if unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} else char
+        for char in text
     )
 
 

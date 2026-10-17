@@ -34,9 +34,17 @@ COMMIT: dict[str, Any] = {
 }
 
 
-def response(items: list[dict], *, more: bool = False) -> str:
-    link = '\nLink: <https://api.github.com/repos/example/project/issues?page=2>; rel="next"' if more else ""
-    return f"HTTP/2.0 200 OK{link}\n\n" + json.dumps(items)
+def response(items: list[dict], *, more: bool = False, page: int = 1) -> str:
+    """A page as `gh api --include` prints it: the status line, then sorted CRLF headers and an empty CRLF line.
+
+    GitHub's Link header names the next and last pages, then on later pages the previous and first ones too.
+    """
+    url = "https://api.github.com/repos/example/project/issues?per_page=100&page="
+    links = [f'<{url}{page - 1}>; rel="prev"'] if page > 1 else []
+    links += [f'<{url}{page + 1}>; rel="next"', f'<{url}{page + 1}>; rel="last"'] if more else []
+    links += [f'<{url}1>; rel="first"'] if page > 1 else []
+    headers = ["Content-Type: application/json; charset=utf-8", *([f"Link: {', '.join(links)}"] if links else [])]
+    return "HTTP/2.0 200 OK\n" + "".join(f"{header}\r\n" for header in headers) + "\r\n" + json.dumps(items)
 
 
 def test_github_main_commits_respect_half_open_window(provider: Provider) -> None:
@@ -66,7 +74,7 @@ def test_github_old_closed_issues_and_merged_pulls_are_separate(provider: Provid
             "gh",
             [
                 {"match": ["page=1"], "stdout": response([ISSUE], more=True)},
-                {"match": ["page=2"], "stdout": response([pull(2, "closed", START)])},
+                {"match": ["page=2"], "stdout": response([pull(2, "closed", START)], page=2)},
             ],
         )
         [record] = provider.records("github-history.py", "example/project", kind, START, END)
@@ -205,7 +213,8 @@ def test_github_pull_state_comes_from_the_listing(provider: Provider) -> None:
 
 
 # A stateful issue listing: `since` is inclusive and pages hold 100 objects in modification order. Changes
-# scheduled for a call apply before it is answered, as an edit between two requests would.
+# scheduled for a call apply before it is answered, as an edit between two requests would. Replies keep the CRLF
+# framing of `gh api --include`.
 LISTING = """
 import json, sys
 from datetime import datetime
@@ -224,8 +233,10 @@ listed = sorted(
     key=lambda issue: (datetime.fromisoformat(issue["updated_at"]), issue["number"]),
 )
 more = len(listed) > number * 100
-link = f'\\nLink: <https://api.github.com/repos/example/project/issues?page={number + 1}>; rel="next"' if more else ""
-sys.stdout.write(f"HTTP/2.0 200 OK{link}\\n\\n" + json.dumps(listed[(number - 1) * 100 : number * 100]))
+url = "https://api.github.com/repos/example/project/issues?per_page=100&page="
+link = f'Link: <{url}{number + 1}>; rel="next"\\r\\n' if more else ""
+head = f"HTTP/2.0 200 OK\\nContent-Type: application/json; charset=utf-8\\r\\n{link}\\r\\n"
+sys.stdout.write(head + json.dumps(listed[(number - 1) * 100 : number * 100]))
 """
 
 

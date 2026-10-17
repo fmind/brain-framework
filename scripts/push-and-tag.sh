@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Push main, wait for CI on that exact commit, then tag it: a failed push, a missing CI run or any unsuccessful
 # conclusion exits before the tag exists, and a failed tag push deletes the local tag so that a rerun retries. Run it as
-# its own command from the clean release worktree; as a separate process, its checks hold whatever shell calls it
-# (`set -e` inside `( ... )` does not after `&&`).
+# its own command from the clean release worktree; as a separate process, its checks hold whatever shell calls it,
+# whereas bash ignores an inline `set -e`, even in `( ... )`, within any command whose status `if`, `&&` or `||` tests,
+# such as an agent shell's `eval '...' && pwd` wrapper.
 set -euo pipefail
 
 version=${1:?usage: scripts/push-and-tag.sh X.Y.Z}
@@ -39,7 +40,10 @@ if [[ -n ${remote_tags} ]]; then
   exit 1
 fi
 
-git push origin main
+if ! git push origin main; then
+  echo "push-and-tag: pushing main failed; nothing tagged" >&2
+  exit 1
+fi
 commit="$(git rev-parse HEAD)"
 run=""
 for _ in $(seq "${attempts}"); do

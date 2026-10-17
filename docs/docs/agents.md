@@ -48,7 +48,7 @@ Run the same command after each BF update: it updates the skills it installed an
 | `unmanaged` | It has no `.bf-skill.json` manifest, such as a copy made before 16.0.                                                           | Back it up, then rerun with `--force`.                                           |
 | `newer`     | A newer `bf`, such as a brain's pinned runtime sharing the folder, installed a different copy.                                  | Upgrade this `bf` or run the newer one: `--force` would install this older copy. |
 
-`--force` installs the packaged copies over those folders and keeps files BF does not ship; it refuses a folder that is a symbolic link, which you remove first. `bf skills ~/.agents/skills --check` writes nothing: it reports each skill as `current`, `outdated`, `modified`, `unmanaged`, `newer` or `missing` and exits 1 unless all are current.
+`--force` installs the packaged copies over those folders and keeps files BF does not ship; it refuses a folder that is a symbolic link, which you remove first. With `--force`, an `updated` entry still lists `edited`: the files it overwrote or restored, plus edited files it kept because this version no longer ships them. `bf skills ~/.agents/skills --check` writes nothing: it reports each skill as `current`, `outdated`, `modified`, `unmanaged`, `newer` or `missing` and exits 1 unless all are current.
 
 Start a new session and ask: “Search my brain for why we chose a single product page. Read the source and cite its ref.” The agent should read `projects/new-website.md#decision` before answering.
 
@@ -87,7 +87,7 @@ bf read actions/2026-09-27_website-review/ACTION.md#resume
 
 The reply's `text` says the decision is saved and the next step is to check the product page. Update Resume as work progresses, so the next session starts from the last verified state.
 
-For longer sessions, the [action template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/templates/action.md) adds a Context section: the outcome, constraints, decision, unknowns and up to six refs, within 300 words. Before a handoff or context compaction, ask the agent to refresh Context and Resume, then run the [handoff checker](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/scripts/check-handoff.py). It checks the size budgets and returns exact section refs, without writing notes. The [handoff guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/references/handoff.md) covers the whole procedure.
+The [action template](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/templates/action.md)'s Context section holds the outcome, constraints, decision, unknowns and up to six refs, within 300 words. Before a handoff or context compaction, ask the agent to refresh Context and Resume, then run the [handoff checker](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/scripts/check-handoff.py). It checks the size budgets and returns exact section refs, without writing notes. The [handoff guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/references/handoff.md) covers the whole procedure.
 
 ## Decision workflows
 
@@ -118,7 +118,7 @@ Keep each capture within its evidence's audience and Git policy: a capture of a 
 
 ## Bring context into every session
 
-The [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add context without the agent asking. Copy them into a folder of the brain, such as `hooks/`, review them and make them executable with `chmod +x hooks/*.py`: hosts run them as commands. The session hook prints the current repository's project: its status, review deadline, next task and linked notes, plus programs that are overdue, never collected or failed.
+The [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add context without the agent asking. Copy them into a folder only you write, such as your personal brain's `hooks/`, review them and make them executable with `chmod +x hooks/*.py`: hosts run them as commands at every session or prompt, so never register a hook from a brain others can push to. The session hook prints the current repository's project: its status, review deadline, next task and linked notes, plus programs that are overdue, never collected or failed, and sources that [fell silent](schedule.md#silent-sources).
 
 The optional prompt hook searches at most eight content words of each prompt, waits up to 5 seconds and prints the refs of up to three matching notes. Both print nothing when retrieval is slow, unusable or empty.
 

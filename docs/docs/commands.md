@@ -96,7 +96,7 @@ Typing `bf sea` and Tab then completes `search`.
 
 Results are compact UTF-8 JSON on stdout; help and version are plain text. Dashboards use the full terminal, and `watch --json` streams JSON Lines. Each diagnostic is one stderr line starting with `bf:`; it names files and positions without quoting your content.
 
-Collected text and file names are data. Results, `export` lines, `watch --json` snapshots and MCP text escape DEL, C1 controls and Unicode format characters, such as soft hyphens and zero-width, bidi or tag characters, as JSON `\uXXXX` escapes, with a surrogate pair beyond U+FFFF; decoded values are unchanged. Diagnostics and MCP errors also escape the other control characters, including newlines, so a file name cannot forge another `bf:` line.
+Collected text and file names are data. Results, `export` lines, `watch --json` snapshots and MCP text escape DEL and C1 controls, the line and paragraph separators U+2028 and U+2029, which many readers treat as line breaks, and Unicode format characters, such as soft hyphens and zero-width, bidi or tag characters, as JSON `\uXXXX` escapes, with a surrogate pair beyond U+FFFF; decoded values are unchanged. Diagnostics and MCP errors also escape the other control characters, including newlines, so a file name cannot forge another `bf:` line.
 
 | Code  | Meaning                                                                                                    |
 | ----- | ---------------------------------------------------------------------------------------------------------- |
@@ -115,7 +115,7 @@ Other examples: `bf search "!!!"` (no word to search), `bf read 2026-13` (no suc
 
 A well-formed ref that names nothing exits 1 and suggests what exists: a close page, note, sensor, routine or assistant name (`did you mean projects?`), or the note's sections for a missing `#section`. `collect` and `run` suggest only enabled programs and fail on a disabled one with `sensor NAME is disabled in bf.yaml; set enabled: true to run it`.
 
-`update` and `run` exit 1 when a program fails, and `update` and `build` when the refreshed cache skipped files; successful programs keep their results. `status --check` exits 1 on problems, unavailable brains or references, or scheduled programs that failed, are `overdue` or `never` succeeded, or fell silent. `validate` exits 1 on problems, never on warnings. `skills` exits 1 when it keeps a folder holding your edits, foreign files or a newer bf's copy, and `--check` unless every skill is current; see [skills](agents.md#install-the-skills).
+`update` and `run` exit 1 when a program fails, and `update` and `build` when the refreshed cache skipped files; successful programs keep their results. `status --check` exits 1 on problems, an unavailable cache, brain or reference, or scheduled programs that failed, are `overdue` or `never` succeeded, or fell silent. `validate` exits 1 on problems, never on warnings. `skills` exits 1 when it keeps a folder holding your edits, foreign files or a newer bf's copy, and `--check` unless every skill is current; see [skills](agents.md#install-the-skills).
 
 ## Using replies
 
@@ -125,7 +125,7 @@ An `update` reply has `ok`, `dry_run`, its `brain`, the `sensors`, `routines` an
 
 ### Program and source status {#status-sources-and-routines}
 
-`bf status` groups results under `brains`. Each brain has its `cache`, `notes`, `problems`, `attention`, `sources`, `routines`, [`assistants`](prompts.md#schedule-and-overlap), `coverage` totals and `usage`. `healthy` is false when any brain has a problem, an `attention` entry, an unavailable cache or cannot load. A brain that cannot load appears with only `brain`, `error` and, when known, `path`.
+`bf status` groups results under `brains`. Each brain has its `cache`, `notes`, `problems`, `attention`, `sources`, `coverage` totals and `usage`, plus `routines` and [`assistants`](prompts.md#schedule-and-overlap) when it declares any. `healthy` is false when any brain has a problem, an `attention` entry, an unavailable cache or cannot load. A brain that cannot load appears with only `brain`, `error` and, when known, `path`.
 
 | Field                                | Meaning                                                                                                                                                                                                                    |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -158,7 +158,19 @@ For example, an hourly `mail` sensor that collected one message reports:
   "records": 1,
   "bytes": 612,
   "latest": "2026-09-29T14:20:00+02:00",
-  "last_run": { "records": 1, "added": 1, "updated": 0, "unchanged": 0, "removed": 0, "elapsed_seconds": 0.02 }
+  "changed": "2026-09-29T15:00:00+02:00",
+  "last_run": {
+    "records": 1,
+    "added": 1,
+    "updated": 0,
+    "unchanged": 0,
+    "removed": 0,
+    "requested_start": "2026-09-28T15:00:00+02:00",
+    "requested_end": "2026-09-29T15:00:00+02:00",
+    "reconcile": false,
+    "elapsed_seconds": 0.02,
+    "output_bytes": 597
+  }
 }
 ```
 

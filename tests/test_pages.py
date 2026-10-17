@@ -5,17 +5,23 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
+from collections.abc import Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
-from bf import index, pages, retrieve, usage
+from bf import index, pages, retrieve, storage, usage
+from bf.collect import collect
 from bf.config import register
 from bf.markdown import Task, note
-from bf.models import Config, Error, InputError, NotFoundError, Query, Record, encode, present
+from bf.models import Config, Error, InputError, NotFoundError, Query, Record, encode, present, timestamp
 from bf.retrieve import read, search
 from bf.storage import Store, writer
 from conftest import records_file
@@ -88,6 +94,25 @@ def test_home_lists_what_needs_attention(brain: Store) -> None:
     assert home["pages"] == pages.BROWSE
     assert read([brain])["page"] == ""
     assert read([brain], "bf://fixture/")["pages"] == pages.BROWSE
+
+
+def test_home_lists_a_silent_source_in_its_declared_shape(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nsensors:\n  papers:\n    command: [echo]\n    refresh: 86400\n    silent_after: 1\n",
+    )
+    # Collected seconds ago, so fresh, but its newest change is older than silent_after.
+    earlier = datetime.now(UTC) - timedelta(seconds=5)
+    collect(
+        brain,
+        "papers",
+        start=(earlier - timedelta(days=1)).isoformat(),
+        end=earlier.isoformat(),
+        runner=lambda *_: b'[{"id":"one","title":"One"}]',
+        clock=lambda: earlier,
+    )
+    # The read reply validates against its declaration, which used to reject `silent` here.
+    assert read([brain])["attention"] == [{"sensor": "papers", "freshness": "fresh", "silent": True}]
 
 
 def test_home_keeps_future_notes_out_of_recent_changes(brain: Store) -> None:
@@ -172,6 +197,39 @@ def test_home_fits_projects_in_the_budget_of_the_reply_as_printed(
     monkeypatch.setattr(pages, "BUDGET", len(encode(present(whole))))
     assert len(cast("list", read([brain])["projects"])) == 19
     assert len(cast("list", pages.home([brain])["projects"])) < 19
+
+
+def test_home_lets_a_build_publish_while_it_reads(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    index.refresh(brain)
+    waiting = Event()
+
+    def sleep(seconds: float) -> None:
+        waiting.set()
+        time.sleep(seconds)
+
+    # A publish closes the gate to new cache readers, then waits for those already connected, such as this read.
+    monkeypatch.setattr(storage, "time", SimpleNamespace(monotonic=time.monotonic, sleep=sleep))
+    # Its wait for them, 30 seconds otherwise: a regression fails in 5.
+    monkeypatch.setattr(index, "_PUBLISH", 5)
+    alerts = pages.attention
+    builds: list[Future[dict[str, object]]] = []
+    with ThreadPoolExecutor(max_workers=1) as executor:
+
+        def publishing(
+            store: Store, now: datetime | None = None, counts: Mapping[str, Mapping[str, object]] | None = None
+        ) -> list[dict[str, object]]:
+            # A full build publishes while the home page holds the cache.
+            builds.append(executor.submit(index.refresh, brain, full=True))
+            assert waiting.wait(10)
+            return alerts(store, now, counts)
+
+        monkeypatch.setattr(pages, "attention", publishing)
+        home = read([brain], counted=False)
+        # Attention used to open the cache again, behind the closed gate: both waited until the publish gave up and
+        # discarded the finished build.
+        assert builds[0].result(timeout=10)["files"] == 4
+    assert refs(home, "projects") == ["projects/offline.md"]
+    assert "problems" not in home
 
 
 def test_exact_reads_summarize_their_note(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -431,7 +489,6 @@ def test_memories_pages_browse_sources_record_files_and_periods(brain: Store) ->
     source = read([brain], "memories/meetings")
     assert cast("list[dict[str, object]]", source["sources"])[0]["records"] == 2
     assert refs(source) == ["meetings:decision-1", "meetings:lunch"]
-    assert cast("list[dict[str, object]]", source["sources"])[0]["records"] == 2
     assert refs(read([brain], "memories/mail")) == ["mail:tomorrow", "mail:today", "mail:followup"]
     month = read([brain], "memories/meetings/2026-08")
     assert refs(month) == ["meetings:decision-1", "meetings:lunch"]
@@ -452,10 +509,44 @@ def test_memories_pages_browse_sources_record_files_and_periods(brain: Store) ->
     assert overview[2]["latest"] == "2026-08-31T12:00:00.000000Z"
     # The undated page is also a search scope for the same records.
     assert pages.scope("memories/catalog/undated") == {"prefix": "memories/catalog", "undated": True}
-    assert refs(read([brain], "memories/meetings/undated")) == []
+    undated = read([brain], "memories/meetings/undated")
+    assert refs(undated) == []
+    # Every page of one source states its coverage: an empty period alone would read as absence.
+    for page in (month, single, undated):
+        assert [s["source"] for s in cast("list[dict[str, object]]", page["sources"])] == ["meetings"]
     for missing in ("memories/absent", "memories/Bad", "memories/meetings/latest", "memories/a/b/c"):
         with pytest.raises(Error):
             read([brain], missing)
+
+
+def test_memories_pages_name_when_a_source_last_changed(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nsensors:\n  papers:\n    command: [echo]\n    refresh: 86400\n    silent_after: 345600\n",
+    )
+    # Collected five days ago and nothing new since: past the four days of its silent_after.
+    seen = datetime.now(UTC) - timedelta(days=5)
+    one = b'[{"id":"one","title":"One","time":"2026-09-10T00:00:00Z"}]'
+    start, end = (seen - timedelta(days=1)).isoformat(), seen.isoformat()
+    collect(brain, "papers", start=start, end=end, runner=lambda *_: one, clock=lambda: seen)
+    for ref in ("memories", "memories/papers"):
+        sources = cast("list[dict[str, object]]", read([brain], ref)["sources"])
+        papers = next(source for source in sources if source["source"] == "papers")
+        assert (papers["changed"], papers["silent"]) == (timestamp(seen.isoformat()), True)
+
+
+def test_unknown_sources_suggest_close_source_pages(brain: Store) -> None:
+    # Like a mistyped page or note, a mistyped source names the close ones: it used to name none.
+    for ref in ("memories/meeting", "memories/meeting/7d", "memories/meeting/undated"):
+        with pytest.raises(NotFoundError, match=r"^page not found; .*; did you mean memories/meetings\?$"):
+            read([brain], ref)
+    with pytest.raises(NotFoundError, match=r"^unknown source; .*; did you mean memories/meetings\?$"):
+        search([brain], Query(text="lunch", **pages.scope("memories/meeting")))
+    # Closeness compares source names alone: a shared memories/ prefix would make every source look close.
+    with pytest.raises(NotFoundError, match=r"browse the brain$"):
+        read([brain], "memories/zzz")
+    with pytest.raises(NotFoundError, match=r"list sources$"):
+        search([brain], Query(text="lunch", **pages.scope("memories/zzz")))
 
 
 def test_note_reads_carry_backlinks_grouped_by_relation(brain: Store) -> None:
@@ -488,9 +579,7 @@ def test_deep_listing_pages_skip_their_offset_in_sql_and_keep_their_order(
     brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     times = ["2026-09-02T09:00:00Z", "2026-09-01T09:00:00Z", ""]
-    mail = [
-        Record(id=f"m{n:02}", title=f"Mail {n}", **({"time": times[n % 3]} if n % 3 < 2 else {})) for n in range(30)
-    ]
+    mail = [Record(id=f"m{n:02}", title=f"Mail {n}", time=times[n % 3]) for n in range(30)]
     records_file(brain, "mail", mail)
     root = tmp_path / "team"
     root.mkdir()
@@ -831,6 +920,11 @@ def test_a_file_in_one_brain_does_not_hide_a_folder_note_in_another(brain: Store
     )
     with pytest.raises(Error, match=r"^projects/archive: expected a directory; symlinks"):
         read([brain], "projects/archive/old.md")
+    # A folder below the link: the brain holding it answers its page, and alone, the link is named.
+    team.write("projects/archive/2025/older.md", b"# Older\n")
+    assert read([brain, team], "projects/archive/2025")["page"] == "projects/archive/2025"
+    with pytest.raises(Error, match=r"^projects/archive: expected a directory; symlinks"):
+        read([brain], "projects/archive/2025")
 
 
 def test_relation_pages_list_every_link_of_one_relation(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1007,7 +1101,7 @@ def test_backlinks_show_each_source_s_facts_side_by_side(brain: Store) -> None:
         b"  labels: {description: Labels., type: string, cardinality: many}\n"
         b"  mirrors: {description: Same work item., type: identity, cardinality: many, relation: true}\n",
     )
-    long = "x" * 300
+    long = " ".join(["evidence"] * 40)
     records_file(
         brain,
         "jira",
@@ -1030,7 +1124,8 @@ def test_backlinks_show_each_source_s_facts_side_by_side(brain: Store) -> None:
     item = cast("list[dict[str, object]]", group["items"])[0]
     # Only single-value facts appear, and the preview stays short: disagreement is visible in one read.
     assert (group["relation"], item["fields"]) == ("mirrors", {"status": "Done"})
-    assert len(cast(str, item["excerpt"])) == pages.GLIMPSE
+    # Cut at a word within 160 characters, as other previews are: it once ended mid-word.
+    assert item["excerpt"] == " ".join(["evidence"] * 17) + "…"
     found = cast("list[dict[str, object]]", search([brain], Query(text="accessibility"))["items"])
     assert {entry["ref"]: entry["fields"] for entry in found} == {
         "jira:WEB-7": {"status": "In Progress"},

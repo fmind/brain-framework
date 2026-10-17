@@ -11,7 +11,7 @@ Agent procedures for **gather → normalize → organize and connect → act →
 | [bf-setup](bf-setup/SKILL.md)       | Installing BF, creating a brain, connecting an agent, discovering and importing sources | “Set up `~/brain` and check that you can find our project decision.”    |
 | [bf-maintain](bf-maintain/SKILL.md) | Sensors, routines, assistants and hooks, collection, refresh, recovery and conflicts    | “Why is the local-documents source overdue? Diagnose it before fixing.” |
 
-Install all four: each one names its neighbors when a task crosses into their scope. `bf-use` covers everyday work, including "remember this"; `bf-action` starts a session when invoked with a topic, so no request wording is needed, and resumes or hands one off; `bf-setup` and `bf-maintain` hand selected sources to each other without collecting, scheduling or authenticating on their own.
+Install all four: each one names its neighbors when a task crosses into their scope. `bf-use` covers everyday work, including "remember this"; `bf-action` starts a session when invoked with a topic, so no request wording is needed, and resumes or hands one off; `bf-setup` recommends sources and hands the selected ones to `bf-maintain`, which collects or schedules them only with the user's authority.
 
 ## Install and update
 
@@ -56,4 +56,4 @@ Each folder holds a short `SKILL.md` router (when to use the skill, its core loo
 
 To adapt a skill, edit the installed copy: `bf skills` then reports it as `modified` and never overwrites it. To return to the packaged version, rerun `bf skills DIR --force` after keeping the edits you need. Brain-specific procedures belong in the brain itself, for example under its own `skills/` folder, rather than in these copies.
 
-Tests in the repository check that every command, option, link and file a skill mentions exists, that each `SKILL.md` references all of its files, and that helpers run on Python 3.11 with the standard library. The [example brain](https://github.com/fmind/brain-framework/tree/main/examples/brain) exercises decision review, evidence retention and sharing with fictional data.
+Tests in the repository check that every command, option, link and file a skill mentions exists, that each `SKILL.md` references all of its files, and that helpers parse and type-check against Python 3.11 and its standard library. The [example brain](https://github.com/fmind/brain-framework/tree/main/examples/brain) exercises decision review, evidence retention and sharing with fictional data.

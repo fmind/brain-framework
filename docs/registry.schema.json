@@ -2,6 +2,7 @@
   "$defs": {
     "Registration": {
       "additionalProperties": false,
+      "description": "A registered brain's location on this machine.",
       "properties": {
         "path": {
           "description": "Machine-local absolute or home-relative path to the brain.",

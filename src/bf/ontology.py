@@ -1,4 +1,7 @@
-"""Explicit, deterministic field projection; no expressions, inference or provider access."""
+"""Explicit, deterministic field projection, identity checks and the claims that notes and records assert.
+
+No expressions, inference or provider access.
+"""
 
 from __future__ import annotations
 

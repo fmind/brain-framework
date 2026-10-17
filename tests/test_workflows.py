@@ -137,13 +137,26 @@ def test_bad_json_and_oversized_input_fail_before_output() -> None:
         "{} {}",
         '{"brain":"example","brain":"other"}',
         "[" * 2000,
-        " " * ((9 << 20) + 1),
     ]:
         result = execute("capture", raw=data)
         assert result.returncode == 1
         assert not result.stdout
         assert "PRIVATE FAILURE" not in result.stderr
+    oversized = execute("capture", raw=" " * ((19 << 20) + 1))
+    assert (oversized.returncode, oversized.stdout) == (1, "")
+    assert "input exceeds 19 MiB" in oversized.stderr
     assert execute("not-a-mode", NOTE).returncode == 2
+
+
+def test_large_records_capture_and_compare() -> None:
+    # Record text holds up to 4,194,304 characters, here of three UTF-8 bytes each, as bf prints them: a capture beside
+    # its new read exceeds both 9 MiB and one reply's bound, and used to be refused as invalid input.
+    large = json.dumps({**RECORD, "record": {**RECORD["record"], "text": "日本語" * 1_200_000}}, ensure_ascii=False)
+    capture = execute("capture", raw=large)
+    assert capture.returncode == 0, capture.stderr
+    compared = execute("compare", raw=capture.stdout + large)
+    assert compared.returncode == 0, compared.stderr
+    assert json.loads(compared.stdout)["state"] == "unchanged"
 
 
 def test_capture_identity_and_integrity_are_required() -> None:
@@ -188,7 +201,7 @@ def test_real_reads_keep_history_after_replacement_and_explain_direct_impact(bra
     groups = [group for group in cast("list[dict]", whole["backlinks"]) if group["relation"] == "depends-on"]
     assert len(groups) == 1
     assert "projects/decision.md" in json.dumps(groups)
-    # The role page lists every dependent; an identity search explains each claim with its origin.
+    # The relation page lists every dependent; an identity search explains each claim with its origin.
     dependents = retrieve.read([brain], "bf://fixture/projects/policy.md", rel="depends-on")["items"]
     assert [item["ref"] for item in cast("list[dict]", dependents)] == ["projects/decision.md"]
     found = retrieve.search([brain], Query(text="bf://fixture/projects/policy.md"))["items"]
@@ -209,10 +222,10 @@ def paged(brain: Store, ref: str) -> list[dict[str, object]]:
     return replies
 
 
-def helper_read(brain: Store, ref: str) -> subprocess.CompletedProcess[str]:
+def helper_read(brain: Store, ref: str, zone: str = "UTC") -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - the bundled helper runs this checkout's bf on a synthetic brain
         [sys.executable, str(HELPER), "read", ref, "--brain", str(brain.root)],
-        env={**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"},
+        env={**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}", "TZ": zone},
         capture_output=True,
         text=True,
         check=False,
@@ -237,6 +250,22 @@ def test_real_record_read_keeps_its_local_time_and_unknown_freshness(brain: Stor
         "limitations": ["source freshness is not established"],
         "baseline_at": capture["captured_at"],
     }
+
+
+def test_a_record_read_in_another_time_zone_is_not_a_change(brain: Store) -> None:
+    # Replies state a record's time with the reader's offset: a teammate elsewhere changes only how it is spelled.
+    paris, new_york = (helper_read(brain, "meetings:decision-1", zone) for zone in ("Europe/Paris", "America/New_York"))
+    assert paris.returncode == new_york.returncode == 0, paris.stderr + new_york.stderr
+    before, after = json.loads(paris.stdout), json.loads(new_york.stdout)
+    assert (before["record"]["time"], after["record"]["time"]) == (
+        "2026-08-31T14:00:00+02:00",
+        "2026-08-31T08:00:00-04:00",
+    )
+    capture = run("capture", before)
+    assert run("compare", capture, after)["content_changed"] is False
+    # Another instant is still a change.
+    moved = {**after, "record": {**after["record"], "time": "2026-08-31T08:00:01-04:00"}}
+    assert run("compare", capture, moved)["content_changed"] is True
 
 
 def test_read_assembles_paged_exact_replies_for_capture(brain: Store) -> None:

@@ -13,7 +13,7 @@ Read the exact note section or record with `bf read`. In a dated decision note, 
 - A record of a source Git ignores, as `bf init` ignores `memories/`, goes in the ignored `originals/` folder; cite its path in a code span, since a link fails `bf validate` in clones that lack the file.
 - An authored note, or a record Git versions, goes in the owning action's `inputs/`, otherwise in `assets/`.
 
-The [evidence helper](../scripts/evidence.py) never contacts a network. `read REF --brain PATH` prints the whole exact reply of the offline `bf read`. `capture` keeps one exact read's text or record, source metadata, local capture time and a content digest, and refuses listing pages, lone text pages and incomplete or `stale` reads: a local observation, not proof of truth or live provider state.
+The [evidence helper](../scripts/evidence.py) never contacts a network. `read REF --brain PATH` prints the whole exact reply of the offline `bf read`. `capture` keeps one exact read's text or record, source metadata, local capture time and a content digest, and refuses listing pages, lone text pages and incomplete or `stale` reads: a local observation, not proof of truth or live provider state. `capture` and `compare` read at most 19 MiB of standard input per reply or capture; beyond that, capture a note section or a smaller record.
 
 Below, `$evidence_ref` is the exact ref (with several brains, its `uri`), `$new_capture` an unused `.json` path and `$saved_capture` an earlier capture. This subshell writes an owner-only capture, never replaces an earlier one and removes only a capture it failed to write:
 
@@ -44,7 +44,7 @@ To compare, supply the saved capture followed by a new exact read:
 
 Only this compact comparison reaches the model. `state` is `changed`, `unchanged` or `unknown`; `content_changed` compares stored content even when freshness is unknown.
 
-- A new `observed` time alone is not a change; every other record field is.
+- A new `observed` time alone is not a change, nor is a record `time` stated with another time zone's offset; every other record field is.
 - A partial baseline or record, an incomplete read or a source that is not both `active` and `fresh` makes the state `unknown`. A missing read fails; it never means unchanged.
 - For a record, `unchanged` means no newer local revision: an older item can change upstream unseen by a window sensor.
 

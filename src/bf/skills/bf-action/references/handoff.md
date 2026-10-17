@@ -1,6 +1,6 @@
 # Session handoff
 
-Use with an open action when handing work to another session or before a planned compaction. Refresh its Context and Resume within the user's authorized work; durable changes go to the owning project. Never create another packet, copy a transcript or change knowledge merely because a hook ran.
+Use with an open action when handing work to another session or before a planned compaction. Refresh its Context and Resume within the user's authorized work; durable changes go to the owning project. Never create a separate handoff note, copy a transcript or change knowledge merely because a hook ran.
 
 ## Check and resume
 

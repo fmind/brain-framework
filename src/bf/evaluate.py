@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from collections.abc import Iterator
 from math import inf
 from pathlib import Path
@@ -11,11 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationIn
 
 from bf import links
 from bf.config import load, yaml_object
-from bf.markdown import authored, split_ref
+from bf.markdown import authored, editor_lock, split_ref
 from bf.models import MAX_FILE, Error, Model, NotFoundError, check_version, clean, decode, explain
 from bf.pages import address, query, readable
 from bf.retrieve import read, search
-from bf.storage import Store, expand
+from bf.storage import Store, expand, unread
 
 Nonblank = Annotated[str, Field(pattern=r"\S")]
 # A search case ranks its expected refs this deep, past its limit, so MRR still sees a drop below the limit.
@@ -128,7 +129,9 @@ class Suite(Model):
     """A bounded collection of retrieval assertions; evaluated offline without executing programs."""
 
     version: Literal[8] = Field(description="Brain format, shared with bf.yaml; independent of the package version.")
-    cases: Annotated[list[Case], Field(min_length=1, max_length=200)]
+    cases: Annotated[list[Case], Field(min_length=1, max_length=200)] = Field(
+        description="One to 200 retrieval cases with unique names."
+    )
 
     @model_validator(mode="after")
     def unique(self) -> Suite:
@@ -201,14 +204,15 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
             # Nothing to read answers "is anything there?"; every other failure fails the case.
             reply = {}
         pairs = [(key, value) for key, value in _strings(reply) if key != "notice"]
-        # An entry without a brain belongs to the evaluated one, the only brain its reply selected.
+        # An entry without a brain belongs to the evaluated one, the only brain its reply selected. An exact record
+        # read names no kind: address it as a record, whose id may hold `#`, never as a note's section.
         entries = [(str(entry.get("brain", name)), entry) for entry in _entries(reply)]
         return (
             reply,
             [str(entry["ref"]) for _, entry in entries],
             [str(entry["ref"]) for brain, entry in entries if brain == name]
             + [value for key, value in pairs if key == "uri"]
-            + [address(brain, entry) for brain, entry in entries],
+            + [address(brain, {"kind": "record", **entry} if "record" in entry else entry) for brain, entry in entries],
             "\n".join(value for _, value in pairs),
             [],
         )
@@ -239,7 +243,8 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
 
 def _matches(expected: str, refs: list[str]) -> bool:
     parsed = links.parse(expected)
-    whole_note = authored(parsed.path if parsed else expected) and not (parsed.fragment if parsed else "#" in expected)
+    # Like split_ref, a plain ref ending in .md names a whole note, even when the note's file name holds `#`.
+    whole_note = (authored(parsed.path) and not parsed.fragment) if parsed else authored(expected)
     return any(ref == expected or (whole_note and split_ref(ref)[0] == expected) for ref in refs)
 
 
@@ -313,13 +318,23 @@ def _compare(results: list[dict[str, object]], previous: dict[tuple[str, str], _
 def evaluate(
     store: Store, path: str = "evals", previous: dict[tuple[str, str], _Outcome] | None = None
 ) -> dict[str, object]:
-    paths = (
-        [path]
-        if path.endswith((".yaml", ".yml"))
-        else sorted(name for name in store.files(path) if name.endswith((".yaml", ".yml")))
-    )
+    """Run every suite below `path`, or one suite file; with `previous`, compare each case with that baseline."""
+    paths = [path]
+    if not path.endswith((".yaml", ".yml")):
+        # An editor's lock beside a suite, such as Emacs `.#retrieval.yaml`, comes and goes with an open editor, as
+        # beside notes; any other link, special file or unreadable folder fails the run by name.
+        skipped: dict[str, tuple[int, int, int, int]] = {}
+        listed = store.files(path, skipped=skipped)
+        # A regular file at the path, or above it as for a path below a note, leaves no folder to read suites from.
+        if any(stat.S_ISREG(store.mode(name)) for name in skipped if f"{path}/".startswith(f"{name}/")):
+            raise Error(f"{path}: name a folder of suites or a .yaml or .yml suite file")
+        if first := min((name for name in skipped if not editor_lock(name)), default=""):
+            raise Error(f"{first}: {unread(store, first)}")
+        paths = [name for name in listed if name.endswith((".yaml", ".yml")) and not editor_lock(name)]
     if not paths:
-        raise Error(f"{path} has no suites; add evals/retrieval.yaml before running bf eval")
+        raise Error(
+            f"{path} holds no .yaml or .yml suites; add one, such as {path}/retrieval.yaml, before running bf eval"
+        )
     if len(paths) > 100:
         raise Error("evaluation exceeds 100 suites")
     cases: list[tuple[str, Case]] = []
@@ -327,22 +342,22 @@ def evaluate(
         try:
             value = yaml_object(store.read(name, 1 << 20), name)
             check_version(value, name)
-            suite = Suite.model_validate(value)
+            parsed = Suite.model_validate(value)
         except FileNotFoundError:
             raise Error(f"{name} does not exist; add retrieval cases before running bf eval") from None
         except ValidationError as error:
             raise Error(f"invalid {name}: " + explain(error)) from error
-        cases.extend((name, case) for case in suite.cases)
+        cases.extend((name, case) for case in parsed.cases)
     results: list[dict[str, object]] = []
     # Each ranked search case's reciprocal rank of its best-placed expected ref within DEPTH results, even below its
     # limit; a miss or an error counts zero.
     reciprocal: list[float] = []
-    for path, case in cases:
+    for suite, case in cases:
         ranked = case.read is None and bool(case.expect)
         try:
             reply, refs, matches, delivered, ranking = _answer(store, case)
         except Error as error:
-            results.append({"suite": path, "name": case.name, "passed": False, "error": str(error)})
+            results.append({"suite": suite, "name": case.name, "passed": False, "error": str(error)})
             reciprocal.extend([0.0] if ranked else [])
             continue
         missing = [ref for ref in case.expect if not _matches(ref, matches)]
@@ -351,7 +366,7 @@ def evaluate(
         passed = not (missing or forbidden or absent or reply.get("problems") or reply.get("stale")) and (
             not case.empty or not refs
         )
-        result: dict[str, object] = {"suite": path, "name": case.name, "passed": passed}
+        result: dict[str, object] = {"suite": suite, "name": case.name, "passed": passed}
         if ranked:
             result["rank"] = ranks = _ranks(case.expect, ranking)
             reciprocal.append(max((1 / n for n in ranks.values() if n), default=0.0))
@@ -361,10 +376,10 @@ def evaluate(
                 if field in reply:
                     result[field] = reply[field]
         results.append(result)
-    passed = sum(bool(r["passed"]) for r in results)
+    count = sum(bool(r["passed"]) for r in results)
     summary = {
-        "passed": passed == len(results),
-        "score": f"{passed}/{len(results)}",
+        "passed": count == len(results),
+        "score": f"{count}/{len(results)}",
         **({"mrr": round(sum(reciprocal) / len(reciprocal), 4)} if reciprocal else {}),
         "cases": results,
     }

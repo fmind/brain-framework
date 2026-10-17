@@ -138,6 +138,15 @@ def test_handoff_names_an_empty_section_instead_of_blaming_the_read(provider: Pr
     assert report["error"] == "context is empty; write it before a handoff"
 
 
+def test_handoff_reports_unencodable_section_text_without_quoting_it(provider: Provider) -> None:
+    # JSON can escape a lone surrogate that UTF-8 cannot encode: the fixed diagnostic replaces the encoder's message.
+    install(provider, reply("context", "## Context {#context}\n\nPRIVATE CONTENT \ud800\n"))
+    result = execute(provider)
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error"] == "invalid section encoding"
+    assert "PRIVATE CONTENT" not in result.stdout + result.stderr
+
+
 def test_handoff_rejects_oversized_bf_reply(provider: Provider) -> None:
     install(provider, reply("context", "PRIVATE CONTENT" + "x" * (4 << 20)))
     result = execute(provider)

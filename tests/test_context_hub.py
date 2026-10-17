@@ -13,6 +13,7 @@ import yaml
 from typer.testing import CliRunner
 
 from bf.cli import app
+from conftest import BLOCK, FRAGMENT, anywhere
 
 ROOT = Path(__file__).parents[1]
 EXAMPLE = ROOT / "examples/context-hub"
@@ -43,6 +44,13 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
     )
     assert result.returncode == 0, result.stderr + result.stdout
     replies = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    # The page's stated results: each inline reply fragment and documented JSON object appears in the output.
+    for fragment in FRAGMENT.findall(BLOCK.sub("", page)):
+        assert fragment in result.stdout, fragment
+    for language, body in BLOCK.findall(page):
+        if language == "json":
+            assert any(anywhere(reply, json.loads(body)) for reply in replies), body
+    # The checks below pin which reply holds each value.
     collections = [reply for reply in replies if "sensor" in reply]
     assert [(reply["sensor"], reply["records"]) for reply in collections[:4]] == [(s, 1) for s, *_ in SOURCES]
     assert (collections[4]["sensor"], collections[4]["updated"]) == ("jira", 1)

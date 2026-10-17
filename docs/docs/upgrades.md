@@ -31,7 +31,7 @@ uv tool upgrade brain-framework
 bf --version
 ```
 
-For a major release, apply the changelog's upgrade steps now, before collecting again. Then check the brain and update the agent skills:
+Apply the upgrade steps of each release newer than your previous version, oldest first, and finish a major release's steps before collecting again. When a release asks you to copy updated example sensors, routines or hooks, copy them from the tag matching `bf --version`, preserving your adaptations. Then check the brain and update the agent skills:
 
 ```bash
 cd ~/brain
@@ -40,7 +40,7 @@ bf eval
 bf skills ~/.agents/skills
 ```
 
-Expect `"valid":true` from validation and `"passed":true` from your retrieval cases; otherwise fix the reported problem first, with [Troubleshooting](troubleshooting.md). `bf skills` updates the skills it installed. It leaves a folder unchanged and exits 1 when the folder reports `modified` (you edited it), `unmanaged` (it has no BF manifest) or `newer` (a newer `bf` installed a different copy): see [skill installation](agents.md#install-the-skills) before passing `--force`.
+Expect `"valid":true` from validation and `"passed":true` from your retrieval cases; otherwise fix the reported problem first, with [Troubleshooting](troubleshooting.md). `bf skills` updates the skills it installed in that folder: repeat it for each folder you installed them into, such as `~/.claude/skills` for Claude Code. It leaves a folder unchanged and exits 1 when the folder reports `modified` (you edited it), `unmanaged` (it has no BF manifest) or `newer` (a newer `bf` installed a different copy): see [skill installation](agents.md#install-the-skills) before passing `--force`.
 
 `bf init` writes a brain's `AGENTS.md` once. Merge new guidance by hand, as [Refresh brain instructions](agents.md#refresh-brain-instructions) shows. Regenerate native schedules with `bf schedule` when the changelog asks or the `bf` executable moved.
 

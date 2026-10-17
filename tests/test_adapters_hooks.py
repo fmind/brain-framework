@@ -8,6 +8,7 @@ import io
 import json
 import runpy
 import subprocess
+import unicodedata
 from pathlib import Path
 from types import ModuleType
 
@@ -382,6 +383,39 @@ def test_session_context_bounds_the_attention_line(provider: Provider) -> None:
     ) in lines
 
 
+def test_session_context_names_a_silent_source_only_while_it_is_otherwise_fresh(provider: Provider) -> None:
+    # 18.5.0 printed `papers fresh`. A stopped sensor falls silent too: its lateness or failure says what to repair.
+    attention = [
+        {"sensor": "papers", "freshness": "fresh", "silent": True},
+        {"sensor": "feeds", "freshness": "overdue", "silent": True},
+        {"sensor": "mail", "freshness": "fresh", "failed": True, "silent": True},
+    ]
+    install(provider, "git@github.com:fmind/brain-framework.git", home={**HOME, "attention": attention})
+    lines = session(provider).stdout.splitlines()
+    assert "- Collection needs attention: papers silent, feeds overdue, mail failed; see `bf status`." in lines
+
+
+def test_session_context_lists_a_note_linking_with_several_relations_once(provider: Provider) -> None:
+    # The exact read lists such a note in each relation's group: 18.5.0 printed it twice and dropped another note.
+    review, linked, older = (
+        {"ref": f"actions/{day}_{name}/ACTION.md", "kind": "note", "title": name.capitalize(), "date": day}
+        for name, day in [("review", "2026-10-15"), ("linked", "2026-10-14"), ("older", "2026-10-13")]
+    )
+    groups = [
+        {"relation": "depends-on", "total": 1, "items": [review]},
+        {"relation": "related-to", "total": 2, "items": [review, older]},
+        {"relation": "links", "total": 1, "items": [linked]},
+    ]
+    install(provider, "git@github.com:fmind/brain-framework.git", {**PAGE, "backlinks": groups})
+    lines = session(provider).stdout.splitlines()
+    assert "- Linked evidence: depends-on 1, related-to 2, links 1." in lines
+    assert [line for line in lines if line.startswith("  - ")] == [
+        "  - 2026-10-15 Review (`actions/2026-10-15_review/ACTION.md`)",
+        "  - 2026-10-14 Linked (`actions/2026-10-14_linked/ACTION.md`)",
+        "  - 2026-10-13 Older (`actions/2026-10-13_older/ACTION.md`)",
+    ]
+
+
 # The prompt hook: the host sends its event as JSON on stdin; only authored-note titles and refs reach the agent.
 SEARCH = {
     "items": [
@@ -538,6 +572,8 @@ def test_context_programs_keep_hidden_characters_visible(program: str) -> None:
     module = runpy.run_path(str(ROOT / "examples" / program))
     assert module["plain"]("Ship\u202e it\U000e0069\u200b\x9b") == "Ship\\u202e it\\U000e0069\\u200b\\x9b"
     assert module["code"]("projects/a\u200b.md") == "`projects/a\\u200b.md`"
+    # As bf replies escape them: a reader such as str.splitlines() breaks a line there.
+    assert module["code"]("projects/a\u2028b\u2029.md") == "`projects/a\\u2028b\\u2029.md`"
 
 
 def test_context_program_visible_copies_stay_identical() -> None:
@@ -560,6 +596,9 @@ def test_prompt_context_mirrors_the_core_stopwords() -> None:
     # Like bf search, it keeps a function word written as an acronym.
     assert hook.query("What does the EU AI Act say AND who owns IT?") == "EU AI Act say owns IT"
     assert hook.query(" ".join(index.terms("What does the EU AI Act say AND who owns IT?"))) == "EU AI Act say owns IT"
+    # Pasted text may decompose its accents: bf search reads it in NFKC form, and so does the hook.
+    decomposed = unicodedata.normalize("NFD", "Qu'a décidé l'équipe sur la rétention ?")
+    assert hook.query(decomposed) == " ".join(index.terms(decomposed)) == "décidé équipe rétention"
 
 
 STALE_ERROR = {"brain": "brain", "error": "identity resolution used a stale cache"}

@@ -8,6 +8,9 @@ Start from a reviewed [sensor example](https://github.com/fmind/brain-framework/
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
+fields:
+  # Beside the existing entries, such as depends-on: bf.yaml has one fields: key.
+  kind: { description: Common kind of source item., type: string, cardinality: one }
 sensors:
   docs:
     command: [sensors/local-documents.py, team, "{{home}}/Documents/team"]
@@ -75,7 +78,7 @@ Git passes the remote and URL as arguments and the pushed refs on stdin (within 
 
 An assistant runs the owner's harness over `prompts/NAME.md`; its records are model output, not verified facts. Declare it under `assistants:` with `prompt`, argv `command`, optional JSON Pointer `text`, and reviewed tool permissions. No schedule is implicit. Add named `schedules` only within recurring-work authority; inputs, outputs and triggers are separate assistant-level fields. Follow the [assistant guide](https://fmind.github.io/brain-framework/docs/prompts/) for the complete configuration.
 
-1. Test with `command: [cat]` and no `text`, then switch to the approved harness and run `bf run NAME --stdin` once. `--dry-run` still executes the harness; it skips records and delivery, not tool effects or provider cost.
+1. Test with `command: [cat]` and no `text`, then switch to the approved harness, such as `[claude, --print, --output-format, json, --tools, "Read,Grep,Glob,Bash", --allowedTools, "Bash(bf read *),Bash(bf search *)", --permission-mode, dontAsk]` with `text: /result`, and run `bf run NAME --stdin` once. `--dry-run` still executes the harness; it skips records and delivery, not tool effects or provider cost.
 1. Put provider code in brain-owned `channels/` scripts. Declare only supported `send`, `read` and `stream` capabilities. A stream owns push/long-poll/fast-poll transport and acknowledges its provider only after BF's durable ACK. Batch reads are complete bounded windows, never partial pagination. [Channel contracts](https://fmind.github.io/brain-framework/docs/channels/) own envelopes and limits.
 1. Authenticate and admit senders in the adapter, preserve their identity and constrain destinations. Prompt text must not grant extra authority to arbitrary remote input. Outputs deliver the saved answer; remove model-owned duplicate sends.
 1. Use `outputs: [{reply: {}}]` for replies to the origin; every such input needs send support. Use named output objects for independent destinations and `when` filters. Notifications are send-only channels. Include proactive destinations as inputs if later replies must reach the assistant.

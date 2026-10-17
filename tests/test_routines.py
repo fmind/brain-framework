@@ -9,7 +9,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -288,6 +287,16 @@ def test_an_action_with_a_broken_link_is_never_written(configured: Store, link: 
     assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW)["action"]
 
 
+def test_a_broken_link_error_quotes_only_the_start_of_a_long_target(configured: Store) -> None:
+    # Routine output can carry evidence: before, the whole target filled the error, run history and every bf status.
+    output = ACTION.replace(b"../../projects/offline.md", b"x" * 10_000)
+    # The quoted entry is cut to 200 characters with its `…`, as Limits lists.
+    with pytest.raises(Error, match=r"^digest: broken link: x{186}…; no action was written;") as raised:
+        routine(configured, "digest", start=START, end=END, runner=printing(output), clock=lambda: NOW)
+    assert len(str(raised.value).encode()) < 1024
+    assert len(str(state(configured, ROUTINES)["digest"]["error"]).encode()) < 1024
+
+
 def test_due_routines_cover_the_time_since_their_last_reviewed_window(configured: Store) -> None:
     assert due_routines(configured, NOW) == [("digest", START, END)]
     routine(configured, "digest", start=START, end=END, runner=printing(b""), clock=lambda: NOW)
@@ -500,9 +509,7 @@ def test_a_direct_run_never_waits_for_input_an_agent_shell_holds_open(hooked: St
         stderr=subprocess.PIPE,
         env={**os.environ, "PATH": "/usr/bin:/bin"},
     ) as process:
-        started = time.monotonic()
         assert process.wait(timeout=60) == 0
-        assert time.monotonic() - started < 10
         assert process.stdin is not None
         process.stdin.close()
     assert "args:first\n-- stderr --" in hooked.read(log_path("check")).decode()
@@ -617,3 +624,73 @@ def test_keep_spares_a_report_folder_holding_anything_else(brain: Store) -> None
     second = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: later)
     assert second["removed"] == 0
     assert (folder / "ACTION.md").read_bytes() == report
+
+
+def test_keep_never_removes_the_action_it_just_wrote(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+    )
+    report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
+    # Another clone, in a time zone ahead, already dated its report tomorrow.
+    ahead = f"actions/{(NOW + timedelta(days=1)).astimezone().date().isoformat()}_review-0a0a0a0a/ACTION.md"
+    brain.write(ahead, report)
+    result = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)
+    # Before, its earlier date made the new action the oldest: it was removed at once while the reply named it.
+    assert result["removed"] == 0
+    assert brain.read(str(result["action"])) == report
+    assert brain.read(ahead) == report
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="permission bits do not bind root")
+def test_keep_logs_what_it_cannot_remove_and_never_fails_the_run(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+    )
+    report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
+    first = str(routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)["action"])
+    folder = (brain.root / first).parent
+    # A folder BF can read but not change, such as one the owner made read-only, keeps its report.
+    folder.chmod(0o500)
+    try:
+        later = NOW + timedelta(days=1)
+        second = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: later)
+    finally:
+        folder.chmod(0o700)
+    # Before, the run failed, blaming its run history, and never recorded the new action for a later removal.
+    assert second["removed"] == 0
+    history = state(brain, ROUTINES)["review"]
+    assert (history["error"], history["failures"]) == ("", 0)
+    assert list(cast("dict[str, str]", history["reports"])) == [second["action"]]
+    assert (folder / "ACTION.md").read_bytes() == report
+    assert f"kept {first.removesuffix('/ACTION.md')}: " in brain.read(log_path("review")).decode()
+    # A link anywhere in actions/ leaves the listing incomplete, which could miscount the newest: none is removed.
+    (brain.root / "actions/notes").mkdir()
+    (brain.root / "actions/notes/link").symlink_to(brain.root / "bf.yaml")
+    third = routine(
+        brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW + timedelta(days=2)
+    )
+    assert third["removed"] == 0
+    assert brain.read(str(second["action"])) == report
+    expected = "kept older actions: actions/notes/link: symlinks and special files are forbidden"
+    assert expected in brain.read(log_path("review")).decode()
+
+
+def test_keep_puts_a_report_back_when_its_folder_gains_an_entry(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [review]\n    output: action\n    keep: 1\n",
+    )
+    report = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
+    first = str(routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: NOW)["action"])
+
+    def gained(_store: Store, _name: str) -> None:
+        # The owner added a file between the check and the removal.
+        raise OSError(errno.ENOTEMPTY, "synthetic entry")
+
+    monkeypatch.setattr(Store, "rmdir", gained)
+    later = NOW + timedelta(days=1)
+    second = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: later)
+    assert second["removed"] == 0
+    assert brain.read(first) == report

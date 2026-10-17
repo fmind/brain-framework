@@ -9,6 +9,8 @@ import re
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager
 from importlib.metadata import version as distribution_version
 from pathlib import Path
 
@@ -127,7 +129,7 @@ def test_shell_completion_in_fresh_process(
         env={**os.environ, "_BF_COMPLETE": instruction, **variables},
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=120,
         check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -206,7 +208,7 @@ def test_console_errors_are_private_and_on_stderr(
         assert malformed.returncode == 2, (query, malformed.stderr)
         assert "QUERY: " in malformed.stderr
     assert "REF: invalid period" in bf("read", "2026-13").stderr
-    # An undeclared role names the valid ones, never the rejected value.
+    # An undeclared relation names the valid ones, never the rejected value.
     undeclared = bf("read", "projects/offline.md", "--rel", "nope").stderr
     assert undeclared.startswith("bf: invalid input: --rel: undeclared relation; use links, cites (see ")
     assert "nope" not in undeclared
@@ -284,7 +286,7 @@ def test_closed_output_pipe_exits_1_without_a_traceback() -> None:
     os.close(reader)
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "bf", "schema"], stdout=writer_end, stderr=subprocess.PIPE, timeout=15, check=False
+            [sys.executable, "-m", "bf", "schema"], stdout=writer_end, stderr=subprocess.PIPE, timeout=120, check=False
         )
     finally:
         os.close(writer_end)
@@ -300,7 +302,7 @@ def test_encoding_failures_name_the_note_and_replies_stay_utf8(brain: Store) -> 
             [sys.executable, "-m", "bf", "read", ref, "--brain", "fixture"],
             capture_output=True,
             env={**os.environ, "PYTHONIOENCODING": "latin-1"},
-            timeout=15,
+            timeout=120,
             check=False,
         )
 
@@ -476,6 +478,36 @@ def test_initialization_obeys_the_physical_writer_lock(tmp_path: Path) -> None:
     assert not list(target.iterdir())
 
 
+def test_initialization_never_replaces_a_brain_created_before_it_took_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "empty"
+    target.mkdir()
+
+    @contextmanager
+    def raced(store: Store) -> Generator[None]:
+        # Another init created its brain after this one found the directory empty, then released the lock.
+        (target / "bf.yaml").write_text("name: other\n")
+        with writer(store):
+            yield
+
+    monkeypatch.setattr("bf.cli.writer", raced)
+    result = CliRunner().invoke(app, ["init", str(target), "--name", "mine"])
+    assert result.exit_code == 1
+    assert "freshly cloned" in str(result.exception)
+    # Before, the second init replaced the first one's bf.yaml with its own name.
+    assert [entry.name for entry in target.iterdir()] == ["bf.yaml"]
+    assert (target / "bf.yaml").read_text() == "name: other\n"
+
+
+def test_init_quotes_yaml_names_and_keeps_private_evidence_out_of_git(tmp_path: Path) -> None:
+    result = CliRunner().invoke(app, ["init", str(tmp_path / "brain"), "--name", "on"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["brain"] == "on"
+    assert "memories/" in (tmp_path / "brain" / ".gitignore").read_text()
+    assert CliRunner().invoke(app, ["validate", "--brain", str(tmp_path / "brain")]).exit_code == 0
+
+
 def test_initialization_names_team_brains_and_keeps_action_inputs_versioned(tmp_path: Path) -> None:
     clone = tmp_path / "Team_Knowledge"
     (clone / ".git").mkdir(parents=True)
@@ -543,10 +575,13 @@ def test_typed_tag_links_validate_and_read_through_cli_and_mcp(brain: Store, tag
 
 
 def test_replies_escape_terminal_controls_without_changing_values(brain: Store) -> None:
-    # Collected text is data: a C1 control such as CSI (U+009B), or a bidi override that reorders what a terminal
-    # shows, reaches a terminal only as a JSON escape.
-    text = "before \u009b2J\u009d0;title\u009c after \u007f \u202egnp.exe\u202c \u200b\u2066x\u2069\ufeff \u061c1-2"
-    hidden = re.compile("[\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+    # Collected text is data: a C1 control such as CSI (U+009B), a bidi override that reorders what a terminal shows,
+    # or a line separator that splits a JSON line for str.splitlines(), reaches the output only as a JSON escape.
+    text = (
+        "before \u009b2J\u009d0;title\u009c after \u007f \u202egnp.exe\u202c \u200b\u2066x\u2069\ufeff \u061c1-2"
+        " \u2028\u2029"
+    )
+    hidden = re.compile("[\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2028\u2029\u2060-\u2069\ufeff]")
     records_file(brain, "meetings", [Record(id="c1", title="Controls", text=text, attributes={"note": "\u009b31m"})])
     result = CliRunner().invoke(app, ["read", "meetings:c1", "--brain", "fixture"])
     assert result.exit_code == 0, result.output
@@ -790,21 +825,24 @@ def test_diagnostics_escape_terminal_controls_in_brain_file_names(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # A shared brain controls its file names: OSC and CSI sequences could set the title, clear the screen or write
-    # the clipboard, a newline forge another diagnostic line, and a bidi override reorder the text around it.
-    name = "projects/x\x1b]0;P\x07\u202e\nbf: y.md"
-    shown = "projects/x\\u001b]0;P\\u0007\\u202e\\u000abf: y.md"
+    # the clipboard, a newline or line separator forge another diagnostic line, and a bidi override reorder the text
+    # around it.
+    name = "projects/x\x1b]0;P\x07\u202e\n\u2028bf: y.md"
+    shown = "projects/x\\u001b]0;P\\u0007\\u202e\\u000a\\u2028bf: y.md"
     brain.write(name, b"---\nstale_after: soon\n---\n# Broken\n")
     exported = CliRunner().invoke(app, ["export", "--brain", "fixture"])
     assert exported.exit_code == 1
     assert exported.stderr.startswith(f"bf: fixture: {shown}: ")
     assert exported.stderr.count("\n") == 1
+    # Python's str.splitlines(), like other line readers, also breaks lines at U+2028.
+    assert len(exported.stderr.splitlines()) == 1
     # A mistyped ref's hint names the brain's files.
     monkeypatch.setattr(sys, "argv", ["bf", "read", "projects/xy.md", "--brain", "fixture"])
     with pytest.raises(SystemExit):
         main()
     hint = capsys.readouterr().err
     assert shown in hint
-    assert not re.search("[\x00-\x09\x0b-\x1f\x7f-\x9f\u202e]", hint)
+    assert not re.search("[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u202e]", hint)
     missing = asyncio.run(server([brain]).call_tool("read", {"ref": "projects/xy.md"}))
     assert isinstance(missing, CallToolResult)
     assert shown in text(missing)

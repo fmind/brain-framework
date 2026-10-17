@@ -12,7 +12,7 @@ import stat
 import sys
 import time
 import unicodedata
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from importlib.resources import files
@@ -91,7 +91,7 @@ def _named(hint: str | Sequence[str]) -> str:
 
 
 @contextmanager
-def _plain() -> Iterator[None]:
+def _plain() -> Generator[None]:
     """Usage errors as `_usage` lines, exit 2; help and its panels stay Typer's, as do Exit, interrupts and EPIPE."""
     try:
         yield
@@ -262,6 +262,12 @@ def _derived(directory: str) -> str:
     return name
 
 
+def _vacant(directory: Path) -> None:
+    """Refuse a directory holding anything but the Git metadata of a fresh clone of an empty repository."""
+    if any(entry.name != ".git" for entry in directory.iterdir()):
+        raise Error("initialization requires a new, empty or freshly cloned directory")
+
+
 @app.command("init", rich_help_panel="Set up")
 def initialize(
     path: Annotated[
@@ -298,12 +304,13 @@ def initialize(
             }.items()
         },
     )
-    # A fresh clone of an empty repository contains only Git metadata.
-    if path.exists() and any(entry.name != ".git" for entry in path.iterdir()):
-        raise Error("initialization requires a new, empty or freshly cloned directory")
+    if path.exists():
+        _vacant(path)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     store = Store(path)
     with writer(store):
+        # Again under the lock: of two runs on one empty directory, the second never replaces the first's files.
+        _vacant(store.root)
         store.write(
             "bf.yaml",
             (
@@ -325,10 +332,13 @@ def initialize(
 @app.command("register", rich_help_panel="Set up")
 def enroll(
     path: Annotated[
-        Path, typer.Argument(metavar="PATH", help="Existing brain directory; defaults to the current directory.")
+        Path,
+        typer.Argument(
+            metavar="PATH", show_default=False, help="Existing brain directory; defaults to the current directory."
+        ),
     ] = Path(),
 ) -> None:
-    """Select an existing brain by name and search it from outside any brain; never runs its programs."""
+    """Register an existing brain to select it by name outside its folder; never runs its programs."""
     path = expand(path)
     if not path.is_dir():
         raise Error("PATH is not an existing directory; pass the brain's directory")
@@ -380,7 +390,7 @@ def install(
         bool, typer.Option(help="Replace edited, foreign or newer skill folders with the packaged copies.")
     ] = False,
 ) -> None:
-    """Install or update the bf-use, bf-action, bf-setup and bf-maintain skills of this version; never over edits."""
+    """Install or update this version's bf-use, bf-action, bf-setup and bf-maintain skills; never overwrites edits."""
     from bf.install import skills
 
     result = skills(destination, check=check, force=force)
@@ -483,14 +493,16 @@ def capture(
     ],
     brain: RunOption = "",
     since: Annotated[str, typer.Option(help="Window start: 7d, yesterday, YYYY-MM-DD or ISO 8601.")] = "",
-    until: Annotated[str, typer.Option(help="Window end; default now.")] = "now",
+    until: Annotated[str, typer.Option(help="Window end.")] = "now",
     dry_run: Annotated[
         bool, typer.Option(help="Run the sensor (can contact providers); preview samples without saving records.")
     ] = False,
     allow_removal: Annotated[
         bool,
         typer.Option(
-            "--allow-removal", help="Accept a snapshot that empties its catalog or removes more than half of it."
+            "--allow-removal",
+            help="Accept, for this run, a snapshot that empties its catalog, or removes more than half of it and more "
+            "than 10 records.",
         ),
     ] = False,
 ) -> None:
@@ -550,6 +562,9 @@ def perform(
         names, args = (), values
     elif values and not values[0].strip():
         raise typer.BadParameter("give a routine or assistant name; an empty value names none", param_hint="PROGRAM")
+    elif values and _surrogates(values[0]):
+        # A program name is text; ARGS, like a pre-push hook's Git arguments, reach the routine as given.
+        raise typer.BadParameter("expected UTF-8 text", param_hint="PROGRAM")
     elif values:
         names, args = values[:1], values[1:]
     else:
@@ -687,13 +702,14 @@ def refresh(
     ] = False,
 ) -> None:
     """Run due sensors, then due routines, then due assistants, of one brain, then refresh its search cache."""
+    kinds = _kinds(kind or [])
     result = update(
         execution(brain),
         dry_run=dry_run,
         sensors=tuple(sensor or ()),
         routines=tuple(routine or ()),
         assistants=tuple(assistant or ()),
-        kinds=_kinds(kind or []),
+        kinds=kinds,
     )
     emit(result)
     if not result["ok"]:
@@ -703,7 +719,8 @@ def refresh(
 def _kinds(values: list[str]) -> frozenset[ProgramKind]:
     """The program kinds an update runs; none given runs every kind."""
     if unknown := sorted(set(values) - KINDS):
-        raise typer.BadParameter(f"{unknown[0]} is not sensor, routine or assistant", param_hint="--kind")
+        # Worded like Click's choices, which quote the value: an empty one, as an unset variable gives, stays visible.
+        raise typer.BadParameter(f"{unknown[0]!r} is not one of 'sensor', 'routine', 'assistant'", param_hint="--kind")
     return cast("frozenset[ProgramKind]", frozenset(values)) if values else KINDS
 
 
@@ -729,8 +746,8 @@ def monitor(
     notify: Annotated[
         Literal["off", "failure", "success", "all"] | None,
         typer.Option(
-            help="Desktop notifications: off, failure (default; includes recovery), success or all; overrides "
-            "bf.yaml watch.notifications."
+            help="Desktop notifications: off, failure (default), success or all; every mode except off also alerts on "
+            "recovery; overrides bf.yaml watch.notifications."
         ),
     ] = None,
     json_output: Annotated[
@@ -808,8 +825,8 @@ def report(
     check: Annotated[
         bool,
         typer.Option(
-            help="Exit 1 on scheduled programs that are overdue, never ran or failed, on problems, unavailable brains "
-            "or broken references."
+            help="Exit 1 on problems, an unavailable cache, brain or reference, or scheduled programs that failed, are "
+            "overdue, never succeeded or fell silent."
         ),
     ] = False,
     watch: Annotated[
@@ -835,7 +852,7 @@ def report(
 
 @app.command("validate", rich_help_panel="Check and repair")
 def check(brain: OneBrainOption = "") -> None:
-    """Check OKF projects, concepts and ACTION.md notes, links and record files; exit 1 on problems."""
+    """Check OKF projects, concepts and ACTION.md notes, links, record files and program files; exit 1 on problems."""
     result = validate(one(brain))
     emit(result)
     if not result["valid"]:
@@ -1001,6 +1018,7 @@ class _Command(TyperCommand):
         for param in self.params:
             value = given.get(param.name)
             reason = _GIVEN.get(_named(param.get_error_hint(ctx)))
+            # Run's variadic arguments arrive as one tuple, left to perform(): only their PROGRAM must be text.
             values = value if isinstance(value, list) else [value]
             # Python decodes other bytes as surrogates: refuse them before a command writes, such as init's files.
             if any(isinstance(item, str) and not item.isascii() and _surrogates(item) for item in values):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import UTC, datetime
 from typing import Literal
@@ -31,8 +31,8 @@ def selection(
     assistants: tuple[str, ...] = (),
     kinds: frozenset[ProgramKind] = KINDS,
 ) -> tuple[set[str], set[str], set[str]]:
-    """An explicit list selects only those programs; omitted lists select all programs. `kinds` keeps only those
-    kinds of program, as watch does to run assistants beside collection."""
+    """Explicit lists select only the programs they name; with no list at all, every program is selected. `kinds`
+    keeps only those kinds of program, as watch does to run assistants beside collection."""
     for kind, names, known in (
         ("sensor", sensors, config.sensors),
         ("routine", routines, config.routines),
@@ -90,8 +90,9 @@ def late(
 
 
 @contextmanager
-def _cycle(store: Store, wait: float) -> Iterator[None]:
-    """Serialize collection cycles of one brain; prompts run outside it, so a long agent run never blocks collection."""
+def _cycle(store: Store, wait: float) -> Generator[None]:
+    """Serialize collection cycles of one brain; assistant work runs outside it, so a long agent run never blocks
+    collection."""
     with ExitStack() as stack:
         try:
             # Program names cannot start with a dot; this cannot collide with a program's lock.
@@ -101,26 +102,30 @@ def _cycle(store: Store, wait: float) -> Iterator[None]:
         yield
 
 
-def _update(
+def update(
     store: Store,
     *,
-    dry_run: bool,
-    now: datetime | None,
-    runner: Runner,
-    sensors: tuple[str, ...],
-    routines: tuple[str, ...],
+    dry_run: bool = False,
+    now: datetime | None = None,
+    runner: Runner = run,
+    sensors: tuple[str, ...] = (),
+    routines: tuple[str, ...] = (),
     assistants: tuple[str, ...] = (),
     kinds: frozenset[ProgramKind] = KINDS,
-    wait: float = 0,
+    wait: float = WAIT,
 ) -> dict[str, object]:
-    """One failing program never blocks the others; the report names it and its private log.
+    """Run one brain's due programs; like collect, a brain that cannot start its cycle fails with an error.
 
-    Routines run after the sensors, and prompts after both, so each sees this run's evidence. Sensors and routines
-    hold the brain's update lock, computing their due list inside it; prompts run after its release, each skipping
-    while a scheduled run of it is still active.
+    One failing program never blocks the others; the report names it and its private log. Routines run after the
+    sensors, and assistant work after both, so each sees this run's evidence. Collection cycles are serialized per
+    brain so watch and timers cannot repeat a stale due list: sensors and routines hold the brain's update lock,
+    waiting up to `wait` seconds for another cycle of the same brain, such as a schedule for another selection firing
+    at the same minute, then compute their due list inside it. Assistant work, due batch reads, schedules, queued jobs
+    and deliveries, runs after its release.
     """
     given = now
     config = load(store)
+    # Validate the selection before waiting for the lock or executing anything.
     selected_sensors, selected_routines, selected_assistants = selection(config, sensors, routines, assistants, kinds)
     failed = False
     results: list[dict[str, object]] = []
@@ -179,7 +184,7 @@ def _update(
     )
     if manual:
         report["manual"] = manual
-    # A prompt-only cycle that ran nothing changed nothing to index.
+    # An assistant-only cycle that ran nothing changed nothing to index.
     if not dry_run and (kinds & {"sensor", "routine"} or any(item["status"] == "ran" for item in asked)):
         try:
             report["index"] = index.refresh(store, wait=120, recover=True)
@@ -188,39 +193,6 @@ def _update(
             report["index"] = {"error": _failure(error)}
             failed = True
     return {"ok": not failed, "dry_run": dry_run, **report}
-
-
-def update(
-    store: Store,
-    *,
-    dry_run: bool = False,
-    now: datetime | None = None,
-    runner: Runner = run,
-    sensors: tuple[str, ...] = (),
-    routines: tuple[str, ...] = (),
-    assistants: tuple[str, ...] = (),
-    kinds: frozenset[ProgramKind] = KINDS,
-    wait: float = WAIT,
-) -> dict[str, object]:
-    """Run one brain's due programs; like collect, a brain that cannot start its cycle fails with an error.
-
-    Collection cycles are serialized per brain so watch and timers cannot repeat a stale due list. A cycle waits up
-    to `wait` seconds for another cycle of the same brain, such as a schedule for another selection firing at the
-    same minute, then computes its due list inside the lock.
-    """
-    # Validate the selection before waiting for the lock or executing anything.
-    selection(load(store), sensors, routines, assistants, kinds)
-    return _update(
-        store,
-        dry_run=dry_run,
-        now=now,
-        runner=runner,
-        sensors=sensors,
-        routines=routines,
-        assistants=assistants,
-        kinds=kinds,
-        wait=wait,
-    )
 
 
 def run_routines(

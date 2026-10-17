@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from bf import graph, index, links, usage
 from bf.config import load
 from bf.health import attention, source_health
-from bf.markdown import Markdown, action_note, authored, editor_lock, entry_note, note, reference, split_ref
+from bf.markdown import Markdown, action_note, authored, editor_lock, entry_note, note, preview, reference, split_ref
 from bf.models import (
     AUTHORED,
     CACHE,
@@ -32,10 +32,11 @@ from bf.models import (
     addressable,
     encode,
     present,
+    suggest,
     tag_name,
     timestamp,
 )
-from bf.storage import UNNAMED, Store, relative, temporary, unnamed
+from bf.storage import FileAncestorError, Store, relative, temporary, unread
 
 # The automatic reminder interval for project files; modification time is not evidence of verification.
 REVIEW_DAYS = 14
@@ -57,6 +58,7 @@ _SCOPE = (
     "a source period or its undated records (memories/gmail/7d, memories/gmail/undated), an identity or a tag "
     "(bf://NAME/tags/LABEL)"
 )
+_WHOLE = "scope takes a whole note without its #section; search the note, then read the section"
 _MISSING = "page not found; read projects, concepts, actions or memories to browse the brain"
 _BELOW = "(i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')"
 # Items outside the :low sources; notes have no source. Period and home lists keep those sources as counts.
@@ -203,7 +205,7 @@ def _scope(value: str, now: datetime | None) -> Scope:
         raise Error(_SCOPE)
     if authored(note := split_ref(path)[0]) and note != path:
         # Items carry a note's path, never a section's: a section ref, as search returns it, would scope nothing.
-        raise Error("scope takes a whole note without its #section; search the note, then read the section")
+        raise Error(_WHOLE)
     if parts[0] == "memories" and len(parts) >= 3:
         # The source pages below memories/SOURCE, and nothing else: another segment would scope nothing.
         if len(parts) == 3 and not parts[2].endswith(".json") and (found := period(parts[2], now)):
@@ -629,7 +631,8 @@ def home(
         activity = _counts(store, index.activity(connection, day, stamp), "24h")
         issues: list[dict[str, object]] = []
         try:
-            alerts = attention(store, now)
+            # From this connection: opening the cache again would wait behind a publish that waits for this read.
+            alerts = attention(store, now, index.sources(connection))
         except Error, OSError, UnicodeError:
             alerts = []
             issues.append({"brain": _name, "error": "operational status is unavailable; run bf status"})
@@ -715,11 +718,13 @@ def timeline(
     }
 
 
-def _directory(store: Store, path: str) -> bool:
+def _kind(store: Store, path: str) -> int:
+    """An entry's own file type, never a link target's; 0 when it is absent, unreadable or below a file. A link or
+    special file above it raises, naming that entry."""
     try:
-        return stat.S_ISDIR(store.mode(path))
-    except Error, OSError:
-        return False
+        return stat.S_IFMT(store.mode(path))
+    except FileAncestorError, OSError:
+        return 0
 
 
 def folder(
@@ -759,7 +764,8 @@ def folder(
 def memories(
     stores: list[Store], parts: tuple[str, ...], now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
-    """Sources with their coverage, one source with its records, or one source's records in a period."""
+    """Sources with their coverage, or one source's coverage with its records: all of them, those in a period, the
+    undated ones or one record file's."""
     now = now or datetime.now(UTC)
     if len(parts) == 1:
         if offset:
@@ -780,18 +786,19 @@ def memories(
     source = parts[1]
     if not re.fullmatch(NAME, source) or len(parts) > 3:
         raise NotFoundError(_MISSING)
+    # Every answering brain's sources: a source none of them holds names the close ones.
+    known: set[str] = set()
 
-    def known(store: Store, connection: sqlite3.Connection) -> dict[str, object] | None:
-        """The source's record count in a brain that indexes or configures it."""
-        return sources(store, connection).get(source)
+    def coverage(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
+        """The source's coverage in a brain that indexes or configures it: without it, an empty day would read as
+        absence."""
+        counts = sources(store, connection)
+        known.update(counts)
+        if (count := counts.get(source)) is None:
+            return None
+        return {"sources": [{"source": source, **count, **source_health(store, {source: count}, now=now)[source]}]}
 
     if len(parts) == 2:
-
-        def coverage(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
-            if (count := known(store, connection)) is None:
-                return None
-            return {"sources": [{"source": source, **count, **source_health(store, {source: count}, now=now)[source]}]}
-
         # A record's time is its stored instant: ordering by the column walks items_kind_source_time.
         reply, found = _listing(
             stores,
@@ -806,7 +813,7 @@ def memories(
         )
         if not found:
             # An unknown source is a missing page, never an empty answer.
-            raise absent(reply)
+            raise absent(reply, _MISSING + suggest(source, known, prefix="memories/"))
         return {"page": "/".join(parts), "sources": _gather(found, "sources"), **reply}
     name = parts[2]
     window = None if name.endswith(".json") else period(name, now)
@@ -819,10 +826,6 @@ def memories(
         where, params = "i.kind='record' AND i.path=:path", {"path": f"memories/{source}/{name}"}
     else:
         raise NotFoundError(_MISSING)
-
-    def exists(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object] | None:
-        return None if known(store, connection) is None else {}
-
     reply, found = _listing(
         stores,
         where,
@@ -832,12 +835,13 @@ def memories(
         PAGE,
         offset,
         counted=counted,
-        summary=exists,
+        summary=coverage,
     )
     if not found:
-        raise absent(reply)
+        raise absent(reply, _MISSING + suggest(source, known, prefix="memories/"))
     return {
         "page": "/".join(parts),
+        "sources": _gather(found, "sources"),
         **reply,
         **(
             {"previous": f"memories/{source}/{window.previous}", "next": f"memories/{source}/{window.next}"}
@@ -870,7 +874,7 @@ def tasks(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict
                     {
                         "ref": ref + ("#" + fragment if fragment else ""),
                         "note": ref,
-                        "title": title,
+                        "title": preview(title, index.TITLE),
                         "line": line,
                         "text": text,
                     },
@@ -916,7 +920,8 @@ def _label(name: str) -> None:
     try:
         tag_name(name)
     except ValueError as error:
-        raise Error("invalid tag label; use a ref returned by bf read tags") from error
+        # Both interfaces show this: MCP would rename a `bf read tags` hint to "the read tool tags".
+        raise Error("invalid tag label; read the tags page and use one of its refs") from error
 
 
 def tagged(stores: list[Store], name: str, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
@@ -977,13 +982,31 @@ def page(
 
 def folder_page(stores: list[Store], path: str) -> str | None:
     """The folder page an authored path names: a root, or an existing folder below one other than an action's,
-    which reads as its ACTION.md. Notes and their sections (`path#heading`) are items, not folders."""
+    which reads as its ACTION.md. Notes and their sections (`path#heading`) are items, not folders; a symlink or
+    special file where the folder would be, or above it, fails, naming it."""
     if (target := route(path)).kind != "folder":
         return None
     name = target.name
     relative(name)
+    if name in AUTHORED:
+        return name
     # Entity names such as projects/archive are logical: only an existing folder is a page.
-    return name if name in AUTHORED or any(_directory(store, name) for store in stores) else None
+    kinds: set[int] = set()
+    linked: Error | None = None
+    for store in stores:
+        try:
+            kinds.add(_kind(store, name))
+        except Error as error:
+            linked = error
+    if stat.S_IFDIR in kinds:
+        return name
+    if linked is not None:
+        # A folder below a link is skipped and reported like the link itself: not found would claim it absent.
+        raise linked
+    if kinds - {0, stat.S_IFREG}:
+        # Skipped and reported like a path below it: not found would claim the folder absent.
+        raise Error(f"{name}: expected a directory; symlinks and special files are not followed")
+    return None
 
 
 # A page has no relation page: by its syntax here, or once retrieve finds an existing folder below a root.
@@ -1008,6 +1031,8 @@ def readable(ref: str, rel: str = "") -> str:
 
 
 _SECTIONLESS = "pages have no sections; read the page without its #fragment"
+# A label may hold `#`, which only its address encodes: dropping the fragment of tags/C# would read the label C.
+_TAGGED = "tag pages have no sections; for a label holding #, read the tags page and use its ref"
 
 
 def _syntax(ref: str) -> tuple[str, bool]:
@@ -1033,7 +1058,7 @@ def _syntax(ref: str) -> tuple[str, bool]:
     bare = parsed is None and note != path and not fragment
     # A page, such as tasks or 7d, has no sections; a folder below a root may hold `#` in its name.
     if (fragment or bare) and links.reserved(note.rstrip("/")):
-        raise Error(_SECTIONLESS)
+        raise Error(_TAGGED if note.startswith("tags/") else _SECTIONLESS)
     target = route(path)
     if target.kind == "tag":
         _label(target.name.removeprefix("tags/"))
@@ -1059,9 +1084,9 @@ GLIMPSE = 160
 
 
 def _glimpse(item: dict[str, object]) -> dict[str, object]:
-    excerpt = item.get("excerpt")
-    if isinstance(excerpt, str) and len(excerpt) > GLIMPSE:
-        item["excerpt"] = excerpt[: GLIMPSE - 1].rstrip() + "…"
+    if isinstance(excerpt := item.get("excerpt"), str):
+        # Cut at a word, as other previews are.
+        item["excerpt"] = preview(excerpt, GLIMPSE)
     return item
 
 
@@ -1218,15 +1243,12 @@ def context(stores: list[Store], owner: Store, brain: str, reply: dict[str, obje
             result.update(_action(owner, brain, path, str(reply["text"]), skipped))
         except Error, OSError, sqlite3.DatabaseError:
             issues.append({"brain": brain, "error": "the action's files or projects are unavailable; run bf status"})
-        # Never followed, so never offered as the action's files; the owner can replace or rename them.
-        issues.extend(
-            {
-                "brain": brain,
-                "file": name,
-                "error": UNNAMED if unnamed(name) else "symlinks and special files are not listed",
-            }
-            for name in sorted(name for name in skipped if not editor_lock(name))[:LISTING]
-        )
+        # Never followed, so never offered as the action's files; the owner can replace or rename them. The cache
+        # names each entry it scanned with its cause: only those it did not report, such as past its 200, are added,
+        # with the cause bf validate names.
+        reported = {(problem.get("brain"), problem.get("file")) for problem in issues}
+        unlisted = sorted(name for name in skipped if not editor_lock(name) and (brain, name) not in reported)
+        issues.extend({"brain": brain, "file": name, "error": unread(owner, name)} for name in unlisted[:LISTING])
     return {
         **result,
         **({"stale": extra["stale"]} if "stale" in extra else {}),

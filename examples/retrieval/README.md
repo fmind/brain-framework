@@ -26,7 +26,7 @@ Run from the Brain Framework checkout after `uv sync --locked`. This subshell co
 )
 ```
 
-Expect validation to return `"valid":true`, with 15 notes and nine records, and evaluation to return `"passed":true`, `"score":"26/26"` and `"mrr":1.0`. The cases require Atlas's budget of 4200 credits to rank first, excluding Zephyr's competing budget of 900 credits.
+Expect validation to return `{"notes":15,"problems":[],"records":9,"valid":true}` and evaluation to return `"passed":true`, `"score":"26/26"` and `"mrr":1.0`. The cases require Atlas's budget of 4200 credits to rank first, excluding Zephyr's competing budget of 900 credits.
 
 `bf.yaml`, `projects/`, `concepts/`, `actions/` and `memories/` form the brain; `evals/retrieval.yaml` holds its questions and expected results. The records are checked in: a disabled `catalog` sensor entry only sets that source's `priority: low`, and nothing is collected. There are no routines or related brains. The example pins UTC and uses fixed dates. Retrieval may refresh the disposable `.bf/` cache; it does not collect or count evaluation reads as user usage.
 
@@ -53,6 +53,7 @@ cases:
     text: [4200 credits]
   - name: read-the-budget-answer
     read: projects/atlas.md#budget
+    expect: [projects/atlas.md#budget]
     text: [The Atlas launch budget is 4200 credits.]
 ```
 

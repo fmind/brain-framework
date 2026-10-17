@@ -83,11 +83,9 @@ font = false
 features = [
   "content.action.edit",
   "content.action.view",
-  "content.code.annotate",
   "content.code.copy",
   "content.code.select",
   "content.footnote.tooltips",
-  "content.tabs.link",
   "content.tooltips",
   "navigation.footer",
   "navigation.instant",
@@ -140,25 +138,16 @@ link = "https://pypi.org/project/brain-framework/"
 name = "Brain Framework on PyPI"
 
 [project.markdown_extensions]
-abbr = {}
-admonition = {}
 attr_list = {}
-def_list = {}
 footnotes = {}
 md_in_html = {}
 toc.permalink = true
-pymdownx.details = {}
 pymdownx.highlight.line_spans = "__span"
 pymdownx.highlight.pygments_lang_class = true
-pymdownx.inlinehilite = {}
-pymdownx.keys = {}
-pymdownx.mark = {}
 # Changelog and license pages include the repository files; a missing file fails the build.
 pymdownx.snippets.check_paths = true
 pymdownx.snippets.restrict_base_path = true
 pymdownx.superfences = {}
-pymdownx.tabbed.alternate_style = true
-pymdownx.tasklist.custom_checkbox = true
 
 [project.plugins.redirects]
 # Preserve published URLs: the repository root leads to the overview, and merged pages lead to their new home.

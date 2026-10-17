@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from bf.markdown import note, parse
+from bf.markdown import LEAD, note, parse, section
 from bf.models import Error
 from conftest import assert_linear_time
 
@@ -116,6 +116,38 @@ def test_footnote_continuations_and_labels_follow_github() -> None:
         ("mail:m2", "decision", 13),
         ("mail:m3", "risks", 15),
     ]
+    # Four columns continue a definition indented by up to three spaces, and an example definition inside a
+    # continuation's fence keeps that footnote's indentation, so the fence still closes.
+    indented = b"# Web\n\n## Decision\n\nClaim.[^r]\n\n## Risks\n\n   [^r]: [Review](mail:m1)\n\n    [Quote](mail:m2)\n"
+    assert note("projects/web.md", indented).contexts == [("mail:m1", "decision", 9), ("mail:m2", "decision", 11)]
+    fenced = (
+        b"# Web\n\nClaim.[^1]\n\n[^1]: Example:\n\n    ```\n    [^2]: y\n    ```\n\n## After\n\nSee [Plan](mail:m1).\n"
+    )
+    parsed = note("projects/web.md", fenced)
+    assert (parsed.slugs, parsed.contexts) == ({"web", "after"}, [("mail:m1", "after", 13)])
+
+
+def test_a_footnote_definition_never_turns_code_or_a_rule_into_sections() -> None:
+    # A definition in an indented code block took the next code line as its continuation: that line left the block
+    # as a heading and a link that failed validation. A line right below a definition underlined it as a heading.
+    code = b"# Guide\n\nExample:\n\n    [^1]: A footnote\n    ## Not a heading\n    [Code](absent.md)\n\n## After\n"
+    parsed = note("projects/guide.md", code)
+    assert (parsed.slugs, parsed.contexts) == ({"guide", "after"}, [])
+    defined = b"# Web\n\nClaim.[^1]\n\n[^1]: [Review](mail:m1)\n"
+    for underline in (b"---\n---\n", b"===\n"):
+        assert note("projects/web.md", defined + underline).slugs == {"web"}
+    # So does one in a block quote, whose underline repeats its markers: `> ===` made the definition the note's title.
+    for quote, underline in ((b"> ", b">---\n"), (b"> ", b"> ===\n"), (b"> > ", b"> >    ---\n")):
+        quoted = note("projects/web.md", b"# Web\n\nClaim.[^1]\n\n" + quote + b"[^1]: [Review](mail:m1)\n" + underline)
+        assert (quoted.title, quoted.slugs, quoted.contexts) == ("Web", {"web"}, [("mail:m1", "web", 5)])
+    assert note("projects/web.md", b"# Web\n\n> Quoted\n> ---\n").slugs == {"web", "quoted"}
+    # As on GitHub, `---` is a rule ending the footnote: an indented line below it is code.
+    assert note("projects/web.md", defined + b"---\n    [Quote](mail:m2)\n").contexts == [("mail:m1", "web", 5)]
+    # A real setext heading after the definition keeps its section, and so does a paragraph whose text holds a
+    # definition indented like code.
+    assert note("projects/web.md", defined + b"## H\nText\n---\n").slugs == {"web", "h", "text"}
+    lazy = parse("projects/web.md", b"# Web\n\nClaim.[^1]\n    [^1]: text\n---\n")
+    assert [(h.level, h.line) for h in lazy.headings] == [(1, 0), (2, 2)]
 
 
 def test_a_run_of_footnote_openers_parses_in_linear_time() -> None:
@@ -126,6 +158,27 @@ def test_a_run_of_footnote_openers_parses_in_linear_time() -> None:
         assert note("projects/web.md", data).contexts == [("mail:m1", "decision", 9)]
 
     assert_linear_time(parse_run, 50_000)
+
+
+def test_a_long_line_dense_in_punctuation_parses_in_linear_time() -> None:
+    # markdown-it copied a line's pending text at each punctuation mark: a note holding pasted minified JSON took
+    # minutes to index, validate or read.
+    def parse_line(size: int) -> None:
+        note("projects/web.md", b"# Line\n\n" + b'{"k":1},' * size + b"\n")
+
+    assert_linear_time(parse_line, 100_000)
+    # The trailing spaces of a long line still make a hard break, which no slug keeps.
+    assert slugs(b"Title " + b"word " * 300 + b"end  \nline two\n---\n")[0].endswith("word-end-line-two")
+
+
+def test_links_to_any_source_name_are_links() -> None:
+    # markdown-it's HTML filter dropped links to the schemes file, data, javascript and vbscript, which a sensor may
+    # be named; BF renders no HTML. An inline data image still names no target.
+    assert note("projects/web.md", b"# Web\n\n[Notes](file:notes.txt) [Report](data:q3)\n").targets == [
+        "data:q3",
+        "file:notes.txt",
+    ]
+    assert note("projects/web.md", b"# Web\n\n![i](data:image/svg+xml;base64,AA)\n").targets == []
 
 
 @pytest.mark.parametrize(
@@ -140,6 +193,60 @@ def test_a_run_of_footnote_openers_parses_in_linear_time() -> None:
 def test_indented_footnote_definitions_keep_their_links(data: bytes) -> None:
     # CommonMark would read each definition as a link reference definition, its whole text as one target.
     assert note("projects/web.md", data).targets == ["mail:m1"]
+
+
+def test_note_projection_sections_and_titles() -> None:
+    projection = note(
+        "projects/p.md",
+        b"---\nsummary: Short summary.\ntags: [x]\n---\n# Title\n\nIntro [link](other.md).\n\n## Same\n\nA\n\n### Same\n\nB\n\n## Last\n\nC\n",
+    )
+    assert projection.title == "Title"
+    assert projection.knowledge.type == "project"
+    assert projection.lead == "Short summary."
+    assert [p.fragment for p in projection.passages] == ["", "same", "same-1", "last"]
+    assert projection.links == ["projects/other.md"]
+    assert note("concepts/some-name.md", b"No heading at all.\n").title == "some name"
+    footnoted = note(
+        "concepts/f.md", b"---\ntags: [2026, x]\n---\n# F\n\nClaim.[^a]\n\n[^a]: [Source](other.md#part).\n"
+    )
+    assert footnoted.targets == ["other.md#part"]
+    assert footnoted.knowledge.tags == ["2026", "x"]
+    assert note("actions/t/ACTION.md", b"# T\n\n## Only\n\nFirst section text.\n").lead == "First section text."
+    data = "# T\r\n\r\n## A\r\n\r\nx\u2028y\r\n\r\n## B\r\n".encode()
+    assert section("concepts/t.md", data, "a") == "## A\r\n\r\nx\u2028y\r\n\r\n"
+    for bad in [b"---\ntitle: x\n", b"\xff", b"---\ntags: x\n---\n", f"# {'x' * 4097}\n".encode()]:
+        with pytest.raises(Error):
+            note("concepts/x.md", bad)
+
+
+@pytest.mark.parametrize("frontmatter", ["", "---\ntype: concept\n---\n"])
+def test_a_rule_below_the_title_is_not_frontmatter(frontmatter: str) -> None:
+    data = f"{frontmatter}# Title\n---\nIntro text.\n\n---\n\n## Next\n\nBody\n".encode()
+    projection = note("concepts/x.md", data)
+    assert projection.title == "Title"
+    assert projection.lead == "Intro text."
+    assert [p.fragment for p in projection.passages] == ["", "next"]
+
+
+def test_indented_conflict_markers_are_literal_examples() -> None:
+    example = b"# Git\n\n```text\n <<<<<<< HEAD\n ours\n =======\n theirs\n >>>>>>> feature\n```\n"
+    assert note("concepts/git.md", example).title == "Git"
+    with pytest.raises(Error, match=r"line 4: unresolved merge conflict marker; .* indent a literal example"):
+        note("concepts/git.md", example.replace(b" <<<", b"<<<"))
+
+
+@pytest.mark.parametrize(
+    ("prefix", "unit", "suffix", "size"),
+    [
+        (b"# Links\n\n", b"[", b"]\n", 100_000),
+        (b"# Links\n\n- [ ] ", b"[](", b"\n", 30_000),
+        (b"# Heading\n\n## a", b" ", b"b\n", 100_000),
+    ],
+    ids=["brackets", "links", "heading"],
+)
+def test_adversarial_markdown_parses_in_linear_time(prefix: bytes, unit: bytes, suffix: bytes, size: int) -> None:
+    # Measure each former backtracking case separately: a slow linear case must not mask a quadratic one.
+    assert_linear_time(lambda n: note("concepts/adversarial.md", prefix + unit * n + suffix), size)
 
 
 def test_leads_and_tasks_drop_emphasis_but_keep_identifiers_and_code() -> None:
@@ -161,6 +268,17 @@ def test_leads_and_tasks_drop_emphasis_but_keep_identifiers_and_code() -> None:
         "Read [drafts](projects/_drafts/plan.md), [cfg](projects/config_.md) and [notes](projects/my notes_.md).",
         "Fix [init](https://example.test/src/pkg/__init__.py).",
     ]
+
+
+def test_a_lead_cut_short_ends_with_an_ellipsis() -> None:
+    # Listings and relation pages show the lead as an excerpt: cut mid-word without a mark, it read as complete.
+    words = "Evidence " * 60
+    assert note("projects/web.md", f"# Web\n\n{words}\n".encode()).lead == ("Evidence " * 35).rstrip() + "…"
+    assert note("projects/web.md", b"# Web\n\nShort.\n").lead == "Short."
+    # The lead reads a bounded prefix: a note continuing beyond it is cut short too, even when the prefix's words fit.
+    listed = " ".join(f"[link{n}](https://example.test/{'x' * 100})" for n in range(30))
+    lead = note("projects/web.md", f"# Web\n\n{listed}\n".encode()).lead
+    assert (lead[:12], lead[-1], len(lead) <= LEAD) == ("link0 link1 ", "…", True)
 
 
 def test_link_errors_name_their_line_or_frontmatter_key() -> None:

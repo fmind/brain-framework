@@ -1,5 +1,5 @@
 #!/bin/sh
-# Print exactly one tagged section from CHANGELOG.md for the GitHub release.
+# Print exactly one tagged section from CHANGELOG.md, up to the next level-2 heading, for the GitHub release.
 set -eu
 
 tag=${1:?usage: release-notes.sh <tag> [changelog]}
@@ -7,7 +7,7 @@ changelog=${2:-CHANGELOG.md}
 
 awk -v tag="${tag}" -v prefix="## [${tag}]" '
   index($0, prefix) == 1 { found++; active = 1; next }
-  /^## \[/ { active = 0 }
+  /^## / { active = 0 }
   active { notes = notes $0 "\n" }
   END {
     if (!found) {
