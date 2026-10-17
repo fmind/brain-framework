@@ -7,11 +7,11 @@ description: Validate saved files and test that recurring questions still retrie
 
 Check that files are valid, useful evidence stays findable and programs are healthy. Run these inside your brain:
 
-| Command             | What it checks                                                        |
-| ------------------- | --------------------------------------------------------------------- |
-| `bf validate`       | Notes, links, actions, record files and the programs `bf.yaml` names. |
-| `bf eval`           | Your saved questions still retrieve the expected evidence.            |
-| `bf status --check` | The cache and scheduled programs are healthy on this machine.         |
+| Command             | What it checks                                                                          |
+| ------------------- | --------------------------------------------------------------------------------------- |
+| `bf validate`       | Notes, links, actions, record files and the programs `bf.yaml` names.                   |
+| `bf eval`           | Your saved questions still retrieve the expected evidence.                              |
+| `bf status --check` | The cache, scheduled programs, assistant work and channels are healthy on this machine. |
 
 A valid New website note can still omit the reason for its decision: validation accepts its structure, while a retrieval case expecting that reason fails. Neither checks whether the reason is true. Program health depends on this machine's run history, which a teammate's clone does not share.
 
@@ -25,7 +25,7 @@ A valid New website note can still omit the reason for its decision: validation 
 - [Identities](links.md#give-a-subject-a-stable-identity): a BF `entity`, alias or `resource` names a whole subject in this brain, never also a folder page, and no two notes or records claim one identity (`ambiguous identity`); no identity holds invisible format characters, such as U+200B.
 - Record files: their names, the fixed record format and stored `fields` against the current `fields:`.
 - Files BF cannot read in `projects/`, `concepts/`, `actions/` and `memories/`: links, special files, unreadable folders and names that are not valid UTF-8 or hold a backslash, and a file where one of these folders belongs (`expected a folder; replace the file with a folder`).
-- Each enabled program: a script run directly must be an executable regular file, and behind a command on PATH, such as `[uv, run, ..., sensors/brief.py]`, the first `sensors/` or `routines/` path among the arguments must exist. An enabled prompt's `prompt` file must be a regular file of at most 120,000 bytes.
+- Each enabled program: a script run directly must be an executable regular file, and behind a command on PATH, such as `[uv, run, ..., sensors/brief.py]`, the first `sensors/`, `routines/` or `channels/` path among the arguments must exist; channel `send`, `read` and `stream` commands are checked the same way. An enabled assistant's `prompt` file must be a regular file of at most 120,000 bytes.
 
 Each distinct problem appears once per file; a link relation problem names the frontmatter key, such as `links:`, or the `line N` where it first occurs. A note whose frontmatter or links cannot be parsed reports that first, and its other problems once it is fixed. Validation lists at most 200 problems, then `"problems_truncated":true`: fix these and validate again. Targets in other brains appear under [`unresolved`](link-reference.md#across-brains), up to 200, then `"unresolved_truncated":true`, without making the brain invalid.
 

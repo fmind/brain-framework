@@ -24,6 +24,12 @@ From the framework checkout, run this isolated walkthrough:
   bf update
   cat logs/deliveries.jsonl
   bf read memories/personal
+  printf '%s\n' '{"id":"demo-send","text":"The review is ready."}' | bf channel send local --stdin
+  printf '%s\n' '{"id":"demo-retry","text":"Sent after the outage."}' |
+    CHANNEL_DEMO_OFFLINE=1 bf channel send local --stdin || echo "The send failed; its delivery waits in the queue."
+  bf queue demo-retry
+  bf queue demo-retry --retry
+  wc -l <logs/deliveries.jsonl
 )
 ```
 
@@ -32,7 +38,10 @@ Expected observations:
 1. Validation succeeds. The history read returns `hello-1` in `thread-1`; the queue still has no jobs.
 1. The manual run returns `Acknowledged.` and sends one message to the configured endpoint's default conversation.
 1. The first update runs the named review schedule and sends another message. The two lines in `logs/deliveries.jsonl` have distinct stable delivery IDs and an empty `reply_to`.
-1. `bf read memories/personal` lists both saved answers.
+1. `bf read memories/personal` lists both saved answers, with `"total":2`.
+1. `bf channel send` uses the endpoint directly, without an assistant: it saves the delivery, sends it and prints `"state":"delivered"` with the fixture's receipt, `"id":"sent-demo-send"`.
+1. With `CHANNEL_DEMO_OFFLINE` set, the fixture refuses to send, standing in for a provider outage: `bf channel send` exits 1, its reply shows `"state":"uncertain"`, since the fixture's `send` does not declare `idempotent: true`, with the `error`, and the fixture's message goes to `logs/channel.local.send.log`. `bf queue demo-retry` opens the saved delivery, text included, and `--retry` sends that same delivery once the outage is over: `{"id":"demo-retry","status":"delivered"}`. Watch and `bf update` never retry such a standalone send on their own.
+1. `logs/deliveries.jsonl` ends with four lines: the failed attempt recorded nothing.
 
 To try incoming messages, copy this brain to a directory you keep, select it explicitly and run:
 

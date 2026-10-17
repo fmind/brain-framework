@@ -220,7 +220,7 @@ inputs/, originals/                      # imports to process and retained origi
 .bf/                                     # disposable search cache; ignored by Git
 ```
 
-Search covers Markdown under `projects/`, `concepts/` and `actions/`, and records under `memories/`; an [assistant's](prompts.md#what-a-run-records) records hold model output, so they rank like a low-priority source. Everything else is configuration, programs and media. New brains also ignore `memories/` in Git; [Team setup](team.md#collect-on-a-laptop) shows how to share a reviewed source. Back up `memories/`, `inputs/` and `originals/`: ignored does not mean disposable. `.bf/` and `logs/` are safe to delete while BF is idle.
+Search covers Markdown under `projects/`, `concepts/` and `actions/`, and records under `memories/`; an [assistant's](prompts.md#what-a-run-records) records hold model output, so they rank like a low-priority source. Everything else is configuration, programs and media. New brains also ignore `memories/` in Git; [Team setup](team.md#collect-on-a-laptop) shows how to share a reviewed source. Back up `memories/`, `inputs/` and `originals/`, and an assistant brain's [durable queue](channels.md#queue-and-recovery), which lives outside it: ignored does not mean disposable. `.bf/` and `logs/` are safe to delete while BF is idle.
 
 ## Personal and team brains
 

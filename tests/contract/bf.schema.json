@@ -5,7 +5,7 @@
       "description": "One harness with independent acquisition, delivery, schedules and event reactions.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -168,7 +168,7 @@
       "description": "An owner's process interface, without scheduling or provider-specific settings.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -324,7 +324,7 @@
       "description": "A deterministic brain program: run when due, by a named hook, or now with `bf run`.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -441,7 +441,13 @@
           "title": "Cardinality",
           "type": "string"
         },
-        "description": { "maxLength": 4096, "minLength": 1, "title": "Description", "type": "string" },
+        "description": {
+          "description": "What a value of this field means, such as the account explicitly credited as the author.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
         "examples": {
           "description": "Complete field values checked against type and cardinality; never defaults.",
           "items": { "$ref": "#/$defs/JsonValue" },
@@ -475,6 +481,7 @@
           "title": "Targets"
         },
         "type": {
+          "description": "Strict value type; a relation requires identity.",
           "enum": ["string", "integer", "number", "boolean", "timestamp", "identity"],
           "title": "Type",
           "type": "string"
@@ -489,7 +496,7 @@
       "description": "A bounded sender; only explicitly idempotent adapters may retry uncertain outcomes automatically.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -536,7 +543,7 @@
       "if": { "properties": { "reconcile": { "type": "object" } }, "required": ["reconcile"] },
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -659,7 +666,7 @@
       "description": "A persistent JSON Lines process; timeout bounds acknowledgement writes, not healthy idle time.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -674,7 +681,7 @@
           "type": "array"
         },
         "max_bytes": {
-          "default": 65536,
+          "default": 1048576,
           "description": "Maximum bytes per incoming JSON Lines frame.",
           "maximum": 1048576,
           "minimum": 1024,
@@ -751,7 +758,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "One brain: its name, related brains, declared fields, and the sensors, routines and prompts it may run.",
+  "description": "One brain: its name, related brains, declared fields, and the sensors, routines and assistants it may run.",
   "properties": {
     "assistants": {
       "anyOf": [
@@ -824,7 +831,7 @@
         },
         { "type": "null" }
       ],
-      "description": "Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ from sensors.",
+      "description": "Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ from sensors and assistants.",
       "title": "Routines"
     },
     "sensors": {

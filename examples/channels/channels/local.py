@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Offline channel fixture: finite history, one pushed message, and recorded outgoing deliveries."""
+"""Offline channel fixture: finite history, one pushed message, and recorded outgoing deliveries.
+
+While CHANNEL_DEMO_OFFLINE is set, send fails before recording anything, standing in for a provider outage.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -23,6 +27,8 @@ def main(argv: list[str]) -> None:
         sys.stdout.write(json.dumps({"messages": [MESSAGE] if start <= MESSAGE["time"] < end else []}) + "\n")
     elif operation == "send":
         message = json.load(sys.stdin)
+        if os.environ.get("CHANNEL_DEMO_OFFLINE"):
+            sys.exit("local channel is offline; nothing was sent")
         destination = message.get("conversation") or "proactive-thread"
         path = Path("logs/deliveries.jsonl")
         path.parent.mkdir(exist_ok=True)

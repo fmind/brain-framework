@@ -2,7 +2,7 @@
 name: bf-action
 description: Start, resume, hand off or close a tracked work session (an action) in a Brain Framework brain (bf). Invoking this skill with a topic, such as "bf-action website-review", is the request to start that action now. Use to track a session, resume an action, hand off work or prepare for compaction.
 license: MIT
-compatibility: Requires Brain Framework 18 (the bf command) on Linux or macOS.
+compatibility: Requires Brain Framework 19 (the bf command) on Linux or macOS.
 ---
 
 # bf-action

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -48,7 +49,21 @@ def export() -> str:
                 '"title":"Brain assistant"',
             ],
         ),
-        ("channels", 0, ['"valid":true', '"id":"hello-1"', '"counts":{}', "Acknowledged."]),
+        (
+            "channels",
+            0,
+            [
+                '"valid":true',
+                '"id":"hello-1"',
+                '"counts":{}',
+                '"status":"ran","text":"Acknowledged."',
+                '"total":2',
+                '"id":"sent-demo-send"},"state":"delivered"',
+                "The send failed; its delivery waits in the queue.",
+                '"text":"Sent after the outage."',
+                '{"id":"demo-retry","status":"delivered"}',
+            ],
+        ),
         ("routines", 0, ['"status":"ran"', "weekly-review-", '"valid":true']),
         (
             "routines",
@@ -99,5 +114,13 @@ def test_readme_walkthrough(example: str, block: int | None, expected: list[str]
     assert result.returncode == 0, result.stderr + result.stdout
     for text in expected:
         assert text in result.stdout, result.stdout
+    if example == "channels":
+        # The manual run and the scheduled review each send one proactive message with its own stable id.
+        sent = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"conversation"')]
+        assert len(sent) == 2, result.stdout
+        assert sent[0]["id"] != sent[1]["id"]
+        assert all(item["reply_to"] == "" and item["text"] == "Acknowledged." for item in sent)
+        # The failed attempt recorded nothing: two assistant answers, then the direct send and the retried one.
+        assert re.search(r"^\s*4$", result.stdout, re.MULTILINE), result.stdout
     assert not (tmp_path / "unrelated-brain").exists()
     assert not list(tmp_path.glob("tmp.*")), "walkthrough did not remove its disposable brain"

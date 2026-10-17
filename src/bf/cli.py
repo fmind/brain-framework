@@ -825,8 +825,8 @@ def report(
     check: Annotated[
         bool,
         typer.Option(
-            help="Exit 1 on problems, an unavailable cache, brain or reference, or scheduled programs that failed, are "
-            "overdue, never succeeded or fell silent."
+            help="Exit 1 on problems, an unavailable cache, brain or reference, scheduled programs that failed, are "
+            "overdue, never succeeded or fell silent, unresolved assistant work, or a failing channel."
         ),
     ] = False,
     watch: Annotated[

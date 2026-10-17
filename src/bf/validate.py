@@ -13,7 +13,19 @@ from functools import cache
 from bf import links, ontology, pages, records
 from bf.config import load
 from bf.markdown import Note, authored, broken, editor_lock, note, okf, parse, resolve, scheme, validate_okf
-from bf.models import AUTHORED, IDENTITY, MAX_NOTE, MAX_PROMPT, Config, Error, Knowledge
+from bf.models import (
+    AUTHORED,
+    IDENTITY,
+    MAX_NOTE,
+    MAX_PROMPT,
+    Assistant,
+    ChannelOutput,
+    Config,
+    Error,
+    Knowledge,
+    ReplyOutput,
+)
+from bf.runtime import answer_limit, answer_space
 from bf.storage import Store, relative, temporary, unread
 
 _ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -138,6 +150,23 @@ def _script(argument: str) -> bool:
     )
 
 
+def _routes(settings: Assistant) -> int:
+    """The most deliveries one answer of an assistant can make, across the kinds of run that invoke it."""
+
+    def named(kind: str) -> set[str]:
+        return {
+            output.channel.name
+            for output in settings.outputs
+            if isinstance(output, ChannelOutput) and (output.channel.when is None or kind in output.channel.when)
+        }
+
+    reply = any(isinstance(output, ReplyOutput) for output in settings.outputs)
+    counts = [len(named(kind)) for kind in ("schedule", "trigger", "manual")]
+    # A reply and a named output to the incoming channel make one threaded delivery.
+    counts += [len(named("input") - {item.channel.name}) + reply for item in settings.inputs]
+    return max(counts, default=0)
+
+
 def _programs(store: Store, config: Config) -> list[dict[str, str]]:
     """Each enabled program the brain holds exists, with its prompt file; commands on PATH vary by machine.
 
@@ -154,6 +183,17 @@ def _programs(store: Store, config: Config) -> list[dict[str, str]]:
             readable, size = False, 0
         if prompt.enabled and not readable:
             problems.append(_problem("bf.yaml", f"assistants.{name}.prompt: {prompt.prompt} is not a regular file"))
+        elif (
+            prompt.enabled and (space := answer_space(prompt.max_bytes, 0, routes := _routes(prompt))) > answer_limit()
+        ):
+            # Every job would fail when it starts: the queue cannot reserve that much for one answer.
+            problems.append(
+                _problem(
+                    "bf.yaml",
+                    f"assistants.{name}: an answer with {routes} outputs needs {space >> 20} MiB of queue space, more "
+                    f"than one job may reserve ({answer_limit() >> 20} MiB); lower its max_bytes or its outputs",
+                )
+            )
         elif size > MAX_PROMPT:
             # Every run would fail on it: say so before the schedule does.
             problems.append(

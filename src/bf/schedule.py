@@ -217,7 +217,10 @@ def generate(
         )
     config = load(store)
     if not scheduled(config, sensors, routines, assistants):
-        raise Error("selection contains no enabled scheduled programs; configure a nonzero refresh first")
+        raise Error(
+            "selection contains no enabled scheduled programs; configure a nonzero refresh, or assistant schedules or read"
+            " inputs, first"
+        )
     executable = executable or Path(sys.executable).parent / "bf"
     executable = expand(executable).absolute()
     if not executable.is_file() or not os.access(executable, os.X_OK):

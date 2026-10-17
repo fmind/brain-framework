@@ -260,6 +260,6 @@ Before adding more data, choose a recurring question, the sources that answer it
 | Keep answers findable                | [Check your brain](checks.md).                                                                |
 | Use an agent                         | Install the skills with `bf skills ~/.agents/skills`, then read [Agent workflows](agents.md). |
 | Add external evidence                | [Add a sensor](sensors.md), then keep it fresh with [Watch and schedule](schedule.md).        |
-| Run your agent harness on a schedule | [Run prompts](prompts.md).                                                                    |
+| Run your agent harness on a schedule | [Assistants](prompts.md).                                                                     |
 | Share with a team                    | [Team setup](team.md).                                                                        |
 | Fix a failed step                    | [Troubleshooting](troubleshooting.md).                                                        |

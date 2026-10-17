@@ -5,7 +5,7 @@ description: Run deterministic brain programs now, on a schedule or from Git hoo
 
 # Run routines
 
-A routine is any deterministic program your brain runs: a validation, a backup, a weekly review. It uses no model and makes no decisions for you; run your agent harness as a [assistant](prompts.md) instead. Declare it under `routines:` in `bf.yaml`, then run it three ways:
+A routine is any deterministic program your brain runs: a validation, a backup, a weekly review. It uses no model and makes no decisions for you; run your agent harness as an [assistant](prompts.md) instead. Declare it under `routines:` in `bf.yaml`, then run it three ways:
 
 | Run it…     | With                                                 | For example                                |
 | ----------- | ---------------------------------------------------- | ------------------------------------------ |
@@ -119,7 +119,7 @@ The reply lists each routine with its `status`: `ran`, `skipped` or `failed` wit
 
 ## Write a routine
 
-Read the brain with `bf read` and `bf search` using literal arguments. Programs receive `BF_BRAIN` set to the brain running them, so a nested `bf` call reads that brain whatever your shell selected. Keep routines offline and deterministic; do not edit notes or call a model: a [assistant](prompts.md) runs your agent. Name each item by the `uri` it returns, or by its `ref` when it has none, so a reviewer chooses what to open; a link from a dated action would count as [newer evidence](brain.md#review-reminders) for its target.
+Read the brain with `bf read` and `bf search` using literal arguments. Programs receive `BF_BRAIN` set to the brain running them, so a nested `bf` call reads that brain whatever your shell selected. Keep routines offline and deterministic; do not edit notes or call a model: an [assistant](prompts.md) runs your agent. Name each item by the `uri` it returns, or by its `ref` when it has none, so a reviewer chooses what to open; a link from a dated action would count as [newer evidence](brain.md#review-reminders) for its target.
 
 An `output: action` routine prints one complete OKF note with a nonempty `type`, such as:
 

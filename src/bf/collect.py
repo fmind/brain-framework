@@ -439,7 +439,13 @@ def collect(
                 # Local import avoids coupling the low-level process runner to the assistant dispatcher.
                 from bf.assistants import sensor_event
 
-                event = sensor_event(config, name, start, end)
+                # The triggers configured now, not when the sensor started, decide which assistants this change
+                # concerns; dispatch checks them again. A bf.yaml mid-edit keeps the run's own configuration.
+                try:
+                    current = load(store)
+                except Error:
+                    current = config
+                event = sensor_event(current, name, start, end)
                 result.update(records.upsert(store, name, incoming, snapshot=snapshot, event=event))
                 committed = True
                 result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
@@ -457,19 +463,17 @@ def collect(
                     **{key: value for key, value in result.items() if key != "sensor"},
                 )
         except (Error, OSError, UnicodeError) as error:
-            if isinstance(error, records.DispatchPendingError):
-                raise
             message = (
                 str(error)
                 if isinstance(error, Error)
                 else "collector files are inaccessible; check its executable, record permissions and free space"
             )
-            # A failed collection never changes evidence: say so, unless the records were already committed.
-            message = (
-                "records were committed but local run history could not be saved; retry is safe"
-                if committed
-                else f"{message}; nothing was written"
-            )
+            # A failed collection never changes evidence: say so, unless the records were already committed,
+            # as when only their assistant event could not be queued.
+            if committed:
+                message = "records were committed but local run history could not be saved; retry is safe"
+            elif not (isinstance(error, records.DispatchPendingError) and error.source == name):
+                message = f"{message}; nothing was written"
             _failed(store, name, SENSORS, started, message, error, dry_run=dry_run)
         counts = ", ".join(f"{result.get(key, 0)} {key}" for key in ("added", "updated", "unchanged", "removed"))
         with suppress(Error, OSError):
@@ -718,18 +722,18 @@ def parse_reply(raw: bytes, pointer: str | None) -> tuple[str, dict[str, JsonVal
     try:
         output = raw.decode("utf-8")
     except UnicodeError as error:
-        raise Error("prompt command must print UTF-8") from error
+        raise Error("assistant command must print UTF-8") from error
     if pointer is None:
         return output.strip(), {}
     try:
         document = decode(raw)
     except Error as error:
-        raise Error("prompt command must print one JSON object when text is set") from error
+        raise Error("assistant command must print one JSON object when text is set") from error
     if not isinstance(document, dict):
-        raise Error("prompt command must print one JSON object when text is set")
+        raise Error("assistant command must print one JSON object when text is set")
     value = ontology.pointer(cast(JsonValue, document), pointer)
     if not isinstance(value, str):
-        raise Error(f"prompt reply has no text string at {pointer}")
+        raise Error(f"assistant reply has no text string at {pointer}")
     parent, _, key = pointer.rpartition("/")
     holder = ontology.pointer(cast(JsonValue, document), parent) if parent else document
     if isinstance(holder, dict):

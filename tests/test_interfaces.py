@@ -11,6 +11,7 @@ import subprocess
 import sys
 from collections.abc import Generator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from importlib.metadata import version as distribution_version
 from pathlib import Path
 
@@ -20,12 +21,14 @@ from typer.core import TyperGroup
 from typer.main import get_command
 from typer.testing import CliRunner
 
-from bf import links, pages, records
+from bf import assistants, links, pages, records
 from bf.cli import app, main
 from bf.config import user_config
 from bf.mcp import server
-from bf.models import Error, NotFoundError, Record
+from bf.messages import Message, Outgoing
+from bf.models import Error, NotFoundError, Record, Send, timestamp
 from bf.retrieve import read
+from bf.runtime import Queue
 from bf.storage import Store, writer
 from conftest import plain, records_file
 
@@ -107,6 +110,32 @@ def test_status_check_fails_on_overdue_sources(brain: Store) -> None:
         "bf.yaml", b"version: 8\nname: fixture\nsensors:\n  mail:\n    command: [sh, -c, exit 3]\n    refresh: 60\n"
     )
     assert invoke("status", "--brain", "fixture", "--check", code=1)["healthy"] is False
+
+
+def test_status_and_queue_state_every_instant_with_the_local_offset(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nchannels:\n  chat:\n    send: {command: [send-chat]}\n"
+        b"    stream: {command: [receive-chat]}\nassistants:\n  personal:\n    prompt: prompts/personal.md\n"
+        b"    command: [harness]\n    inputs:\n      - channel: {name: chat, mode: stream}\n"
+        b"    schedules:\n      review: {every: 1800}\n",
+    )
+    brain.write("prompts/personal.md", b"Answer {{input}}.\n")
+    at = datetime.now(UTC).isoformat()
+    message = Message(id="m-1", sender="owner", conversation="thread-1", time=timestamp(at), text="Why?")
+    assistants.accept(brain, "chat", [message], {"personal"})
+    Queue(brain).send("chat", Send(command=["send-chat"]), Outgoing(id="delivery-1", text="Hello"))
+    entry = invoke("status", "--brain", "fixture")["brains"][0]
+    replies = [
+        entry["assistants"],
+        entry["messaging"],
+        invoke("queue", "--brain", "fixture"),
+        invoke("queue", "delivery-1", "--brain", "fixture"),
+    ]
+    instants = re.findall(r'"(\d{4}-\d\d-\d\dT[^"]*)"', json.dumps(replies))
+    # A schedule's next run, a job's creation and a delivery's due time, like every other reply time.
+    assert len(instants) >= 4
+    assert all(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00", instant) for instant in instants), instants
 
 
 @pytest.mark.parametrize(

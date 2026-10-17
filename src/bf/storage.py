@@ -497,7 +497,8 @@ def runtime_store(store: Store) -> Store:
     """Durable assistant obligations follow the physical brain, as its execution locks do.
 
     The queue also checks the canonical path and configured name to reject accidental identity reuse.
-    Drain pending work before moving or renaming a brain; never discard this directory as a search cache.
+    A drained queue follows a move or rename; unresolved work refuses execution until the brain is restored. Never
+    discard this directory as a search cache.
     """
     return _private("runtime", store.identity, root=store.root)
 

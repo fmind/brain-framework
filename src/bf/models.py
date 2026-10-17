@@ -181,6 +181,8 @@ _INSTANTS = frozenset(
     {
         "at",
         "changed",
+        "created",
+        "due",
         "end",
         "last_collected",
         "last_success",
@@ -731,13 +733,13 @@ class Command(Model):
 
     model_config = ConfigDict(frozen=True)
 
-    # The placeholders each argument may hold; a prompt's command also takes its expanded prompt.
+    # The placeholders each argument may hold; an assistant's command also takes its expanded prompt.
     PLACEHOLDERS: ClassVar[tuple[str, ...]] = ("brain", "home", "start", "end")
 
     command: Annotated[list[str], Field(min_length=1, max_length=128)] = Field(
         description=(
             "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then "
-            "arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; a prompt's also {{prompt}}."
+            "arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}."
         ),
         json_schema_extra={
             "prefixItems": [
@@ -894,8 +896,9 @@ class Send(Command):
 class Stream(Command):
     """A persistent JSON Lines process; timeout bounds acknowledgement writes, not healthy idle time."""
 
+    # The largest valid envelope, with every bounded field at its limit and JSON-escaped, fits the default.
     max_bytes: Annotated[int, Field(ge=1024, le=1 << 20)] = Field(
-        default=65_536, description="Maximum bytes per incoming JSON Lines frame."
+        default=1 << 20, description="Maximum bytes per incoming JSON Lines frame."
     )
     timeout: Annotated[int, Field(ge=1, le=3600)] = Field(
         default=30, description="Seconds a blocked acknowledgement pipe may wait; idle streams do not time out."
@@ -1078,7 +1081,7 @@ class WatchSettings(Model):
 
 
 class Config(Model):
-    """One brain: its name, related brains, declared fields, and the sensors, routines and prompts it may run."""
+    """One brain: its name, related brains, declared fields, and the sensors, routines and assistants it may run."""
 
     # One validated configuration is shared by a whole command; freezing keeps it intact. Freezing does not
     # reach its dictionaries: read them, never change them, or a later load returns the changed value.
@@ -1118,10 +1121,10 @@ class Config(Model):
         default_factory=dict,
         json_schema_extra=_nullable,
         description="Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ "
-        "from sensors and prompts.",
+        "from sensors and assistants.",
     )
-    # A prompt name is the source of the records its runs write.
     channels: dict[Name, Channel] = Field(default_factory=dict, max_length=64, json_schema_extra=_nullable)
+    # An assistant name is the source of the records its runs write.
     assistants: dict[Name, Assistant] = Field(
         default_factory=dict,
         max_length=32,
@@ -1154,14 +1157,18 @@ class Config(Model):
             for item in assistant.inputs:
                 binding = item.channel
                 channel = self.channels.get(binding.name)
-                if channel is None or getattr(channel, binding.mode) is None:
+                if channel is None:
+                    raise ValueError(f"assistants.{name}.inputs: unknown channel {binding.name}")
+                if getattr(channel, binding.mode) is None:
                     raise ValueError(f"assistants.{name}.inputs: channel {binding.name} requires {binding.mode}")
                 if replies and channel.send is None:
                     raise ValueError(f"assistants.{name}.outputs: reply requires send on input channel {binding.name}")
             for item in assistant.outputs:
                 if isinstance(item, ChannelOutput):
                     channel = self.channels.get(item.channel.name)
-                    if channel is None or channel.send is None:
+                    if channel is None:
+                        raise ValueError(f"assistants.{name}.outputs: unknown channel {item.channel.name}")
+                    if channel.send is None:
                         raise ValueError(f"assistants.{name}.outputs: channel {item.channel.name} requires send")
             for trigger, settings in assistant.triggers.items():
                 if settings.sensor.name not in self.sensors:

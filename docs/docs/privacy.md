@@ -64,8 +64,8 @@ Replies and diagnostics escape control characters and invisible format character
 - Review direct `brains:` references: they add readable evidence to every search.
 - Share only files every recipient may read and retain; Git history keeps committed content.
 - Keep credentials with provider tools, and review sensor output before saving or sharing it.
-- Back up notes, records, originals and any pending recovery journal: BF is not a backup.
+- Back up notes, records, originals, any pending recovery journal and the local assistant queue: BF is not a backup.
 
 See [team setup](team.md) for sharing, [What BF does not do](concepts.md#what-bf-does-not-do) for its boundaries and [limits](limits.md#processes-and-logs) for process safeguards. Report suspected vulnerabilities through [private reporting](https://github.com/fmind/brain-framework/blob/main/SECURITY.md).
 
-Channels execute only through explicit channel commands or authorized assistant/watch work. Adapters own authentication, admitted senders and fixed destinations; remote text never selects executable commands. Queued inputs, saved answers and deliveries contain private content in the local BF runtime state. Preserve it for recovery and protect it like the brain; `bf queue ID` intentionally reveals that specific private body. See [channel recovery](channels.md#queue-and-recovery).
+Channels execute only through explicit channel commands or authorized assistant/watch work. Adapters own authentication, admitted senders and fixed destinations; remote text never selects executable commands. Queued inputs, saved answers and deliveries contain private content in the local BF runtime state. Preserve it for recovery and protect it like the brain; `bf queue ID` intentionally reveals that specific private body. Completed bodies are compacted beyond 8 MiB budgets, and identity tombstones with send receipts are deleted after 35 days. Search, read and status open the queue read-only and never create it. See [channel recovery](channels.md#queue-and-recovery).

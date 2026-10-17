@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import tomllib
-from collections.abc import Iterable, Mapping
+from collections.abc import Generator, Iterable, Mapping
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from bf import __version__, index, usage
 from bf.config import Selection, brain_name, load, related
 from bf.history import ASSISTANTS, ROUTINES, log_path, state
-from bf.models import CACHE, Assistant, Config, Error, Program, Sensor
-from bf.runtime import Queue
+from bf.models import CACHE, Assistant, Config, Error, Program, Sensor, decode, timestamp
+from bf.runtime import DATABASE, Queue
 from bf.storage import Store
 
 # Counters of the last committed collection, reported apart from indexed totals.
@@ -147,21 +149,108 @@ def routine_health(store: Store, *, now: datetime | None = None) -> dict[str, di
     return result
 
 
+class _Reader(Queue):
+    """The durable queue as status and retrieval see it: read only when it exists, never created, bound or locked for
+    writing, so reading never waits behind or blocks assistant work."""
+
+    def exists(self) -> bool:
+        # Execution creates the file, then commits its schema: until then the queue holds nothing.
+        try:
+            return self.store.lstat(DATABASE).st_size > 0
+        except FileNotFoundError:
+            return False
+
+    @contextmanager
+    def connect(self) -> Generator[sqlite3.Connection]:
+        info = self.store.lstat(DATABASE)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise Error("assistant queue must be a private regular file owned by you")
+        for suffix in ("-wal", "-shm", "-journal"):
+            with suppress(FileNotFoundError):
+                self.store.lstat(DATABASE + suffix)
+        try:
+            uri = (self.store.root / DATABASE).as_uri() + "?mode=ro"
+            connection = sqlite3.connect(uri, uri=True, timeout=10, isolation_level=None)
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA trusted_schema=OFF")
+                # One snapshot for every query of this read.
+                connection.execute("BEGIN")
+                if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
+                    raise Error("unsupported assistant queue version; preserve it and use its matching BF release")
+                # The binding execution writes and checks: a queue it refuses reports nothing either. A drained
+                # queue follows a moved or renamed brain at its next execution, so reading it is safe now.
+                bound = connection.execute("SELECT value FROM checkpoints WHERE key='binding'").fetchone()
+                if (
+                    bound is not None
+                    and decode(bound[0]) != {"path": str(self.brain.root), "name": load(self.brain).name}
+                    and Queue.unresolved(connection)
+                ):
+                    raise Error(
+                        "assistant queue holds unresolved work admitted under this brain's previous path or name; "
+                        "restore them, resolve the work with bf queue, then move or rename the brain again"
+                    )
+                yield connection
+            finally:
+                connection.close()
+        except sqlite3.DatabaseError as error:
+            raise Error(
+                "assistant queue is unavailable; preserve its files and check permissions, disk space or corruption"
+            ) from error
+
+    def failing(self) -> tuple[list[str], list[str]]:
+        """Assistants with failed or uncertain jobs, and channels with unresolved deliveries that failed or are
+        uncertain: durable work only an explicit retry or cancel resolves."""
+        with self.connect() as db:
+            jobs = db.execute(
+                "SELECT DISTINCT assistant FROM jobs WHERE state IN ('failed','uncertain') ORDER BY assistant"
+            ).fetchall()
+            deliveries = db.execute(
+                "SELECT DISTINCT channel FROM deliveries WHERE state NOT IN ('delivered','cancelled') "
+                "AND (state='uncertain' OR error!='') ORDER BY channel"
+            ).fetchall()
+        return [row[0] for row in jobs], [row[0] for row in deliveries]
+
+
 def assistant_health(store: Store, *, now: datetime | None = None) -> dict[str, dict[str, object]]:
-    """Each configured assistant's state, freshness, last scheduled success, runs, latest record and failure."""
+    """Each configured assistant's state, freshness, last scheduled success, runs, latest record and failure.
+
+    A queue that cannot be read leaves every freshness unknown and names the reason as each assistant's error.
+    """
     now = now or datetime.now(UTC)
     config, history = load(store), state(store, ASSISTANTS)
     result: dict[str, dict[str, object]] = {}
     if not config.assistants:
         return result
-    queue = Queue(store)
-    report = queue.report(limit=10000)
+    checkpoints: dict[str, object] = {}
+    failures: dict[str, str] = {}
+    unavailable = ""
+    try:
+        if (queue := _Reader(store)).exists():
+            with queue.connect() as db:
+                checkpoints = {
+                    row[0]: decode(row[1])
+                    for row in db.execute("SELECT key,value FROM checkpoints WHERE key LIKE 'schedule:%'")
+                }
+                # Each assistant's latest unresolved failure.
+                failures = {
+                    row[0]: row[1]
+                    for row in db.execute(
+                        "SELECT assistant,error,max(updated) FROM jobs WHERE state IN ('failed','uncertain') "
+                        "GROUP BY assistant"
+                    )
+                }
+    except (Error, OSError) as error:
+        unavailable = str(error) if isinstance(error, Error) else "assistant queue is inaccessible; check its state"
     for name, settings in sorted(config.assistants.items()):
         entry = history.get(name, {})
         schedules: dict[str, dict[str, object]] = {}
         for schedule, spec in settings.schedules.items():
-            progress = queue.progress(f"schedule:{name}:schedule:{schedule}")
-            success = str(progress.get("success", ""))
+            if unavailable:
+                schedules[schedule] = {"freshness": "unknown", "every": spec.every}
+                continue
+            progress = checkpoints.get(f"schedule:{name}:schedule:{schedule}")
+            success = str(progress.get("success", "")) if isinstance(progress, dict) else ""
             freshness = (
                 "never"
                 if not success
@@ -173,21 +262,17 @@ def assistant_health(store: Store, *, now: datetime | None = None) -> dict[str, 
             schedules[schedule] = {
                 "freshness": freshness,
                 "every": spec.every,
-                "next_due": due.isoformat(),
+                # The canonical instant replies present with the local offset, like every other time.
+                "next_due": timestamp(due.isoformat()),
                 **({"last_success": success} if success else {}),
             }
         freshness = next(
             (kind for kind in ("overdue", "never") if any(item["freshness"] == kind for item in schedules.values())),
             "fresh" if schedules else "manual",
         )
-        failures = [
-            job
-            for job in cast(list[dict[str, object]], report["jobs"])
-            if job["assistant"] == name and job["state"] in {"failed", "uncertain"}
-        ]
         item: dict[str, object] = {
             "state": "active" if settings.enabled else "disabled",
-            "freshness": freshness if settings.enabled else "unknown",
+            "freshness": "unknown" if unavailable or not settings.enabled else freshness,
             "runs": entry.get("runs", 0),
             "schedules": schedules,
             "inputs": [binding.channel.model_dump() for binding in settings.inputs],
@@ -196,8 +281,10 @@ def assistant_health(store: Store, *, now: datetime | None = None) -> dict[str, 
             item["last_success"] = entry["success"]
         if entry.get("record"):
             item["record"] = entry["record"]
-        if failures:
-            item.update(failed=True, error=failures[0]["error"], log=log_path(name))
+        if unavailable:
+            item.update(failed=True, error=unavailable)
+        elif name in failures:
+            item.update(failed=True, error=failures[name], log=log_path(name))
         result[name] = item
     return result
 
@@ -208,7 +295,8 @@ def _attention(
     routines: dict[str, dict[str, object]],
     assistants: dict[str, dict[str, object]],
 ) -> list[dict[str, object]]:
-    """Scheduled programs this machine runs that failed, have not succeeded recently or, for a source, fell silent."""
+    """Scheduled programs this machine runs that failed, have not succeeded recently or, for a source, fell silent, and
+    assistants with failed work however it was asked."""
     result: list[dict[str, object]] = []
     for kind, healths, programs in (
         ("sensor", {name: health for name, health in sources.items() if name not in config.assistants}, config.sensors),
@@ -222,7 +310,8 @@ def _attention(
                 settings
                 and settings.enabled
                 and (
-                    bool(settings.schedules or settings.inputs or settings.triggers)
+                    # An assistant's failed work stays queued until retried or cancelled, however it was asked.
+                    (failed or bool(settings.schedules or settings.inputs or settings.triggers))
                     if isinstance(settings, Assistant)
                     else settings.refresh
                 )
@@ -242,7 +331,8 @@ def _attention(
 def attention(
     store: Store, now: datetime | None = None, counts: Mapping[str, Mapping[str, object]] | None = None
 ) -> list[dict[str, object]]:
-    """Scheduled sensors, routines and assistants this machine runs that failed, are late or fell silent.
+    """Scheduled sensors, routines and assistants this machine runs that failed, are late or fell silent, and
+    assistants with failed work.
 
     `counts` are the indexed counts per source, as `index.sources` gives them, from a caller holding the cache open:
     opening it again would wait behind a publish that waits for that caller.
@@ -261,6 +351,44 @@ def attention(
         routine_health(store, now=now),
         assistant_health(store, now=now),
     )
+
+
+def _messaging(store: Store, config: Config) -> tuple[dict[str, object] | None, list[str], list[str]]:
+    """The queue's report, read only when it exists, then the assistants and channels it shows failing.
+
+    Failed and uncertain work counts until it is retried or cancelled. Stream and read errors count while the
+    dispatcher that records them runs: watch clears them whenever its dispatcher starts or stops.
+    """
+    queue = _Reader(store)
+    if not queue.exists():
+        return None, [], []
+    messaging = queue.report()
+    assistants, channels = queue.failing()
+    transports = cast(dict[str, object], messaging["transports"])
+    # Work that cannot start counts too: a schedule or trigger the queue refused, a trigger waiting for its prompt,
+    # and a dispatcher pass that fails for every assistant.
+    blocked = {
+        str(item.get("assistant"))
+        for item in cast(list[dict[str, object]], messaging.get("triggers", []))
+        if item.get("state") == "pending" and item.get("error")
+    }
+    for name, settings in config.assistants.items():
+        if settings.enabled and (
+            name in blocked
+            or any(
+                isinstance(value := transports.get(key), dict) and value.get("error")
+                for key in (f"health:assistant:{name}", "health:dispatcher")
+            )
+        ):
+            assistants = sorted({*assistants, name})
+    for name, settings in config.assistants.items():
+        for item in settings.inputs if settings.enabled else ():
+            channel = item.channel.name
+            key = f"health:channel:{channel}" if item.channel.mode == "stream" else f"health:read:{name}:{channel}"
+            value = transports.get(key)
+            if isinstance(value, dict) and value.get("error") and channel not in channels:
+                channels.append(channel)
+    return messaging, assistants, sorted(channels)
 
 
 def _pinned(store: Store) -> str:
@@ -291,8 +419,6 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             coverage = source_health(store, counts, now=now)
             routines = routine_health(store, now=now)
             assistants = assistant_health(store, now=now)
-            queue = Queue(store)
-            messaging = queue.report() if config.assistants or config.channels or queue.exists() else None
         except (Error, OSError, UnicodeError, sqlite3.DatabaseError) as error:
             # Status diagnoses brains: among registered ones, even beside only unavailable ones, one that cannot load
             # is reported, and the others still are. A brain selected alone fails with its own error.
@@ -316,40 +442,31 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
                 entry["reconciled"] = run["reconciled"]
             entry.update(_failure(name, run))
             sources[name] = {key: value for key, value in entry.items() if value != ""}
-        # The reasons a brain is unhealthy, beside its problems: the home page's list of late or failed programs.
-        alerts = _attention(config, coverage, routines, assistants)
-        # A busy cache still serves its last generation, marked stale in replies, while a live writer finishes.
-        if messaging:
-            job_counts = cast(dict[str, int], messaging["counts"])
-            unhealthy = bool(
-                job_counts.get("failed", 0) or job_counts.get("uncertain", 0) or messaging["delivery_failures"]
-            ) or bool(cast(dict[str, int], messaging["delivery_counts"]).get("uncertain", 0))
-            active_transports = {
-                f"health:channel:{item.channel.name}"
-                for settings in config.assistants.values()
-                if settings.enabled
-                for item in settings.inputs
-                if item.channel.mode == "stream"
-            }
-            active_transports |= {
-                f"health:read:{name}:{item.channel.name}"
-                for name, settings in config.assistants.items()
-                if settings.enabled
-                for item in settings.inputs
-                if item.channel.mode == "read"
-            }
-            active_transports |= {
-                "health:reactive",
-                "health:proactive",
-                *(f"health:delivery:{name}" for name in config.channels),
-            }
-            unhealthy |= any(
-                bool(cast(dict[str, object], value).get("error"))
-                for key, value in cast(dict[str, object], messaging["transports"]).items()
-                if key in active_transports
+        problems = cast("list[dict[str, object]]", summary["problems"])
+        try:
+            messaging, jobs, channels = _messaging(store, config)
+        except (Error, OSError) as error:
+            # Unread work is unknown work: the reply is incomplete, not healthy.
+            messaging, jobs, channels = None, [], []
+            problems.append(
+                {
+                    "error": str(error)
+                    if isinstance(error, Error)
+                    else "assistant queue is inaccessible; check its state"
+                }
             )
-            healthy &= not unhealthy
-        healthy &= not alerts and not summary["problems"] and summary["cache"] in {"ready", "busy"}
+        # The reasons a brain is unhealthy, beside its problems: the home page's late or failed programs, then
+        # unresolved assistant work and failing channels.
+        alerts = _attention(config, coverage, routines, assistants)
+        named = {entry.get("assistant") for entry in alerts}
+        alerts += [
+            {"assistant": name, "freshness": str(assistants.get(name, {}).get("freshness", "unknown")), "failed": True}
+            for name in jobs
+            if name not in named
+        ]
+        alerts += [{"channel": name, "freshness": "unknown", "failed": True} for name in channels]
+        # A busy cache still serves its last generation, marked stale in replies, while a live writer finishes.
+        healthy &= not alerts and not problems and summary["cache"] in {"ready", "busy"}
         brains.append(
             {
                 "brain": config.name,

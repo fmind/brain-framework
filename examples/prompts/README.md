@@ -1,6 +1,6 @@
 # Run an assistant offline
 
-A [assistant](../../docs/docs/prompts.md) runs your agent harness over the brain and keeps each reply as a record. This fictional brain replaces the harness with `cat`, which prints the expanded prompt it receives: no model, account or network is needed, and you see exactly what a real harness would be given.
+An [assistant](../../docs/docs/prompts.md) runs your agent harness over the brain and keeps each reply as a record. This fictional brain replaces the harness with `cat`, which prints the expanded prompt it receives: no model, account or network is needed, and you see exactly what a real harness would be given.
 
 | File                                         | Purpose                                                                                     |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------- |
@@ -35,10 +35,10 @@ Expect, in order:
 
 1. Validation returns `"valid":true`: the prompt file exists. Validation does not look up `cat` or your harness on PATH, which varies by machine: a run whose command is missing fails with `COMMAND is not on PATH` and writes no record.
 1. The dry run runs nothing: this assistant has no inputs, schedules or triggers. Only `bf run` starts it.
-1. The run returns `"status":"ran"`, the `record` it wrote, such as `assistant:20261014T090000Z-1a2b3c4d`, and its reply as `text`. Here the reply is the expanded prompt: the brain's absolute path, a window ending now and `Owner message: What changed in the launch?`.
+1. The run returns `"status":"ran"`, the `record` it wrote, such as `assistant:20261014T090000Z-1a2b3c4d`, and its reply as `text`. Here the reply is the expanded prompt: the brain's absolute path, the 24 hours ending now and `Owner message: What changed in the launch?`.
 1. The source page lists that one record, titled `Brain assistant`, the reply's first line without its heading mark.
-1. The scoped search finds the record by a word of the owner's message. Like any record, a prompt run is evidence the next run, `bf search` and your agents read back.
+1. The scoped search finds the record by a word of the owner's message. Like any record, an assistant run is evidence the next run, `bf search` and your agents read back.
 
 ## Use your harness
 
-Replace `[cat]` with your harness, such as `[claude, --print, --output-format, json, --tools, "Read,Grep,Glob,Bash", --allowedTools, "Bash(bf read *),Bash(bf search *)", --permission-mode, dontAsk]` with `text: /result`, then add `schedules: {review: {every: 1800}}` to run it every 30 minutes. [Pass the prompt to the harness](../../docs/docs/prompts.md#pass-the-prompt-to-the-harness) lists the harness settings; [prompt troubleshooting](../../docs/docs/troubleshooting.md#a-prompt-fails) covers failed runs. Swapping a harness back to `[cat]`, without `text`, is a quick way to check what it receives.
+Replace `[cat]` with your harness, such as `[claude, --print, --output-format, json, --tools, "Read,Grep,Glob,Bash", --allowedTools, "Bash(bf read *),Bash(bf search *)", --permission-mode, dontAsk]` with `text: /result`, then add `schedules: {review: {every: 1800}}` to run it every 30 minutes, about 1,440 harness runs a month: pick the interval whose model cost you accept. [Pass the prompt to the harness](../../docs/docs/prompts.md#pass-the-prompt-to-the-harness) lists the harness settings; [assistant troubleshooting](../../docs/docs/troubleshooting.md#a-prompt-fails) covers failed runs. To check later what the harness receives, keep this `[cat]` assistant under another name, without `text`, and dry-run it with `bf run NAME --dry-run`: swapping the command of an assistant with queued work fails that work until you retry it.

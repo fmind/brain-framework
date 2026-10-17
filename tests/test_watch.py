@@ -13,6 +13,7 @@ import subprocess
 import sys
 import termios
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,10 +26,12 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 import bf.collect as collector
+from bf.assistants import Dispatcher
 from bf.cli import _cancel, app
 from bf.history import state
 from bf.models import Error, WatchSettings, encode, local, timestamp
-from bf.storage import Store, state_store
+from bf.runtime import Queue
+from bf.storage import Store, collecting, state_store
 from bf.watch import (
     Dashboard,
     Job,
@@ -868,26 +871,6 @@ def test_a_cancellation_while_stopping_still_waits_then_kills(brain: Store, monk
     assert signals == ["terminate", "wait 1", "wait 59", "kill", "wait None"]
 
 
-def test_updates_stopping_together_share_one_bound_and_one_notice(
-    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    clock, signals = [0], []
-    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0]))
-    jobs = [Job(brain, (), ()), Job(brain, (), ())]
-    for job, name in zip(jobs, (" collection", " prompts"), strict=True):
-        job.process = cast("subprocess.Popen[bytes]", Hung(clock, signals, name))
-    _stop(*jobs)
-    # Signalled together, the prompt update has had its whole bound once the collection update is killed.
-    assert clock[0] == 60
-    assert [event for event in signals if not event.startswith("wait")] == [
-        "terminate collection",
-        "terminate prompts",
-        "kill collection",
-        "kill prompts",
-    ]
-    assert capsys.readouterr().err == "bf: stopping the active update; this can take up to 60 seconds\n"
-
-
 def test_job_tells_skipped_cache_files_apart_from_failed_programs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
@@ -1226,20 +1209,219 @@ def test_a_check_interval_slower_than_a_refresh_is_flagged(
     assert not capsys.readouterr().err
 
 
-def test_stopping_signals_every_update_before_waiting_for_any() -> None:
+HELPER = b"""assistants:
+  helper:
+    prompt: prompts/helper.md
+    command: [harness]
+"""
+
+
+def json_watch(
+    brain: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seconds: float,
+    step: Callable[[float], None] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Run `bf watch --json`, which snapshots every two seconds, for `seconds` of a fake clock that each 0.1-second
+    sleep advances; `step` sees the time."""
+    clock = [0.0]
+
+    def sleep(delay: float) -> None:
+        clock[0] = round(clock[0] + delay, 3)
+        if step is not None:
+            step(clock[0])
+        if clock[0] >= seconds:
+            raise StopIteration
+
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
+    monkeypatch.setattr(Job, "start", lambda _: None)
+    with pytest.raises(StopIteration):
+        watch(brain, interval=60, json_output=True)
+    captured = capsys.readouterr()
+    return [json.loads(line) for line in captured.out.splitlines()], captured.err.splitlines()
+
+
+def test_watch_signals_the_update_then_stops_the_dispatcher_then_waits(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    brain.write("bf.yaml", CONFIG + HELPER)
     events: list[str] = []
 
-    class Recorder:
-        def __init__(self, name: str) -> None:
-            self.name = name
+    class Update:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            events.append("start")
+
+        def poll(self) -> None:
+            return None
 
         def terminate(self) -> None:
-            events.append(f"terminate {self.name}")
+            events.append("terminate")
 
-        def close(self, _deadline: float | None = None, *, announce: bool = True) -> bool:
-            events.append(f"close {self.name}{'' if announce else ' quietly'}")
-            return True
+        def close(self) -> None:
+            events.append("close")
 
-    _stop(*cast("list[Job]", [Recorder("collection"), Recorder("assistants")]))
-    # Once one update said why the terminal waits, the next one says nothing.
-    assert events == ["terminate collection", "terminate assistants", "close collection", "close assistants quietly"]
+    class Dispatching:
+        def __init__(self, _store: Store, names: set[str]) -> None:
+            assert names == {"helper"}
+            self.tasks: dict[str, object] = {}
+            self.transports: dict[str, object] = {}
+            self.health: dict[str, str] = {}
+
+        def __enter__(self) -> Dispatching:
+            events.append("dispatcher start")
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            events.append("dispatcher close")
+
+        def tick(self) -> None:
+            pass
+
+    monkeypatch.setattr("bf.watch.Job", Update)
+    monkeypatch.setattr("bf.watch.Dispatcher", Dispatching)
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=iter([0.0]).__next__, sleep=lambda _: None))
+    with pytest.raises(StopIteration):
+        watch(brain, json_output=True)
+    # Exit callbacks run in reverse: the update is signalled before the dispatcher waits for its harnesses, and watch
+    # waits for the update only once the dispatcher stopped.
+    assert events == ["start", "dispatcher start", "terminate", "dispatcher close", "close"]
+
+
+@pytest.mark.parametrize("failure", ["invalid", "prompt", "capacity"])
+def test_watch_shows_dispatcher_errors_and_keeps_collecting(
+    brain: Store,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    # A due schedule whose prompt is missing, a half-saved bf.yaml or a full queue never stops watch.
+    config = CONFIG + HELPER + b"    schedules:\n      review: {every: 3600}\n"
+    brain.write("bf.yaml", config)
+    if failure != "prompt":
+        brain.write("prompts/helper.md", b"Review.\n")
+    if failure == "capacity":
+        # The queue refuses the schedule's job: schedule() reports it per assistant, retried after a backoff.
+        monkeypatch.setattr(
+            "bf.assistants.Queue.enqueue",
+            lambda *_: (_ for _ in ()).throw(Error("assistant queue is full; finish, retry or cancel unfinished work")),
+        )
+    ran: list[str] = []
+    monkeypatch.setattr("bf.assistants.Dispatcher.runner", lambda *_: ran.append("harness") or b"Reviewed.")
+
+    def step(now: float) -> None:
+        # Saved between two-second snapshots, so the next dispatcher pass reads it first.
+        if failure == "invalid" and now == 0.5:
+            brain.write("bf.yaml", config + b"  broken: [\n")
+        if failure == "invalid" and now == 3.5:
+            brain.write("bf.yaml", config)
+
+    events, errors = json_watch(brain, monkeypatch, capsys, 7, step)
+    reason = {
+        "invalid": "bf.yaml: invalid YAML",
+        "prompt": "prompts/helper.md: cannot read assistant helper's prompt",
+        "capacity": "assistant queue is full",
+    }[failure]
+    messages = [event["message"] for event in events]
+    assert any(message.startswith(reason) for message in messages), messages
+    # One diagnostic line on stderr for each new reason, not one per pass.
+    assert [line for line in errors if reason in line] == [errors[0]]
+    assert errors[0].startswith("bf: ")
+    if failure == "invalid":
+        assert "Configuration recovered" in messages
+        assert messages[-1] == "Assistant work resumed"
+    else:
+        # A schedule that cannot be admitted queues nothing, and collection keeps reporting its programs.
+        assert ran == []
+        assert all(event["programs"] for event in events)
+
+
+def test_watch_waits_for_an_update_that_owns_assistant_work(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    brain.write("bf.yaml", CONFIG + HELPER)
+    brain.write("prompts/helper.md", b"Review.\n")
+    owner = collecting(brain, ".dispatch")
+    owner.__enter__()
+
+    def step(now: float) -> None:
+        if now == 2.0:
+            # bf update finishes its assistant cycle.
+            owner.__exit__(None, None, None)
+
+    try:
+        events, errors = json_watch(brain, monkeypatch, capsys, 5, step)
+    finally:
+        owner.__exit__(None, None, None)
+    waiting = "Another bf update owns assistant work; assistants start once it finishes"
+    # The first snapshot precedes the first dispatcher pass.
+    assert events[1]["message"] == waiting
+    assert errors == [f"bf: {waiting}"]
+    assert events[-1]["message"] == "Assistant work resumed"
+
+
+def test_a_stopped_stream_worker_still_stops_watch(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    brain.write(
+        "bf.yaml",
+        CONFIG
+        + b"channels:\n  chat:\n    send: {command: [send]}\n    stream: {command: [receive]}\n"
+        + HELPER
+        + b"    inputs:\n      - channel: {name: chat, mode: stream}\n",
+    )
+    brain.write("prompts/helper.md", b"Answer.\n")
+    # A worker that returns without being stopped: watch exits so its service manager restarts it.
+    monkeypatch.setattr("bf.assistants.Dispatcher._stream", lambda *_: None)
+    clock = [0.0]
+
+    def sleep(delay: float) -> None:
+        clock[0] += delay
+        assert clock[0] < 10, "watch kept running without its stream"
+
+    monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
+    monkeypatch.setattr(Job, "start", lambda _: None)
+    with pytest.raises(Error, match="stream worker stopped unexpectedly"):
+        watch(brain, interval=3600, json_output=True)
+
+
+def test_an_idle_dispatcher_ticks_once_a_second(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    brain.write("bf.yaml", CONFIG + HELPER)
+    brain.write("prompts/helper.md", b"Review.\n")
+    ticks: list[float] = []
+    clock: list[float] = []
+    original = Dispatcher.tick
+
+    def counted(self: Dispatcher) -> None:
+        ticks.append(1)
+        original(self)
+
+    monkeypatch.setattr(Dispatcher, "tick", counted)
+    json_watch(brain, monkeypatch, capsys, 10, clock.append)
+    # Ten seconds of 0.1-second passes reach the queue ten times, not a hundred.
+    assert len(clock) == 100
+    assert len(ticks) == 10
+
+
+def test_watch_clears_the_transport_health_its_dispatcher_records(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    brain.write("bf.yaml", CONFIG + HELPER)
+    brain.write("prompts/helper.md", b"Review.\n")
+    queue = Queue(brain)
+    # A watcher that crashed left a stream error; a running one records another.
+    queue.set_progress("health:channel:chat", {"error": "stream exited", "at": "2026-10-17T00:00:00.000000Z"})
+    seen: list[dict] = []
+
+    def step(now: float) -> None:
+        if now == 1.0:
+            seen.append(cast("dict", queue.report()["transports"]))
+            queue.set_progress("health:read:helper:chat", {"error": "read failed", "at": "2026-10-17T00:00:00.000000Z"})
+
+    json_watch(brain, monkeypatch, capsys, 2, step)
+    # Health describes a running dispatcher only: bf status --check recovers once watch stops.
+    assert seen == [{}]
+    assert queue.report()["transports"] == {}

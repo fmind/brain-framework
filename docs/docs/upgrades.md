@@ -24,14 +24,14 @@ This site follows the repository's current code, which can be newer than your in
 
 ## Update
 
-Stop watchers and scheduled collection, read the [changelog](../changelog.md) and back up the idle brain. Then upgrade and confirm the new version:
+Stop watchers and scheduled collection, read the [changelog](../changelog.md) and back up the idle brain, together with its durable assistant queue under `$XDG_STATE_HOME/bf/runtime/` (normally `~/.local/state/bf/runtime/`), which lives outside the brain: a copy of its `queue.sqlite3` taken while no BF process runs is complete; see [queue recovery](channels.md#queue-and-recovery). Then upgrade and confirm the new version:
 
 ```bash
 uv tool upgrade brain-framework
 bf --version
 ```
 
-Apply the upgrade steps of each release newer than your previous version, oldest first, and finish a major release's steps before collecting again. When a release asks you to copy updated example sensors, routines or hooks, copy them from the tag matching `bf --version`, preserving your adaptations. Then check the brain and update the agent skills:
+Apply the upgrade steps of each release newer than your previous version, oldest first, and finish a major release's steps before collecting again. Resolve the work `bf queue` lists before a step that changes assistant or channel configuration: a queued job keeps the settings it was queued with and fails once they change. When a release asks you to copy updated example sensors, routines or hooks, copy them from the tag matching `bf --version`, preserving your adaptations. Then check the brain and update the agent skills:
 
 ```bash
 cd ~/brain

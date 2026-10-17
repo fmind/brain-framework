@@ -748,3 +748,22 @@ def test_validate_reports_a_prompt_file_every_run_would_reject(brain: Store) -> 
         "file": "bf.yaml",
         "error": f"assistants.assistant.prompt: prompts/a.md exceeds {MAX_PROMPT} bytes",
     } in problems
+
+
+def test_validate_reports_an_assistant_whose_answer_never_fits_the_queue(brain: Store) -> None:
+    channels = "".join(f"  out{n}:\n    send:\n      command: [cat]\n" for n in range(3))
+    outputs = "".join(f"      - channel: {{name: out{n}}}\n" for n in range(3))
+    config = (
+        f"version: 8\nname: fixture\nchannels:\n{channels}assistants:\n"
+        f"  large:\n    prompt: prompts/a.md\n    command: [agent]\n    max_bytes: 4194304\n    outputs:\n{outputs}"
+        "  small:\n    prompt: prompts/a.md\n    command: [agent]\n    outputs:\n      - channel: {name: out0}\n"
+    )
+    brain.write("bf.yaml", config.encode())
+    brain.write("prompts/a.md", b"Review.\n")
+    problems = cast("list[dict[str, str]]", validate(brain)["problems"])
+    # Each job of `large` would fail when it starts: say so before the schedule does.
+    refused = (
+        "assistants.large: an answer with 3 outputs needs 100 MiB of queue space, more than one job may reserve "
+        "(96 MiB); lower its max_bytes or its outputs"
+    )
+    assert [problem["error"] for problem in problems] == [refused]

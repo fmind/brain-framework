@@ -19,7 +19,7 @@ BF installs no background service. First run your programs once by hand.
 
 ```bash
 bf update --dry-run    # list due work; run nothing
-bf update              # run due sensors, then routines, then prompts
+bf update              # run due sensors, then routines, then assistants
 bf status --check
 ```
 
@@ -31,7 +31,7 @@ The dry run lists due programs with their windows, and names under `manual` the 
 bf watch
 ```
 
-Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. The assistant dispatcher supervises persistent streams, due batch reads, named schedules, queued events and deliveries beside collection; the dashboard marks assistants with `@`. A long proactive review leaves separate capacity for incoming messages. It can contact providers. Closing watch stops all owned process groups. Restart after changing channel commands or input subscriptions. See [assistant timing and recovery](prompts.md#schedule-and-overlap).
+Watch runs due sensors and routines at once, then checks again 60 seconds after each completed cycle; `--interval SECONDS` changes that. The assistant dispatcher supervises persistent streams, due batch reads, named schedules, queued events and deliveries beside collection; the dashboard marks assistants with `@`. A long proactive review leaves separate capacity for incoming messages. It can contact providers. Closing watch stops all owned process groups. Assistant work that cannot start, such as for a missing prompt or a full queue, never stops watch: the message line says why and watch retries; only a stopped stream worker ends it. Restart it after adding or renaming an assistant, or changing channel commands or stream subscriptions. See [assistant timing and recovery](prompts.md#schedule-and-overlap).
 
 The dashboard shows each program's state, last success, next due time, returned items and record changes. `never` means no success on this machine, such as a sensor that only backfilled older windows; `failed` means the last attempt failed. Items counts the records the last committed collection returned, even a backfill, not the stored total. Manual and disabled programs stay visible without running. Use `bf status --check` for full health.
 
@@ -48,7 +48,7 @@ This is the fictional [offline watch demo](https://github.com/fmind/brain-framew
 | `?`               | Toggle the guide: every key, sort field and count explained.                 |
 | `q`               | Cancel any active update and quit. Ctrl-C or closing the terminal exits 130. |
 
-Press `f` after adding a reviewed program to `bf.yaml`: its row appears and it runs if due. Refresh respects selectors, pause, `refresh` and failure backoff. When `bf.yaml` becomes invalid, or stops declaring a program you selected, the message line shows BF's diagnostic, such as `unknown sensor git; check names in bf.yaml`, and nothing runs until you fix it. Changes to the `watch` preferences need a restart.
+Press `f` after adding a reviewed sensor or routine to `bf.yaml`: its row appears and it runs if due. A new assistant's row appears too, but it runs only after you restart watch. Refresh respects selectors, pause, `refresh` and failure backoff. When `bf.yaml` becomes invalid, or stops declaring a program you selected, the message line shows BF's diagnostic, such as `unknown sensor git; check names in bf.yaml`, and nothing runs until you fix it. Changes to the `watch` preferences need a restart.
 
 ### Sort the dashboard
 
@@ -65,7 +65,7 @@ bf watch --json     # run due work and stream JSON Lines
 
 Observation shows local history alongside a native scheduler. It offers `u` to reread and has no pause. Without an interactive terminal, it fails and suggests `bf status`.
 
-`bf watch --json` writes a snapshot every `poll_interval` with `brain`, `running`, `assisting` (assistant work is active), `message` and `programs`, one row per program. A row's `status` is the dashboard state: `failed`, `never`, `due`, `fresh`, `manual` or `disabled`. Times show your local offset, and absent values are empty strings or null. The [`Row` class](https://github.com/fmind/brain-framework/blob/main/src/bf/watch.py) defines every row field. A JSON watcher always collects and fails while another watcher owns the brain.
+`bf watch --json` writes a snapshot every `poll_interval` with `brain`, `running`, `assisting` (assistant work is active), `message` and `programs`, one row per program. A row's `status` is the dashboard state: `failed`, `never`, `due`, `fresh`, `manual` or `disabled`. Times show your local offset, and absent values are empty strings or null. The [`Row` class](https://github.com/fmind/brain-framework/blob/main/src/bf/watch.py) defines every row field. A JSON watcher always collects and fails while another watcher owns the brain. It writes each new reason assistant work waits as one `bf:` line on stderr.
 
 ## Watch preferences
 
@@ -103,7 +103,7 @@ bf watch --sensor git-commits --routine weekly-review
 bf schedule --sensor git-commits --name git-only
 ```
 
-With no selector, every configured program is eligible, including programs added later (restart watch to activate new stream subscriptions). `bf update --kind KIND`, repeatable, keeps only sensors, routines or assistants. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run. To keep a long prompt from delaying a native schedule's collection, [give prompts their own job](prompts.md#schedule-and-overlap).
+With no selector, every configured program is eligible, including sensors and routines added later; restart watch after adding or renaming an assistant or changing stream subscriptions. `bf update --kind KIND`, repeatable, keeps only sensors, routines or assistants. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run. To keep a long assistant run from delaying a native schedule's collection, [give assistants their own job](prompts.md#schedule-and-overlap).
 
 ## Generate a native schedule
 
@@ -143,9 +143,9 @@ Updates of one brain run one at a time. A second update waits up to 10 minutes, 
 
 A program is **due** when it is enabled, has a nonzero `refresh` and has not succeeded on this machine within that many seconds. `refresh` defaults to `0` for sensors and routines, which keeps them manual: only `bf collect` or `bf run` starts them. Assistants have no implicit schedule: declare `schedules: {review: {every: 1800}}` for a 30-minute review; their input and schedule windows are independent.
 
-A sensor or routine failure lets the other programs continue and makes `bf update` exit 1. The failed program retries 1 minute later, then after 2, 4, 8… minutes per consecutive failure, never waiting longer than its `refresh`; a success resets the delay. `bf collect` and `bf run` always run at once, and a direct assistant run [leaves the schedule unchanged](prompts.md#schedule-and-overlap). An assistant failure instead remains queued for explicit inspection and retry; uncertain model effects are never replayed automatically. Each run appends to the program's log, `logs/NAME.log` in the brain, as [processes and logs](limits.md#processes-and-logs) describes.
+A sensor or routine failure lets the other programs continue and makes `bf update` exit 1. The failed program retries 1 minute later, then after 2, 4, 8… minutes per consecutive failure, never waiting longer than its `refresh`; a success resets the delay. `bf collect` and `bf run` always run at once, and a direct assistant run [leaves the schedule unchanged](prompts.md#schedule-and-overlap). An assistant failure instead remains queued for explicit inspection and retry; uncertain model effects are never replayed automatically. Each failing assistant read, schedule, trigger, job or delivery is its own `failed` row and makes `bf update` exit 1, while the other assistants still run. Each run appends to the program's log, `logs/NAME.log` in the brain, as [processes and logs](limits.md#processes-and-logs) describes.
 
-A scheduled program is `fresh` when it succeeded on this machine within twice its `refresh`, `overdue` when it has succeeded but not within that time, and `never` when it has no local success. A sensor succeeds only with a collection reaching the moment it runs: one that only [backfilled](sensors.md#backfills-and-coverage) older windows stays `never`. A program with `refresh: 0` is `manual`; a disabled program or historical source is `unknown`. `bf status --check` exits 1 for an enabled scheduled program that is `overdue`, `never` succeeded, last failed or, for a source, [fell silent](#silent-sources). Run it on the collecting machine: run history is local, even when records are shared.
+A scheduled program is `fresh` when it succeeded on this machine within twice its `refresh`, `overdue` when it has succeeded but not within that time, and `never` when it has no local success. A sensor succeeds only with a collection reaching the moment it runs: one that only [backfilled](sensors.md#backfills-and-coverage) older windows stays `never`. A program with `refresh: 0` is `manual`; a disabled program or historical source is `unknown`. `bf status --check` exits 1 for an enabled scheduled program that is `overdue`, `never` succeeded, last failed or, for a source, [fell silent](#silent-sources), for an assistant with failed or uncertain jobs or schedules or triggers that cannot start, and for a channel with an unresolved delivery that failed or is uncertain, or a stream or read error: see [`messaging`](commands.md#status-sources-and-routines). Run it on the collecting machine: run history is local, even when records are shared.
 
 ### Silent sources
 

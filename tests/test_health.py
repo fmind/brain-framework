@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -11,15 +13,17 @@ from typing import cast
 import pytest
 from typer.testing import CliRunner
 
-from bf import index, records
+from bf import assistants, index, records
 from bf.cli import app
 from bf.collect import collect, routine
 from bf.config import ABSENT, register
 from bf.health import report, source_health
 from bf.history import log_path
-from bf.models import Error, Query, encode
+from bf.messages import Message
+from bf.models import Error, Query, encode, timestamp
 from bf.retrieve import read, search
-from bf.storage import Store, state_store
+from bf.runtime import DATABASE, Queue
+from bf.storage import Store, runtime_store, state_store
 from bf.update import update
 
 
@@ -357,3 +361,148 @@ def test_status_names_the_installed_and_pinned_runtime(brain: Store) -> None:
     for lock in (b"[[package\n", b"a = " + b"[" * 100_000 + b"]" * 100_000, b"a = " + b"1" * 5000):
         brain.write("uv.lock", lock)
         assert "pinned" not in cast("dict", report([brain]))["brains"][0]["runtime"]
+
+
+ASSISTED = b"""version: 8
+name: fixture
+sensors: {}
+channels:
+  chat:
+    send: {command: [send-chat]}
+    stream: {command: [receive-chat]}
+assistants:
+  personal:
+    prompt: prompts/personal.md
+    command: [harness]
+    inputs:
+      - channel: {name: chat, mode: stream}
+    outputs:
+      - reply: {}
+  notes:
+    prompt: prompts/personal.md
+    command: [harness]
+"""
+
+
+def assisted(brain: Store) -> Store:
+    brain.write("bf.yaml", ASSISTED)
+    brain.write("prompts/personal.md", b"Answer {{input}}.\n")
+    return brain
+
+
+def incoming(key: str = "message-1") -> Message:
+    return Message(
+        id=key, sender="owner", conversation="thread-1", time=timestamp(datetime.now(UTC).isoformat()), text="Why?"
+    )
+
+
+def test_retrieval_and_status_never_create_or_write_lock_the_queue(brain: Store) -> None:
+    assisted(brain)
+    database = runtime_store(brain).root / DATABASE
+    search([brain], Query(text="offline retrieval"))
+    read([brain], "meetings:decision-1")
+    read([brain])
+    assert report([brain])["healthy"]
+    # Reading reports nothing yet: only execution creates and binds the queue.
+    assert not database.exists()
+    assistants.accept(brain, "chat", [incoming()], {"personal"})
+    # An execution transaction holds the queue's write lock: readers neither wait for it nor take it.
+    writer = sqlite3.connect(database, isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        started = time.monotonic()
+        status = cast("dict", report([brain]))["brains"][0]
+        assert read([brain], "meetings:decision-1")["ref"] == "meetings:decision-1"
+        assert time.monotonic() - started < 5
+    finally:
+        writer.close()
+    assert status["messaging"]["counts"] == {"pending": 1}
+
+
+def test_a_queue_execution_refuses_still_leaves_reads_and_status_working(brain: Store) -> None:
+    assisted(brain)
+    assistants.accept(brain, "chat", [incoming()], {"personal"})
+    # Renaming the brain leaves its queue bound to the former name.
+    brain.write("bf.yaml", ASSISTED.replace(b"name: fixture", b"name: renamed"))
+    assert read([brain], "meetings:decision-1")["ref"] == "meetings:decision-1"
+    status = cast("dict", report([brain]))
+    entry = status["brains"][0]
+    assert not status["healthy"]
+    # Status names the reason instead of failing, and claims no freshness it cannot read.
+    refused = (
+        "assistant queue holds unresolved work admitted under this brain's previous path or name; restore them, "
+        "resolve the work with bf queue, then move or rename the brain again"
+    )
+    assert [problem["error"] for problem in entry["problems"]] == [refused]
+    assert entry["assistants"]["personal"]["freshness"] == "unknown"
+    assert "messaging" not in entry
+    # Drained under its former name, the queue follows the renamed brain: status reads it without a problem.
+    brain.write("bf.yaml", ASSISTED)
+    for job in cast("list[dict]", Queue(brain).report()["jobs"]):
+        Queue(brain).retry(str(job["id"]), cancel=True)
+    brain.write("bf.yaml", ASSISTED.replace(b"name: fixture", b"name: renamed"))
+    entry = cast("dict", report([brain]))["brains"][0]
+    assert entry["problems"] == []
+    assert "messaging" in entry
+
+
+def test_status_names_unresolved_work_and_recovers_once_it_is_resolved(brain: Store) -> None:
+    assisted(brain)
+    queue = Queue(brain)
+
+    def failing(*_: object) -> bytes:
+        raise Error("harness timed out")
+
+    # A manual run that failed, and a message whose answer could not be sent.
+    assert not assistants.manual(brain, "notes", runner=failing)["ok"]
+    assistants.accept(brain, "chat", [incoming()], {"personal"})
+    key = queue.next(True, {"personal"})
+    assert key
+
+    def sent(argv: list[str], *_: object) -> bytes:
+        if argv[0] == "send-chat":
+            raise Error("send failed")
+        return b"Because."
+
+    assistants.execute(brain, key, runner=sent)
+    assistants.deliver(brain, runner=sent)
+    # A dispatcher's lane checkpoint repeats what the durable job already says.
+    queue.set_progress("health:reactive", {"error": "harness timed out", "at": "2026-10-17T00:00:00.000000Z"})
+    status = cast("dict", report([brain]))
+    attention = status["brains"][0]["attention"]
+    assert not status["healthy"]
+    assert attention == [
+        {"assistant": "notes", "freshness": "manual", "failed": True},
+        {"channel": "chat", "freshness": "unknown", "failed": True},
+    ]
+    for job in cast("list[dict]", queue.report()["jobs"]):
+        if job["state"] in {"failed", "uncertain"}:
+            queue.retry(str(job["id"]), cancel=True)
+    for delivery in cast("list[dict]", queue.report()["deliveries"]):
+        queue.retry(str(delivery["id"]), cancel=True)
+    # Resolved work no longer fails the check, whatever a stopped dispatcher's lane checkpoints still hold.
+    status = cast("dict", report([brain]))
+    assert status["brains"][0]["attention"] == []
+    assert status["healthy"]
+    # A running stream's error names its channel until watch clears it.
+    queue.set_progress("health:channel:chat", {"error": "stream exited", "at": "2026-10-17T00:00:00.000000Z"})
+    status = cast("dict", report([brain]))
+    assert status["brains"][0]["attention"] == [{"channel": "chat", "freshness": "unknown", "failed": True}]
+    assert not status["healthy"]
+
+
+def test_status_names_an_assistant_whose_work_cannot_start(brain: Store) -> None:
+    assisted(brain)
+    queue = Queue(brain)
+    # A schedule the full queue refused: the dispatcher records it per assistant and retries after a backoff.
+    queue.set_progress(
+        "health:assistant:notes", {"error": "assistant queue is full", "at": "2026-10-17T00:00:00.000000Z"}
+    )
+    status = cast("dict", report([brain]))
+    assert not status["healthy"]
+    assert {"assistant": "notes", "freshness": "manual", "failed": True} in status["brains"][0]["attention"]
+    # Once admission succeeds, the dispatcher records an empty error and status recovers.
+    queue.set_progress("health:assistant:notes", {"error": "", "at": "2026-10-17T00:01:00.000000Z"})
+    status = cast("dict", report([brain]))
+    assert status["brains"][0]["attention"] == []
+    assert status["healthy"]

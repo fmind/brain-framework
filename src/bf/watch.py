@@ -26,12 +26,13 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from bf.assistants import Dispatcher
+from bf.assistants import Dispatcher, StreamStoppedError
 from bf.collect import next_due, starting
 from bf.config import load
 from bf.health import assistant_health
 from bf.history import ROUTINES, SENSORS, environment, log_path, state
 from bf.models import Error, WatchSettings, decode, local, present, printable, terminal, timestamp
+from bf.runtime import Queue
 from bf.storage import BusyError, Store, collecting
 from bf.update import KINDS, ProgramKind, late, selection
 from bf.watch_settings import Notifications, settings
@@ -139,7 +140,8 @@ def snapshot(
     for name, health in assistant_health(store, now=now).items():
         settings = config.assistants[name]
         schedules = cast(dict[str, dict[str, object]], health["schedules"])
-        deadlines = [str(item["next_due"]) for item in schedules.values()]
+        # A queue that cannot be read states no deadline.
+        deadlines = [str(item["next_due"]) for item in schedules.values() if "next_due" in item]
         due = min(deadlines) if deadlines else ""
         success = str(health.get("last_success", ""))
         error = str(health.get("error", ""))
@@ -265,6 +267,9 @@ HEADER, FOOTER, FRAME, DETAILS = 2, 4, 4, 8
 WIDE = 120
 # Seconds a stopped update may take to roll back an interrupted record commit before it is killed.
 STOP = 60
+# Seconds between dispatcher passes in either mode: streamed input starts within about a second, and an idle watcher
+# leaves the queue alone in between.
+TICK = 1.0
 
 
 @dataclass
@@ -279,6 +284,8 @@ class Dashboard:
     running: bool = False
     # Assistant work runs in the watcher's dispatcher beside the collection cycle.
     assisting: bool = False
+    # Why the dispatcher cannot run assistant work now; it retries on its next pass.
+    waiting: str = ""
     message: str = "Ready"
     # Why the check interval runs a selected program late, shown in the header and the guide.
     late: str = ""
@@ -440,6 +447,8 @@ class Dashboard:
         )
         if self.assisting:
             working += " · assistant running"
+        if self.waiting:
+            working += " · assistants waiting"
         header = Text.assemble(
             (" BF ", "bold white on blue"),
             (f"  {clean(self.brain)}", "bold cyan"),
@@ -616,7 +625,7 @@ class Job:
             self.reply = None
 
     def terminate(self) -> None:
-        """Ask a running update to stop without waiting, so several jobs stop together.
+        """Ask a running update to stop without waiting, so it stops while the dispatcher stops its own work.
 
         One request only: a second SIGTERM would interrupt the update while it stops its own programs.
         """
@@ -624,32 +633,92 @@ class Job:
             self.stopping = True
             self.process.terminate()
 
-    def close(self, deadline: float | None = None, *, announce: bool = True) -> bool:
-        """Stop a running update by `deadline`, STOP seconds from now by default; True when it took over a second.
-
-        Without `announce`, a slow stop says nothing: updates stopping together explain the wait once.
-        """
-        slow = False
+    def close(self) -> None:
+        """Stop a running update within STOP seconds, then kill it."""
         if self.process is not None and self.process.poll() is None:
             self.terminate()
-            end = time.monotonic() + STOP if deadline is None else deadline
+            end = time.monotonic() + STOP
             try:
                 try:
                     self.process.wait(timeout=max(0, min(1, end - time.monotonic())))
                 except subprocess.TimeoutExpired:
-                    slow = True
                     # The dashboard is gone: say why the terminal waits instead of seeming to hang. A closed
                     # terminal must not skip the wait and kill below, which would leave the update unsupervised.
-                    if announce:
-                        with suppress(OSError, ValueError):
-                            sys.stderr.write(f"bf: stopping the active update; this can take up to {STOP} seconds\n")
-                            sys.stderr.flush()
+                    with suppress(OSError, ValueError):
+                        sys.stderr.write(f"bf: stopping the active update; this can take up to {STOP} seconds\n")
+                        sys.stderr.flush()
                     self.process.wait(timeout=max(0, end - time.monotonic()))
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait()
         self.discard()
-        return slow
+
+
+def _settle(store: Store) -> None:
+    """Stream, read and lane health describes a running dispatcher: clear what one left once it stopped or crashed.
+
+    Never creates the queue; a queue execution refuses keeps its entries for bf status to show.
+    """
+    queue = Queue(store)
+    with suppress(Error, OSError):
+        if queue.exists():
+            with queue.connect() as db:
+                db.execute("DELETE FROM checkpoints WHERE key LIKE 'health:%'")
+
+
+class Assistants:
+    """Assistant work beside collection: the dispatcher starts once it can, and a pass that fails is shown and retried.
+
+    Only a stopped stream worker stays fatal, as the dispatcher reports it: restarting watch reconnects it.
+    """
+
+    def __init__(
+        self, store: Store, selected: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], stack: ExitStack
+    ) -> None:
+        self.store, self.selected, self.stack = store, selected, stack
+        self.dispatcher: Dispatcher | None = None
+        self.due = 0.0
+        self.reason = ""
+        _settle(store)
+        # Registered first, so it runs once the dispatcher has stopped its streams and workers.
+        stack.callback(_settle, store)
+
+    @property
+    def running(self) -> bool:
+        return self.dispatcher is not None and bool({"reactive", "proactive"} & self.dispatcher.tasks.keys())
+
+    def tick(self, now: float) -> str | None:
+        """One pass at most every TICK seconds: why it failed, "" once passes succeed again, or None when unchanged."""
+        if now < self.due:
+            return None
+        self.due = now + TICK
+        try:
+            if self.dispatcher is None:
+                # The current selection: a retry must not start an assistant that bf.yaml no longer declares.
+                names = selection(load(self.store), *self.selected)[2]
+                self.dispatcher = self.stack.enter_context(Dispatcher(self.store, names))
+            self.dispatcher.tick()
+            # The dispatcher keeps running past a failing pass and records why: show that reason, else the first
+            # assistant whose schedule or trigger cannot start.
+            health = self.dispatcher.health
+            reason = health.get("dispatcher", "") or next(
+                (error for name, error in sorted(health.items()) if name.startswith("assistant:") and error), ""
+            )
+        except StreamStoppedError:
+            raise
+        except (Error, OSError, UnicodeError) as error:
+            reason = (
+                "Another bf update owns assistant work; assistants start once it finishes"
+                if isinstance(error, BusyError) and self.dispatcher is None
+                # BF's own diagnostic names the invalid field, file or capacity without quoting content.
+                else clean(str(error))
+                if isinstance(error, Error)
+                else "Assistant work cannot read its files; run bf status for diagnostics"
+            )
+        if reason == self.reason:
+            return None
+        self.reason = reason
+        return reason
 
 
 @contextmanager
@@ -725,12 +794,13 @@ def watch(
             if json_output:
                 sys.stderr.write(f"bf: {printable(dashboard.late)}\n")
         stack.callback(_stop, job)
+        # Exit callbacks run in reverse: the update is signalled first, then the dispatcher stops its streams and
+        # workers, then watch waits for the update.
         dispatcher = (
-            stack.enter_context(Dispatcher(store, selection(load(store), *selected)[2]))
+            Assistants(store, selected, stack.enter_context(ExitStack()))
             if not dashboard.observe and selection(load(store), *selected)[2]
             else None
         )
-        # Signal the update first, so it stops while the dispatcher stops its streams and workers.
         stack.callback(job.terminate)
         if json_output:
             _loop(store, dashboard, job, *selected, dispatcher=dispatcher)
@@ -745,18 +815,14 @@ def watch(
                 _loop(store, dashboard, job, *selected, dispatcher=dispatcher, live=live, descriptor=descriptor)
 
 
-def _stop(*jobs: Job) -> None:
-    """Signal every running update first, then wait for each: they stop together within one STOP bound.
+def _stop(job: Job) -> None:
+    """Wait for the signalled update to stop, or kill it.
 
-    A cancellation arriving meanwhile, such as a second Ctrl-C or the hangup of a closing terminal, is raised once
-    every update stopped or was killed.
+    A cancellation arriving meanwhile, such as a second Ctrl-C or the hangup of a closing terminal, is raised once the
+    update stopped or was killed.
     """
     with starting():
-        for job in jobs:
-            job.terminate()
-        deadline, announced = time.monotonic() + STOP, False
-        for job in jobs:
-            announced = job.close(deadline, announce=not announced) or announced
+        job.close()
 
 
 def _finished(job: Job, code: int, done: str, failed: str) -> tuple[str, int]:
@@ -777,7 +843,7 @@ def _loop(
     routines: tuple[str, ...],
     assistants: tuple[str, ...] = (),
     *,
-    dispatcher: Dispatcher | None = None,
+    dispatcher: Assistants | None = None,
     live: Live | None = None,
     descriptor: int = -1,
 ) -> None:
@@ -790,9 +856,8 @@ def _loop(
     refresh_requested = invalid = False
     while True:
         now = time.monotonic()
-        if dispatcher is not None and not dashboard.paused and not invalid:
-            dispatcher.tick()
-            dashboard.assisting = bool({"reactive", "proactive"} & dispatcher.tasks.keys())
+        if dispatcher is not None:
+            dashboard.assisting = dispatcher.running
         if dashboard.running and (code := job.poll()) is not None:
             dashboard.running = False
             dashboard.message, code = _finished(
@@ -882,6 +947,17 @@ def _loop(
                 sys.stdout.flush()
             next_read = now + preferences.poll_interval
             next_frame = 0
+        # After collection starts, so the message line keeps a new reason until the next snapshot shows it; an invalid
+        # bf.yaml already shows its own diagnostic.
+        if dispatcher is not None and not dashboard.paused and not invalid:
+            reason = dispatcher.tick(now)
+            if reason is not None:
+                dashboard.waiting = reason
+                dashboard.message = reason or "Assistant work resumed"
+                next_frame = 0
+                if reason and live is None:
+                    # One diagnostic line per new reason, like every other bf: line on stderr.
+                    sys.stderr.write(f"bf: {printable(reason)}\n")
         if live is None:
             time.sleep(0.1)
             continue

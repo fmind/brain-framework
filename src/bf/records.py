@@ -40,7 +40,14 @@ class _Journal(Model):
 
 
 class DispatchPendingError(Error):
-    """Records committed, but their durable lifecycle event still needs admission."""
+    """Records committed, but the assistant queue could not record their change event yet."""
+
+    def __init__(self, source: str, reason: str) -> None:
+        super().__init__(
+            f"{source} records were committed but their assistant event is not queued: {reason}; "
+            "preserve memories/.pending and retry once the queue is available"
+        )
+        self.source = source
 
 
 def _pending(store: Store) -> bool:
@@ -151,12 +158,12 @@ def recover(store: Store) -> None:
 
 def _finish(store: Store, journal: _Journal) -> None:
     if journal.event is not None:
+        # Admission only records the change: configuration, prompts and queue capacity cannot block writers.
         try:
             admit(store, journal.event)
         except (Error, OSError) as error:
-            raise DispatchPendingError(
-                "records were committed; event dispatch is pending; preserve memories/.pending and retry"
-            ) from error
+            reason = str(error) if isinstance(error, Error) else "the assistant queue is inaccessible"
+            raise DispatchPendingError(journal.source, reason) from error
     _clear(store)
 
 

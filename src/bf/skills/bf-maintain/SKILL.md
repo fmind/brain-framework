@@ -2,7 +2,7 @@
 name: bf-maintain
 description: Keep a Brain Framework brain (bf) healthy — add or fix sensors, field mappings, routines, assistants and Git hooks; collect, update, watch or schedule sources; diagnose overdue or failed collection; recover writes, fix bf validate problems, upgrade bf and resolve brain merge conflicts. Use for "connect this source", "collection failed", "my brain is out of date" or "upgrade bf".
 license: MIT
-compatibility: Requires Brain Framework 18 (the bf command) on Linux or macOS.
+compatibility: Requires Brain Framework 19 (the bf command) on Linux or macOS.
 ---
 
 # bf-maintain

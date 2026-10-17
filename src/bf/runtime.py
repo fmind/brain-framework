@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
-from collections.abc import Generator
+from collections.abc import Collection, Generator
 from contextlib import contextmanager, suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from functools import cache
 from threading import Lock
 from typing import Annotated, Literal, cast
 from uuid import uuid4
@@ -17,17 +18,38 @@ from pydantic import Field, JsonValue, ValidationError, field_validator
 from bf.config import load
 from bf.messages import Message, Outgoing, Receipt
 from bf.models import Assistant, Error, Invocation, Model, Name, Record, Send, decode, digest, encode, timestamp
-from bf.storage import BusyError, Store, collecting, runtime_store
+from bf.storage import BusyError, Store, collecting, lock_file, runtime_store
 
 DATABASE = "queue.sqlite3"
 MAX_PENDING = 10_000
 MAX_DATABASE = 256 << 20
 BODY_BUDGET = 8 << 20
+# Identity tombstones outlive the longest provider redelivery window, Pub/Sub's 31 days, then go: they must
+# never exhaust the queue.
+RETENTION = timedelta(days=35)
+# A failing idempotent delivery retries after 2, 4, ... up to 300 seconds; past this many attempts it waits for
+# an explicit retry or cancellation instead of starting its adapter forever.
+MAX_ATTEMPTS = 20
 _CREATE = Lock()
 
 
 def now() -> str:
     return timestamp(datetime.now(UTC).isoformat())
+
+
+def _limit() -> int:
+    """Stored bytes plus the answer space of claimed jobs never exceed this; admission stops at half of it, so
+    admitted work can always claim the answer space one job needs once running work finishes."""
+    return MAX_DATABASE * 3 // 4
+
+
+def answer_limit() -> int:
+    """The most answer space one job may reserve: what admission leaves free once the queue is full."""
+    return _limit() - _limit() // 2
+
+
+class QueueFullError(Error):
+    """Admission or a job's start waits for unfinished work to free space; nothing changed."""
 
 
 class Origin(Model):
@@ -62,10 +84,11 @@ class Work(Model):
 class EventTarget(Model):
     assistant: Name
     trigger: Name
-    configuration: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 
 
 class EventIntent(Model):
+    """A committed sensor change and the triggers that named its sensor then: names only, never configuration."""
+
     id: Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")]
     kind: Literal["sensor.changed"] = "sensor.changed"
     source: Name
@@ -83,22 +106,79 @@ class Prepared(Model):
 _SCHEMA = """
 CREATE TABLE events (id TEXT PRIMARY KEY, kind TEXT NOT NULL, source TEXT NOT NULL, at TEXT NOT NULL,
                      digest TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE triggers (id TEXT PRIMARY KEY, event TEXT NOT NULL, assistant TEXT NOT NULL, trigger TEXT NOT NULL,
+                       source TEXT NOT NULL, at TEXT NOT NULL, data TEXT NOT NULL, state TEXT NOT NULL,
+                       error TEXT NOT NULL DEFAULT '');
+CREATE INDEX trigger_states ON triggers(state,at);
 CREATE TABLE jobs (id TEXT PRIMARY KEY, assistant TEXT NOT NULL, kind TEXT NOT NULL, slot TEXT NOT NULL,
                    state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, payload TEXT NOT NULL,
-                   raw BLOB, prepared TEXT, error TEXT NOT NULL DEFAULT '');
+                   raw BLOB, prepared TEXT, error TEXT NOT NULL DEFAULT '', slots INTEGER NOT NULL);
 CREATE INDEX ready_jobs ON jobs(state,kind,created);
 CREATE INDEX job_slots ON jobs(assistant,slot,state);
 CREATE TABLE deliveries (id TEXT PRIMARY KEY, job TEXT REFERENCES jobs(id), channel TEXT NOT NULL,
-                         state TEXT NOT NULL, payload TEXT NOT NULL, command TEXT NOT NULL,
-                         receipt TEXT, error TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0,
-                         due TEXT NOT NULL);
+                         state TEXT NOT NULL, payload TEXT NOT NULL, command TEXT NOT NULL, digest TEXT NOT NULL,
+                         receipt TEXT, receipt_id TEXT, error TEXT NOT NULL DEFAULT '',
+                         attempts INTEGER NOT NULL DEFAULT 0, due TEXT NOT NULL);
 CREATE INDEX ready_deliveries ON deliveries(state,due);
+CREATE INDEX job_deliveries ON deliveries(job);
+CREATE INDEX delivery_receipts ON deliveries(channel,receipt_id);
 CREATE TABLE checkpoints (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE messages (id TEXT PRIMARY KEY, channel TEXT NOT NULL, conversation TEXT NOT NULL,
                        role TEXT NOT NULL, at TEXT NOT NULL, text TEXT NOT NULL);
 CREATE INDEX conversation_messages ON messages(channel,conversation,at);
 PRAGMA user_version=1;
 """
+_OBJECTS = "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+
+
+@cache
+def _expected() -> frozenset[tuple[str, str, str]]:
+    """The one current schema, exactly as SQLite records it: any other database is preserved, never adapted."""
+    db = sqlite3.connect(":memory:")
+    try:
+        for statement in _SCHEMA.split(";"):
+            if statement.strip():
+                db.execute(statement)
+        return frozenset(db.execute(_OBJECTS).fetchall())
+    finally:
+        db.close()
+
+
+def _identity(channel: str, payload: str, command: str) -> str:
+    """What one delivery id stands for; it outlives body compaction, so an identical resend stays recognizable."""
+    return digest(encode([channel, payload, command]))
+
+
+def answer_space(size: int, payload: int, routes: int) -> int:
+    """Bytes a started job can still write: `size` of raw output, then its record and one delivery per route, each
+    JSON-escaped up to sixfold (a control character becomes \\u00XX), plus identity fields per copy."""
+    return size * (1 + 6 * (1 + routes)) + (payload + 65_536) * (1 + routes)
+
+
+def retry_policy(idempotent: bool, owned: bool, attempts: int, reason: str) -> tuple[str, str, str]:
+    """The state, error and due time of a delivery after a failed or interrupted attempt.
+
+    Only an idempotent assistant delivery retries by itself, with bounded backoff; a standalone send waits for
+    `bf queue ID --retry`, and an unknown non-idempotent outcome for inspection.
+    """
+    if not idempotent:
+        return "uncertain", reason, ""
+    if not owned:
+        return "failed", f"{reason}; retry it with bf queue ID --retry", ""
+    if attempts >= MAX_ATTEMPTS:
+        return "failed", f"{reason}; stopped retrying after {attempts} attempts; retry or cancel it with bf queue", ""
+    delay = min(300, 2 ** min(attempts, 9))
+    return "pending", reason, timestamp((datetime.now(UTC) + timedelta(seconds=delay)).isoformat())
+
+
+def forget(store: Store, name: str) -> None:
+    """Remove the lock file of a finished job or delivery while holding that lock.
+
+    A finished job or delivery never runs again: a process that still locks the removed file finds nothing to do.
+    """
+    state, leaf = lock_file(store, f"collect-{name}.lock")
+    with suppress(Error, OSError):
+        state.delete(leaf, durable=False)
 
 
 class Queue:
@@ -116,7 +196,8 @@ class Queue:
         return True
 
     @contextmanager
-    def connect(self) -> Generator[sqlite3.Connection]:
+    def connect(self, *, bound: bool = True) -> Generator[sqlite3.Connection]:
+        """One immediate transaction; `bound` checks, or rebinds, the brain path and name the queue serves."""
         try:
             # Never open/close a live SQLite inode ourselves: POSIX close drops this process's locks,
             # including another thread's transaction. Serialize creation before SQLite can see the file.
@@ -142,7 +223,10 @@ class Queue:
                 connection.row_factory = sqlite3.Row
                 connection.execute("PRAGMA foreign_keys=ON")
                 connection.execute("PRAGMA trusted_schema=OFF")
-                connection.execute("PRAGMA synchronous=FULL")
+                # In the rollback-journal mode, only EXTRA also syncs the directory once deleting the journal has
+                # committed: each commit, such as the sending mark before an external send, is durable when it
+                # returns, not after a later write. That mode keeps the queue one file to back up.
+                connection.execute("PRAGMA synchronous=EXTRA")
                 connection.execute("BEGIN IMMEDIATE")
                 page_size = connection.execute("PRAGMA page_size").fetchone()[0]
                 connection.execute(f"PRAGMA max_page_count={MAX_DATABASE // page_size}").fetchall()
@@ -155,22 +239,10 @@ class Queue:
                             connection.execute(statement)
                 elif version != 1:
                     raise Error("unsupported assistant queue version; preserve it and use its matching BF release")
-                objects = connection.execute(
-                    "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
-                ).fetchall()
-                tables = {row[1] for row in objects if row[0] == "table"}
-                if tables != {"events", "jobs", "deliveries", "checkpoints", "messages"} or any(
-                    row[0] not in {"table", "index"} for row in objects
-                ):
+                if frozenset(tuple(row) for row in connection.execute(_OBJECTS)) != _expected():
                     raise Error("unexpected assistant queue schema; preserve it and repair it")
-                binding: dict[str, JsonValue] = {"path": str(self.brain.root), "name": load(self.brain).name}
-                previous = connection.execute("SELECT value FROM checkpoints WHERE key='binding'").fetchone()
-                if previous is not None and decode(previous[0]) != binding:
-                    raise Error(
-                        "assistant queue belongs to a different brain path or name; preserve pending work before rebinding it"
-                    )
-                if previous is None:
-                    self.checkpoint(connection, "binding", binding)
+                if bound:
+                    self._bind(connection)
                 yield connection
                 connection.commit()
             except BaseException:
@@ -182,6 +254,43 @@ class Queue:
             raise Error(
                 "assistant queue is unavailable; preserve its files and check permissions, disk space or corruption"
             ) from error
+
+    def _bind(self, db: sqlite3.Connection) -> None:
+        """Follow a drained brain to its new path or name; refuse while work admitted under the old one waits.
+
+        The queue is keyed by physical identity: the binding keeps a reused identity, or another path to the
+        same brain, from running work it did not admit.
+        """
+        try:
+            name: str | None = load(self.brain).name
+        except Error:
+            # A bf.yaml mid-edit must not keep running work from saving its answer: the path still binds the queue.
+            name = None
+        binding: dict[str, JsonValue] = {"path": str(self.brain.root), "name": name}
+        row = db.execute("SELECT value FROM checkpoints WHERE key='binding'").fetchone()
+        previous = decode(row[0]) if row is not None else None
+        if isinstance(previous, dict) and (
+            previous == binding or (name is None and previous.get("path") == binding["path"])
+        ):
+            return
+        if previous is not None and self.unresolved(db):
+            raise Error(
+                "assistant queue holds unresolved work admitted under this brain's previous path or name; restore "
+                "them, resolve the work with bf queue, then move or rename the brain again"
+            )
+        if name is not None:
+            self.checkpoint(db, "binding", binding)
+
+    @staticmethod
+    def unresolved(db: sqlite3.Connection) -> bool:
+        """Whether any job or delivery still waits; pending sensor events are not bound to a path."""
+        return (
+            db.execute(
+                "SELECT 1 FROM jobs WHERE state NOT IN ('complete','cancelled') UNION ALL "
+                "SELECT 1 FROM deliveries WHERE state NOT IN ('delivered','cancelled') LIMIT 1"
+            ).fetchone()
+            is not None
+        )
 
     @staticmethod
     def checkpoint(db: sqlite3.Connection, key: str, value: dict[str, JsonValue]) -> None:
@@ -213,55 +322,71 @@ class Queue:
         db.execute("INSERT OR IGNORE INTO events VALUES (?,?,?,?,?,?)", (key, kind, source, at, checksum, encoded))
 
     @staticmethod
-    def reserve(db: sqlite3.Connection, slots: int, size: int) -> None:
-        Queue.trim(db)
-        # An unfinished job reserves its future deliveries as well as its own slot. Once complete,
-        # only actual unresolved deliveries count; never double-count already prepared fan-out.
-        count = db.execute(
-            "SELECT coalesce(sum(1+json_array_length(payload,'$.routes')),0) FROM jobs "
-            "WHERE state NOT IN ('complete','cancelled')"
-        ).fetchone()[0]
-        count += db.execute(
-            "SELECT count(*) FROM deliveries WHERE state NOT IN ('delivered','cancelled') "
-            "AND (job IS NULL OR job IN (SELECT id FROM jobs WHERE state IN ('complete','cancelled')))"
-        ).fetchone()[0]
-        if count + slots > MAX_PENDING:
-            raise Error("assistant queue has no unfinished-work slots; resolve its backlog before accepting more input")
-        # Reserve before acknowledging input: raw output, record text/metadata and every delivery.
-        # Sixfold encoding headroom covers JSON escaping and number normalization. Count occupied pages
-        # too: identity tombstones survive body retention and must not consume future answer space.
-        reserved = db.execute(
-            "SELECT coalesce(sum(json_extract(payload,'$.settings.max_bytes') * 6 * "
-            "(3+json_array_length(payload,'$.routes')) + 2*length(CAST(payload AS BLOB))),0) "
-            "FROM jobs WHERE state NOT IN ('complete','cancelled')"
-        ).fetchone()[0]
-        reserved += db.execute(
-            "SELECT coalesce(sum(length(CAST(payload AS BLOB))+coalesce(length(raw),0)+coalesce(length(CAST(prepared AS BLOB)),0)),0) "
-            "FROM jobs WHERE state IN ('complete','cancelled') AND EXISTS "
-            "(SELECT 1 FROM deliveries WHERE job=jobs.id AND state NOT IN ('delivered','cancelled'))"
-        ).fetchone()[0]
-        reserved += db.execute(
-            "SELECT coalesce(sum(length(CAST(payload AS BLOB))+length(CAST(command AS BLOB))),0) FROM deliveries "
-            "WHERE state NOT IN ('delivered','cancelled') AND (job IS NULL OR job IN (SELECT id FROM jobs WHERE state IN ('complete','cancelled')))"
-        ).fetchone()[0]
+    def used(db: sqlite3.Connection) -> int:
+        """Occupied database bytes plus the answer space that started and answered jobs may still write."""
         pages = db.execute("PRAGMA page_count").fetchone()[0] - db.execute("PRAGMA freelist_count").fetchone()[0]
-        occupied = pages * db.execute("PRAGMA page_size").fetchone()[0]
-        if occupied + reserved + size > MAX_DATABASE * 3 // 4:
-            raise Error(
-                "assistant queue has insufficient reserved answer space; resolve its backlog before accepting more input"
-            )
+        used = pages * db.execute("PRAGMA page_size").fetchone()[0]
+        for row in db.execute(
+            "SELECT state,length(CAST(payload AS BLOB)),coalesce(length(raw),0),"
+            "json_extract(payload,'$.settings.max_bytes'),json_array_length(payload,'$.routes') "
+            "FROM jobs WHERE state IN ('running','answered')"
+        ):
+            size = row[3] if row[0] == "running" else row[2]
+            used += answer_space(int(size), int(row[1]), int(row[4]))
+        return used
 
     @staticmethod
-    def put(db: sqlite3.Connection, work: Work) -> None:
+    def reserve(db: sqlite3.Connection, slots: int, size: int, *, limit: int = 0, reason: str = "") -> None:
+        """Admit `slots` obligations and `size` bytes, or raise QueueFullError; admission stops at half the limit."""
+        if slots:
+            # An unfinished job counts its future deliveries as well as its own slot. Once complete, only actual
+            # unresolved deliveries count; never double-count already prepared fan-out.
+            count = db.execute(
+                "SELECT coalesce(sum(slots),0) FROM jobs WHERE state NOT IN ('complete','cancelled')"
+            ).fetchone()[0]
+            count += db.execute(
+                "SELECT count(*) FROM deliveries WHERE state NOT IN ('delivered','cancelled') "
+                "AND (job IS NULL OR job IN (SELECT id FROM jobs WHERE state IN ('complete','cancelled')))"
+            ).fetchone()[0]
+            if count + slots > MAX_PENDING:
+                raise QueueFullError(
+                    "assistant queue has no unfinished-work slots; resolve its backlog before accepting more input"
+                )
+        ceiling = limit or _limit() // 2
+        if Queue.used(db) + size > ceiling:
+            # Expired tombstones and bodies beyond their budgets may free enough: compact only when needed.
+            Queue.trim(db)
+            if Queue.used(db) + size > ceiling:
+                raise QueueFullError(
+                    reason or "assistant queue is full; finish, retry or cancel unfinished work before accepting more"
+                )
+
+    @staticmethod
+    def put(db: sqlite3.Connection, work: Work, *, error: str = "") -> None:
+        """Store one job; its answer space is reserved only when a worker starts it. An `error` stores it failed."""
         if db.execute("SELECT 1 FROM jobs WHERE id=?", (work.id,)).fetchone():
             return
-        required = work.settings.max_bytes * 6 * (3 + len(work.routes)) + len(work.model_dump_json().encode()) * 2
-        Queue.reserve(db, 1 + len(work.routes), required)
+        payload, slots = work.model_dump_json(), 1 + len(work.routes)
+        Queue.reserve(db, slots, 2 * len(payload.encode()))
         at = now()
         db.execute(
-            "INSERT INTO jobs(id,assistant,kind,slot,state,created,updated,payload) VALUES (?,?,?,?,'pending',?,?,?)",
-            (work.id, work.assistant, work.kind, work.slot, at, at, work.model_dump_json()),
+            "INSERT INTO jobs(id,assistant,kind,slot,state,created,updated,payload,error,slots) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                work.id,
+                work.assistant,
+                work.kind,
+                work.slot,
+                "failed" if error else "pending",
+                at,
+                at,
+                payload,
+                error,
+                slots,
+            ),
         )
+        if error:
+            Queue.event(db, uuid4().hex, "assistant.failed", "runtime", {"job": work.id, "uncertain": False}, at)
 
     def enqueue(self, work: Work) -> None:
         with self.connect() as db:
@@ -271,106 +396,103 @@ class Queue:
         self,
         name: str,
         messages: list[Message],
-        jobs: list[Work],
+        jobs: list[tuple[Work, str]],
         *,
         checkpoint: tuple[str, dict[str, JsonValue]] | None = None,
     ) -> None:
-        """Persist messages, every consumer obligation and transport progress before acknowledging."""
+        """Persist messages, every consumer obligation and transport progress before acknowledging.
+
+        Each job comes with the error that stores it failed, such as a message too large for its prompt, or "".
+        """
         with self.connect() as db:
             accepted: set[str] = set()
             for message in messages:
-                # A delivery receipt suppresses echoes even when an adapter omits own=true.
-                echoed = db.execute(
-                    "SELECT 1 FROM messages WHERE id=? AND role='assistant'", (f"{name}:{message.id}",)
-                ).fetchone()
+                key = f"{name}:{message.id}"
+                # A delivery receipt suppresses echoes even when an adapter omits own=true, and after the
+                # conversation cache trimmed the sent text.
+                echoed = (
+                    db.execute("SELECT 1 FROM messages WHERE id=? AND role='assistant'", (key,)).fetchone()
+                    or (
+                        db.execute("SELECT 1 FROM deliveries WHERE channel=? AND receipt_id=?", (name, message.id))
+                    ).fetchone()
+                )
                 if message.own or echoed:
                     continue
                 accepted.add(message.id)
                 payload = message.model_dump(mode="json", exclude={"cursor"})
-                self.event(db, f"input:{name}:{message.id}", "channel.received", name, payload, message.time)
+                if db.execute("SELECT 1 FROM events WHERE id=?", (f"input:{key}",)).fetchone() is None:
+                    self.reserve(db, 0, 2 * (len(encode(payload)) + len(message.text.encode())))
+                self.event(db, f"input:{key}", "channel.received", name, payload, message.time)
                 db.execute(
                     "INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,?)",
-                    (f"{name}:{message.id}", name, message.conversation, "user", message.time, message.text),
+                    (key, name, message.conversation, "user", message.time, message.text),
                 )
-            for work in jobs:
-                origin = work.origin
-                if origin is None or origin.message.id not in accepted:
-                    continue
-                work = work.model_copy(
-                    update={"id": digest(f"{work.assistant}:{name}:{origin.message.id}".encode())[:32]}
-                )
-                self.put(db, work)
+            for work, error in jobs:
+                if work.origin is not None and work.origin.message.id in accepted:
+                    self.put(db, work, error=error)
             if checkpoint:
                 self.checkpoint(db, *checkpoint)
             self.trim(db)
 
     def admit_event(self, event: EventIntent) -> None:
-        # A record journal is portable evidence, not an executable configuration or prompt carrier.
-        from bf.assistants import prepare
+        """Record a committed sensor change for each trigger that named its sensor; dispatch admits the jobs.
 
-        with self.connect() as db:
-            if db.execute("SELECT 1 FROM events WHERE id=?", (event.id,)).fetchone():
-                self.event(db, event.id, event.kind, event.source, event.data, event.at)
-                return
-        config = load(self.brain)
-        jobs = []
-        for target in event.targets:
-            settings = config.assistants.get(target.assistant)
-            trigger = settings.triggers.get(target.trigger) if settings else None
-            if (
-                settings is None
-                or trigger is None
-                or trigger.sensor.name != event.source
-                or trigger.event != event.kind
-            ):
-                raise Error(
-                    "pending sensor event no longer matches a configured assistant trigger; restore configuration before recovery"
-                )
-            if digest(encode(config.model_dump(mode="json"))) != target.configuration:
-                raise Error(
-                    "configuration changed before sensor event admission; restore it to recover pending dispatch"
-                )
-            jobs.append(
-                prepare(
-                    self.brain,
-                    target.assistant,
-                    "trigger",
-                    str(event.data["start"]),
-                    str(event.data["end"]),
-                    config=config,
-                    slot=f"trigger:{target.trigger}",
-                    key=digest(f"{event.id}:{target.assistant}:{target.trigger}".encode())[:32],
-                    event={"id": event.id, "type": event.kind, "sensor": event.source, **event.data},
-                )
-            )
-        with self.connect() as db:
-            existed = db.execute("SELECT 1 FROM events WHERE id=?", (event.id,)).fetchone() is not None
+        Record writers call this: it reads no configuration or prompt, reserves nothing and ignores the path
+        binding, so only an unavailable queue can delay it. A record journal is portable evidence, not an
+        executable configuration or prompt carrier.
+        """
+        with self.connect(bound=False) as db:
             self.event(db, event.id, event.kind, event.source, event.data, event.at)
-            if existed:
+            for target in event.targets:
+                db.execute(
+                    "INSERT OR IGNORE INTO triggers(id,event,assistant,trigger,source,at,data,state) "
+                    "VALUES (?,?,?,?,?,?,?,'pending')",
+                    (
+                        digest(f"{event.id}:{target.assistant}:{target.trigger}".encode())[:32],
+                        event.id,
+                        target.assistant,
+                        target.trigger,
+                        event.source,
+                        event.at,
+                        encode(event.data).decode(),
+                    ),
+                )
+
+    def pending_triggers(self) -> list[dict[str, object]]:
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM triggers WHERE state='pending' ORDER BY at,id")]
+
+    def settle(self, key: str, state: str, error: str = "") -> None:
+        """Mark a pending trigger dispatched or dropped, or keep it pending with the reason it waits."""
+        with self.connect() as db:
+            db.execute("UPDATE triggers SET state=?,error=? WHERE id=? AND state='pending'", (state, error, key))
+
+    def dispatch(self, key: str, work: Work) -> None:
+        """Admit one pending trigger once; it extends a compatible pending job of its slot instead of adding one."""
+        with self.connect() as db:
+            row = db.execute("SELECT state FROM triggers WHERE id=?", (key,)).fetchone()
+            if row is None or row[0] != "pending":
                 return
-            for work in jobs:
-                # Keep at most one pending successor to a running trigger, extending its evidence window.
-                previous = db.execute(
-                    "SELECT id,payload FROM jobs WHERE assistant=? AND slot=? AND state='pending' ORDER BY created LIMIT 1",
-                    (work.assistant, work.slot),
-                ).fetchone()
-                if previous is not None:
-                    combined = Work.model_validate_json(previous["payload"])
-                    if (combined.settings, combined.routes, combined.template) != (
-                        work.settings,
-                        work.routes,
-                        work.template,
-                    ):
-                        self.put(db, work)
-                        continue
-                    combined.start = min(combined.start, work.start)
-                    combined.end = max(combined.end, work.end)
-                    combined.event.update(start=combined.start, end=combined.end)
-                    for key in ("added", "updated", "removed"):
-                        combined.event[key] = int(str(combined.event.get(key, 0))) + int(str(work.event.get(key, 0)))
-                    db.execute("UPDATE jobs SET payload=? WHERE id=?", (combined.model_dump_json(), previous["id"]))
-                    continue
+            # Keep at most one pending successor to a running trigger, extending its evidence window.
+            previous = db.execute(
+                "SELECT id,payload FROM jobs WHERE assistant=? AND slot=? AND state='pending' ORDER BY created LIMIT 1",
+                (work.assistant, work.slot),
+            ).fetchone()
+            combined = Work.model_validate_json(previous["payload"]) if previous is not None else None
+            if combined is not None and (combined.settings, combined.routes, combined.template) == (
+                work.settings,
+                work.routes,
+                work.template,
+            ):
+                combined.start = min(combined.start, work.start)
+                combined.end = max(combined.end, work.end)
+                combined.event.update(start=combined.start, end=combined.end)
+                for name in ("added", "updated", "removed"):
+                    combined.event[name] = int(str(combined.event.get(name, 0))) + int(str(work.event.get(name, 0)))
+                db.execute("UPDATE jobs SET payload=? WHERE id=?", (combined.model_dump_json(), previous["id"]))
+            else:
                 self.put(db, work)
+            db.execute("UPDATE triggers SET state='dispatched',error='' WHERE id=?", (key,))
 
     def lifecycle(self, kind: str, source: str, data: dict[str, JsonValue]) -> None:
         with self.connect() as db:
@@ -386,16 +508,20 @@ class Queue:
     def inspect(self, key: str) -> dict[str, object]:
         with self.connect() as db:
             row = db.execute("SELECT * FROM deliveries WHERE id=?", (key,)).fetchone()
+            row = row or db.execute("SELECT * FROM triggers WHERE id=?", (key,)).fetchone()
         return dict(row) if row is not None else self.get(key)
 
-    def work(self, key: str) -> Work:
+    @staticmethod
+    def parse(row: dict[str, object]) -> Work:
+        if row["payload"] == "{}" and row["state"] in {"complete", "cancelled"}:
+            raise Error("completed job body expired; read its assistant records instead")
         try:
-            row = self.get(key)
-            if row["payload"] == "{}" and row["state"] in {"complete", "cancelled"}:
-                raise Error("completed job body expired; read its assistant records instead")
             return Work.model_validate_json(str(row["payload"]))
         except ValidationError as error:
             raise Error("invalid queued assistant job; preserve the queue and repair it") from error
+
+    def work(self, key: str) -> Work:
+        return self.parse(self.get(key))
 
     def active(self, assistant: str, slot: str) -> bool:
         with self.connect() as db:
@@ -407,26 +533,48 @@ class Queue:
                 is not None
             )
 
-    def next(self, reactive: bool, names: set[str]) -> str | None:
+    def next(self, reactive: bool, names: set[str], *, excluding: Collection[str] = ()) -> str | None:
+        """The oldest runnable job of `names` whose earlier work in its slot is resolved, skipping `excluding`.
+
+        A delivery that stopped retrying (`failed`) no longer holds its conversation; an uncertain one does.
+        """
         with self.connect() as db:
             rows = db.execute(
                 "SELECT id,assistant FROM jobs WHERE state IN ('pending','answered','prepared') "
                 "AND (kind IN ('input','manual'))=? AND NOT EXISTS (SELECT 1 FROM jobs earlier WHERE earlier.assistant=jobs.assistant "
                 "AND earlier.slot=jobs.slot AND earlier.id!=jobs.id AND (earlier.state NOT IN ('complete','cancelled') "
-                "OR EXISTS (SELECT 1 FROM deliveries WHERE job=earlier.id AND state NOT IN ('delivered','cancelled'))) "
+                "OR EXISTS (SELECT 1 FROM deliveries WHERE job=earlier.id AND state NOT IN ('delivered','cancelled','failed'))) "
                 "AND (earlier.created<jobs.created OR (earlier.created=jobs.created AND earlier.id<jobs.id))) "
                 "ORDER BY created,id LIMIT 10000",
                 (reactive,),
             ).fetchall()
-        return next((row[0] for row in rows if row[1] in names), None)
+        return next((row[0] for row in rows if row[1] in names and row[0] not in excluding), None)
 
-    def claim(self, key: str) -> bool:
+    def claim(self, key: str, payload: str) -> bool:
+        """Start a pending job exactly as its worker read it, reserving its answer space first.
+
+        False when the job changed meanwhile, as when a sensor change extended its window, or is no longer pending.
+        """
         with self.connect() as db:
-            return bool(
-                db.execute(
-                    "UPDATE jobs SET state='running',updated=? WHERE id=? AND state='pending'", (now(), key)
-                ).rowcount
+            row = db.execute("SELECT state,payload FROM jobs WHERE id=?", (key,)).fetchone()
+            if row is None or row[0] != "pending" or row[1] != payload:
+                return False
+            work = self.parse(dict(row))
+            space = answer_space(work.settings.max_bytes, len(payload.encode()), len(work.routes))
+            if space > answer_limit():
+                raise Error(
+                    f"assistant {work.assistant} needs {space >> 20} MiB of queue space per answer, more than one "
+                    "job may reserve; lower its max_bytes or its outputs"
+                )
+            self.reserve(
+                db,
+                0,
+                space,
+                limit=_limit(),
+                reason="assistant queue lacks answer space for this job; it waits until running work finishes",
             )
+            db.execute("UPDATE jobs SET state='running',updated=? WHERE id=? AND state='pending'", (now(), key))
+            return True
 
     def answer(self, key: str, raw: bytes) -> None:
         with self.connect() as db:
@@ -443,14 +591,17 @@ class Queue:
                 (prepared.model_dump_json(), now(), work.id),
             )
             for route, message in zip(work.routes if replies else [], replies, strict=True):
+                payload, command = message.model_dump_json(), route.command.model_dump_json()
                 db.execute(
-                    "INSERT OR IGNORE INTO deliveries(id,job,channel,state,payload,command,due) VALUES (?,?,?,'pending',?,?,?)",
+                    "INSERT OR IGNORE INTO deliveries(id,job,channel,state,payload,command,digest,due) "
+                    "VALUES (?,?,?,'pending',?,?,?,?)",
                     (
                         message.id,
                         work.id,
                         route.channel,
-                        message.model_dump_json(),
-                        route.command.model_dump_json(),
+                        payload,
+                        command,
+                        _identity(route.channel, payload, command),
                         now(),
                     ),
                 )
@@ -472,8 +623,15 @@ class Queue:
             self.event(db, uuid4().hex, "assistant.failed", "runtime", {"job": key, "uncertain": uncertain}, now())
 
     def delivery(
-        self, *, job: str = "", key: str = "", names: set[str] | None = None, excluding: set[str] | None = None
+        self,
+        *,
+        job: str = "",
+        key: str = "",
+        names: set[str] | None = None,
+        excluding: set[str] | None = None,
+        skip: Collection[str] = (),
     ) -> dict[str, object] | None:
+        """The next due delivery; `excluding` names busy channels and `skip` delivery ids to pass over."""
         with self.connect() as db:
             rows = db.execute(
                 "SELECT deliveries.*,jobs.assistant FROM deliveries LEFT JOIN jobs ON jobs.id=deliveries.job "
@@ -486,7 +644,9 @@ class Queue:
             (
                 row
                 for row in rows
-                if (names is None or row["assistant"] in names) and row["channel"] not in (excluding or set())
+                if (names is None or row["assistant"] in names)
+                and row["channel"] not in (excluding or set())
+                and row["id"] not in skip
             ),
             None,
         )
@@ -518,54 +678,63 @@ class Queue:
     def delivered(self, key: str, name: str, message: Outgoing, receipt: Receipt) -> None:
         with self.connect() as db:
             db.execute(
-                "UPDATE deliveries SET state='delivered',receipt=?,error='' WHERE id=?",
-                (receipt.model_dump_json(), key),
+                # A delivered row's due time dates its receipt, which RETENTION keeps.
+                "UPDATE deliveries SET state='delivered',receipt=?,receipt_id=?,error='',due=? WHERE id=?",
+                (receipt.model_dump_json(), receipt.id, now(), key),
             )
             db.execute(
                 "INSERT OR REPLACE INTO messages VALUES (?,?,?,?,?,?)",
                 (f"{name}:{receipt.id}", name, receipt.conversation, "assistant", now(), message.text),
             )
             # A receipt can arrive after an adapter's echo. Cancel only work which has not started.
-            for row in db.execute("SELECT id,payload FROM jobs WHERE kind='input' AND state='pending'").fetchall():
-                work = Work.model_validate_json(row["payload"])
-                if work.origin and work.origin.channel == name and work.origin.message.id == receipt.id:
-                    db.execute("UPDATE jobs SET state='cancelled',error='own-message echo' WHERE id=?", (row["id"],))
+            db.execute(
+                "UPDATE jobs SET state='cancelled',error='own-message echo' WHERE kind='input' AND state='pending' "
+                "AND json_extract(payload,'$.origin.channel')=? AND json_extract(payload,'$.origin.message.id')=?",
+                (name, receipt.id),
+            )
             self.event(db, f"sent:{key}", "channel.sent", name, {"delivery": key}, now())
             self.trim(db)
 
-    def delivery_failed(self, key: str, error: str, retry: str = "") -> None:
+    def delivery_failed(self, key: str, error: str, *, outcome: str = "uncertain", due: str = "") -> None:
+        """Record a failed attempt: `pending` retries at `due`; `failed` and `uncertain` wait for bf queue."""
         with self.connect() as db:
             db.execute(
                 "UPDATE deliveries SET state=?,error=?,due=? WHERE id=? AND state NOT IN ('delivered','cancelled')",
-                ("pending" if retry else "uncertain", error, retry or now(), key),
+                (outcome, error, due or now(), key),
             )
 
     def recover_attempts(self) -> None:
-        """Only the exclusive dispatcher calls this; unresolved effects are never silently replayed."""
+        """Only the exclusive dispatcher calls this. An interrupted harness attempt or non-idempotent send is never
+        silently replayed; an interrupted idempotent delivery retries as a failed one would."""
         with self.connect() as db:
             runs = [row[0] for row in db.execute("SELECT id FROM jobs WHERE state='running'")]
-            sends = [row[0] for row in db.execute("SELECT id FROM deliveries WHERE state='sending'")]
-        for table, prefix, keys in (("jobs", ".job-", runs), ("deliveries", ".delivery-", sends)):
-            for key in keys:
-                try:
-                    with (
-                        collecting(self.brain, prefix + (digest(key.encode()) if table == "deliveries" else key)),
-                        self.connect() as db,
-                    ):
-                        query = (
-                            "UPDATE jobs SET state='uncertain',error='interrupted harness attempt; inspect before retrying' WHERE id=? AND state='running'"
-                            if table == "jobs"
-                            else "UPDATE deliveries SET state='uncertain',error='interrupted send; inspect before retrying' WHERE id=? AND state='sending'"
-                        )
-                        db.execute(query, (key,))
-                except BusyError:
-                    pass
+            sends = db.execute(
+                "SELECT id,job IS NOT NULL,coalesce(json_extract(command,'$.idempotent'),0),attempts "
+                "FROM deliveries WHERE state='sending'"
+            ).fetchall()
+        for key in runs:
+            with suppress(BusyError), collecting(self.brain, f".job-{key}"), self.connect() as db:
+                db.execute(
+                    "UPDATE jobs SET state='uncertain',error='interrupted harness attempt; inspect before retrying' "
+                    "WHERE id=? AND state='running'",
+                    (key,),
+                )
+        for key, owned, idempotent, attempts in sends:
+            reason = "interrupted send" if idempotent else "interrupted send; inspect before retrying"
+            outcome, error, due = retry_policy(bool(idempotent), bool(owned), int(attempts), reason)
+            with suppress(BusyError), collecting(self.brain, f".delivery-{digest(key.encode())}"), self.connect() as db:
+                db.execute(
+                    "UPDATE deliveries SET state=?,error=?,due=? WHERE id=? AND state='sending'",
+                    (outcome, error, due or now(), key),
+                )
 
-    def conversation(self, channel: str, conversation: str, before: str) -> list[dict[str, str]]:
+    def conversation(self, channel: str, conversation: str, before: str, *, exclude: str = "") -> list[dict[str, str]]:
+        """Up to 20 earlier messages of one conversation within 32 KiB, oldest first, without `exclude`."""
         with self.connect() as db:
             rows = db.execute(
-                "SELECT role,text,at FROM messages WHERE channel=? AND conversation=? AND at<=? ORDER BY at DESC,id DESC LIMIT 20",
-                (channel, conversation, before),
+                "SELECT role,text,at FROM messages WHERE channel=? AND conversation=? AND at<=? AND id!=? "
+                "ORDER BY at DESC,id DESC LIMIT 20",
+                (channel, conversation, before, exclude),
             ).fetchall()
         result: list[dict[str, str]] = []
         size = 0
@@ -592,33 +761,58 @@ class Queue:
                     (limit,),
                 )
             ]
+            triggers = [
+                dict(row)
+                for row in db.execute(
+                    "SELECT id,assistant,trigger,source,state,at,error FROM triggers "
+                    "WHERE state IN ('pending','dropped') ORDER BY at DESC LIMIT ?",
+                    (limit,),
+                )
+            ]
             counts = {row[0]: row[1] for row in db.execute("SELECT state,count(*) FROM jobs GROUP BY state")}
             delivery_counts = {
                 row[0]: row[1] for row in db.execute("SELECT state,count(*) FROM deliveries GROUP BY state")
             }
+            trigger_counts = {
+                row[0]: row[1] for row in db.execute("SELECT state,count(*) FROM triggers GROUP BY state")
+            }
             failures = db.execute(
                 "SELECT count(*) FROM deliveries WHERE state NOT IN ('delivered','cancelled') AND error!=''"
             ).fetchone()[0]
+            # A healthy entry, such as a stream that recovered, is recorded as an empty error: list only failures.
             health = {
-                row[0]: decode(row[1])
-                for row in db.execute("SELECT key,value FROM checkpoints WHERE key LIKE 'health:%'")
+                key: value
+                for key, raw in db.execute("SELECT key,value FROM checkpoints WHERE key LIKE 'health:%'")
+                if isinstance(value := decode(raw), dict) and value.get("error")
             }
         return {
             "jobs": jobs,
             "deliveries": deliveries,
+            "triggers": triggers,
             "counts": counts,
             "delivery_counts": delivery_counts,
+            "trigger_counts": trigger_counts,
             "delivery_failures": failures,
             "transports": health,
         }
 
     def compact(self) -> None:
-        """Bound retained bodies; small identity tombstones continue preventing duplicate work."""
+        """Bound retained bodies and expire old identity tombstones."""
         with self.connect() as db:
             self.trim(db)
 
     @staticmethod
     def trim(db: sqlite3.Connection) -> None:
+        # Tombstones and receipts suppress replays and echoes for RETENTION, longer than providers redeliver.
+        horizon = timestamp((datetime.now(UTC) - RETENTION).isoformat())
+        db.execute("DELETE FROM deliveries WHERE state IN ('delivered','cancelled') AND due<?", (horizon,))
+        db.execute(
+            "DELETE FROM jobs WHERE state IN ('complete','cancelled') AND updated<? "
+            "AND NOT EXISTS (SELECT 1 FROM deliveries WHERE job=jobs.id)",
+            (horizon,),
+        )
+        db.execute("DELETE FROM events WHERE at<?", (horizon,))
+        db.execute("DELETE FROM triggers WHERE state!='pending' AND at<?", (horizon,))
         db.execute(
             "UPDATE jobs SET payload='{}',raw=NULL,prepared=NULL WHERE state IN ('complete','cancelled') "
             "AND id IN (SELECT id FROM (SELECT id,sum(length(CAST(payload AS BLOB))+coalesce(length(raw),0)+coalesce(length(CAST(prepared AS BLOB)),0)) "
@@ -645,38 +839,72 @@ class Queue:
 
     def send(self, name: str, command: Send, message: Outgoing) -> None:
         with self.connect() as db:
-            previous = db.execute("SELECT channel,payload,command FROM deliveries WHERE id=?", (message.id,)).fetchone()
+            payload, encoded = message.model_dump_json(), command.model_dump_json()
+            identity = _identity(name, payload, encoded)
+            previous = db.execute("SELECT digest FROM deliveries WHERE id=?", (message.id,)).fetchone()
             if previous is not None:
-                if tuple(previous) != (name, message.model_dump_json(), command.model_dump_json()):
+                if previous[0] != identity:
                     raise Error("delivery id already used; inspect its receipt or use a new id for a different message")
                 return
-            self.reserve(db, 1, len(message.model_dump_json().encode()) + len(command.model_dump_json().encode()))
+            self.reserve(db, 1, 2 * (len(payload.encode()) + len(encoded.encode())))
             db.execute(
-                "INSERT INTO deliveries(id,job,channel,state,payload,command,due) VALUES (?,NULL,?,'pending',?,?,?)",
-                (message.id, name, message.model_dump_json(), command.model_dump_json(), now()),
+                "INSERT INTO deliveries(id,job,channel,state,payload,command,digest,due) VALUES (?,NULL,?,'pending',?,?,?,?)",
+                (message.id, name, payload, encoded, identity, now()),
             )
 
     def retry(self, key: str, *, cancel: bool = False) -> None:
+        """Explicitly retry or cancel a job, delivery or pending sensor trigger."""
+        lock = ""
         with self.connect() as db:
             delivery = db.execute("SELECT state FROM deliveries WHERE id=?", (key,)).fetchone()
+            trigger = db.execute("SELECT state FROM triggers WHERE id=?", (key,)).fetchone()
             if delivery is not None:
                 if delivery[0] not in {"uncertain", "failed", "pending"}:
                     raise Error("only pending or unresolved deliveries can be retried or cancelled")
+                # An explicit retry starts the automatic backoff of an idempotent delivery over.
                 db.execute(
-                    "UPDATE deliveries SET state=?,error='',due=? WHERE id=?",
+                    "UPDATE deliveries SET state=?,error='',due=?,attempts=0 WHERE id=?",
                     ("cancelled" if cancel else "pending", now(), key),
                 )
+                lock = f".delivery-{digest(key.encode())}"
+            elif trigger is not None:
+                if trigger[0] not in {"pending", "dropped"}:
+                    raise Error("only pending or dropped sensor triggers can be retried or cancelled")
+                db.execute(
+                    "UPDATE triggers SET state=?,error='' WHERE id=?", ("cancelled" if cancel else "pending", key)
+                )
                 return
-            row = db.execute("SELECT state,raw,prepared,payload FROM jobs WHERE id=?", (key,)).fetchone()
-            if row is None or row[0] not in {"failed", "uncertain", "pending"}:
-                raise Error("only pending or unresolved jobs can be retried or cancelled")
-            state = "cancelled" if cancel else "prepared" if row[2] else "answered" if row[1] is not None else "pending"
-            db.execute("UPDATE jobs SET state=?,error='',updated=? WHERE id=?", (state, now(), key))
-            if cancel:
-                db.execute("UPDATE deliveries SET state='cancelled',error='' WHERE job=? AND state='pending'", (key,))
-                work = Work.model_validate_json(row[3])
-                if work.kind == "schedule":
-                    self.checkpoint(db, f"schedule:{work.assistant}:{work.slot}", {"end": work.end, "success": now()})
+            else:
+                row = db.execute("SELECT state,raw,prepared,payload FROM jobs WHERE id=?", (key,)).fetchone()
+                if row is None or row[0] not in {"failed", "uncertain", "pending"}:
+                    raise Error("only pending or unresolved jobs can be retried or cancelled")
+                state = (
+                    "cancelled" if cancel else "prepared" if row[2] else "answered" if row[1] is not None else "pending"
+                )
+                if state == "answered":
+                    work = self.parse(dict(row))
+                    self.reserve(
+                        db,
+                        0,
+                        answer_space(len(row[1]), len(str(row[3]).encode()), len(work.routes)),
+                        limit=_limit(),
+                        reason="assistant queue lacks space to record this saved answer; resolve other work first",
+                    )
+                db.execute("UPDATE jobs SET state=?,error='',updated=? WHERE id=?", (state, now(), key))
+                if cancel:
+                    db.execute(
+                        "UPDATE deliveries SET state='cancelled',error='' WHERE job=? AND state='pending'", (key,)
+                    )
+                    work = self.parse(dict(row))
+                    if work.kind == "schedule":
+                        self.checkpoint(
+                            db, f"schedule:{work.assistant}:{work.slot}", {"end": work.end, "success": now()}
+                        )
+                lock = f".job-{key}"
+        if cancel and lock:
+            # A worker holding the lock removes it itself once it sees the cancellation.
+            with suppress(BusyError), collecting(self.brain, lock):
+                forget(self.brain, lock)
 
 
 def admit(store: Store, event: EventIntent) -> None:

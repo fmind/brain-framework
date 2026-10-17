@@ -20,7 +20,7 @@ A second brain for you, your team and your AI agents, on your own computer. Gath
 <a href="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg">
   <img
     src="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg"
-    alt="The Brain Framework loop: sensors gather evidence from your tools into a brain folder; bf.yaml declares the ontology, sensors, routines, prompts and watch settings; memories, projects, concepts and actions form a knowledge graph; agents read that context, act through the same CLIs, APIs, MCP servers and browsers, and write outcomes back."
+    alt="The Brain Framework loop: sensors gather evidence from your tools into a brain folder; bf.yaml declares the ontology, sensors, routines, assistants, channels and watch settings; memories, projects, concepts and actions form a knowledge graph; agents read that context, act through the same CLIs, APIs, MCP servers and browsers, and write outcomes back."
     width="960"
   >
 </a>
@@ -95,6 +95,7 @@ A brain gives your work the structure of a detective's case file, in plain files
 | `actions/`  | One work session: objective, inputs, outputs, outcome and next step.         | `actions/2026-09-27_website-review/ACTION.md`, resumed the next day. |
 | `routines/` | Deterministic programs you review, run on demand, on a schedule or from Git. | A weekly review that drafts an action listing projects to revisit.   |
 | `prompts/`  | Markdown prompts your agent harness runs; each run's reply is a record.      | An assistant that reviews new mail and chat every half hour.         |
+| `channels/` | Scripts you review that send, read or stream messages for assistants.        | A script that posts an assistant's answer in your chat thread.       |
 | `evals/`    | Saved questions with the evidence that search or read must return.           | “Why one page?” must return the project's Decision section.          |
 
 Notes are Markdown with YAML metadata, records are JSON, and `bf validate` checks both. `bf init --full` creates `sensors/` and `routines/`; create `prompts/` and `channels/` when you add an [assistant](https://fmind.github.io/brain-framework/docs/prompts/). An assistant's records hold model output, so search weighs them at half, like a low-priority source. The SQLite search cache in `.bf/` is disposable and rebuilds itself from the files. See the [file conventions](https://fmind.github.io/brain-framework/docs/brain/#directory-reference).
@@ -131,6 +132,8 @@ watch: # keep sources fresh and alert on failure
 ```
 
 BF runs each program with its configured arguments and no shell, bounds its time and output, validates what it prints and keeps its stderr in `logs/`. A failed sensor run preserves its evidence; assistant answers and delivery obligations have durable recovery. `bf watch` keeps due sensors, routines and assistants fresh in a terminal dashboard, and `bf schedule` generates native systemd, launchd or cron jobs for you to install. See [sensors](https://fmind.github.io/brain-framework/docs/sensors/), [routines](https://fmind.github.io/brain-framework/docs/routines/) and [watch and schedule](https://fmind.github.io/brain-framework/docs/schedule/).
+
+[Assistants and channels](https://fmind.github.io/brain-framework/docs/prompts/) connect your own harness to any messaging surface through small scripts: receive messages, reply in their thread, review on a schedule and fan out saved answers. The [offline messaging example](https://github.com/fmind/brain-framework/tree/main/examples/channels) demonstrates the full loop without a provider or model.
 
 ### One vocabulary, set at collection
 
@@ -241,5 +244,3 @@ A brain is a folder, so Git gives it history, rollback, review and conflict reso
 1. **It finds what was said and linked, not what was meant.** Search matches words and explicit identities, without embeddings, and incomplete results say so. Search and read never contact providers: collect again when you need newer evidence. See [what BF does not do](https://fmind.github.io/brain-framework/docs/concepts/#what-bf-does-not-do).
 
 [Browse the commands](https://fmind.github.io/brain-framework/docs/commands/) · [Report an issue](https://github.com/fmind/brain-framework/issues) · [Contribute](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md) · [MIT licensed](https://github.com/fmind/brain-framework/blob/main/LICENSE) · [Third-party notices](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md)
-
-[Assistants and channels](https://fmind.github.io/brain-framework/docs/prompts/) connect your own harness to any messaging surface through small scripts: receive messages, reply in their thread, review on a schedule and fan out saved answers. The [offline messaging example](https://github.com/fmind/brain-framework/tree/main/examples/channels) demonstrates the full loop without a provider or model.
