@@ -50,7 +50,7 @@ class DispatchPendingError(Error):
         self.source = source
 
 
-def _pending(store: Store) -> bool:
+def pending(store: Store) -> bool:
     try:
         # An excluded or unreadable memories root cannot contain an accessible transaction. Retrieval reports the
         # root through its scan; a linked or unreadable .pending inside a readable root still fails closed.
@@ -72,7 +72,7 @@ def interrupted(store: Store) -> bool:
     A completed manifest proves every record was committed or restored: only cleanup remains, which the next writer
     finishes, so reads need not wait for it. A missing or invalid manifest proves nothing.
     """
-    return _pending(store) and not _completed(store)
+    return pending(store) and not _completed(store)
 
 
 def _completed(store: Store) -> bool:
@@ -107,7 +107,7 @@ def recover(store: Store) -> None:
     Originals and the manifest are durable evidence under memories/, never disposable state.
     A completion marker means all records were committed (or restored) and only cleanup remains.
     """
-    if not _pending(store):
+    if not pending(store):
         return
     try:
         raw = store.read(_MANIFEST, _MANIFEST_LIMIT)

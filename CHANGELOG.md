@@ -4,6 +4,15 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v19.0.1](https://github.com/fmind/brain-framework/releases/tag/v19.0.1) - 2026-10-20
+
+A fix release. The brain format (`version: 8`), `bf.yaml`, the reply schemas and the search cache are unchanged. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin); `bf skills DIR` refreshes the `bf-maintain` operations guide, whose only change is naming assistants where it still said prompts.
+
+### Fixed
+
+- `bf update` and `bf build --reproject` no longer wait for the brain's exclusive writer lock when the search cache is current: they check the cache's pages (`PRAGMA quick_check(1)`, with a 64 MiB page cache) and compare file fingerprints under the shared reader lock, so a refresh with nothing to index runs beside searches and long reads and commits nothing. A refresh that finds changes still takes the writer lock and checks the pages again if another refresh replaced or changed the cache meanwhile.
+- The privacy page, the `bf-maintain` operations guide and the example `prompts/.gitignore` name an assistant's harness and runs where they still said prompt, as 19.0.0 renamed them.
+
 ## [v19.0.0](https://github.com/fmind/brain-framework/releases/tag/v19.0.0) - 2026-10-17
 
 A major release. Assistants replace prompts: one harness answers messages from brain-owned channel commands in their thread, reviews on named schedules or after a sensor changes and fans its saved answer out to several channels, while a durable local queue keeps every accepted message, answer and delivery. The brain format moves to `version: 8`: `bf.yaml` renames `prompts:` to `assistants:`, replaces their `refresh` and `lookback` with named `schedules` and adds `channels:`. Search and read replies name an assistant's `attention` entry `assistant` instead of `prompt` and gain the optional `silent` flag that home `attention` entries already carried, and the search cache rebuilds once. Follow the upgrade steps below before collecting again; they include this release's skill, example, `AGENTS.md` and Claude Code command updates.

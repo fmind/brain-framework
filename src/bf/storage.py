@@ -627,7 +627,7 @@ def generation(store: Store, *, shared: bool, wait: float) -> Generator[None]:
 
 @contextmanager
 def appending(store: Store, name: str, wait: float = 10) -> Generator[None]:
-    """Serialize writers of one program's log: a direct prompt run takes no program lock."""
+    """Serialize writers of one program's log: a direct assistant run takes no program lock."""
     relative(name)
     with _lock(store, f"log-{name}.lock", wait, busy=f"another run of {name} is writing its log"):
         yield

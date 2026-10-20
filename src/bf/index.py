@@ -774,6 +774,27 @@ def _refresh(store: Store, *, full: bool, wait: float, recover: bool, compared: 
 
 def _incremental(store: Store, *, wait: float, recover: bool, compared: Scan | None) -> dict[str, object] | None:
     """Update the live generation in place; None when there is no compatible one."""
+    checked = ""
+    if recover or compared is None or compared.unchanged():
+        with reader(store, wait):
+            if not (recover and records.pending(store)):
+                if not recover:
+                    records.require_ready(store)
+                config = load(store)
+                connection = _open(store, config)
+                if connection is None:
+                    return None
+                with closing(connection):
+                    connection.execute("PRAGMA cache_size=-65536")
+                    # Refreshes read only the pages of changed files: damage elsewhere would fail every later search.
+                    if recover:
+                        if connection.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok":
+                            raise _DamagedError("the search cache is damaged")
+                        checked = _file(_path(store))
+                    if compared is None or not _holds(connection, compared):
+                        compared = _scan(store, connection)
+                    if compared.unchanged():
+                        return _counts(connection, compared, 0, 0)
     with writer(store, wait):
         if recover:
             records.recover(store)
@@ -784,8 +805,14 @@ def _incremental(store: Store, *, wait: float, recover: bool, compared: Scan | N
         if connection is None:
             return None
         with closing(connection):
-            # Refreshes read only the pages of changed files: damage elsewhere would fail every later search.
-            if recover and connection.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok":
+            connection.execute("PRAGMA cache_size=-65536")
+            if compared is not None and not _holds(connection, compared):
+                compared = None
+            if (
+                recover
+                and (compared is None or _file(_path(store)) != checked)
+                and connection.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok"
+            ):
                 raise _DamagedError("the search cache is damaged")
             return _fill(store, connection, config, new=False, compared=compared)
 
@@ -871,19 +898,16 @@ def _fill(
     connection.execute("PRAGMA cache_size=-65536")
     # A freshness check's scan still applies while the cache holds what it compared, so no other refresh has
     # committed since; as during a build, a file or folder changed after the scan no longer matches.
-    if compared is None or new or not _holds(connection, compared):
+    if compared is None or new:
         compared = _scan(store, None if new else connection)
+    if not new and compared.unchanged():
+        return _counts(connection, compared, 0, 0)
     known, current = compared.known, compared.current
     # A file's problem depends on its own bytes and the configuration signature: an unchanged
     # fingerprint keeps its result.
     changed = sorted(path for path, info in current.items() if known.get(path) != info)
     removed = sorted(known.keys() - current.keys())
     vanished = sorted((compared.stored.keys() & compared.scope) - compared.trees.keys())
-    # The files of the source folders the scan did not list, which keep their rows.
-    kept = connection.execute(
-        "SELECT count(*) FROM files WHERE tree NOT IN (SELECT value FROM json_each(?))",
-        (json.dumps(sorted(compared.scope)),),
-    ).fetchone()[0]
     with connection:
         connection.execute("BEGIN")
         for path in () if new else (removed + changed):
@@ -929,8 +953,17 @@ def _fill(
             connection.execute(statement)
         # PRAGMA has no bound-parameter form; SCHEMA is an internal integer constant.
         connection.execute(f"PRAGMA user_version={SCHEMA}")
+    return _counts(connection, compared, len(changed), len(removed))
+
+
+def _counts(connection: sqlite3.Connection, compared: Scan, changed: int, removed: int) -> dict[str, object]:
+    # The files of the source folders the scan did not list, which keep their rows.
+    kept = connection.execute(
+        "SELECT count(*) FROM files WHERE tree NOT IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(compared.scope)),),
+    ).fetchone()[0]
     skipped = connection.execute("SELECT count(*) FROM files WHERE error!=''").fetchone()[0]
-    return {"files": len(current) + kept, "changed": len(changed), "removed": len(removed), "skipped": skipped}
+    return {"files": len(compared.current) + kept, "changed": changed, "removed": removed, "skipped": skipped}
 
 
 def _capped(text: str) -> str:

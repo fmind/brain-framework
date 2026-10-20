@@ -18,7 +18,7 @@ from bf.cli import app
 from bf.evaluate import evaluate
 from bf.models import Error, Query, Record
 from bf.retrieve import read, search
-from bf.storage import BusyError, Store, writer
+from bf.storage import BusyError, Store, reader, writer
 from bf.update import update
 from bf.validate import validate
 
@@ -387,3 +387,30 @@ def test_notes_with_thousands_of_invalid_values_keep_replies_small(brain: Store)
     )
     assert errors["concepts/many.md"].endswith("links.4: Input should be a valid string; and 994 more")
     assert read([brain], "projects/offline.md", counted=False)["text"]
+
+
+def test_unchanged_recovery_refresh_runs_beside_readers_without_writing(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index.refresh(brain)
+    with reader(brain):
+        # A recovery refresh whose scan finds no change checks pages under the shared lock and skips the writer lock.
+        assert index.refresh(brain, wait=0, recover=True) == {"files": 4, "changed": 0, "removed": 0, "skipped": 0}
+        brain.write("concepts/late.md", b"# Late\n\nOsmium.\n")
+        with pytest.raises(BusyError):
+            index.refresh(brain, wait=0, recover=True)
+    real_writer = index.writer
+    interleaved = False
+
+    def racing_writer(store: Store, wait: float = 0):
+        nonlocal interleaved
+        if not interleaved:
+            interleaved = True
+            # Another writer updates the same cache inode and damages a table after the reader scan passed.
+            index.refresh(store)
+            _damage(store, "items")
+        return real_writer(store, wait)
+
+    monkeypatch.setattr(index, "writer", racing_writer)
+    assert index.refresh(brain, wait=0, recover=True) == {"files": 5, "changed": 5, "removed": 0, "skipped": 0}
+    assert _intact(brain)

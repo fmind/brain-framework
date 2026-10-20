@@ -244,15 +244,15 @@ def _request(argument: str, **values: object) -> Query:
 
 
 def sources(store: Store, connection: sqlite3.Connection) -> dict[str, dict[str, object]]:
-    """Each source a brain indexes or configures, as a sensor or a prompt, with its indexed record count."""
+    """Each source a brain indexes or configures, as a sensor or an assistant, with its indexed record count."""
     config = load(store)
     return {**{name: {"records": 0} for name in (*config.sensors, *config.assistants)}, **index.sources(connection)}
 
 
 def low(store: Store) -> list[str]:
-    """Sensors configured with `priority: low`, and every prompt, read at query time so a change needs no rebuild.
+    """Sensors configured with `priority: low`, and every assistant, read at query time so a change needs no rebuild.
 
-    A prompt's records are model output: its summaries must never outrank the evidence they summarize.
+    An assistant's records are model output: its summaries must never outrank the evidence they summarize.
     """
     config = load(store)
     return sorted({*(name for name, sensor in config.sensors.items() if sensor.priority == "low"), *config.assistants})

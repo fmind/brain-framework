@@ -1,4 +1,4 @@
-# Local retrieval cache, program logs and prompt runs are disposable in this fictional demo.
+# Local retrieval cache, program logs and assistant runs are disposable in this fictional demo.
 /.bf/
 /logs/
 /memories/
