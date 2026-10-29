@@ -610,7 +610,7 @@ def test_replies_escape_terminal_controls_without_changing_values(brain: Store) 
         "before \u009b2J\u009d0;title\u009c after \u007f \u202egnp.exe\u202c \u200b\u2066x\u2069\ufeff \u061c1-2"
         " \u2028\u2029"
     )
-    hidden = re.compile("[\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2028\u2029\u2060-\u2069\ufeff]")
+    hidden = re.compile(r"[\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2028\u2029\u2060-\u2069\ufeff]")
     records_file(brain, "meetings", [Record(id="c1", title="Controls", text=text, attributes={"note": "\u009b31m"})])
     result = CliRunner().invoke(app, ["read", "meetings:c1", "--brain", "fixture"])
     assert result.exit_code == 0, result.output
@@ -871,7 +871,7 @@ def test_diagnostics_escape_terminal_controls_in_brain_file_names(
         main()
     hint = capsys.readouterr().err
     assert shown in hint
-    assert not re.search("[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u202e]", hint)
+    assert not re.search(r"[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u202e]", hint)
     missing = asyncio.run(server([brain]).call_tool("read", {"ref": "projects/xy.md"}))
     assert isinstance(missing, CallToolResult)
     assert shown in text(missing)

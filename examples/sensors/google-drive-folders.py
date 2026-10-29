@@ -33,8 +33,14 @@ def run(argv: list[str], limit: int, timeout: int) -> bytes:
     """Bound provider output while it runs; inherit Brain Framework's cancellable process group."""
     # Only literal provider commands reach this helper; no shell interprets argv. It starts them from /, so none depends
     # on the folder BF runs the sensor from: gws, for one, loads a `.env` file from its working directory or any parent,
-    # and one in the brain could switch its account.
-    child = subprocess.Popen(argv, cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    # and one in the brain could switch its account. A Git hook's repository variables, such as GIT_DIR, would make
+    # git -C read that one repository for every path, so they stay out.
+    local = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
+    local += ("GIT_ALTERNATE_OBJECT_DIRECTORIES",)
+    env = {key: value for key, value in os.environ.items() if key not in local}
+    child = subprocess.Popen(
+        argv, cwd="/", env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
     output = bytearray()
     deadline = time.monotonic() + timeout
     try:

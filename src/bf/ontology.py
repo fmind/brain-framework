@@ -45,13 +45,20 @@ def project(record: Record, sensor: Sensor, config: Config) -> Record:
     """
     document = record.model_dump(mode="json")
     fields: dict[str, JsonValue] = {}
-    for name, mapping in sensor.fields.items():
-        definition = config.ontology[name]
-        value = pointer(document, mapping.path) if mapping.path is not None else mapping.value
-        if value is None:
-            if definition.cardinality == "one":
-                raise Error(f"field {name}: required mapped value is missing")
-            continue
+    for name, definition in config.ontology.items():
+        mapping = sensor.fields.get(name)
+        if mapping is None:
+            if definition.path is None:
+                continue
+            value = pointer(document, definition.path)
+            if value is None:
+                continue
+        else:
+            value = pointer(document, mapping.path) if mapping.path is not None else mapping.value
+            if value is None:
+                if definition.cardinality == "one":
+                    raise Error(f"field {name}: required mapped value is missing")
+                continue
         try:
             fields[name] = definition.normalize(value)
         except ValueError as error:

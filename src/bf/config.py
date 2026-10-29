@@ -256,14 +256,15 @@ def register(store: Store) -> dict[str, object]:
                     f"{path}, or rename one of the brains in its bf.yaml"
                 )
             replaced = existing.path
+        # An unchanged registration leaves the file, and the owner's inline comments, as they are.
         if existing is None or replaced:
             registry.brains[name] = Registration(path=str(store.root))
-        document = {"brains": {key: value.model_dump() for key, value in sorted(registry.brains.items())}}
-        registry_store.write(
-            path.name,
-            # Keep the owner's leading comments; inline comments do not survive the rewrite.
-            ((header or _HEADER) + yaml.safe_dump(document, sort_keys=True)).encode(),
-        )
+            document = {"brains": {key: value.model_dump() for key, value in sorted(registry.brains.items())}}
+            registry_store.write(
+                path.name,
+                # Keep the owner's leading comments; inline comments do not survive the rewrite.
+                ((header or _HEADER) + yaml.safe_dump(document, sort_keys=True)).encode(),
+            )
     return {"brain": name, "path": str(store.root), "config": str(path), **({"replaced": replaced} if replaced else {})}
 
 

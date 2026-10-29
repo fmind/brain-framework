@@ -28,9 +28,9 @@ MAX_INPUT = 4 * MAX_REPLY + (3 << 20)
 # the line and paragraph separators U+2028 and U+2029, which str.splitlines() reads as line breaks, and every
 # Unicode format character (category Cf), such as bidi controls and zero-width and tag characters.
 CONTROLS = re.compile(
-    "[\x7f-\x9f\u2028\u2029\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e"
-    "\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
-    "\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]"
+    r"[\x7f-\x9f\u2028\u2029\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e"
+    r"\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
+    r"\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]"
 )
 
 
@@ -154,7 +154,11 @@ def exact(ref: str, brain: str) -> dict[str, JSON]:
     else:
         whole["text"] = text
         # A whole note's text is its file, which the digest names; a section's digest names its whole file.
-        if "#" not in str(whole.get("ref")) and hashlib.sha256(text.encode()).hexdigest() != whole["sha256"]:
+        if (
+            "section" not in whole
+            and "#" not in str(whole.get("ref"))
+            and hashlib.sha256(text.encode()).hexdigest() != whole["sha256"]
+        ):
             raise ValueError("the reply changed while reading")
     return whole
 

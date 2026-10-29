@@ -306,8 +306,8 @@ def _plain(entry: object) -> object:
 
 
 def addressed(reply: dict[str, object]) -> dict[str, object]:
-    """With several selected brains a plain ref can be ambiguous: `newer`, `also` and `sections` name items by
-    address, like each entry's `uri`.
+    """With several selected brains a plain ref can be ambiguous: `newer`, `also`, `sections`, a claim's
+    `target_ref` and an outline's refs name items by address, like each entry's `uri`.
 
     Listed entries and an exact read each name their brain. Pages fit their items in this shape: with one selected
     brain, local() keeps refs plain and drops each entry's brain and address, so that reply is only smaller.
@@ -331,6 +331,14 @@ def _named(entry: object) -> object:
     if isinstance(refs := found.get("sections"), list):
         # A section ref names its note's path and fragment; a record id or note path may hold a literal `#`.
         changed["sections"] = [links.address(brain, *split_ref(str(ref))) for ref in refs]
+    if isinstance(outline := found.get("outline"), list):
+        changed["outline"] = [
+            {**entry, "ref": links.address(brain, *split_ref(str(entry["ref"])))}
+            for entry in cast("list[dict[str, object]]", outline)
+        ]
+    if "target_ref" in found:
+        # A claim's target is a whole note or record, never a section: a `#` in it is literal.
+        changed["target_ref"] = links.address(brain, str(found["target_ref"]))
     return {**found, **changed} if changed else found
 
 

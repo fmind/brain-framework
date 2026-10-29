@@ -44,7 +44,7 @@ from bf.models import (
     suggest,
     timestamp,
 )
-from bf.storage import Store, collecting, relative, writer
+from bf.storage import BusyError, Store, collecting, relative, writer
 from bf.validate import broken_links
 
 _LOG = 256 << 10
@@ -120,17 +120,26 @@ def starting() -> Generator[None]:
             handlers[signum](signum, frame)
 
 
+class NotStartedError(Error):
+    """The program never started, so it cannot have acted: retrying it is safe."""
+
+
 def executable(store: Store, command: str, env: Mapping[str, str]) -> str:
     """Resolve an owner's argv executable without following brain-owned symlinks."""
     if command.startswith(("sensors/", "routines/", "channels/")):
         relative(command)
-        store.fingerprint(command)
+        try:
+            store.fingerprint(command)
+        except FileNotFoundError as error:
+            raise NotStartedError(f"{command} does not exist; restore it or correct bf.yaml") from error
+        except (Error, OSError) as error:
+            raise NotStartedError(str(error) if isinstance(error, Error) else f"cannot read {command}") from error
         return str(store.root / command)
     if "/" in command:
-        raise Error("executable must be a bare command name or a sensors/, routines/ or channels/ path")
+        raise NotStartedError("executable must be a bare command name or a sensors/, routines/ or channels/ path")
     found = shutil.which(command, path=env.get("PATH"))
     if found is None:
-        raise Error(f"{command} is not on PATH")
+        raise NotStartedError(f"{command} is not on PATH")
     return found
 
 
@@ -153,7 +162,7 @@ def run(
     # A nested bf call without --brain reads the executing brain, never an inherited selection.
     env = {**environment(), "BF_BRAIN": str(store.root), **(overrides or {})}
     if cancelled is not None and cancelled():
-        raise Error("program cancelled")
+        raise NotStartedError("program cancelled")
     command = executable(store, argv[0], env)
     started = time.monotonic()
     child: subprocess.Popen[bytes] | None = None
@@ -166,7 +175,7 @@ def run(
     try:
         with starting():
             if cancelled is not None and cancelled():
-                raise Error("program cancelled")
+                raise NotStartedError("program cancelled")
             try:
                 child = subprocess.Popen(  # noqa: S603
                     # Direct argv from the owner's bf.yaml, plus a `bf run` caller's arguments; no shell interprets them.
@@ -182,7 +191,9 @@ def run(
                 # A log that cannot be written must not hide why the program did not start.
                 with suppress(Error, OSError):
                     append_log(store, name, f"{_now()} could not start {command}")
-                raise Error("could not start the program; check its executable bit and interpreter") from error
+                raise NotStartedError(
+                    "could not start the program; check its executable bit and interpreter"
+                ) from error
         stdout, stderr = child.stdout, child.stderr
         if stdout is None or stderr is None:
             raise Error("program pipes were not created")
@@ -291,12 +302,15 @@ def _failed(
     with suppress(Error, OSError):
         append_log(store, name, f"{_now()} failed: {message}")
     if not dry_run:
+        busy = isinstance(cause, BusyError)
         try:
-            with writer(store, wait=120):
+            # A run that already waited for a busy writer records its failure only if the writer is free now.
+            with writer(store, wait=0 if busy else 120):
                 failures = int(str(state(store, file).get(name, {}).get("failures", 0))) + 1
                 remember(store, name, file, run=timestamp(started.isoformat()), error=message, failures=failures)
         except (Error, OSError) as history_error:
-            raise Error(f"{name}: {message}; run history could not be saved") from history_error
+            if not (busy and isinstance(history_error, BusyError)):
+                raise Error(f"{name}: {message}; run history could not be saved") from history_error
     raise Error(f"{name}: {message}; see {log_path(name)}") from cause
 
 
@@ -394,11 +408,33 @@ def collect(
             # A {{home}} that cannot resolve fails the run in its history, as for routines.
             raw = runner(arguments(store, sensor, start, end), sensor, store, name, b"")
             printed = decode(raw)
-            for position, item in enumerate(printed if isinstance(printed, list) else ()):
-                # Collection maps fields itself. Checked before validation, which would name invalid keys or the
-                # 1,000-name bound instead of this rule.
-                if isinstance(item, dict) and item.get("fields"):
-                    raise Error(f"record {position}: sensors must supply mapped output, not precomputed fields")
+            text_limit = sensor.max_text_bytes or (4 << 20)
+            truncated_count = 0
+            if isinstance(printed, list):
+                for position, item in enumerate(printed):
+                    # Collection maps fields itself. Checked before validation, which would name invalid keys or the
+                    # 1,000-name bound instead of this rule.
+                    if isinstance(item, dict) and item.get("fields"):
+                        raise Error(f"record {position}: sensors must supply mapped output, not precomputed fields")
+                    if isinstance(item, dict) and isinstance(item.get("text"), str):
+                        text = item["text"]
+                        if (sensor.truncate_text or sensor.max_text_bytes is not None or len(text) > 4 << 20) and len(
+                            encoded_text := text.encode("utf-8")
+                        ) > text_limit:
+                            cut = encoded_text[:text_limit].decode("utf-8", errors="ignore")
+                            attrs = item.get("attributes")
+                            updated_attrs = (
+                                {**attrs, "truncated": True} if isinstance(attrs, dict) or attrs is None else attrs
+                            )
+                            printed[position] = {**item, "text": cut, "attributes": updated_attrs}
+                            truncated_count += 1
+            if truncated_count:
+                with suppress(Error, OSError):
+                    append_log(
+                        store,
+                        name,
+                        f"{_now()} truncated {truncated_count} oversized record text value(s) to {text_limit} bytes",
+                    )
             try:
                 # Stop at the first invalid record: a large invalid array must not build one diagnostic per item.
                 incoming = TypeAdapter(Annotated[list[Record], FailFast()]).validate_python(printed)
@@ -542,20 +578,51 @@ def home_folder() -> str:
     try:
         return str(Path.home())
     except RuntimeError as error:
-        raise Error("cannot find the home directory for {{home}}; set HOME") from error
+        raise NotStartedError("cannot find the home directory for {{home}}; set HOME") from error
+
+
+def expand_lines(store: Store, path: str) -> list[str]:
+    """Read a brain-relative line-list file, ignoring blank lines and `#` comments."""
+    relative(path)
+    try:
+        raw = store.read(path, MAX_NOTE)
+    except FileNotFoundError as error:
+        raise NotStartedError(f"{path} does not exist; restore it or correct bf.yaml") from error
+    except (Error, OSError) as error:
+        raise NotStartedError(str(error) if isinstance(error, Error) else f"cannot read {path}") from error
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise NotStartedError(f"{path} is not valid UTF-8") from error
+    items = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "\x00" in stripped or len(stripped) > 16_384:
+            raise NotStartedError(f"{path}: line exceeds 16384 characters or contains NUL")
+        items.append(stripped)
+    return items
 
 
 def arguments(store: Store, program: Command, start: str, end: str, prompt: str = "") -> list[str]:
     values = {"brain": str(store.root), "start": start, "end": end, "prompt": prompt}
     # One pass: an expanded prompt that mentions a placeholder keeps it as text.
-    return [
-        re.sub(
-            r"\{\{(brain|home|start|end|prompt)\}\}",
-            lambda match: home_folder() if match[1] == "home" else values[match[1]],
-            arg,
-        )
-        for arg in program.command
-    ]
+    expanded: list[str] = []
+    for index, arg in enumerate(program.command):
+        if index > 0 and (lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", arg)):
+            expanded.extend(expand_lines(store, lines_match[1]))
+        else:
+            expanded.append(
+                re.sub(
+                    r"\{\{(brain|home|start|end|prompt)\}\}",
+                    lambda match: home_folder() if match[1] == "home" else values[match[1]],
+                    arg,
+                )
+            )
+    if len(expanded) > 128:
+        raise NotStartedError("command arguments exceed 128 items after expanding line files")
+    return expanded
 
 
 def _written(store: Store, prefix: str) -> bool:

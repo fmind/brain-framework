@@ -15,7 +15,7 @@ from contextlib import closing, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import cache, lru_cache
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 
 from pydantic import JsonValue
@@ -41,7 +41,7 @@ from bf.models import (
 )
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, unread, writer
 
-SCHEMA = 36
+SCHEMA = 37
 CACHE = ".bf/index.sqlite"
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
@@ -444,7 +444,8 @@ def _signature(config: Config) -> str:
     """The configuration a generation's rows depend on. Documentation, such as a field's description, is not, nor
     are `broader`, which relation pages read at query time, and `targets`, which collection and validation check."""
     schema = {
-        n: f.model_dump(exclude={"description", "examples", "broader", "targets"}) for n, f in config.ontology.items()
+        n: f.model_dump(exclude={"description", "examples", "broader", "targets", "path"})
+        for n, f in config.ontology.items()
     }
     return digest(encode({"name": config.name, "fields": schema}))
 
@@ -581,7 +582,19 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
         values = [
             str(v) for value in knowledge.fields.values() for v in (value if isinstance(value, list) else [value])
         ]
-        metadata = " ".join([knowledge.type, *knowledge.aliases, *projection.links, *values])
+        stem = PurePosixPath(path).stem
+        title_folded = fold(projection.title).lower()
+        extra_stem = (
+            [stem]
+            if stem not in {"ACTION", "index", "log"} and fold(stem.replace("-", " ")).lower() != title_folded
+            else []
+        )
+        extra_aliases = [
+            alias
+            for alias in knowledge.aliases
+            if fold(alias.partition(":")[2].replace("-", " ")).lower() != title_folded
+        ]
+        metadata = " ".join([knowledge.type, *extra_stem, *knowledge.aliases, *projection.links, *values])
         item = _insert(
             connection,
             {
@@ -605,7 +618,7 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
                 "stale_after": knowledge.stale_after,
                 "fields": _facts(knowledge.fields, config),
             },
-            # The whole note ranks under its tags and each section under its parents, like headings (see _lexical).
+            # The whole note ranks under its tags and each section under its stem, aliases and parents (see _lexical).
             [
                 (
                     p.fragment,
@@ -613,7 +626,7 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
                     p.heading,
                     p.text,
                     "" if p.fragment else metadata,
-                    " ".join(p.parents or knowledge.tags),
+                    " ".join([*extra_stem, *extra_aliases, *p.parents] if p.fragment else knowledge.tags),
                 )
                 for p in projection.passages
             ],

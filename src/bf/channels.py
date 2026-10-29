@@ -148,7 +148,10 @@ def stream(
                     writing = True
                 for key, events in selector.select(0.05):
                     if events & selectors.EVENT_WRITE:
-                        size = os.write(key.fd, pending[:65_536])
+                        try:
+                            size = os.write(key.fd, pending[:65_536])
+                        except BrokenPipeError as error:
+                            raise Error(f"channel {name}: stream closed its input") from error
                         del pending[:size]
                         blocked = time.monotonic()
                         if not pending:

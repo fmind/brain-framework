@@ -12,7 +12,7 @@ from functools import cache
 
 from bf import links, ontology, pages, records
 from bf.config import load
-from bf.markdown import Note, authored, broken, editor_lock, note, okf, parse, resolve, scheme, validate_okf
+from bf.markdown import Note, authored, broken, editor_lock, entry_note, note, okf, parse, resolve, scheme, validate_okf
 from bf.models import (
     AUTHORED,
     IDENTITY,
@@ -137,7 +137,7 @@ class _Spellings:
 
 
 def _script(argument: str) -> bool:
-    """Whether a later command argument names a brain path in sensors/ or routines/, such as sensors/brief.py.
+    """Whether a later command argument names a brain path in sensors/, routines/ or channels/, such as sensors/brief.py.
 
     Normalized and without placeholders, like the program itself; whitespace marks a shell command line instead.
     """
@@ -175,6 +175,8 @@ def _programs(store: Store, config: Config) -> list[dict[str, str]]:
     first brain path among the arguments is checked: a script or a folder, such as a `uv run --project` project. Later
     ones may name files the program creates.
     """
+    from bf.collect import expand_lines
+
     problems = []
     for name, prompt in sorted(config.assistants.items()):
         try:
@@ -213,23 +215,40 @@ def _programs(store: Store, config: Config) -> list[dict[str, str]]:
         ("channels", channel_commands),
     ):
         for name, program in sorted(programs.items()):
+            if not getattr(program, "enabled", True):
+                continue
             # Program.command already requires a normalized path when the brain's own script runs directly.
             direct = program.command[0].startswith(("sensors/", "routines/", "channels/"))
             path = program.command[0] if direct else next(filter(_script, program.command[1:]), "")
-            if not getattr(program, "enabled", True) or not path:
-                continue
-            try:
-                mode = store.mode(path)
-                usable = (
-                    stat.S_ISREG(mode) and bool(mode & stat.S_IXUSR)
-                    if direct
-                    else stat.S_ISREG(mode) or stat.S_ISDIR(mode)
+            if path:
+                try:
+                    mode = store.mode(path)
+                    usable = (
+                        stat.S_ISREG(mode) and bool(mode & stat.S_IXUSR)
+                        if direct
+                        else stat.S_ISREG(mode) or stat.S_ISDIR(mode)
+                    )
+                except Error, OSError:
+                    usable = False
+                if not usable:
+                    required = "an executable regular file" if direct else "a regular file or folder"
+                    problems.append(_problem("bf.yaml", f"{kind}.{name}.command: {path} is not {required}"))
+            total_args = 1
+            for argument in program.command[1:]:
+                if lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", argument):
+                    try:
+                        total_args += len(expand_lines(store, lines_match[1]))
+                    except Error as error:
+                        problems.append(_problem("bf.yaml", f"{kind}.{name}.command: {error}"))
+                else:
+                    total_args += 1
+            if total_args > 128:
+                problems.append(
+                    _problem(
+                        "bf.yaml",
+                        f"{kind}.{name}.command: command arguments exceed 128 items after expanding line files",
+                    )
                 )
-            except Error, OSError:
-                usable = False
-            if not usable:
-                required = "an executable regular file" if direct else "a regular file or folder"
-                problems.append(_problem("bf.yaml", f"{kind}.{name}.command: {path} is not {required}"))
     return problems
 
 
@@ -281,6 +300,7 @@ class _Validation:
         # Typed note claims outside their relation's literal targets: the target's owner may declare a matching alias.
         self.targeted: list[tuple[str, links.Claim]] = []
         self.leftovers: list[str] = []
+        self.stale_warnings: list[dict[str, object]] = []
         self.slugs: dict[str, set[str]] = {}
         self.tagged: set[str] = set()
         self.unresolved: set[str] = set()
@@ -395,8 +415,56 @@ class _Validation:
                     for key in sorted(markdown.attributes)
                     if key in config.ontology and key not in Knowledge.model_fields
                 )
+            self._policy(name, markdown.text, markdown.attributes, parsed_note)
+        if config.validation.index_note is not None:
+            self._check_index_note(config.validation.index_note)
         self.slugs = {n.path: n.slugs for n in self.parsed}
         self.tagged = {tag for item in self.parsed for tag in item.knowledge.tags}
+
+    def _policy(self, name: str, text: str, attributes: dict[str, object], parsed_note: Note) -> None:
+        rules = self.config.validation
+        today = date.today()
+        if entry_note(name):
+            if rules.required_status is not None and attributes.get("status") not in rules.required_status:
+                allowed = ", ".join(rules.required_status)
+                self.problems.append(_problem(name, f"frontmatter status must be explicitly set to one of: {allowed}"))
+            if parsed_note.knowledge.stale_after:
+                due_days = (date.fromisoformat(parsed_note.knowledge.stale_after[:10]) - today).days
+                if rules.max_stale_days is not None and due_days > rules.max_stale_days:
+                    self.problems.append(
+                        _problem(name, f"stale_after exceeds max_stale_days ({rules.max_stale_days} days)")
+                    )
+                if rules.warn_stale_days is not None and due_days <= rules.warn_stale_days:
+                    self.stale_warnings.append(
+                        {
+                            "warning": f"stale_after is within {rules.warn_stale_days} days",
+                            "file": name,
+                            "stale_after": parsed_note.knowledge.stale_after[:10],
+                        }
+                    )
+        for pattern in rules.forbid_patterns:
+            compiled = re.compile(pattern)
+            for line_number, line in enumerate(text.splitlines(), 1):
+                if compiled.search(line):
+                    self.problems.append(_problem(name, f"line {line_number}: matches forbidden pattern {pattern}"))
+                    break
+
+    def _check_index_note(self, index_path: str) -> None:
+        by_path = {item.path: item for item in self.parsed}
+        index_item = by_path.get(index_path)
+        if index_item is None:
+            if index_path not in self.invalid:
+                self.problems.append(_problem("bf.yaml", f"validate.index_note: {index_path} does not exist"))
+            return
+        bundle = index_path.rsplit("/", 1)[0]
+        linked = {
+            resolve(index_path, target)[0]
+            for target in index_item.targets
+            if not scheme(index_path, target) and target != "#"
+        }
+        for item in self.parsed:
+            if item.path.startswith(bundle + "/") and entry_note(item.path) and item.path not in linked:
+                self.problems.append(_problem(index_path, f"missing link to {item.path}"))
 
     def _exists(self, name: str) -> bool:
         return self.kind(name) in {stat.S_IFREG, stat.S_IFDIR}
@@ -538,6 +606,7 @@ class _Validation:
             {"warning": "an interrupted write left this temporary file; delete it", "file": name}
             for name in self.leftovers
         )
+        warnings.extend(self.stale_warnings)
         warnings.extend(self.spellings.warnings())
         # One problem per file and error: a link repeated across a note or a record never crowds out the others.
         problems = list({(problem["file"], problem["error"]): problem for problem in self.problems}.values())

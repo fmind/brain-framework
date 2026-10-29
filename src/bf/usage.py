@@ -1,8 +1,10 @@
-"""Local usage counts: when search and read ran and how many results they returned, never what was asked."""
+"""Local usage counts: when search and read ran, how many results they returned and unmatched zero-result terms."""
 
 from __future__ import annotations
 
 import os
+from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import NotRequired, TypedDict
 
@@ -14,6 +16,9 @@ LIMIT = 1 << 20
 # Rotation keeps at most this much, so the next one waits for at least a quarter of the limit in new lines.
 KEEP = LIMIT * 3 // 4
 WINDOWS = {"7d": 7, "30d": 30}
+MAX_UNMATCHED = 8
+MAX_TOKEN = 64
+TOP_TERMS = 10
 
 
 class Counts(TypedDict):
@@ -25,6 +30,7 @@ class Counts(TypedDict):
     search: int
     empty: int
     read: int
+    empty_terms: NotRequired[list[dict[str, object]]]
     since: NotRequired[str]
 
 
@@ -52,13 +58,21 @@ def _rotate(tail: bytes, now: datetime) -> bytes:
     return (encode({"since": timestamp(since.isoformat())}) if since else b"") + kept
 
 
-def note(store: Store, operation: str, results: int) -> None:
+def note(store: Store, operation: str, results: int, *, unmatched: Sequence[str] = ()) -> None:
     """Append one line to private state outside the brain; counting never breaks retrieval."""
     try:
         state = state_store(store.root)
         path = state.root / USAGE
         now = datetime.now(UTC)
-        line = encode({"at": timestamp(now.isoformat()), "op": operation, "results": results})
+        tokens = (
+            [str(term).strip().lower()[:MAX_TOKEN] for term in unmatched if str(term).strip()][:MAX_UNMATCHED]
+            if operation == "search" and results == 0 and unmatched
+            else []
+        )
+        entry: dict[str, object] = {"at": timestamp(now.isoformat()), "op": operation, "results": results}
+        if tokens:
+            entry["unmatched"] = tokens
+        line = encode(entry)
         fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         with os.fdopen(fd, "a+b") as stream:
             stream.write(line)
@@ -76,6 +90,7 @@ def summary(store: Store, now: datetime | None = None) -> dict[str, Counts]:
     """Searches, searches that found nothing, and reads over the last 7 and 30 days."""
     now = now or datetime.now(UTC)
     counts = {window: Counts(search=0, empty=0, read=0) for window in WINDOWS}
+    terms: dict[str, Counter[str]] = {window: Counter() for window in WINDOWS}
     try:
         lines = state_store(store.root).read(USAGE, LIMIT * 2).splitlines()
     except OSError, Error:
@@ -92,10 +107,24 @@ def summary(store: Store, now: datetime | None = None) -> dict[str, Counts]:
         except Error, KeyError, TypeError, ValueError:
             # Private counts are advisory: a malformed line never hides the rest.
             continue
+        raw_unmatched = event.get("unmatched")
+        unmatched = (
+            [term for term in raw_unmatched if isinstance(term, str) and term]
+            if isinstance(raw_unmatched, list)
+            else []
+        )
         for window, days in WINDOWS.items():
             if timedelta(0) <= age <= timedelta(days=days) and operation in ("search", "read"):
                 counts[window][operation] += 1
                 counts[window]["empty"] += operation == "search" and not results
+                if operation == "search" and not results and unmatched:
+                    terms[window].update(unmatched[:MAX_UNMATCHED])
+    for window, counter in terms.items():
+        if counter:
+            counts[window]["empty_terms"] = [
+                {"term": term, "count": count}
+                for term, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:TOP_TERMS]
+            ]
     # Rotation's mark, its first line: a window that began before the oldest event it kept is incomplete.
     if lines and (since := _instant(lines[0], "since")):
         for window, days in WINDOWS.items():

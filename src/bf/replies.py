@@ -134,7 +134,7 @@ _DEFS: dict[str, object] = {
             "target_ref": {
                 **_STRING,
                 "description": "The ref of the one item in the asserting brain that the target names, when exactly "
-                "one does: read it to follow the claim.",
+                "one does, as a bf:// address with several brains: read it to follow the claim.",
             },
             "target_title": {**_STRING, "description": "The title of the item `target_ref` names."},
             "origin": _STRING,
@@ -224,7 +224,11 @@ _DEFS: dict[str, object] = {
     "OutlineEntry": {
         "type": "object",
         "required": ["ref", "title", "characters"],
-        "properties": {"ref": _STRING, "title": _STRING, "characters": _COUNT},
+        "properties": {
+            "ref": {**_STRING, "description": "The section's ref; a bf:// address with several brains."},
+            "title": _STRING,
+            "characters": _COUNT,
+        },
         "additionalProperties": False,
     },
 }

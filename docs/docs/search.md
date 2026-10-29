@@ -35,7 +35,7 @@ bf search '"clear explanation" zebra'
 bf search 'explenation'
 ```
 
-The first reply returns the Decision section and `"unmatched":["zebra"]`. The second finds nothing and returns `"unmatched":["explenation"]` with `"suggestions":{"explenation":["explanation"]}`: search the suggested word to confirm. Section titles name their parent headings, such as `Portfolio review — Vega — Budget`, and a note's tags rank like headings. Among equal scores, the newest item comes first. Records of several sources that share a URL appear once; `also` lists the other refs.
+The first reply returns the Decision section and `"unmatched":["zebra"]`. The second finds nothing and returns `"unmatched":["explenation"]` with `"suggestions":{"explenation":["explanation"]}`: search the suggested word to confirm. Section titles name their parent headings, such as `Portfolio review — Vega — Budget`, and a note's tags weigh more than body text, less than headings. Among equal scores, the newest item comes first. Records of several sources that share a URL appear once; `also` lists the other refs.
 
 If a query misses, use the evidence's own words and drop the scope. The sample says “visitors” and “signing up”, so “customer conversion” need not find it. Accents fold only in Latin script, and Chinese, Japanese, Thai or Devanagari text matches by runs or fragments rather than words; see [other scripts](retrieval.md#search).
 

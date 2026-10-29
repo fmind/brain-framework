@@ -296,3 +296,44 @@ def test_keep_never_removes_the_run_it_just_recorded(configured: Store) -> None:
     # Before, its earlier time made the run's own record the oldest: it was removed while the reply named it.
     kept = sorted(str(record.id) for record in stored(configured))
     assert kept == sorted([result["record"].removeprefix("assistant:"), "20260926T020000Z-00000002"])
+
+
+def test_wall_clock_schedules_context_schedule_silent_noop_and_idempotent_retry(configured: Store) -> None:
+    configured.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nassistants:\n"
+        b"  brief:\n"
+        b"    prompt: prompts/brief.md\n"
+        b"    command: [agent]\n"
+        b"    text: /response\n"
+        b"    idempotent: true\n"
+        b"    schedules:\n"
+        b"      morning:\n"
+        b'        at: "08:00"\n'
+        b"        timezone: UTC\n"
+        b"        days: [mon, tue, wed, thu, fri]\n",
+    )
+    configured.write("prompts/brief.md", b"Context: {{context}}\n")
+    # Sunday at 09:00 UTC is not in days; Monday at 07:30 UTC is before 08:00; Monday at 08:05 UTC is due.
+    sunday = datetime(2026, 8, 30, 9, 0, tzinfo=UTC)
+    monday_early = datetime(2026, 8, 31, 7, 30, tzinfo=UTC)
+    monday_due = datetime(2026, 8, 31, 8, 5, tzinfo=UTC)
+    assert assistants.due_schedules(configured, {"brief"}, sunday) == []
+    assert assistants.due_schedules(configured, {"brief"}, monday_early) == []
+    due_list = assistants.due_schedules(configured, {"brief"}, monday_due)
+    assert len(due_list) == 1
+    assert due_list[0][1] == "schedule:morning"
+    keys, _ = assistants.schedule(configured, {"brief"}, monday_due)
+    job_id = keys[0]
+    work = Queue(configured).work(job_id)
+    _, stdin = assistants.expanded(configured, work)
+    assert '"schedule":"morning"' in stdin.decode()
+    # A pre-answer harness failure on an idempotent assistant retries (pending) instead of wedging in uncertain.
+    with pytest.raises(Error, match="network down"):
+        assistants.execute(configured, job_id, runner=lambda *_: (_ for _ in ()).throw(Error("network down")))
+    assert Queue(configured).get(job_id)["state"] == "pending"
+    # A silent no-op scheduled reply (empty response and no metadata) completes and advances the checkpoint without writing a record.
+    noop = assistants.execute(configured, job_id, runner=lambda *_: b'{"response": ""}')
+    assert "record" not in noop
+    assert records.files(configured, "brief") == []
+    assert Queue(configured).progress("schedule:brief:schedule:morning")["end"] == "2026-08-31T08:05:00.000000Z"

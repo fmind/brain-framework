@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal
 from urllib.parse import quote, unquote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator, model_validator
 from pydantic.json_schema import JsonDict
@@ -161,19 +162,19 @@ def encode(value: object) -> bytes:
 # replies and diagnostics escape them. Listed, as finding them would scan every code point in each command; a test
 # compares the list with the running Python's Unicode data.
 _FORMAT = (
-    "\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064"
-    "\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
-    "\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f"
+    r"\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064"
+    r"\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd\U00013430-\U0001343f\U0001bca0-\U0001bca3"
+    r"\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f"
 )
 _INVISIBLE = re.compile(f"[{_FORMAT}]")
 # LINE and PARAGRAPH SEPARATOR, which JSON leaves raw but str.splitlines() and JavaScript read as line breaks: a file
 # name holding one would split a JSON line or a diagnostic.
-_SEPARATORS = "\u2028\u2029"
+_SEPARATORS = r"\u2028\u2029"
 # DEL and C1 controls, which JSON leaves raw and some terminals obey, such as U+009B CSI, the separators and format
 # characters.
-_TERMINAL = re.compile(f"[\x7f-\x9f{_SEPARATORS}{_FORMAT}]")
+_TERMINAL = re.compile(rf"[\x7f-\x9f{_SEPARATORS}{_FORMAT}]")
 # Diagnostics are text, not JSON: C0 controls, including a newline that would forge another `bf:` line, too.
-_UNPRINTABLE = re.compile(f"[\x00-\x1f\x7f-\x9f{_SEPARATORS}{_FORMAT}]")
+_UNPRINTABLE = re.compile(rf"[\x00-\x1f\x7f-\x9f{_SEPARATORS}{_FORMAT}]")
 # The canonical UTC instant that files, run history and the cache store.
 _CANONICAL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z")
 # Reply keys holding instants; record `fields` keep their stored values.
@@ -642,6 +643,10 @@ class SchemaField(Model):
     examples: Annotated[list[JsonValue], Field(max_length=20)] = Field(
         default_factory=list, description="Complete field values checked against type and cardinality; never defaults."
     )
+    path: Annotated[str, Field(max_length=4096, pattern=r"^/(?:[^~]|~[01])*$")] | None = Field(
+        default=None,
+        description="Optional default JSON Pointer into sensor output when a sensor does not specify its own mapping.",
+    )
 
     def allows(self, value: JsonValue) -> bool:
         """Whether each identity of a field value starts with one of the declared targets; any value without them."""
@@ -759,9 +764,15 @@ class Command(Model):
     @field_validator("command")
     @classmethod
     def valid_command(cls, values: list[str]) -> list[str]:
-        for value in values:
+        for index, value in enumerate(values):
             if "\x00" in value or len(value) > 16_384:
                 raise ValueError("invalid command argument")
+            if index > 0 and (lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", value)):
+                target = lines_match[1]
+                parts = target.split("/")
+                if not target or target.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+                    raise ValueError("lines placeholder requires a normalized brain-relative file path")
+                continue
             stripped = re.sub(r"\{\{(?:" + "|".join(cls.PLACEHOLDERS) + r")\}\}", "", value)
             if "{{" in stripped or "}}" in stripped:
                 raise ValueError(
@@ -839,6 +850,14 @@ class Sensor(Program):
         default=None,
         description="Seconds without a new or changed record after which a scheduled source is reported silent in "
         "status and attention; unset never reports silence.",
+    )
+    truncate_text: bool = Field(
+        default=False,
+        description="Truncate oversized record text on a UTF-8 codepoint boundary instead of failing the batch.",
+    )
+    max_text_bytes: Annotated[int, Field(ge=1, le=4 << 20)] | None = Field(
+        default=None,
+        description="Maximum UTF-8 bytes of a record's text before truncation; sets truncated: true in attributes.",
     )
 
     _empty = field_validator("fields", mode="before")(empty)
@@ -971,9 +990,67 @@ class ReplyOutput(Model):
     reply: Reply
 
 
+Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
 class AssistantSchedule(Model):
-    every: Annotated[int, Field(ge=1, le=31_536_000)]
+    every: Annotated[int, Field(ge=1, le=31_536_000)] = 86_400
     lookback: Annotated[int, Field(ge=1, le=31_536_000)] = 86_400
+    at: Annotated[str, Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")] | None = Field(
+        default=None, description="Optional 24-hour wall-clock time (HH:MM) for daily or weekday-filtered runs."
+    )
+    timezone: Annotated[str, Field(min_length=1, max_length=128)] | None = Field(
+        default=None, description="IANA timezone for at and days, such as Europe/Paris; defaults to local time."
+    )
+    days: (
+        Annotated[list[Weekday], Field(min_length=1, max_length=7, json_schema_extra={"uniqueItems": True})] | None
+    ) = Field(default=None, description="Optional weekdays when the schedule may run; omitted means every day.")
+
+    @model_validator(mode="after")
+    def valid_schedule(self) -> AssistantSchedule:
+        if "every" not in self.model_fields_set and self.at is None:
+            raise ValueError("schedule requires every or at")
+        if self.timezone is not None:
+            clean(self.timezone)
+            try:
+                ZoneInfo(self.timezone)
+            except (ZoneInfoNotFoundError, ValueError) as error:
+                raise ValueError("invalid IANA timezone") from error
+        if self.days is not None and len(self.days) != len(set(self.days)):
+            raise ValueError("days must be distinct")
+        return self
+
+    def next_due(self, now: datetime, last_success: str = "") -> datetime:
+        """The UTC instant when this schedule is next due; `<= now` means it is due now."""
+        zone = ZoneInfo(self.timezone) if self.timezone else (datetime.now().astimezone().tzinfo or UTC)
+        allowed = set(self.days or WEEKDAYS)
+        if self.at is None:
+            due = datetime.fromisoformat(last_success) + timedelta(seconds=self.every) if last_success else now
+            if self.days is not None:
+                local = due.astimezone(zone)
+                while WEEKDAYS[local.weekday()] not in allowed:
+                    next_day = local.date() + timedelta(days=1)
+                    local = datetime(next_day.year, next_day.month, next_day.day, tzinfo=zone)
+                due = local.astimezone(UTC)
+            return due
+        hour, minute = map(int, self.at.split(":"))
+        local_now = now.astimezone(zone)
+        succeeded = datetime.fromisoformat(last_success).astimezone(zone) if last_success else None
+        today = local_now.date()
+        today_slot = datetime(today.year, today.month, today.day, hour, minute, tzinfo=zone)
+        if WEEKDAYS[today.weekday()] in allowed:
+            if local_now >= today_slot and (succeeded is None or succeeded < today_slot):
+                return today_slot.astimezone(UTC)
+            if local_now < today_slot:
+                return today_slot.astimezone(UTC)
+        for offset in range(1, 8):
+            candidate = today + timedelta(days=offset)
+            if WEEKDAYS[candidate.weekday()] in allowed:
+                return datetime(candidate.year, candidate.month, candidate.day, hour, minute, tzinfo=zone).astimezone(
+                    UTC
+                )
+        return now
 
 
 class SensorReference(Model):
@@ -1011,6 +1088,11 @@ class Assistant(Command):
         description="Keep this many newest run records in memories/NAME/; older ones are removed after a run. Unset "
         "keeps every run.",
     )
+    idempotent: bool = Field(
+        default=False,
+        description="Retry failed or interrupted pre-answer harness attempts automatically with backoff instead of "
+        "leaving the job uncertain.",
+    )
     inputs: Annotated[list[AssistantInput], Field(max_length=32)] = Field(default_factory=list)
     outputs: Annotated[list[ChannelOutput | ReplyOutput], Field(max_length=32)] = Field(default_factory=list)
     schedules: dict[Name, AssistantSchedule] = Field(default_factory=dict, max_length=32)
@@ -1024,17 +1106,11 @@ class Assistant(Command):
             parts[0] != "prompts"
             or len(parts) < 2
             or not value.endswith(".md")
+            or parts[-1] == ".md"
             or any(part in {"", ".", ".."} for part in parts)
             or any(character in value for character in "{}\\\x00")
         ):
             raise ValueError("prompt must be a normalized Markdown path in prompts/, such as prompts/assistant.md")
-        return value
-
-    @field_validator("text")
-    @classmethod
-    def json_pointer(cls, value: str | None) -> str | None:
-        if value is not None and (not re.fullmatch(r"/(?:[^~\x00]|~[01])*", value) or len(value) > 4096):
-            raise ValueError("text must be a JSON Pointer starting with /, such as /response")
         return value
 
     @model_validator(mode="after")
@@ -1080,6 +1156,69 @@ class WatchSettings(Model):
     )
 
 
+class ValidateSettings(Model):
+    """Optional declarative validation policies enforced by `bf validate`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    max_stale_days: Annotated[int, Field(ge=1, le=36_500)] | None = Field(
+        default=None, description="Maximum days in the future allowed for a note's stale_after date."
+    )
+    warn_stale_days: Annotated[int, Field(ge=0, le=36_500)] | None = Field(
+        default=None, description="Warn when a note's stale_after date is within this many days."
+    )
+    index_note: Annotated[str, Field(min_length=1, max_length=4096)] | None = Field(
+        default=None,
+        description="Bundle index note, such as concepts/index.md, that must link every entry note in its folder.",
+    )
+    required_status: (
+        Annotated[
+            list[Literal["draft", "stable", "deprecated"]],
+            Field(min_length=1, max_length=3, json_schema_extra={"uniqueItems": True}),
+        ]
+        | None
+    ) = Field(default=None, description="Allowed OKF statuses that entry notes must explicitly declare in frontmatter.")
+    forbid_patterns: Annotated[list[Annotated[str, Field(min_length=1, max_length=1024)]], Field(max_length=64)] = (
+        Field(default_factory=list, description="Regular expressions forbidden across tracked Markdown notes.")
+    )
+
+    @field_validator("index_note")
+    @classmethod
+    def valid_index_note(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        clean(value)
+        parts = value.split("/")
+        if (
+            parts[0] not in {"projects", "concepts"}
+            or len(parts) < 2
+            or not value.endswith(".md")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError("index_note must be a normalized Markdown path in projects/ or concepts/")
+        return value
+
+    @field_validator("required_status")
+    @classmethod
+    def distinct_status(
+        cls, value: list[Literal["draft", "stable", "deprecated"]] | None
+    ) -> list[Literal["draft", "stable", "deprecated"]] | None:
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError("required_status values must be distinct")
+        return value
+
+    @field_validator("forbid_patterns")
+    @classmethod
+    def valid_patterns(cls, values: list[str]) -> list[str]:
+        for pattern in values:
+            clean(pattern)
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                raise ValueError(f"invalid regular expression: {error}") from error
+        return values
+
+
 class Config(Model):
     """One brain: its name, related brains, declared fields, and the sensors, routines and assistants it may run."""
 
@@ -1116,6 +1255,12 @@ class Config(Model):
         json_schema_extra=_nullable,
         description="Watch timing and desktop alerts; CLI options override these values.",
     )
+    validation: ValidateSettings = Field(
+        default_factory=ValidateSettings,
+        alias="validate",
+        json_schema_extra=_nullable,
+        description="Optional declarative note and OKF validation rules enforced by bf validate.",
+    )
     # A routine name is the slug of the action folder it writes.
     routines: dict[Slug, Routine] = Field(
         default_factory=dict,
@@ -1134,7 +1279,7 @@ class Config(Model):
     )
 
     _empty = field_validator(
-        "brains", "ontology", "sensors", "watch", "routines", "channels", "assistants", mode="before"
+        "brains", "ontology", "sensors", "watch", "validation", "routines", "channels", "assistants", mode="before"
     )(empty)
 
     @model_validator(mode="after")

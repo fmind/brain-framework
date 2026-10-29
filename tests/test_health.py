@@ -552,7 +552,7 @@ def test_status_says_an_interrupted_queue_write_recovers_with_bf_queue(brain: St
         "    db.execute('INSERT INTO checkpoints VALUES (?,?)', (f'spill:{i}', 'x' * 500))\n"
         "os.kill(os.getpid(), signal.SIGKILL)\n"
     )
-    process = subprocess.run([sys.executable, "-I", "-c", killed, str(database)], check=False)  # noqa: S603
+    process = subprocess.run([sys.executable, "-I", "-c", killed, str(database)], timeout=60, check=False)  # noqa: S603
     assert process.returncode == -signal.SIGKILL
     assert database.with_name(database.name + "-journal").exists()
     interrupted = "assistant queue holds an interrupted write; run bf queue to recover it"

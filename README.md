@@ -182,7 +182,7 @@ uv tool install --python 3.14 brain-framework
 bf --version
 ```
 
-Then follow [Getting started](https://fmind.github.io/brain-framework/docs/getting-started/): create a brain, save a decision, find its reason and link it to a first collected source. The [four-tool walkthrough](https://fmind.github.io/brain-framework/docs/context-hub/) then runs the whole loop offline on fictional Workspace, Jira, GitHub and Gcloud records.
+Then follow [Getting started](https://fmind.github.io/brain-framework/docs/getting-started/): create a brain, save a decision, find its reason and link it to a first collected source. The [four-tool walkthrough](https://fmind.github.io/brain-framework/docs/context-hub/) then runs the whole loop on fictional Workspace, Jira, GitHub and Gcloud records, without a provider account.
 
 ## Open your agent in your brain
 

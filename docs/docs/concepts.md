@@ -34,15 +34,16 @@ Projects, concepts and action `ACTION.md` notes are Markdown with YAML metadata 
 
 ## Programs
 
-A brain can hold three kinds of programs, all declared in `bf.yaml` and reviewed by you:
+A brain can hold four kinds of programs, all declared in `bf.yaml` and reviewed by you:
 
 | Program   | Purpose                                                                         | Runs when                                               |
 | --------- | ------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | Sensor    | Print selected evidence as records; its records form a **source**.              | `bf collect`, or `bf update` and `bf watch` when due.   |
 | Routine   | Any other deterministic brain program, such as a weekly review or a validation. | `bf run`, a hook such as Git's pre-commit, or when due. |
 | Assistant | Your agent harness run over a Markdown prompt; each run becomes a record.       | `bf run`, or `bf update` and `bf watch` when due.       |
+| Channel   | Send, read or stream messages for assistants, such as a chat thread.            | When an assistant answers or reads, or `bf channel`.    |
 
-Each program keeps its recent output and errors in `logs/NAME.log`. [Sensors](sensors.md), [routines](routines.md) and [assistants](prompts.md) explain their setup; [timing and health](schedule.md#timing-and-health) says when they run.
+Each program keeps its recent output and errors in `logs/`, such as `logs/NAME.log`. [Sensors](sensors.md), [routines](routines.md), [assistants](prompts.md) and [channels](channels.md) explain their setup; assistant work and deliveries wait in a local queue that `bf queue` inspects; [timing and health](schedule.md#timing-and-health) says when they run.
 
 ## Retrieval and connections
 

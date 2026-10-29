@@ -72,7 +72,7 @@ bf read projects/new-website.md#decision
 
 The exact read supplies the reason. Whether the product page now meets it needs the actual draft.
 
-When a host cannot detect another session's edit, write through the [guarded-write helper](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/scripts/guarded-write.py). It changes a note only while the note still has the `sha256` of your read (`--expect-sha256`): either the whole file from stdin, or one exact passage with `--old TEXT --new TEXT`. Concurrent helpers writing the same file take turns through a lock below `XDG_STATE_HOME`, so only one of two sessions that read the same digest succeeds; an editor that takes no lock can still save in between.
+When a host cannot detect another session's edit, write through the [guarded-write helper](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/scripts/guarded-write.py). It changes a note only while the note still has the `sha256` of your read (`--expect-sha256`): either one exact passage with `--old=TEXT --new=TEXT`, or the whole file with `--new-file FILE` alone. Concurrent helpers writing the same file take turns through a lock below `XDG_STATE_HOME`, so only one of two sessions that read the same digest succeeds; an editor that takes no lock can still save in between.
 
 ## Resume an action
 

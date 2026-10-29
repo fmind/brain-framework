@@ -16,7 +16,18 @@ from uuid import uuid4
 from pydantic import JsonValue, ValidationError
 
 from bf import channels, records
-from bf.collect import MAX_ARGUMENT, RUN_ID, Runner, arguments, enabled, home_folder, parse_reply, reply_title, run
+from bf.collect import (
+    MAX_ARGUMENT,
+    RUN_ID,
+    NotStartedError,
+    Runner,
+    arguments,
+    enabled,
+    home_folder,
+    parse_reply,
+    reply_title,
+    run,
+)
 from bf.config import load
 from bf.history import ASSISTANTS, append_log, log_path, remember, state
 from bf.messages import MAX_BATCH, Message, Outgoing
@@ -39,6 +50,7 @@ from bf.models import (
 )
 from bf.runtime import (
     MAX_PENDING,
+    SCHEDULING,
     EventIntent,
     EventTarget,
     Origin,
@@ -246,6 +258,8 @@ def accept(
 
 def _body(store: Store, work: Work, history: list[dict[str, str]] | None) -> str:
     context: dict[str, object] = {"kind": work.kind, "start": work.start, "end": work.end}
+    if work.kind == "schedule" and work.slot.startswith("schedule:"):
+        context["schedule"] = work.slot.removeprefix("schedule:")
     if work.event:
         context["event"] = work.event
     if work.origin is not None:
@@ -297,13 +311,19 @@ def expanded(store: Store, work: Work, queue: Queue | None = None) -> tuple[list
     return argv, b"" if passed else body.encode()
 
 
-def _current(store: Store, work: Work) -> None:
+def _current(store: Store, work: Work, *, started: bool) -> None:
+    """Refuse a job whose harness or outputs changed; once its harness has answered, only removal or disabling counts."""
     try:
         config = load(store)
     except Error as error:
         # A bf.yaml mid-edit delays the job instead of failing it: it starts once the file loads again.
         raise BusyError(f"the job waits until bf.yaml loads: {error}") from error
-    if config.assistants.get(work.assistant) != work.settings or not work.settings.enabled:
+    current = config.assistants.get(work.assistant)
+    if (
+        current is None
+        or not current.enabled
+        or (not started and current.model_dump(exclude=SCHEDULING) != work.settings.model_dump(exclude=SCHEDULING))
+    ):
         raise Error("assistant configuration changed; restore it, then retry or cancel this job with bf queue")
     for route in work.routes:
         channel = config.channels.get(route.channel)
@@ -334,6 +354,8 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
     work = Queue.parse(row)
     try:
         if row["state"] == "complete":
+            if not row["prepared"]:
+                return {"assistant": work.assistant, "job": key, "text": ""}
             saved = Prepared.model_validate_json(str(row["prepared"]))
             return {
                 "assistant": work.assistant,
@@ -346,7 +368,7 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
         try:
             # A sensor change can extend a pending trigger's window meanwhile: start only the job as it was read.
             for _ in range(10):
-                _current(store, work)
+                _current(store, work, started=row["state"] != "pending")
                 if row["state"] != "pending":
                     break
                 argv, stdin = expanded(store, work, queue)
@@ -365,6 +387,19 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                 reply, metadata = parse_reply(cast(bytes, row["raw"]), work.settings.text)
                 if work.kind == "input" and not reply.strip():
                     raise Error("assistant returned no response to an incoming message; inspect the saved answer")
+                if work.kind in {"schedule", "trigger"} and not reply.strip() and not metadata:
+                    with writer(store, wait=120):
+                        queue.finish(work)
+                        remember(
+                            store,
+                            work.assistant,
+                            ASSISTANTS,
+                            run=now(),
+                            success=now(),
+                            error="",
+                            failures=0,
+                        )
+                    return {"assistant": work.assistant, "job": key, "text": ""}
                 record = Record(
                     id=datetime.fromisoformat(work.end).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + work.id[-8:],
                     title=reply_title(work.assistant, reply),
@@ -388,7 +423,7 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                         ),
                         **({"event": work.event} if work.event else {}),
                     },
-                ).readable()
+                )
                 replies = (
                     [
                         Outgoing(
@@ -441,7 +476,13 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                 else "assistant execution or saved reply failed; inspect its local log"
             )
             if current["state"] not in {"complete", "cancelled"}:
-                queue.fail(key, message, uncertain=current["state"] == "running")
+                # A harness that never started cannot have acted: its job fails plainly instead of uncertainly.
+                queue.fail(
+                    key,
+                    message,
+                    uncertain=current["state"] == "running" and not isinstance(error, NotStartedError),
+                    idempotent=work.settings.idempotent,
+                )
             with suppress(Error, OSError):
                 append_log(store, work.assistant, message)
             raise Error(message) from error
@@ -496,7 +537,13 @@ def deliver(
             except (Error, OSError, UnicodeError) as error:
                 reason = str(error) if isinstance(error, Error) else "channel send failed; inspect its local log"
                 attempts = int(str(delivery["attempts"])) + 1
-                outcome, reason, due = retry_policy(command.idempotent, delivery["job"] is not None, attempts, reason)
+                # A send command that never started sent nothing, so it retries like an idempotent one.
+                outcome, reason, due = retry_policy(
+                    command.idempotent or isinstance(error, NotStartedError),
+                    delivery["job"] is not None,
+                    attempts,
+                    reason,
+                )
                 queue.delivery_failed(key, reason, outcome=outcome, due=due)
             except BaseException:
                 # Ctrl-C or SIGTERM ends this process: record the send now, not at the next recovery pass.
@@ -513,9 +560,17 @@ def deliver(
 def manual(
     store: Store, name: str, *, text: str = "", dry_run: bool = False, runner: Runner = run
 ) -> dict[str, object]:
-    end = datetime.now(UTC)
+    end, key = datetime.now(UTC), uuid4().hex
+    # Each bf run is its own slot: one awaiting review never holds back another run's saved answer.
     work = prepare(
-        store, name, "manual", timestamp((end - timedelta(days=1)).isoformat()), timestamp(end.isoformat()), text=text
+        store,
+        name,
+        "manual",
+        timestamp((end - timedelta(days=1)).isoformat()),
+        timestamp(end.isoformat()),
+        text=text,
+        slot=f"manual:{key}",
+        key=key,
     )
     result: dict[str, object] = {"assistant": name}
     try:
@@ -581,10 +636,8 @@ def due_schedules(
         for schedule, specification in settings.schedules.items():
             slot = f"schedule:{schedule}"
             progress = queue.progress(f"schedule:{name}:{slot}")
-            success = progress.get("success")
-            if success and timedelta(0) <= at - datetime.fromisoformat(str(success)) < timedelta(
-                seconds=specification.every
-            ):
+            success = str(progress.get("success") or "")
+            if specification.next_due(at, success) > at:
                 continue
             if queue.active(name, slot):
                 continue

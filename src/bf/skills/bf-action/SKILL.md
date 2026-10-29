@@ -18,7 +18,7 @@ An action is **open** until its Outcome section holds more than its heading and 
 Invoking this skill with a topic, or asking to start or track a session, is the explicit request: start it without asking again.
 
 1. Derive the topic as lowercase words joined by hyphens (`website-review`) from the invocation or the request; ask only when neither names the work.
-1. Look for an open action on that topic with `bf search "topic words" --scope actions`, checking a match's open tasks in `bf read actions` and its Outcome. Resume an open match that is not `deprecated` (below) instead of starting another; ask when several match or the user may want a separate session.
+1. Look for an open action on that topic with `bf search "topic words" --scope actions`, checking a match's open tasks in `bf read actions` and its Outcome. Resume an open match that is not `deprecated` instead of starting another, as Resume below describes; ask when several match or the user may want a separate session.
 1. Find and read the owning project, if any, with `bf search "topic words" --scope projects`; clarify ownership only when it is unresolved.
 1. Create the action:
 

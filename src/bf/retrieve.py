@@ -157,7 +157,13 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
     for name, part in parts:
         store = cast("Store", part["store"])
         if counted:
-            usage.note(store, "search", sum(item["brain"] == name for item in selected))
+            brain_results = sum(item["brain"] == name for item in selected)
+            usage.note(
+                store,
+                "search",
+                brain_results,
+                unmatched=cast("list[str]", reply.get("unmatched", ())) if brain_results == 0 else (),
+            )
         if counts := cast("dict[str, dict[str, object]]", part["sources"]):
             try:
                 coverage.extend(

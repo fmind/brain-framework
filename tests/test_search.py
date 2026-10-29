@@ -361,25 +361,6 @@ def test_record_leads_collapse_whitespace_of_a_prefix_like_the_whole_text(text: 
     assert index.lead(Record(id="x", title="T", text=text)) == preview(re.sub(r"\s+", " ", text).strip())
 
 
-def plant(store: Store, *statements: str) -> None:
-    """Add rows no brain file supports, as a cloned or extracted cache could carry, and optional schema objects."""
-    with closing(sqlite3.connect(store.root / index.CACHE)) as connection, connection:
-        connection.execute(
-            "INSERT INTO items(id,ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-            "tasks_open,tasks_done,next,weight,stale_after,fields) VALUES(999,'projects/roadmap.md',"
-            "'projects/roadmap.md','note','','Roadmap','','project','','planted','','','',0,0,0,'',1,'','')"
-        )
-        connection.execute("INSERT INTO passages(id,item,fragment,title,original) VALUES(999,999,'','Roadmap','')")
-        connection.execute("INSERT INTO search(rowid,title,text,names) VALUES(999,'roadmap','zanzibar planted','')")
-        for statement in statements:
-            connection.execute(statement)
-
-
-def cache_file(store: Store) -> str:
-    with closing(sqlite3.connect(store.root / index.CACHE)) as connection:
-        return connection.execute("SELECT file FROM ontology").fetchone()[0]
-
-
 def test_several_brains_interleave_and_reads_name_their_brain(brain: Store, tmp_path: Path) -> None:
     root = tmp_path / "team"
     root.mkdir()
@@ -459,12 +440,17 @@ def test_usage_counts_searches_empty_results_and_reads_without_queries(brain: St
     read([brain], "meetings:lunch")
     search([brain], Query(text="offline"), counted=False)
     log = state_store(brain.root).root / usage.USAGE
-    # Each line holds only a time, an operation and a count: never the query, ref or page.
-    assert [set(json.loads(line)) for line in log.read_text().splitlines()] == [{"at", "op", "results"}] * 3
-    assert not any(word in log.read_text() for word in ("offline", "zzabsent", "meetings", "lunch"))
+    # Matched searches and reads hold only a time, an operation and a count; zero-result searches also record unmatched terms.
+    assert [set(json.loads(line)) for line in log.read_text().splitlines()] == [
+        {"at", "op", "results"},
+        {"at", "op", "results", "unmatched"},
+        {"at", "op", "results"},
+    ]
+    assert not any(word in log.read_text() for word in ("offline", "meetings", "lunch"))
+    assert "zzabsent" in log.read_text()
     assert usage.summary(brain) == {
-        "7d": {"search": 2, "empty": 1, "read": 1},
-        "30d": {"search": 2, "empty": 1, "read": 1},
+        "7d": {"search": 2, "empty": 1, "read": 1, "empty_terms": [{"term": "zzabsent", "count": 1}]},
+        "30d": {"search": 2, "empty": 1, "read": 1, "empty_terms": [{"term": "zzabsent", "count": 1}]},
     }
     later = datetime.now(UTC) + timedelta(days=10)
     assert usage.summary(brain, now=later)["7d"] == {"search": 0, "empty": 0, "read": 0}
@@ -1423,3 +1409,17 @@ def test_words_starting_with_a_bf_scheme_stay_words(brain: Store) -> None:
     # Before 17 any query starting with bf: was parsed as an address and failed as an invalid link.
     assert refs(brain, "bf: how to configure sensors") == ["concepts/setup.md"]
     assert refs(brain, "Bf:setup") == ["concepts/setup.md"]
+
+
+def test_section_passages_inherit_note_stem_and_aliases_in_context(brain: Store) -> None:
+    brain.write(
+        "concepts/service-offerings.md",
+        b"---\ntype: concept\naliases: [catalog:tier-matrix]\n---\n# Architecture Tiers\n\nOverview.\n\n"
+        b"## Verification\n\nCheck the quota setting.\n",
+    )
+    brain.write(
+        "concepts/portal.md",
+        b"---\ntype: concept\n---\n# Portal\n\n## Verification\n\nCheck the quota setting in the portal.\n",
+    )
+    assert refs(brain, "service-offerings quota")[0] == "concepts/service-offerings.md#verification"
+    assert refs(brain, "tier-matrix quota")[0] == "concepts/service-offerings.md#verification"

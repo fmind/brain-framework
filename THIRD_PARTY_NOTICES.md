@@ -507,15 +507,15 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## httpcore2 2.13.1
+## httpcore2 2.16.0
 
 Source: <https://github.com/pydantic/httpx2/blob/main/src/httpcore2>
 
 License: `BSD-3-Clause`
 
-Evidence: `httpcore2-2.13.1.dist-info/licenses/LICENSE.md`
+Evidence: `httpcore2-2.16.0.dist-info/licenses/LICENSE.md`
 
-### httpcore2-2.13.1.dist-info/licenses/LICENSE.md
+### httpcore2-2.16.0.dist-info/licenses/LICENSE.md
 
 ```text
 Copyright © 2026 to present Pydantic Services Inc. and individual contributors.
@@ -548,15 +548,15 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## httpx2 2.13.1
+## httpx2 2.16.0
 
 Source: <https://github.com/pydantic/httpx2>
 
 License: `BSD-3-Clause`
 
-Evidence: `httpx2-2.13.1.dist-info/licenses/LICENSE.md`
+Evidence: `httpx2-2.16.0.dist-info/licenses/LICENSE.md`
 
-### httpx2-2.13.1.dist-info/licenses/LICENSE.md
+### httpx2-2.16.0.dist-info/licenses/LICENSE.md
 
 ```text
 Copyright © 2026 to present Pydantic Services Inc. and individual contributors.
@@ -1086,15 +1086,15 @@ Evidence: `opentelemetry_api-1.45.1.dist-info/licenses/LICENSE`
    limitations under the License.
 ```
 
-## pycparser 3.11
+## pycparser 3.12
 
 Source: <https://github.com/eliben/pycparser>
 
 License: `BSD-3-Clause`
 
-Evidence: `pycparser-3.11.dist-info/licenses/LICENSE`
+Evidence: `pycparser-3.12.dist-info/licenses/LICENSE`
 
-### pycparser-3.11.dist-info/licenses/LICENSE
+### pycparser-3.12.dist-info/licenses/LICENSE
 
 ```text
 pycparser -- A C parser in Python
@@ -1635,15 +1635,15 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## sse-starlette 3.5.0
+## sse-starlette 3.6.0
 
 Source: <https://github.com/sysid/sse-starlette>
 
 License: `BSD-3-Clause`
 
-Evidence: `sse_starlette-3.5.0.dist-info/licenses/LICENSE`
+Evidence: `sse_starlette-3.6.0.dist-info/licenses/LICENSE`
 
-### sse_starlette-3.5.0.dist-info/licenses/LICENSE
+### sse_starlette-3.6.0.dist-info/licenses/LICENSE
 
 ```text
 Copyright © 2020, [sysid](https://sysid.github.io/).
@@ -1675,15 +1675,15 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## starlette 1.8.0
+## starlette 1.10.0
 
 Source: <https://github.com/Kludex/starlette>
 
 License: `BSD-3-Clause`
 
-Evidence: `starlette-1.8.0.dist-info/licenses/LICENSE.md`
+Evidence: `starlette-1.10.0.dist-info/licenses/LICENSE.md`
 
-### starlette-1.8.0.dist-info/licenses/LICENSE.md
+### starlette-1.10.0.dist-info/licenses/LICENSE.md
 
 ```text
 Copyright © 2018, [Encode OSS Ltd](https://www.encode.io/).

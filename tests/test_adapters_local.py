@@ -166,6 +166,20 @@ def test_git_history_projects_commits_of_nested_checkouts(provider: Provider, tm
     assert provider.records("git-history.py", *window, "--skip", "owner/project") == []
     assert provider.records("git-history.py", *window, "--skip", "owner/project-feature") == []
     assert provider.run("git-history.py", *window, "--bad").returncode == 1
+    # A collection started from a Git hook inherits the hook's GIT_DIR, which must not replace every repository.
+    hook = tmp_path / "hook"
+    subprocess.run(["git", "init", "-q", str(hook)], env=env, check=True, capture_output=True, timeout=30)  # noqa: S603,S607
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(hook), "commit", "-q", "--allow-empty", "-m", "chore: hook"],  # noqa: S607
+        env={**env, "GIT_AUTHOR_NAME": "Hook", "GIT_AUTHOR_EMAIL": "hook@fmind.dev"}
+        | {"GIT_COMMITTER_NAME": "Hook", "GIT_COMMITTER_EMAIL": "hook@fmind.dev"},
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    hooked = provider.run("git-history.py", *window, environment={"GIT_DIR": str(hook / ".git")})
+    assert hooked.returncode == 0, hooked.stderr
+    assert [json.loads(hooked.stdout)[0]["title"]] == ["owner/project: feat: keep durable evidence"]
 
 
 def test_git_history_collects_repositories_scanned_only_through_worktrees(provider: Provider, tmp_path: Path) -> None:

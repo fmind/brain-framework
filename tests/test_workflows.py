@@ -352,7 +352,7 @@ def test_output_escapes_terminal_controls_and_keeps_capture_digests(provider: Pr
     # bf escapes DEL and C1 controls, such as U+009B CSI, and bidi or invisible format characters in its replies; the
     # helper never re-emits them raw.
     note = {**NOTE, "text": "## Retention\n\nKeep \x9b31m one\x7f \x1b]52;c;eA==\x07 \u202eversion\u200b.\n"}
-    controls = re.compile("[\x00-\x1f\x7f-\x9f\u202e\u200b]")
+    controls = re.compile(r"[\x00-\x1f\x7f-\x9f\u202e\u200b]")
     provider.install("bf", [{"match": ["read"], "stdout": note}])
     read = provider.run(
         "evidence.py", "read", note["ref"], "--brain", "brain", folder="../src/bf/skills/bf-use/scripts"

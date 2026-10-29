@@ -262,14 +262,18 @@ def assistant_health(
                 continue
             progress = checkpoints.get(f"schedule:{name}:schedule:{schedule}")
             success = str(progress.get("success", "")) if isinstance(progress, dict) else ""
+            due = spec.next_due(now, success)
             freshness = (
                 "never"
                 if not success
                 else "fresh"
-                if timedelta(0) <= now - datetime.fromisoformat(success) <= timedelta(seconds=2 * spec.every)
+                if (
+                    now <= due + timedelta(seconds=spec.every)
+                    if spec.at is not None or spec.days is not None
+                    else timedelta(0) <= now - datetime.fromisoformat(success) <= timedelta(seconds=2 * spec.every)
+                )
                 else "overdue"
             )
-            due = datetime.fromisoformat(success) + timedelta(seconds=spec.every) if success else now
             schedules[schedule] = {
                 "freshness": freshness,
                 "every": spec.every,

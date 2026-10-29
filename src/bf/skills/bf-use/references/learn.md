@@ -17,10 +17,10 @@ When your editor cannot detect another session's save, write through the guarded
 
 ```bash
 python3 "$SKILL_DIR/scripts/guarded-write.py" projects/new-website.md --expect-sha256 "$read_sha256" \
-  --old "- [ ] Draft the product page." --new "- [x] Draft the product page."
+  --old="- [ ] Draft the product page." --new="- [x] Draft the product page."
 ```
 
-Pass multi-line text with `--old-file` and `--new-file`; an empty `--new` deletes the passage. To replace the whole note, pipe its new text on stdin without `--old` and `--new`.
+Write `--old=TEXT` and `--new=TEXT` with `=`, so a passage that starts with `-` stays an argument. Pass multi-line text with `--old-file` and `--new-file`; an empty `--new=` deletes the passage. To replace the whole note, pass its new text with `--new-file` alone.
 
 Expect `{"written":"projects/new-website.md","sha256":"..."}`: that digest guards your next write. Every refusal exits 1 and leaves the file untouched:
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import fcntl
 import importlib.util
-import io
 import json
 import os
 import subprocess
@@ -28,9 +27,15 @@ NOTE = "projects/offline.md"
 def write(
     brain: Store, digest: str, content: str = "", path: str = NOTE, *options: str
 ) -> subprocess.CompletedProcess[str]:
+    """Replace the whole file with `content` through --new-file, unless `options` choose a passage."""
+    if not options:
+        source = brain.root.parent / "whole.md"
+        source.write_text(content)
+        options = ("--new-file", str(source))
     return subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
         [sys.executable, str(HELPER), path, "--expect-sha256", digest, *options],
         cwd=brain.root,
+        # Stdin is never read: an agent's shell may hold it open.
         input=content,
         text=True,
         capture_output=True,
@@ -112,7 +117,7 @@ def test_write_keeps_the_note_within_what_bf_reads(brain: Store) -> None:
     digest = str(retrieve.read([brain], NOTE)["sha256"])
     result = write(brain, digest, "x" * ((4 << 20) + 1))
     assert (result.returncode, result.stdout) == (1, "")
-    assert "1 byte to 4194304 bytes" in result.stderr
+    assert "exceeds 4194304 bytes" in result.stderr
     assert (brain.root / NOTE).read_bytes() == original
     largest = "# Large\n\n" + "x" * ((4 << 20) - 10) + "\n"
     result = write(brain, digest, largest)
@@ -150,10 +155,10 @@ def test_write_follows_no_symlink_in_the_brain(brain: Store, tmp_path: Path) -> 
         assert (brain.root / NOTE).read_text() == f"# Through {path.parts[-4]}\n"
     (brain.root / NOTE).write_bytes(original)
     # Inside a linked brain folder, the working directory is already resolved: a relative path works.
+    (brain.root.parent / "new.md").write_text("# New\n")
     result = subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
-        [sys.executable, str(HELPER), NOTE, "--expect-sha256", digest],
+        [sys.executable, str(HELPER), NOTE, "--expect-sha256", digest, "--new-file", str(brain.root.parent / "new.md")],
         cwd=linked,
-        input="# New\n",
         text=True,
         capture_output=True,
         check=False,
@@ -237,18 +242,22 @@ def test_concurrent_writes_of_one_read_keep_exactly_one(brain: Store, monkeypatc
 
 def test_concurrent_helpers_report_the_one_write_that_survives(brain: Store) -> None:
     digest = str(retrieve.read([brain], NOTE)["sha256"])
+    for n in range(6):
+        (brain.root.parent / f"session-{n}.md").write_text(f"# Session {n}\n")
     sessions = [
         subprocess.Popen(  # noqa: S603 - the bundled helper on a synthetic brain
-            [sys.executable, str(HELPER), NOTE, "--expect-sha256", digest],
+            [
+                *(sys.executable, str(HELPER), NOTE, "--expect-sha256", digest),
+                *("--new-file", str(brain.root.parent / f"session-{n}.md")),
+            ],
             cwd=brain.root,
-            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        for _ in range(6)
+        for n in range(6)
     ]
-    results = [session.communicate(f"# Session {n}\n", timeout=60) for n, session in enumerate(sessions)]
+    results = [session.communicate(timeout=60) for session in sessions]
     written = [json.loads(stdout) for stdout, _ in results if stdout]
     assert len(written) == 1, results
     assert written[0]["sha256"] == retrieve.read([brain], NOTE)["sha256"]
@@ -309,8 +318,11 @@ def test_write_checks_again_before_the_rename(
     # A directory sync failure after the rename is reported as written, never as unchanged or as success.
     monkeypatch.setattr(helper, "snapshot", lambda *_: (data, mode))
     monkeypatch.setattr(helper, "sync", lambda _directory: (_ for _ in ()).throw(OSError("sync")))
-    monkeypatch.setattr(sys, "argv", ["guarded-write.py", str(path), "--expect-sha256", digest])
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"# Replacement\n")))
+    replacement = path.parent.parent / "replacement.md"
+    replacement.write_bytes(b"# Replacement\n")
+    monkeypatch.setattr(
+        sys, "argv", ["guarded-write.py", str(path), "--expect-sha256", digest, "--new-file", str(replacement)]
+    )
     with pytest.raises(SystemExit) as exit_info:
         helper.main()
     assert exit_info.value.code == 1
@@ -325,7 +337,7 @@ def test_replace_edits_one_exact_passage_of_the_note_that_was_read(brain: Store)
     passage = text.rstrip("\n").splitlines()[-1]
     assert passage
     assert text.count(passage) == 1
-    # Replacement mode never reads stdin: an agent sends only the passage and its replacement.
+    # The helper never reads stdin: an agent sends only the passage and its replacement.
     result = write(brain, str(read["sha256"]), "IGNORED STDIN", NOTE, "--old", passage, "--new", "Revised line.")
     assert result.returncode == 0, result.stderr
     reply = json.loads(result.stdout)
@@ -380,16 +392,26 @@ def test_replace_refuses_a_missing_repeated_or_changed_passage(brain: Store) -> 
     [
         ("--old", "a"),
         ("--new", "b"),
+        (),
         ("--old", "", "--new", "b"),
         ("--old", "a", "--old-file", "x", "--new", "b"),
         ("--old", "a", "--new", "b", "--new-file", "x"),
     ],
-    ids=["old-only", "new-only", "empty-old", "two-olds", "two-news"],
+    ids=["old-only", "new-only", "stdin", "empty-old", "two-olds", "two-news"],
 )
 def test_replace_rejects_incomplete_or_conflicting_options(brain: Store, options: tuple[str, ...]) -> None:
     original = (brain.root / NOTE).read_bytes()
     digest = str(retrieve.read([brain], NOTE)["sha256"])
-    assert write(brain, digest, "# New\n", NOTE, *options).returncode == 2
+    result = subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
+        [sys.executable, str(HELPER), NOTE, "--expect-sha256", digest, *options],
+        cwd=brain.root,
+        input="# New\n",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 2
     assert (brain.root / NOTE).read_bytes() == original
 
 

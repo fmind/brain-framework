@@ -65,9 +65,9 @@ def linking(brain: Store, identity: str, relation: str) -> list[str]:
     return [i["ref"] for g in groups if g.get("relation") == relation for i in g["items"]]
 
 
-def ingest(brain: Store, values: list[dict]) -> dict:
+def ingest(brain: Store, values: list[dict], sensor: str = "mail") -> dict:
     return collect(
-        brain, "mail", start="2026-01-01T00:00:00Z", end="2026-02-01T00:00:00Z", runner=lambda *_: encode(values)
+        brain, sensor, start="2026-01-01T00:00:00Z", end="2026-02-01T00:00:00Z", runner=lambda *_: encode(values)
     )
 
 
@@ -443,3 +443,35 @@ def test_identity_search_lists_a_typed_link_once(brain: Store) -> None:
         )
     ]
     assert linking(brain, "person:alice", "sender") == ["mail:one"]
+
+
+def test_default_schema_field_path_and_sensor_override(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nfields:\n"
+        b"  kind:\n    description: Item kind.\n    type: string\n    path: /attributes/ontology/kind\n"
+        b"  author:\n    description: Author.\n    type: identity\n    relation: true\n    path: /attributes/ontology/author\n"
+        b"sensors:\n  mail:\n    command: [echo]\n  custom:\n    command: [echo]\n    fields:\n      kind:\n        value: override\n",
+    )
+    ingest(
+        brain,
+        [
+            {
+                "id": "m1",
+                "title": "Default mapped",
+                "attributes": {"ontology": {"kind": "message", "author": "person:alice"}},
+            }
+        ],
+        sensor="mail",
+    )
+    ingest(
+        brain,
+        [{"id": "c1", "title": "Overridden", "attributes": {"ontology": {"kind": "message"}}}],
+        sensor="custom",
+    )
+    mail_rec = records.find(brain, "mail", "m1")
+    custom_rec = records.find(brain, "custom", "c1")
+    assert mail_rec is not None
+    assert mail_rec[1].fields == {"kind": "message", "author": "person:alice"}
+    assert custom_rec is not None
+    assert custom_rec[1].fields == {"kind": "override"}

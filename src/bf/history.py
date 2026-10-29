@@ -42,7 +42,8 @@ _STARTUP = (
     "SHELLOPTS",
     "ZDOTDIR",
 )
-# R_ENVIRON* name files that can set R_PROFILE*; CORECLR_* loads a .NET profiler library.
+# R_ENVIRON* name files that can set R_PROFILE*; CORECLR_* loads a .NET profiler library. Git's variables stay: a
+# routine run through `bf run --hook pre-commit` needs GIT_INDEX_FILE to see what `git commit -a` stages.
 _PREFIXES = (
     "LD_",
     "DYLD_",

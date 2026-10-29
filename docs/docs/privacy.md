@@ -13,7 +13,7 @@ description: Understand local storage, cloud-agent boundaries, program execution
 - **Search and read:** offline, through both the CLI and MCP, without model calls or provider requests.
 - **Program logs:** each sensor's, routine's, assistant's and channel's recent output in the brain's `logs/`, ignored by Git and never searched. They can hold provider output: keep them private.
 - **Assistant runs:** BF never calls a model. An [assistant](prompts.md) starts your harness, which sends what the prompt and its tools read to its provider; each run's reply and input stay in the brain's ignored `memories/`. A [`{{prompt}}` argument](prompts.md#pass-the-prompt-to-the-harness) shows the expanded prompt, input included, to local process listings while the harness runs.
-- **Run history, locks and usage counts:** private [local state](configuration.md#local-state). Usage keeps times, operations and result counts, never queries or refs.
+- **Run history, locks and usage counts:** private [local state](configuration.md#local-state). Usage keeps times, operations, result counts and (for zero-result searches) up to 8 unmatched query tokens, never matched queries or refs.
 - **Search cache:** `.bf/` holds a copy of searchable text, private to your account (mode 700). It belongs to the machine that built it: exclude it from shared archives and synced folders. A cache that BF did not create in place, such as one copied or restored, or one holding triggers or views, is discarded and rebuilt from the files.
 
 ## Your agent has its own privacy rules

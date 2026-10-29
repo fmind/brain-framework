@@ -68,7 +68,7 @@ Three more cases reproduce misses measured on real brains, with fictional notes 
 Six cases cover the finer search rules:
 
 - `nested-section-budget` asks `What is the Vega budget?` of a portfolio note with a `### Budget` under both `## Orion` and `## Vega`. A section ranks under its parent headings, so `projects/portfolio.md#budget-1`, titled `Portfolio review — Vega — Budget`, answers with 1300 credits, not the empty `#vega` section.
-- `tag-outranks-passing-mention` finds Harbor, tagged `accessibility`, above Cobalt, whose introduction mentions accessibility once: tags rank like headings.
+- `tag-outranks-passing-mention` finds Harbor, tagged `accessibility`, above Cobalt, whose introduction mentions accessibility once: tags weigh more than body text, less than headings.
 - `whole-note-preview` asks `What is Atlas?`. The note matches by its title and has no introduction, so its excerpt previews its first section.
 - `word-prefix` finds Borealis, which "synchronizes" field reports, with `synchro*`.
 - `newest-of-identical-meetings` lists the later of two identical `calendar` status events first: equal scores list the newest item first.

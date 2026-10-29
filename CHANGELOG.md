@@ -4,6 +4,41 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v19.1.0](https://github.com/fmind/brain-framework/releases/tag/v19.1.0) - 2026-10-29
+
+A feature and fix release. The brain format (`version: 8`) and the reply schemas are unchanged; the search cache rebuilds once on first search or read. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin) and run `bf skills DIR` to refresh installed skills.
+
+### Added
+
+- Assistant schedules accept wall-clock `at: "HH:MM"` times with optional IANA `timezone` and `days` (`mon`–`sun`) alongside interval `every` schedules, pass `context.schedule` in `{{context}}` for scheduled runs, and treat an empty scheduled or triggered reply without output metadata as a silent no-op that advances the schedule without writing an empty record.
+- Assistants with read-only harnesses can set `idempotent: true` to automatically retry pre-delivery harness failures and interruptions up to 5 attempts with exponential backoff (`5s` to `300s`), and `bf queue ID --retry` resets the retry budget.
+- Top-level `fields.<name>` declarations in `bf.yaml` accept an optional default JSON Pointer `path`, used when a sensor does not specify an override in `sensors.<sensor>.fields.<name>`.
+- Sensor, routine, assistant and channel `command` arguments support `{{lines:relative/path.txt}}`, expanding non-blank, non-`#` lines from a brain-relative UTF-8 file (up to 64 KiB and 500 lines) into separate arguments and checking the file during `bf validate`.
+- Sensors can set `truncate_text: true` (and optional `max_text_bytes` up to 1 MiB) to truncate oversized `record.text` on a valid UTF-8 codepoint boundary, stamp `attributes.truncated: true` and log the record ID instead of failing the whole batch.
+- `bf.yaml` accepts a top-level `validate:` policy (`max_stale_days`, `warn_stale_days`, `index_note`, `required_status` and `forbid_patterns`) enforced by `bf validate`.
+- `bf update` runs up to four due sensors concurrently while returning `windows` in configuration order.
+- Section search passages include the note's filename stem (when distinct from its H1 title) and declared `aliases` in their lexical context, so multi-word queries combining a note's stem or alias with a section's body terms match that section directly.
+- Zero-result searches record up to 8 unmatched query tokens (up to 64 characters each) in local `usage.jsonl`, and `bf status` surfaces the top 10 recurring `empty_terms` in each usage window.
+
+### Fixed
+
+- A channel input no longer stops when a provider edits a message it already admitted: the edit keeps the admitted version and starts no job, and the messages after it are admitted. Before, every poll failed with `a channel reused an event id with different content` until the edited event expired 35 days later.
+- Editing an assistant's `schedules`, `triggers`, `inputs` or `keep` no longer fails its queued jobs with `assistant configuration changed`, and once a harness has answered, only removing or disabling its assistant or changing an output channel stops its saved answer from being recorded.
+- A harness or channel `send` command that never started, such as one not on `PATH` under a timer's shorter `PATH`, leaves its job `failed` instead of `uncertain`, and its delivery retries like an idempotent one instead of waiting as `uncertain`: nothing ran, so retrying is safe.
+- An unresolved `bf run` no longer holds back the saved answer of a later `bf run` of the same assistant: each manual run is its own slot.
+- With several brains selected, a read's `outline` refs and a claim's `target_ref` are `bf://` addresses, like `sections`, so reading them no longer fails with `reference exists in several brains`.
+- A sensor or routine run that waited 120 seconds for a busy brain no longer waits another 120 seconds to record that failure.
+- `bf register` leaves the registry file, and its inline comments, unchanged when the brain is already registered at the same path.
+- `bf channel` rejects invalid arguments with exit code 2 before selecting a brain, as every other command does, and `bf skills` reports its destination as an absolute path.
+- The example Calendar, Drive, Gmail, Git and GitHub sensors ignore a Git hook's repository variables, such as `GIT_DIR`: started from a hook, the Git history sensor saved the hook's repository commits under every repository's name.
+- Search, the retrieval example and the link reference say that tags weigh more than body text and less than headings, as ranking does.
+
+### Changed
+
+- `bf-use`'s guarded-write helper replaces a whole note only from `--new-file FILE` given alone and never reads standard input, which an agent's shell may hold open; its guide writes `--old=TEXT --new=TEXT` so a passage starting with `-` stays an argument. Run `bf skills DIR` to update installed skills.
+- The Assistants guide's complete example runs Claude Code with the prompt on standard input, as the page recommends for private messages, and Core concepts lists channels among a brain's programs.
+- Development tools: uv 0.13.6, dprint 0.64.3 with the Markdown 0.27.1 plugin, trivy 0.76.1, ruff 0.17.3, ty 0.0.94, pytest 9.2.0, zensical 0.0.73, and the workflows pin mise 2026.10.21, `jdx/mise-action` v5.2.4 and `pypa/gh-action-pypi-publish` v1.14.3. The locked environment moves to starlette 1.10.0, sse-starlette 3.6.0, httpx2 and httpcore2 2.16.0 and pycparser 3.12.
+
 ## [v19.0.1](https://github.com/fmind/brain-framework/releases/tag/v19.0.1) - 2026-10-20
 
 A fix release. The brain format (`version: 8`), `bf.yaml`, the reply schemas and the search cache are unchanged. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin); `bf skills DIR` refreshes the `bf-maintain` operations guide, whose only change is naming assistants where it still said prompts.

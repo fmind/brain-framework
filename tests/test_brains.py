@@ -246,6 +246,15 @@ def test_registry_paths_are_absolute_and_names_win_over_local_directories(
         select("shared")
 
 
+def test_registering_again_leaves_the_registry_and_its_comments_unchanged(tmp_path: Path) -> None:
+    brain = make(tmp_path / "laptop", "laptop")
+    register(brain)
+    commented = user_path().read_text().replace(f"path: {brain.root}", f"path: {brain.root}  # this laptop")
+    user_path().write_text(commented)
+    assert "replaced" not in register(brain)
+    assert user_path().read_text() == commented
+
+
 def test_a_mistyped_brain_name_suggests_close_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     register(make(tmp_path / "work", "work"))
     make(tmp_path / "team", "team")
@@ -549,3 +558,38 @@ def test_an_exact_read_answers_while_another_brain_fails(tmp_path: Path) -> None
     with pytest.raises(Error, match="expected memories/") as failed:
         read([first], "github:org/repo#99")
     assert type(failed.value) is Error
+
+
+def test_outline_and_claim_refs_stay_readable_with_several_brains(tmp_path: Path) -> None:
+    first, second = make(tmp_path / "first", "first"), make(tmp_path / "second", "second")
+    fields = "fields:\n  owner: {description: Owner, type: identity, cardinality: many, relation: true}\n"
+    log = "# Log\n\n" + "".join(f"## Day {day}\n\n{'Worked on the site today. ' * 120}\n\n" for day in range(1, 29))
+    for store in (first, second):
+        store.write("bf.yaml", store.read("bf.yaml") + fields.encode())
+        store.write("concepts/log.md", log.encode())
+        name = store.root.name
+        store.write(
+            "concepts/alice.md", f"---\ntype: person\nentity: bf://{name}/people/alice\n---\n# Alice\n".encode()
+        )
+    first.write("projects/site.md", b"---\ntype: project\n---\n# Site\n\n[Owner](bf://first/people/alice?rel=owner)\n")
+    # Both brains hold the same paths: a plain ref would be ambiguous, so the next refs to read are addresses.
+    outline = cast("list[dict]", read([first, second], "bf://first/concepts/log.md")["outline"])
+    assert outline[0]["ref"] == "bf://first/concepts/log.md#day-1"
+    assert read([first, second], outline[0]["ref"])["ref"] == "concepts/log.md#day-1"
+    [claim] = cast("list[dict]", read([first, second], "bf://first/projects/site.md")["claims"])
+    assert claim["target_ref"] == "bf://first/concepts/alice.md"
+    assert read([first, second], claim["target_ref"])["ref"] == "concepts/alice.md"
+    # A record ref containing `#` is percent-encoded so its `bf://` address is not parsed as a section fragment.
+    from bf import records
+    from bf.models import Record
+
+    records.upsert(
+        first,
+        "github",
+        [Record(id="org/repo#1", title="Issue 1", aliases=["bf://first/issues/one"])],
+        snapshot=True,
+    )
+    first.write("projects/issue.md", b"---\ntype: project\n---\n# Issue\n\n[Owner](bf://first/issues/one?rel=owner)\n")
+    [issue_claim] = cast("list[dict]", read([first, second], "bf://first/projects/issue.md")["claims"])
+    assert issue_claim["target_ref"] == "bf://first/github:org/repo%231"
+    assert read([first, second], issue_claim["target_ref"])["ref"] == "github:org/repo#1"

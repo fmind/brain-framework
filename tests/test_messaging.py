@@ -15,7 +15,7 @@ import yaml
 from pydantic import ValidationError
 
 from bf import assistants, channels, records, runtime
-from bf.collect import collect
+from bf.collect import NotStartedError, collect
 from bf.config import load
 from bf.messages import Message, Outgoing
 from bf.models import Config, Error, ReadInput, Send, encode, timestamp
@@ -377,15 +377,95 @@ def test_sensor_journal_already_admitted_recovers_after_configuration_edit(messa
     assert queue.report()["trigger_counts"] == {"pending": 1}
 
 
-def test_duplicate_event_with_different_content_is_rejected_atomically(messaging: Store) -> None:
+def test_edited_message_keeps_its_admitted_version_and_never_stalls_its_input(messaging: Store) -> None:
     source = message()
     queue = Queue(messaging)
     assistants.accept(messaging, "chat", [source], {"personal"})
+    # A read input re-reads its overlap and sees the provider's edit under the same id, beside a new message.
     changed = source.model_copy(update={"text": "changed"})
-    with pytest.raises(Error, match="different content"):
-        assistants.accept(messaging, "chat", [changed], {"personal"}, checkpoint=("test", {"cursor": "bad"}))
-    assert queue.progress("test") == {}
-    assert queue.report()["counts"] == {"pending": 1}
+    assistants.accept(
+        messaging, "chat", [changed, message("message-2")], {"personal"}, checkpoint=("test", {"end": "x"})
+    )
+    assert queue.progress("test") == {"end": "x"}
+    assert queue.report()["counts"] == {"pending": 2}
+    key = queue.next(True, {"personal"})
+    assert key
+    assert "Please explain" in str(queue.get(key)["payload"])
+
+
+def test_unrelated_assistant_edits_keep_queued_and_answered_jobs_runnable(messaging: Store) -> None:
+    queue = Queue(messaging)
+    assistants.accept(messaging, "chat", [message()], {"personal"})
+    key = queue.next(True, {"personal"})
+    assert key
+    # Schedules, triggers, inputs and keep only decide when jobs start, not what a queued job runs.
+    messaging.write("bf.yaml", messaging.read("bf.yaml").replace(b"every: 1800", b"every: 3600"))
+    assistants.execute(messaging, key, runner=lambda *_: b"Answer")
+    assert queue.get(key)["state"] == "complete"
+    assert assistants.deliver(messaging, runner=lambda *_: b'{"id":"sent","conversation":"thread-1"}')
+    assistants.accept(messaging, "chat", [message("message-2")], {"personal"})
+    later = queue.next(True, {"personal"})
+    assert later
+    assert claim(queue, later)
+    queue.answer(later, b"Saved answer")
+    # Once the harness answered, even a harness edit cannot strand the saved answer; disabling still pauses it.
+    messaging.write("bf.yaml", messaging.read("bf.yaml").replace(b"command: [harness]", b"command: [other]"))
+    configure(messaging, lambda config: config["assistants"]["personal"].update(enabled=False))
+    with pytest.raises(Error, match="configuration changed"):
+        assistants.execute(messaging, later, runner=lambda *_: pytest.fail("must not run while disabled"))
+    queue.retry(later)
+    configure(messaging, lambda config: config["assistants"]["personal"].update(enabled=True))
+    assert assistants.execute(messaging, later, runner=lambda *_: pytest.fail("must reuse"))["text"] == "Saved answer"
+    # A scheduling edit while a trigger job is pending still extends that job instead of queuing a second one.
+    start, end = window()
+    collect(messaging, "calendar", start=start, end=end, runner=changed("event-1"))
+    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
+    configure(messaging, lambda config: config["assistants"]["personal"].update(keep=5))
+    collect(messaging, "calendar", start=start, end=end, runner=changed("event-2"))
+    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
+    assert [row["kind"] for row in cast("list[dict]", queue.report()["jobs"]) if row["state"] == "pending"] == [
+        "trigger"
+    ]
+
+
+def test_a_harness_or_send_command_that_never_started_is_failed_not_uncertain(messaging: Store) -> None:
+    queue = Queue(messaging)
+    assistants.accept(messaging, "chat", [message()], {"personal"})
+    key = queue.next(True, {"personal"})
+    assert key
+    with pytest.raises(Error, match="not on PATH"):
+        assistants.execute(
+            messaging, key, runner=lambda *_: (_ for _ in ()).throw(NotStartedError("harness is not on PATH"))
+        )
+    assert queue.get(key)["state"] == "failed"
+    queue.send("chat", Send(command=["send-chat"]), Outgoing(id="standalone", text="Hello"))
+    missing = lambda *_: (_ for _ in ()).throw(NotStartedError("send-chat is not on PATH"))  # noqa: E731
+    assert assistants.deliver(messaging, runner=missing, key="standalone")
+    sent = queue.inspect("standalone")
+    assert sent["state"] == "failed"
+    assert "retry it with bf queue ID --retry" in str(sent["error"])
+
+
+def test_an_unresolved_manual_run_never_holds_back_another(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    configure(messaging, lambda config: config["assistants"]["personal"].update(inputs=[], schedules={}))
+    queue = Queue(messaging)
+
+    def failing(*_):
+        raise Error("harness exited with status 1")
+
+    [run] = cast("list[dict]", assistants.manual(messaging, "personal", text="first", runner=failing)["assistants"])
+    assert run["status"] == "failed"
+
+    def busy(*_, **__):
+        raise BusyError("writer busy")
+
+    # The second run's answer is saved, but the brain is busy: a background worker must be able to record it.
+    with monkeypatch.context() as patch:
+        patch.setattr(assistants, "writer", busy)
+        assistants.manual(messaging, "personal", text="second", runner=lambda *_: b"Answer")
+    saved = queue.next(True, {"personal"})
+    assert saved
+    assert queue.get(saved)["state"] == "prepared"
 
 
 def test_receipts_suppress_echoes_and_duplicate_send_ids(messaging: Store) -> None:
@@ -791,7 +871,7 @@ def test_real_watch_replies_once_and_recovers_stream_redelivery(tmp_path, monkey
             try:
                 while time.monotonic() < deadline:
                     if child.poll() is not None:
-                        pytest.fail(f"watch exited: {child.communicate()[1].decode()}")
+                        pytest.fail(f"watch exited: {child.communicate(timeout=30)[1].decode()}")
                     outcomes = Queue(store).report()
                     health = Queue(store).progress("health:channel:local")
                     accepted = not attempt or (health != before and health.get("error") == "")
@@ -1305,8 +1385,8 @@ def test_trigger_window_extended_while_starting_runs_with_the_merged_window(
     assert key
     current, raced = assistants._current, []  # noqa: SLF001 - the gap between reading and claiming a job
 
-    def racing(store, work):
-        current(store, work)
+    def racing(store, work, **options):
+        current(store, work, **options)
         if not raced:
             raced.append(True)
             admit(16)
@@ -1364,10 +1444,10 @@ def test_direct_run_keeps_its_job_and_deliveries_from_background_workers(
     )
     current, background = assistants._current, []  # noqa: SLF001 - the gap between enqueueing and claiming
 
-    def racing(store, work):
+    def racing(store, work, **options):
         if work.kind == "manual" and not background:
             background.extend(assistants.cycle(store, {"personal"}, at=datetime.now(UTC), runner=answers))
-        current(store, work)
+        current(store, work, **options)
 
     monkeypatch.setattr(assistants, "_current", racing)
     deliver, contended = assistants.deliver, []

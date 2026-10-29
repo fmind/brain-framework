@@ -436,7 +436,7 @@ print("too late")
         # A cold watch start plus the harness's own gets the suite's 120-second cold-start budget.
         if not wait_for(root / "harness.pids", 120):
             watch.kill()
-            pytest.fail(f"the scheduled harness never started: {watch.communicate()[1].decode()}")
+            pytest.fail(f"the scheduled harness never started: {watch.communicate(timeout=30)[1].decode()}")
         pids = [int(pid) for pid in store.read("harness.pids").split()]
         watch.terminate()
         _, stderr = watch.communicate(timeout=30)
@@ -445,7 +445,7 @@ print("too late")
     finally:
         if watch.poll() is None:
             watch.kill()
-            watch.communicate()
+            watch.communicate(timeout=30)
         kill(*pids)
     report = Queue(store).report()
     assert report["counts"] == {"uncertain": 1}

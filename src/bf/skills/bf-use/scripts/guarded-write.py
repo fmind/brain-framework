@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Change a file only while it still has the SHA-256 digest you read; never overwrite another edit.
 
-Replace the whole file with stdin, or pass --old and --new (or --old-file and --new-file) to replace exactly
-one occurrence of a passage.
+Pass --old and --new (or --old-file and --new-file) to replace exactly one occurrence of a passage, or --new-file
+alone to replace the whole file.
 """
 
 from __future__ import annotations
@@ -293,7 +293,7 @@ def main() -> int:
     old.add_argument("--old-file", type=Path, help="read the passage to replace from this file")
     new = parser.add_mutually_exclusive_group()
     new.add_argument("--new", help="its replacement; may be empty to delete the passage")
-    new.add_argument("--new-file", type=Path, help="read the replacement from this file")
+    new.add_argument("--new-file", type=Path, help="read the replacement, or alone the whole new file, from this file")
     args = parser.parse_args()
     expected = args.expect_sha256.lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
@@ -307,17 +307,17 @@ def main() -> int:
         parser.error("a path's ~ or ~user home directory cannot be resolved")
     before = text(parser, args.old, old_file, "old")
     after = text(parser, args.new, new_file, "new")
-    if (before is None) != (after is None):
-        parser.error("pass both the old passage and its replacement, or neither to replace the file with stdin")
     if before is not None and after is not None:
         if not before:
             parser.error("the old passage must not be empty")
         edit = substitute(before, after)
+    # A whole file comes only from --new-file: a forgotten --old must never turn a passage into the whole note.
+    elif before is None and new_file is not None and after is not None:
+        if not after:
+            parser.exit(1, "Not written: --new-file must hold the new content; nothing changed.\n")
+        edit = whole(after)
     else:
-        data = sys.stdin.buffer.read(MAX_BYTES + 1)
-        if not data or len(data) > MAX_BYTES:
-            parser.exit(1, f"Refusing to write: stdin must hold the new content, 1 byte to {MAX_BYTES} bytes.\n")
-        edit = whole(data)
+        parser.error("pass --old and --new to replace a passage, or --new-file alone to replace the whole file")
     try:
         written = write(path, expected, edit)
     except ChangedError as change:

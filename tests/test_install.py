@@ -234,3 +234,10 @@ def test_an_older_bf_leaves_a_newer_install_alone(tmp_path: Path, version: objec
     # An older or unparsable version's copy updates like any other; either way, only this version's files remain.
     assert not (folder / "future.md").exists()
     assert json.loads((folder / MANIFEST).read_text())["version"] == __version__
+
+
+def test_a_relative_destination_is_reported_as_an_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert run("skills")["destination"] == str(tmp_path / "skills")

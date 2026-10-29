@@ -915,7 +915,8 @@ def test_an_emptied_registry_still_registers(brain: Store) -> None:
 def test_registration_keeps_the_owner_header(brain: Store) -> None:
     # Blank lines between the paragraphs of the leading comments once cut the header at the first one.
     header = "# Machine-local registry; use bf register.\n# Second line\n\n# Second paragraph\n"
-    user_path().write_text(header + "\n" + user_path().read_text().split("\n", 1)[1] + "# trailing note\n")
+    # An unchanged registration leaves the file alone: start from a registry without this brain.
+    user_path().write_text(header + "\nbrains: {}\n# trailing note\n")
     register(brain)
     written = user_path().read_text()
     assert written.startswith(header + "brains:\n")
@@ -923,7 +924,7 @@ def test_registration_keeps_the_owner_header(brain: Store) -> None:
     assert user_config().brains["fixture"].model_dump() == {"path": str(brain.root)}
     # Without comments, BF writes the page that documents the registry.
     documented = "# https://fmind.github.io/brain-framework/docs/configuration/\n"
-    user_path().write_text("\n" + written.removeprefix(header))
+    user_path().write_text("\nbrains: {}\n")
     register(brain)
     assert user_path().read_text().startswith(documented + "brains:\n")
 

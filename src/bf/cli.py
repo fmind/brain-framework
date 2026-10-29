@@ -603,7 +603,9 @@ def channel_command(
     forward: Annotated[bool, typer.Option("--stdin", help="Read a JSON outgoing message from stdin for send.")] = False,
 ) -> None:
     """Use a passive channel explicitly; reading never advances subscriptions or starts an assistant."""
-    store = execution(brain)
+    # Invalid input fails before any brain is selected, as for every other command.
+    if action == "send" and (not forward or since or until != "now"):
+        raise typer.BadParameter("send requires --stdin and takes no time window", param_hint="--stdin")
     if action == "read":
         if not since or forward:
             raise typer.BadParameter("read requires --since and does not accept --stdin", param_hint="--since")
@@ -612,6 +614,8 @@ def channel_command(
         end = _option("--until", lambda value: moment(value, at), until)
         if start >= end:
             raise typer.BadParameter("start must be earlier than end", param_hint="--since")
+    store = execution(brain)
+    if action == "read":
         emit(
             {
                 "channel": name,
@@ -621,8 +625,6 @@ def channel_command(
             }
         )
         return
-    if not forward or since or until != "now":
-        raise typer.BadParameter("send requires --stdin and takes no time window", param_hint="--stdin")
     command = channels.operation(store, name, "send")
     if not isinstance(command, Send):
         raise Error("channel requires a send operation")

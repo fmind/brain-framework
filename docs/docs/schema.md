@@ -164,7 +164,7 @@ With `targets`, a collection whose mapped value falls outside them fails before 
 
 ### Mapping rules
 
-Each sensor's `fields` maps a declared field to exactly one `path` or literal `value`. A path is a JSON Pointer into the sensor's record:
+Each sensor's `fields` maps a declared field to exactly one `path` or literal `value`, overriding any default `path` declared on the field itself in top-level `fields:`. A path is a JSON Pointer into the sensor's record:
 
 | Pointer                   | Reads                                |
 | ------------------------- | ------------------------------------ |

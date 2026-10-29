@@ -150,8 +150,10 @@ class Provider:
         home: Path | None = None,
         folder: str = "sensors",
         stdin: str | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = {
+            **(environment or {}),
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(home or self.state / "home"),
             "PYTHONDONTWRITEBYTECODE": "1",

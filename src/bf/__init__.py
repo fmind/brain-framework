@@ -2,7 +2,7 @@
 
 import os
 
-__version__ = "19.0.1"
+__version__ = "19.1.0"
 
 
 def main() -> None:

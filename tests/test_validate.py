@@ -403,10 +403,21 @@ def test_an_interrupted_edit_warns_before_case_variants(brain: Store, monkeypatc
         "runpy.run_path(sys.argv[0], run_name='__main__')"
     )
     digest = str(read([brain], "projects/x.md")["sha256"])
+    edited = brain.root.parent / "edited.md"
+    edited.write_text("# Edited\n")
     killed = subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
-        [sys.executable, "-c", kill, str(HELPER), "projects/x.md", "--expect-sha256", digest],
+        [
+            sys.executable,
+            "-c",
+            kill,
+            str(HELPER),
+            "projects/x.md",
+            "--expect-sha256",
+            digest,
+            "--new-file",
+            str(edited),
+        ],
         cwd=brain.root,
-        input="# Edited\n",
         text=True,
         capture_output=True,
         check=False,
@@ -788,3 +799,34 @@ def test_validate_counts_the_deliveries_an_incoming_message_makes(brain: Store, 
     )
     errors = [problem["error"] for problem in cast("list[dict[str, str]]", validate(brain)["problems"])]
     assert errors == ([refused] if routes else [])
+
+
+def test_declarative_validate_policies_and_line_files(brain: Store) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\n"
+        b"validate:\n"
+        b"  max_stale_days: 30\n"
+        b"  warn_stale_days: 7\n"
+        b"  index_note: concepts/index.md\n"
+        b"  required_status: [draft, stable]\n"
+        b"  forbid_patterns:\n"
+        b"    - '/Users/[A-Za-z0-9._-]+'\n"
+        b"sensors:\n"
+        b"  scoped:\n"
+        b'    command: [echo, "{{lines:settings/missing.txt}}"]\n',
+    )
+    brain.write("concepts/index.md", b"# Concepts\n")
+    brain.write(
+        "concepts/evidence.md",
+        b"---\ntype: concept\nstale_after: 2099-01-01T00:00:00Z\n---\n# Evidence\n\nPath /Users/alice/secret.\n",
+    )
+    report = validate(brain)
+    errors = {f"{item['file']}: {item['error']}" for item in cast("list[dict[str, str]]", report["problems"])}
+    assert (
+        "bf.yaml: sensors.scoped.command: settings/missing.txt does not exist; restore it or correct bf.yaml" in errors
+    )
+    assert "concepts/index.md: missing link to concepts/evidence.md" in errors
+    assert "concepts/evidence.md: frontmatter status must be explicitly set to one of: draft, stable" in errors
+    assert "concepts/evidence.md: stale_after exceeds max_stale_days (30 days)" in errors
+    assert "concepts/evidence.md: line 7: matches forbidden pattern /Users/[A-Za-z0-9._-]+" in errors

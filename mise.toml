@@ -1,7 +1,7 @@
 # https://mise.jdx.dev/configuration.html
 [tools]
 actionlint = "1.7.12"
-dprint = "0.63.0"
+dprint = "0.64.3"
 gitleaks = "8.30.1"
 lefthook = "2.2.2"
 lychee = "0.24.2"
@@ -9,8 +9,8 @@ lychee = "0.24.2"
 # whose pure-Python fallback is slower and rejects some YAML that libyaml accepts.
 python = "3.14.8"
 shellcheck = "0.11.0"
-trivy = "0.76.0"
-"aqua:astral-sh/uv" = "0.13.1"
+trivy = "0.76.1"
+"aqua:astral-sh/uv" = "0.13.6"
 # 1.30 requires GitHub's new $/ self-reference, which actionlint 1.7.12 cannot parse yet
 # (rhysd/actionlint#711). Keep both strict gates warning-free rather than suppressing either.
 zizmor = "1.29.0"
@@ -98,7 +98,8 @@ description = "Scan recent commits and the working tree for secrets"
 run = [
   # Every scan skips the ignored generated directories, so Git must track no ignored file, including a force-staged one.
   # Only the repository's .gitignore files count, as in CI, not a contributor's global excludes.
-  "! git ls-files -ci --exclude-per-directory=.gitignore | grep .",
+  # Without pipefail a failing git would pass a pipeline, so test its captured output instead.
+  'tracked="$(git ls-files -ci --exclude-per-directory=.gitignore)" && test -z "$tracked"',
   "mise run check:leaks:history",
   "gitleaks dir . --redact=100 --verbose --no-banner",
 ]
@@ -147,7 +148,7 @@ run = "uv run --locked python scripts/render_watch.py"
 
 [tasks."check:shell"]
 description = "Lint the release shell scripts"
-run = "shellcheck -S warning scripts/push-and-tag.sh scripts/release-notes.sh scripts/verify-release-tag.sh scripts/verify-release.sh"
+run = "shellcheck -S warning scripts/*.sh"
 
 [tasks."check:types"]
 alias = "ct"

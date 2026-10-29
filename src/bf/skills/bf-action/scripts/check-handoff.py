@@ -12,7 +12,9 @@ from typing import cast
 
 # Skills use the host's python3; this helper needs only the Python 3.11 standard library.
 MAX_REPLY = 4 << 20  # Bytes of one bf reply.
-ACTION = re.compile(r"(?:bf://([a-z][a-z0-9-]{0,63})/)?(actions/\d{4}-\d{2}-\d{2}_[a-z0-9-]+/ACTION\.md)")
+ACTION = re.compile(
+    r"(?:bf://([a-z][a-z0-9-]{0,63})/)?(actions/[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*/ACTION\.md)"
+)
 
 
 def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:

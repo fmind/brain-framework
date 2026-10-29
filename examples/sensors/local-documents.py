@@ -21,6 +21,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from collections.abc import Iterator
+from contextlib import suppress
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -201,6 +202,9 @@ def pdf(path: Path) -> bytes:
             while selector.get_map() or child.poll() is None:
                 if time.monotonic() >= deadline:
                     raise InvalidError("PDF conversion timed out")
+                if not selector.get_map():
+                    with suppress(subprocess.TimeoutExpired):
+                        child.wait(timeout=0.05)
                 for key, _ in selector.select(0.05):
                     chunk = os.read(key.fd, 65536)
                     if not chunk:

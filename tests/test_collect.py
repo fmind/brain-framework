@@ -11,8 +11,9 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
@@ -1071,3 +1072,86 @@ def test_future_run_history_cannot_block_current_collection(configured: Store, p
     assert entry["end"] == END
     assert entry["start"] == min(previous_start, START)
     assert not due(configured, NOW)
+
+
+def test_a_run_that_waited_for_a_busy_writer_does_not_wait_again_to_record_it(
+    configured: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waits: list[float] = []
+
+    @contextmanager
+    def busy(_store: Store, *, wait: float = 0, **_options: object) -> Generator[None]:
+        waits.append(wait)
+        raise BusyError("brain is busy")
+        yield
+
+    monkeypatch.setattr("bf.collect.writer", busy)
+    with pytest.raises(Error, match=r"brain is busy; nothing was written; see logs/sample\.log$"):
+        collect(configured, "sample", start=START, end=END, runner=lambda *_: b"[]")
+    assert waits == [120, 0]
+
+
+def test_prune_sorts_timeless_records_by_observed_timestamp(configured: Store) -> None:
+    timeless = [
+        Record(id="older", title="Older", time="", attributes={"observed": "2026-09-01T00:00:00Z"}),
+        Record(id="newer", title="Newer", time="", attributes={"observed": "2026-09-02T00:00:00Z"}),
+    ]
+    with writer(configured):
+        records.upsert(configured, "sample", timeless, snapshot=False)
+        removed = records.prune(configured, "sample", 1, re.compile(r".*"))
+    assert removed == 1
+    assert [records.load(configured, p).id for p in records.files(configured, "sample")] == ["newer"]
+
+
+def test_line_list_file_expansion_and_oversized_text_truncation(configured: Store) -> None:
+    configured.write("settings/repos.txt", b"# Tracked repositories\n\n org/alpha \norg/beta\n")
+    configured.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nsensors:\n  scoped:\n"
+        b'    command: [echo, "{{lines:settings/repos.txt}}"]\n'
+        b"    truncate_text: true\n    max_text_bytes: 10\n",
+    )
+    seen: list[list[str]] = []
+
+    def fake(argv: list[str], *_: object) -> bytes:
+        seen.append(argv)
+        return emit({"id": "r1", "title": "UTF-8 boundary", "text": "héllo world", "attributes": {"keep": 1}})
+
+    result = collect(configured, "scoped", start=START, end=END, runner=fake, clock=lambda: NOW)
+    assert seen == [["echo", "org/alpha", "org/beta"]]
+    assert result["records"] == 1
+    stored_record = records.find(configured, "scoped", "r1")
+    assert stored_record is not None
+    # "héllo world" is 12 UTF-8 bytes; 10 bytes cuts cleanly before the end and marks attributes.truncated.
+    assert stored_record[1].text == "héllo wor"
+    assert stored_record[1].attributes["truncated"] is True
+    assert stored_record[1].attributes["keep"] == 1
+    with pytest.raises(Exception, match="lines placeholder"):
+        Sensor(command=["echo", "{{lines:../escape.txt}}"])
+
+
+def test_update_executes_due_sensors_concurrently(configured: Store) -> None:
+    configured.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nsensors:\n"
+        b"  s1:\n    command: [echo]\n    refresh: 60\n"
+        b"  s2:\n    command: [echo]\n    refresh: 60\n",
+    )
+    active = 0
+    peak = 0
+    both = Event()
+
+    def concurrent_runner(_argv: list[str], _source: Command, _store: Store, name: str, _stdin: bytes) -> bytes:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active >= 2:
+            both.set()
+        both.wait(timeout=2)
+        active -= 1
+        return emit({"id": f"{name}-1", "title": name})
+
+    report = cast("Any", update(configured, now=NOW, runner=concurrent_runner))
+    assert report["ok"] is True
+    assert peak == 2
+    assert [item["sensor"] for item in report["sensors"]] == ["s1", "s2"]

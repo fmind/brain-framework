@@ -7,7 +7,7 @@ description: Run a fictional four-tool example that collects evidence, records a
 
 Ask one question across Google Workspace, Jira, GitHub and Gcloud: **“Can the New website launch, what remains, and why did we choose one page?”** This walkthrough collects each tool's evidence into one brain, records the answer in the project, then shows BF flagging that answer when Jira changes.
 
-The four records are fictional fixtures: no provider account, credential, network access or model is needed. URLs under `example.test` are illustrative. Complete [Getting started](getting-started.md) first, including its [collection exercise](getting-started.md#collect-your-first-source): this walkthrough combines sensors, field mappings and identities.
+The four records are fictional fixtures: no provider account, credential or model is needed, and only the `git clone` below uses the network. URLs under `example.test` are illustrative. [Getting started](getting-started.md), including its [collection exercise](getting-started.md#collect-your-first-source), introduces the sensors, field mappings and identities this walkthrough combines.
 
 ## Get the example
 

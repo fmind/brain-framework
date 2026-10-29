@@ -116,24 +116,26 @@ The read returns the selection as `record.text`, the document as `record.url` an
 
 ## Sensor settings
 
-The command is a program on PATH or in `sensors/`, followed by its arguments, run without a shell. The placeholders `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}` are replaced once. A command using `{{home}}` needs a home directory: where none resolves, such as for a container user without `HOME` or a passwd entry, its run fails asking you to set `HOME`. A script run directly, such as `[sensors/local-documents.py, ...]`, needs its executable bit and its interpreter: the reviewed examples need Python 3.11 or later as `python3`; `bf validate` checks the bit. Where `python3` is older, as on a Mac without a newer Python, put uv in front, as in `[uv, run, --no-project, --python, "3.14", sensors/local-documents.py, ...]`; behind a command on PATH, `bf validate` checks that the first `sensors/` path among the arguments exists.
+The command is a program on PATH or in `sensors/`, followed by its arguments, run without a shell. The placeholders `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}` are replaced once, and an argument written as `{{lines:relative/path.txt}}` splices the non-blank, non-`#` lines of that brain-relative UTF-8 file (up to 64 KiB and 500 lines) as separate arguments. A command using `{{home}}` needs a home directory: where none resolves, such as for a container user without `HOME` or a passwd entry, its run fails asking you to set `HOME`. A script run directly, such as `[sensors/local-documents.py, ...]`, needs its executable bit and its interpreter: the reviewed examples need Python 3.11 or later as `python3`; `bf validate` checks the bit. Where `python3` is older, as on a Mac without a newer Python, put uv in front, as in `[uv, run, --no-project, --python, "3.14", sensors/local-documents.py, ...]`; behind a command on PATH, `bf validate` checks that the first `sensors/` path among the arguments exists.
 
 The sensor's name is the source of its records, as in `local-documents:website-demo/brief.txt`. Never name a sensor `bf`: its refs, `bf:ID`, would read as BF addresses. [Program names](schema.md#program-names) gives the other rules.
 
-| Setting        | Default  | Meaning                                                                                                            |
-| -------------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
-| `command`      | required | The program, then its arguments.                                                                                   |
-| `fields`       | `{}`     | [Field mappings](schema.md#shared-fields-and-sensor-mappings).                                                     |
-| `enabled`      | `true`   | A disabled sensor never runs; its records stay searchable.                                                         |
-| `mode`         | `window` | `window` updates returned records; `snapshot` replaces the complete list.                                          |
-| `refresh`      | `0`      | Seconds between automatic runs; `0` keeps the sensor manual.                                                       |
-| `lookback`     | `86400`  | Seconds covered by the first run, each snapshot run and `bf collect` without `--since`.                            |
-| `overlap`      | `300`    | Seconds re-read before the previous window's end.                                                                  |
-| `reconcile`    | none     | An occasional wider window; see [reconciliation](#frequent-updates-and-periodic-reconciliation).                   |
-| `timeout`      | `300`    | Maximum runtime in seconds.                                                                                        |
-| `max_bytes`    | 64 MiB   | Maximum output.                                                                                                    |
-| `priority`     | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                                  |
-| `silent_after` | none     | Seconds without a new or changed record after which a scheduled source [falls silent](schedule.md#silent-sources). |
+| Setting          | Default  | Meaning                                                                                                                                      |
+| ---------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `command`        | required | The program, then its arguments.                                                                                                             |
+| `fields`         | `{}`     | [Field mappings](schema.md#shared-fields-and-sensor-mappings).                                                                               |
+| `enabled`        | `true`   | A disabled sensor never runs; its records stay searchable.                                                                                   |
+| `mode`           | `window` | `window` updates returned records; `snapshot` replaces the complete list.                                                                    |
+| `refresh`        | `0`      | Seconds between automatic runs; `0` keeps the sensor manual.                                                                                 |
+| `lookback`       | `86400`  | Seconds covered by the first run, each snapshot run and `bf collect` without `--since`.                                                      |
+| `overlap`        | `300`    | Seconds re-read before the previous window's end.                                                                                            |
+| `reconcile`      | none     | An occasional wider window; see [reconciliation](#frequent-updates-and-periodic-reconciliation).                                             |
+| `timeout`        | `300`    | Maximum runtime in seconds.                                                                                                                  |
+| `max_bytes`      | 64 MiB   | Maximum output.                                                                                                                              |
+| `truncate_text`  | `false`  | Truncate `record.text` on a UTF-8 codepoint boundary to `max_text_bytes` (default 1 MiB) and set `attributes.truncated: true` when exceeded. |
+| `max_text_bytes` | none     | Per-record UTF-8 byte ceiling (1,024–1,048,576) when `truncate_text` is `true`.                                                              |
+| `priority`       | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                                                            |
+| `silent_after`   | none     | Seconds without a new or changed record after which a scheduled source [falls silent](schedule.md#silent-sources).                           |
 
 [Limits](limits.md#size-bounds) gives each setting's range.
 
@@ -192,7 +194,7 @@ Expect `issues.md` to hold drafts grounded in the collected notes, each citing i
 
 ## Collect and update
 
-`bf collect SENSOR` runs one sensor now. `bf update`, `bf watch` and schedules run the sensors that are due, in one [selected brain](configuration.md#select-a-brain) and never in referenced brains; [timing and health](schedule.md#timing-and-health) gives the due rule and the failure backoff. Each run appends its stderr and a summary to `logs/SENSOR.log` in the brain; status and errors name that log.
+`bf collect SENSOR` runs one sensor now. `bf update`, `bf watch` and schedules run the sensors that are due (up to four concurrently in `bf update`, reported in configuration order), in one [selected brain](configuration.md#select-a-brain) and never in referenced brains; [timing and health](schedule.md#timing-and-health) gives the due rule and the failure backoff. Each run appends its stderr and a summary to `logs/SENSOR.log` in the brain; status and errors name that log.
 
 Window sensors resume from their previous window minus `overlap`, catching up at most 30 days. Run history stays in this machine's [state directory](configuration.md#local-state); without it, the next run uses `lookback`.
 

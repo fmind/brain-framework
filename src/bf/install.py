@@ -97,6 +97,8 @@ def skills(destination: Path, *, check: bool = False, force: bool = False) -> di
     same states without writing. Files a newer version no longer ships are removed only when unedited.
     """
     root = expand(destination)
+    if (root.exists() or root.is_symlink()) and not root.is_dir():
+        raise Error(f"{root} is not a folder")
     if not check:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
     store = Store(root.resolve()) if root.is_dir() else None
@@ -126,4 +128,9 @@ def skills(destination: Path, *, check: bool = False, force: bool = False) -> di
         results.append(entry)
     blocked = any(entry["status"] in BLOCKED for entry in results)
     behind = check and any(entry["status"] != "current" for entry in results)
-    return {"ok": not blocked and not behind, "destination": str(root), "version": __version__, "skills": results}
+    return {
+        "ok": not blocked and not behind,
+        "destination": str(root.absolute()),
+        "version": __version__,
+        "skills": results,
+    }

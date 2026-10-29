@@ -41,8 +41,21 @@ channels:
 assistants:
   personal:
     prompt: prompts/personal.md
-    command: [agy, --output-format, json, "-p={{prompt}}"]
-    text: /response
+    # Claude Code reads the prompt on standard input, so private messages never appear in process listings.
+    command:
+      [
+        claude,
+        --print,
+        --output-format,
+        json,
+        --tools,
+        "Read,Grep,Glob,Bash",
+        --allowedTools,
+        "Bash(bf read *),Bash(bf search *)",
+        --permission-mode,
+        dontAsk,
+      ]
+    text: /result
     timeout: 900
     keep: 100
     inputs:
@@ -76,12 +89,12 @@ Invocation: {{context}} Message: {{input}}
 
 BF expands these placeholders in the prompt file once, so a placeholder in a message stays text, as does any other `{{word}}`:
 
-| Placeholder             | Value                                                                                                                                                                                                                                                                                                                                 |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `{{brain}}`, `{{home}}` | The brain's absolute path and your home folder.                                                                                                                                                                                                                                                                                       |
-| `{{start}}`, `{{end}}`  | The run's evidence window, which depends on its kind (below).                                                                                                                                                                                                                                                                         |
-| `{{input}}`             | The admitted message's text, or what `bf run NAME --stdin` received; empty for schedules and triggers.                                                                                                                                                                                                                                |
-| `{{context}}`           | JSON with the `kind` of run, its `start` and `end`, the trigger's `event` or the admitted `channel` and `message`, and up to 20 earlier messages of that channel and conversation within 32 KiB as `history`, dropping the oldest until the prompt fits. The message's `text` appears there only when the template omits `{{input}}`. |
+| Placeholder             | Value                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{{brain}}`, `{{home}}` | The brain's absolute path and your home folder.                                                                                                                                                                                                                                                                                                                       |
+| `{{start}}`, `{{end}}`  | The run's evidence window, which depends on its kind (below).                                                                                                                                                                                                                                                                                                         |
+| `{{input}}`             | The admitted message's text, or what `bf run NAME --stdin` received; empty for schedules and triggers.                                                                                                                                                                                                                                                                |
+| `{{context}}`           | JSON with the `kind` of run, its `start` and `end`, the schedule's `schedule` name, the trigger's `event` or the admitted `channel` and `message`, and up to 20 earlier messages of that channel and conversation within 32 KiB as `history`, dropping the oldest until the prompt fits. The message's `text` appears there only when the template omits `{{input}}`. |
 
 | Kind       | `{{start}}`                                                                                      | `{{end}}`                                                                                             |
 | ---------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
@@ -106,7 +119,7 @@ bf queue
 
 ## Schedule and overlap
 
-`bf watch` owns one dispatcher per brain. Collection, stream receipt and harness work proceed independently. One reactive worker handles input/manual jobs and one proactive worker handles schedules/triggers; up to four output channels send independently. Jobs in one assistant conversation or schedule wait until earlier work is complete or cancelled and its deliveries are delivered, cancelled or `failed`; an `uncertain` delivery holds them until resolved. A long proactive review does not occupy the reactive worker. Restart watch after adding or renaming an assistant, or changing stream subscriptions or a channel's commands: a running watch dispatches only the assistants and streams it started with, although its dashboard lists a new assistant at once. Resolve an assistant's queued work before editing its settings, as [recovery](channels.md#queue-and-recovery) explains.
+`bf watch` owns one dispatcher per brain. Collection, stream receipt and harness work proceed independently. One reactive worker handles input/manual jobs and one proactive worker handles schedules/triggers; up to four output channels send independently. Jobs in one assistant conversation or schedule wait until earlier work is complete or cancelled and its deliveries are delivered, cancelled or `failed`; an `uncertain` delivery holds them until resolved. A long proactive review does not occupy the reactive worker. Restart watch after adding or renaming an assistant, or changing stream subscriptions or a channel's commands: a running watch dispatches only the assistants and streams it started with, although its dashboard lists a new assistant at once. Resolve an assistant's queued work before editing its harness or outputs, as [recovery](channels.md#queue-and-recovery) explains.
 
 About once a second, watch admits due schedules and pending triggers and starts queued work, so streamed input starts within about a second. It never stops for one assistant's, channel's or job's failure, such as a missing prompt, a full queue or a `bf.yaml` saved half-way: running work continues, the message line shows each new reason once, the header adds `· assistants waiting` and `bf watch --json` writes the reason as one `bf:` line on stderr. Reasons show one at a time: a failing pass or admission first, then a failing read (`channel C: read failed: REASON; see logs/channel.C.read.log`), a stream's last error, such as `channel chat: stream closed its output`, and a delivery of a watched assistant that failed or is uncertain (`channel C: delivery failed or uncertain; inspect bf queue`) until `bf queue` resolves it. A failed job shows on its assistant's row instead. Busy or waiting work and a failing assistant's schedules and triggers wait 10 seconds between attempts, and `Assistant work resumed` follows recovery. While a `bf update` owns assistant work, watch shows `Another bf update owns assistant work; assistants start once it finishes`. Only `channel NAME: stream worker stopped unexpectedly; restart watch` stops it.
 
@@ -114,7 +127,7 @@ About once a second, watch admits due schedules and pending triggers and starts 
 
 A [native schedule](schedule.md#generate-a-native-schedule) runs due assistant work in the same `bf update` job, after collection. Systemd and launchd never start a job that is still running, so a long agent run makes the job miss its next check and delays collection; cron starts each check anyway. To keep collection on time, give assistants a job of their own, such as `bf schedule --assistant personal --name assistants`, and name the sensors and routines in another, such as `bf schedule --sensor calendar --name collect`: a job with selectors runs only the programs it names, so regenerate it after adding one. Each run also admits the pending triggers of the assistants it names, so name a trigger-only assistant in the assistants job: a job naming only its sensor leaves its triggers pending. A native schedule never starts a stream: use watch for stream inputs.
 
-There is no default schedule. Each named schedule has its own `every` interval and successful evidence window. Its first run covers `lookback`; later runs start at its previous successful end. Input and manual runs do not advance those windows. A failed/uncertain job blocks that schedule until inspected and retried or cancelled. Cancelling deliberately skips its window. Disabled assistants receive no new work; existing obligations remain inspectable. Every run starts your harness, which can bill each model call: `every: 1800` means about 1,440 scheduled runs a month and `every: 86400` about 30, before any message or trigger. Choose intervals, triggers and the harness's model for the cost you accept.
+There is no default schedule. Each named schedule sets either an `every` interval in seconds or a wall-clock `at: "HH:MM"` time (with optional IANA `timezone` and `days` list of `mon`–`sun`), and tracks its own successful evidence window. Its first run covers `lookback`; later runs start at its previous successful end. Input and manual runs do not advance those windows. A failed/uncertain job blocks that schedule until inspected and retried or cancelled. Cancelling deliberately skips its window. Disabled assistants receive no new work; existing obligations remain inspectable. Every run starts your harness, which can bill each model call: `every: 1800` means about 1,440 scheduled runs a month and `every: 86400` about 30, before any message or trigger. Choose intervals, triggers and the harness's model for the cost you accept.
 
 A committed change of a sensor that an enabled assistant's trigger names records a `sensor.changed` event with the names of those triggers, and nothing else: no configuration, prompt or capacity check, so editing `bf.yaml`, a missing prompt or a full queue never blocks collection. An unchanged collection, or a sensor no trigger names, records nothing. Watch, about once a second, or each `bf update` for its selected assistants then admits each trigger's job from the current `bf.yaml`. A trigger that cannot be admitted yet, as when its prompt is missing or the queue is full, stays `pending`, with its reason in `bf queue`, as a failed row of `bf update` and in `bf status`; its pending changes merge into one review once it starts. A trigger whose assistant or trigger was removed or disabled, or that now names another sensor, is `dropped`, by any watch pass or `bf update` when its assistant was removed or renamed: `bf queue` lists it and `logs/NAME.log` says the change was not reviewed. Pending events for the same trigger coalesce only when their execution configuration and template match. A collection that a harness starts, even under `bf run --dry-run`, triggers no assistant ([processes](limits.md#processes-and-logs)); only an unavailable queue fails a triggered collection, after its records are saved ([troubleshooting](troubleshooting.md#queue-and-channel-errors)). Internal channel and assistant lifecycle events are recorded locally and cannot be configured as assistant triggers.
 
@@ -134,23 +147,24 @@ Each successful run writes one record in `memories/NAME/`, a source like a senso
 
 BF saves raw harness output in the durable queue before parsing or publishing the record. The `text` pointer's other JSON fields remain record output metadata; the selected field is removed, or replaced with `null` when it is an array element so other indices stay stable. Records are model output, ranked like low-priority sources: inspect the evidence they cite before trusting their claims. `keep` limits generated run records while preserving unrelated files. A run never removes its own record, even when a clock that ran ahead dated older runs later; pruning passes over a run record it cannot read, neither removing it nor counting it toward `keep`, and a pruning failure never fails the run: `logs/NAME.log` names the error.
 
-A nonempty answer creates one delivery per selected output. An empty scheduled/triggered answer records a quiet success and sends nothing; an empty conversational answer is a failure requiring inspection. Delivery failure never reruns the harness. An interrupted or killed harness attempt leaves an uncertain job, because its tools might already have acted; BF requires explicit retry or cancellation. A killed one shows `running` until BF records it, as [recovery](channels.md#queue-and-recovery) describes.
+A nonempty answer creates one delivery per selected output. An empty scheduled/triggered answer (with no output metadata) completes the job and advances its schedule without writing an empty record or sending deliveries; an empty conversational answer is a failure requiring inspection. Delivery failure never reruns the harness. By default, a failed, interrupted or killed harness attempt leaves its job `failed` or `uncertain`, because its tools might already have acted, and BF requires explicit retry or cancellation; when the assistant declares `idempotent: true` (for a read-only harness), pre-delivery harness failures retry automatically with exponential backoff (`min(300, 5 * 2^(attempts - 1))` seconds, up to 5 attempts). A killed one shows `running` until BF records it, as [recovery](channels.md#queue-and-recovery) describes.
 
 ## Assistant settings
 
-| Field       | Default   | Meaning                                                             |
-| ----------- | --------- | ------------------------------------------------------------------- |
-| `prompt`    | required  | Markdown file below `prompts/`.                                     |
-| `command`   | required  | Harness argv; supports `{{prompt}}`.                                |
-| `text`      | omitted   | JSON Pointer to the answer; omitted means plain text.               |
-| `enabled`   | `true`    | Admit and execute this assistant.                                   |
-| `timeout`   | `900`     | Maximum harness runtime in seconds.                                 |
-| `max_bytes` | `1048576` | Maximum stdout bytes, up to 4 MiB.                                  |
-| `keep`      | omitted   | Maximum generated records to retain.                                |
-| `inputs`    | `[]`      | Objects with `channel: {name, mode}`; `read` also requires `every`. |
-| `outputs`   | `[]`      | Objects with `reply: {}` or `channel: {name, when?}`.               |
-| `schedules` | `{}`      | Named `{every, lookback?}` settings; lookback defaults to one day.  |
-| `triggers`  | `{}`      | Named `{event: sensor.changed, sensor: {name}}` settings.           |
+| Field        | Default   | Meaning                                                                                  |
+| ------------ | --------- | ---------------------------------------------------------------------------------------- |
+| `prompt`     | required  | Markdown file below `prompts/`.                                                          |
+| `command`    | required  | Harness argv; supports `{{prompt}}`.                                                     |
+| `text`       | omitted   | JSON Pointer to the answer; omitted means plain text.                                    |
+| `enabled`    | `true`    | Admit and execute this assistant.                                                        |
+| `idempotent` | `false`   | Retry pre-delivery harness failures automatically up to 5 attempts when `true`.          |
+| `timeout`    | `900`     | Maximum harness runtime in seconds.                                                      |
+| `max_bytes`  | `1048576` | Maximum stdout bytes, up to 4 MiB.                                                       |
+| `keep`       | omitted   | Maximum generated records to retain.                                                     |
+| `inputs`     | `[]`      | Objects with `channel: {name, mode}`; `read` also requires `every`.                      |
+| `outputs`    | `[]`      | Objects with `reply: {}` or `channel: {name, when?}`.                                    |
+| `schedules`  | `{}`      | Named `{every, lookback?}` or `{at, timezone?, days?, lookback?}` settings (default 1d). |
+| `triggers`   | `{}`      | Named `{event: sensor.changed, sensor: {name}}` settings.                                |
 
 ## Keep prompts safe
 

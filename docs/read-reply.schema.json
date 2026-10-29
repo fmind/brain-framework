@@ -65,7 +65,7 @@
         "subject": { "type": "string" },
         "target": { "type": "string" },
         "target_ref": {
-          "description": "The ref of the one item in the asserting brain that the target names, when exactly one does: read it to follow the claim.",
+          "description": "The ref of the one item in the asserting brain that the target names, when exactly one does, as a bf:// address with several brains: read it to follow the claim.",
           "type": "string"
         },
         "target_title": { "description": "The title of the item `target_ref` names.", "type": "string" },
@@ -222,7 +222,7 @@
     "OutlineEntry": {
       "properties": {
         "characters": { "minimum": 0, "type": "integer" },
-        "ref": { "type": "string" },
+        "ref": { "description": "The section's ref; a bf:// address with several brains.", "type": "string" },
         "title": { "type": "string" }
       },
       "required": ["ref", "title", "characters"],
