@@ -28,7 +28,7 @@ jobs:
           version: 2026.10.21 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
           cache: false # Like CI: scans and installation checks never restore a cache.
       - name: Scan complete Git history
-        run: gitleaks git --redact=100 --verbose --no-banner
+        run: betterleaks git --redact=100 --verbose --no-banner
       - name: Scan full checkout
         run: mise run check:scan
       - name: Audit all locked Python dependencies

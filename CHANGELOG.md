@@ -4,6 +4,15 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v20.0.2](https://github.com/fmind/brain-framework/releases/tag/v20.0.2) - 2026-10-31
+
+A maintenance release for repository tooling and contributor checks. The package behavior, the brain format (`version: 8`), `bf.yaml`, the reply schemas, the packaged skills, the assistant queue and the search cache are unchanged; no upgrade step is needed.
+
+### Changed
+
+- **Repository checks and workflow tools.** Secret scanning uses Betterleaks 1.9.0 (`.betterleaks.toml`), workflow linting uses jactionlint 2.4.0 and zizmor 1.31.1 with `$/` self-repository reusable workflow references, and dprint's Markdown plugin is updated to 0.28.0.
+- **Linter, hook and task hardening.** `pyproject.toml` adds Ruff's `BLE`, `PLE` and `PLW` rule families and rejects blanket `ty` ignore comments; `lefthook.yml` uses sequential `jobs`; `mise.toml` enforces `min_version = "2026.10.21"` and `UV_MALWARE_CHECK=1` on `install` and `upgrade`; and `AGENTS.md` and `bf-contribute` format rules with scannable lead-ins.
+
 ## [v20.0.1](https://github.com/fmind/brain-framework/releases/tag/v20.0.1) - 2026-10-31
 
 A documentation release that aligns the guides and packaged skills with v20. The brain format (`version: 8`), `bf.yaml`, the reply schemas, the assistant queue and the search cache are unchanged. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), run `bf skills DIR` for each skills folder, and compare a brain's `AGENTS.md` with a scratch `bf init` copy to adopt the starter's new first line.

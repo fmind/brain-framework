@@ -1,8 +1,11 @@
 # https://mise.jdx.dev/configuration.html
+# Fail early on a mise older than the one CI pins (keep equal to the workflow `version:`).
+min_version = "2026.10.21"
+
 [tools]
-actionlint = "1.7.12"
+betterleaks = "1.9.0"
 dprint = "0.64.3"
-gitleaks = "8.30.1"
+jactionlint = "2.4.0"
 lefthook = "2.2.2"
 lychee = "0.24.2"
 # Held below 3.15.0: PyYAML 6.0.3 ships no cp315 wheels, so 3.15 builds it from source, usually without libyaml,
@@ -11,9 +14,7 @@ python = "3.14.8"
 shellcheck = "0.11.0"
 trivy = "0.76.1"
 "aqua:astral-sh/uv" = "0.13.6"
-# 1.30 requires GitHub's new $/ self-reference, which actionlint 1.7.12 cannot parse yet
-# (rhysd/actionlint#711). Keep both strict gates warning-free rather than suppressing either.
-zizmor = "1.29.0"
+zizmor = "1.31.1"
 
 [settings]
 aqua.cosign = true
@@ -65,7 +66,7 @@ depends = [
 [tasks."check:actions"]
 description = "Validate GitHub Actions and Dependabot configuration"
 run = [
-  "actionlint",
+  "jactionlint",
   "zizmor --offline --persona=pedantic .github/workflows",
   "zizmor --offline --collect dependabot --strict-collection .",
 ]
@@ -101,16 +102,16 @@ run = [
   # Without pipefail a failing git would pass a pipeline, so test its captured output instead.
   'tracked="$(git ls-files -ci --exclude-per-directory=.gitignore)" && test -z "$tracked"',
   "mise run check:leaks:history",
-  "gitleaks dir . --redact=100 --verbose --no-banner",
+  "betterleaks dir . --redact=100 --verbose --no-banner",
 ]
 
 [tasks."check:leaks:history"]
 description = "Scan the last 100 commits for secrets"
-run = "gitleaks git --redact=100 --log-opts=--max-count=100 --verbose --no-banner"
+run = "betterleaks git --redact=100 --log-opts=--max-count=100 --verbose --no-banner"
 
 [tasks."check:leaks:staged"]
 description = "Scan the staged snapshot for secrets"
-run = "gitleaks git --staged --redact=100 --verbose --no-banner"
+run = "betterleaks git --staged --redact=100 --verbose --no-banner"
 
 [tasks."check:links"]
 description = "Check repository Markdown links and anchors; check:docs owns documentation links"
@@ -163,7 +164,7 @@ run = "uv audit --preview-features audit-command --locked"
 [tasks.clean]
 alias = "n"
 description = "Remove generated build, test, and documentation output"
-run = "rm -rf dist site .cache .coverage .coverage.* htmlcov .pytest_cache .ruff_cache"
+run = "rm -rf dist site .cache .coverage .coverage.* htmlcov .pytest_cache .ruff_cache .ty_cache"
 
 [tasks.coverage]
 alias = "v"
@@ -218,7 +219,7 @@ run = "uv run --locked python scripts/render_watch.py --write"
 [tasks.install]
 alias = "i"
 description = "Sync locked dependencies and install Git hooks"
-run = ["uv sync --locked", "lefthook install"]
+run = ["UV_MALWARE_CHECK=1 uv sync --locked --preview-features malware-check", "lefthook install"]
 
 [tasks."report:coverage"]
 description = "Show per-file coverage and missing lines from the last test run"
@@ -245,4 +246,4 @@ run = "uv run --locked pytest-watcher ."
 [tasks.upgrade]
 alias = "u"
 description = "Upgrade dependencies to latest compatible versions"
-run = "uv sync --upgrade"
+run = "UV_MALWARE_CHECK=1 uv sync --upgrade --preview-features malware-check"

@@ -1,7 +1,7 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "20.0.1"
+version = "20.0.2"
 description = "🧠 Brain Framework: from information to informed actions."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -80,6 +80,7 @@ dev = [
 [tool.ruff]
 line-length = 120
 src = ["src", "tests"]
+extend-exclude = ["*.md"] # dprint owns Markdown, including its Python code blocks.
 # Skill scripts and copied examples run with the host's python3, not the package interpreter.
 per-file-target-version = { "src/bf/skills/*/scripts/*.py" = "py311", "examples/**/*.py" = "py311" }
 
@@ -94,6 +95,7 @@ select = [
   "ARG", # Find unused function arguments.
   "ASYNC", # Catch async and cancellation mistakes.
   "B", # Catch likely bugs (flake8-bugbear).
+  "BLE", # Catch blind except clauses that swallow errors.
   "C4", # Simplify comprehensions.
   "E", # Enforce pycodestyle errors.
   "ERA", # Remove commented-out code.
@@ -107,6 +109,8 @@ select = [
   "PERF", # Avoid common performance pitfalls.
   "PGH", # Require specific lint and type-checker suppressions.
   "PIE", # Remove unnecessary code constructs.
+  "PLE", # Catch Pylint errors.
+  "PLW", # Catch Pylint warnings.
   "PT", # Keep pytest fixtures and assertions consistent.
   "PTH", # Prefer pathlib for filesystem operations.
   "Q", # Keep string quoting consistent.
@@ -125,18 +129,27 @@ select = [
 ignore = [
   "ASYNC240", # Brain Framework performs bounded local filesystem work from async MCP handlers.
   "E501", # Long CLI help and schema descriptions are clearer as one string.
+  "PLW0108", # Unnecessary-lambda is style outside Ruff's default set.
+  "PLW2901", # Deliberate loop-variable rebinding is outside Ruff's default set.
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"examples/hooks/**" = [
+  "BLE001", # Silent hooks must exit 0 with no output on any unexpected error.
+]
 "examples/sensors/**" = [
   "S603", # Adapters invoke provider CLIs with literal argv lists; no shell is involved.
   "S607", # Provider CLIs are resolved by bare name on the PATH Brain Framework sanitizes.
   "T201", # Adapters print exactly one JSON array to stdout.
 ]
 "tests/**" = [
+  "BLE001", # Worker-thread test helpers record any exception so the test thread can assert on it.
   "S101", # pytest assertions are the test contract.
   "T201", # Test diagnostics may use print.
 ]
+
+[tool.ty.rules]
+blanket-ignore-comment = "error" # Require `ty: ignore[<rule>]`; Ruff PGH003 checks only `type: ignore`.
 
 [tool.pytest]
 addopts = ["-ra"]

@@ -12,13 +12,14 @@ scan:
     - misconfig
     - secret
     - vuln
-  # Ignored generated output, as in .gitleaks.toml. Trivy skips these directories even where Git tracks a file, so
+  # Ignored generated output, as in .betterleaks.toml. Trivy skips these directories even where Git tracks a file, so
   # check:leaks fails when Git tracks an ignored file.
   skip-dirs:
     - .agents/tmp
     - .cache
     - .pytest_cache
     - .ruff_cache
+    - .ty_cache
     - .venv
     - dist
     - htmlcov

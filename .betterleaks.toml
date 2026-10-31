@@ -1,4 +1,4 @@
-# https://github.com/gitleaks/gitleaks#configuration
+# https://github.com/betterleaks/betterleaks/blob/main/docs/config.md
 title = "brain-framework"
 
 [extend]
@@ -8,4 +8,4 @@ useDefault = true
 # check:leaks fails while Git tracks an ignored file.
 [[allowlists]]
 description = "Ignored generated output: environments, builds, caches, reports and the rendered site."
-paths = ['''^(\./)?(\.agents/tmp|\.cache|\.pytest_cache|\.ruff_cache|\.venv|dist|htmlcov|site)/''']
+paths = ['''^(\./)?(\.agents/tmp|\.cache|\.pytest_cache|\.ruff_cache|\.ty_cache|\.venv|dist|htmlcov|site)/''']
