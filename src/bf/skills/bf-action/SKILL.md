@@ -43,7 +43,7 @@ Invoking this skill with a topic, or asking to start or track a session, is the 
 
 ## References and helpers
 
-`SKILL_DIR` is the folder holding this `SKILL.md`. Run a helper as `python3 "$SKILL_DIR/scripts/NAME.py"` (Python 3.11+); when `python3` is older, as on macOS Command Line Tools, use `"$(uv python find --system --no-config --no-project 3.14)"` in its place. `check-handoff.py` calls the installed `bf`, the first on PATH.
+`SKILL_DIR` is the folder holding this `SKILL.md`. Run a helper as `python3 "$SKILL_DIR/scripts/NAME.py"` (Python 3.11+); when `python3` is older, as on macOS Command Line Tools, use `"$(uv python find --system --no-config --no-project 3.14)"` in its place, never uv's run command, which adopts a `.venv` the brain may supply. `check-handoff.py` calls the installed `bf`, the first on PATH. For a contract this skill does not give, read the [documentation](https://fmind.github.io/brain-framework/llms.txt) as Markdown; `bf COMMAND --help` wins where they differ.
 
 - [references/actions.md](references/actions.md): start, resume and close details; metadata.
 - [references/context.md](references/context.md): the Context and Resume budget.

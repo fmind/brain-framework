@@ -16,7 +16,7 @@ bf --version
 
 `--python 3.14` selects the tested Python, which uv downloads if needed. Without it, uv may pick a newer Python for which some dependencies publish no prebuilt packages yet. BF reads YAML only through libyaml: when PyYAML was built without it, as from source on such a Python, every command reading `bf.yaml` stops with a message naming the fix, `uv tool install --reinstall --python 3.14 brain-framework` (`'brain-framework[mcp]'` with MCP, since a reinstall without the extra drops it). uv remembers the choice for later upgrades. If your shell cannot find `bf`, run `uv tool update-shell` and open a new shell. Then follow [Getting started](getting-started.md). To serve an agent host over [MCP](mcp.md), install `'brain-framework[mcp]'` instead; upgrades keep the extra.
 
-The search cache needs SQLite 3.35.0 or newer with FTS5 and JSON functions, which uv's managed Pythons include. When a system Python lacks them, search, read, status and build stop with a message naming the fix: `uv tool install --reinstall --managed-python --python 3.14 brain-framework`.
+The search cache needs SQLite 3.35.0 or newer with FTS5 and JSON functions, which uv's managed Pythons include. When a system Python lacks them, search, read, status and build stop with a message naming the fix: `uv tool install --reinstall --managed-python --python 3.14 brain-framework`, or `'brain-framework[mcp]'` with MCP.
 
 ## Match the docs to your version
 
@@ -24,7 +24,7 @@ This site follows the repository's current code, which can be newer than your in
 
 ## Update
 
-Stop watchers and scheduled collection, read the [changelog](../changelog.md) and back up the idle brain, together with its durable assistant queue under `$XDG_STATE_HOME/bf/runtime/` (normally `~/.local/state/bf/runtime/`), which lives outside the brain: a copy of its `queue.sqlite3` taken while no BF process runs is complete; see [queue recovery](channels.md#queue-and-recovery). Then upgrade and confirm the new version:
+Stop watchers and scheduled collection, read the [changelog](../changelog.md) and back up the idle brain, together with its durable assistant queue under `$XDG_STATE_HOME/bf/runtime/` (normally `~/.local/state/bf/runtime/`), which lives outside the brain: a copy of its `queue.sqlite3` taken while no BF process runs is complete; see [queue recovery](channels.md#queue-and-recovery). Steps that need the previous release, such as draining its assistant queue, come first. Then upgrade and confirm the new version:
 
 ```bash
 uv tool upgrade brain-framework
@@ -37,10 +37,11 @@ Apply the upgrade steps of each release newer than your previous version, oldest
 cd ~/brain
 bf validate
 bf eval
+bf status --check
 bf skills ~/.agents/skills
 ```
 
-Expect `"valid":true` from validation and `"passed":true` from your retrieval cases; otherwise fix the reported problem first, with [Troubleshooting](troubleshooting.md). `bf skills` updates the skills it installed in that folder: repeat it for each folder you installed them into, such as `~/.claude/skills` for Claude Code. It leaves a folder unchanged and exits 1 when the folder reports `modified` (you edited it), `unmanaged` (it has no BF manifest) or `newer` (a newer `bf` installed a different copy): see [skill installation](agents.md#install-the-skills) before passing `--force`.
+Expect `"valid":true` from validation, `"passed":true` from your retrieval cases and exit 0 from the status check; otherwise fix the reported problem first, with [Troubleshooting](troubleshooting.md). `bf skills` updates the skills it installed in that folder: repeat it for each folder you installed them into, such as `~/.claude/skills` for Claude Code. It leaves a folder unchanged and exits 1 when the folder reports `modified` (you edited it), `unmanaged` (it has no BF manifest) or `newer` (a newer `bf` installed a different copy): see [skill installation](agents.md#install-the-skills) before passing `--force`.
 
 `bf init` writes a brain's `AGENTS.md` once. Merge new guidance by hand, as [Refresh brain instructions](agents.md#refresh-brain-instructions) shows. Edit a [watch service](schedule.md#run-watch-as-a-service) or timer when the changelog asks or the `bf` executable moved.
 

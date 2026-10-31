@@ -29,7 +29,7 @@ Start from one project and a few questions the user keeps reconstructing across 
 
 ## Connect the agent
 
-1. A terminal agent can use the CLI directly: "Use `bf search` to find why we chose X, then `bf read` the ref and cite it." Hosts, including Claude Code 2.1.277+, load the brain's `AGENTS.md`; add no `CLAUDE.md`, except one holding only `@AGENTS.md` for an older host.
+1. A terminal agent can use the CLI directly: "Use `bf search` to find why we chose X, then `bf read` the ref and cite it." Hosts, including Claude Code 2.1.277+, load the brain's `AGENTS.md`; add no `CLAUDE.md` here or in a parent folder, where it would replace `AGENTS.md`, except one holding only `@AGENTS.md` for an older host.
 1. Install the skills where the host discovers them, such as `~/.agents/skills` or `~/.claude/skills`, then start a fresh host session:
 
    ```bash
@@ -56,7 +56,7 @@ Report the brain location, the questions answered with their refs, check results
 
 ## References and helpers
 
-`SKILL_DIR` is the folder holding this `SKILL.md`. Run a helper as `python3 "$SKILL_DIR/scripts/NAME.py"` (Python 3.11+); when `python3` is older, as on macOS Command Line Tools, use `"$(uv python find --system --no-config --no-project 3.14)"` in its place, never `uv run`.
+`SKILL_DIR` is the folder holding this `SKILL.md`. Run a helper as `python3 "$SKILL_DIR/scripts/NAME.py"` (Python 3.11+); when `python3` is older, as on macOS Command Line Tools, use `"$(uv python find --system --no-config --no-project 3.14)"` in its place, never `uv run`. For a contract this skill does not give, read the [documentation](https://fmind.github.io/brain-framework/llms.txt) as Markdown; `bf COMMAND --help` wins where they differ.
 
 - [references/scan.md](references/scan.md): agree on a scope, recommend sources, hand them off.
 - [references/discovery.md](references/discovery.md): bounded methods for tools, bookmarks and folders.

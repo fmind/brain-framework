@@ -34,6 +34,6 @@ Inspect `problems`, `stale` and `sources` before interpreting a result, and retr
 
 ## Pages worth knowing
 
-- Home shows as many projects as fit, those needing review first, and `attention` for failing or late programs and silent sources; `bf read projects` lists every project, and the [review guide](review.md) interprets their signals.
+- Home shows as many projects as fit, those needing review first, and `attention` for programs that failed, are `overdue` or `never` succeeded and for silent sources; `bf read projects` lists every project, and the [review guide](review.md) interprets their signals.
 - `bf read tasks` lists open checkboxes in projects, concepts and `ACTION.md` notes; only `deprecated` closes a note's tasks.
 - Period pages place records by event `time`, else by `observed`; `memories/SOURCE/undated` lists records without event time.

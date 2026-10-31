@@ -71,7 +71,7 @@ For the New website project, `bf read projects` shows `"next":"Draft the product
 
 ## Check that a reply is complete
 
-Before concluding that evidence is absent, look for `problems`, `stale`, sources that failed, are late or fell silent, and `next_offset`: [incomplete answers](retrieval.md#incomplete-answers-and-freshness) says what each means and what to do. No match for today's meeting can mean the meeting was never collected.
+Before concluding that evidence is absent, look for `problems`, `stale`, sources that failed, are `overdue`, `never` succeeded or fell silent, and `next_offset`: [incomplete answers](retrieval.md#incomplete-answers-and-freshness) says what each means and what to do. No match for today's meeting can mean the meeting was never collected.
 
 ## Continue a listing
 

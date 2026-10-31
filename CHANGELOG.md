@@ -4,6 +4,16 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v20.0.1](https://github.com/fmind/brain-framework/releases/tag/v20.0.1) - 2026-10-31
+
+A documentation release that aligns the guides and packaged skills with v20. The brain format (`version: 8`), `bf.yaml`, the reply schemas, the assistant queue and the search cache are unchanged. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin), run `bf skills DIR` for each skills folder, and compare a brain's `AGENTS.md` with a scratch `bf init` copy to adopt the starter's new first line.
+
+### Fixed
+
+- **Guides match v20.** [Checks](https://fmind.github.io/brain-framework/docs/checks/#validate) describes the `validate:` policy shapes `bf validate` accepts: `index_note` names one index note, `required_status` lists statuses and `forbid_patterns` holds up to 64 regular expressions. `{{lines:FILE}}` arguments document their real bounds: a file of at most 4 MiB, lines of at most 16,384 characters and at most 128 command items in all. Pages no longer mention the removed `bf schedule` or queued trigger events, and the queue folder command follows a symlinked brain (`stat -L`).
+- **Upgrades and recovery.** [Install and update](https://fmind.github.io/brain-framework/docs/upgrades/#update) runs the steps that need the previous release, such as draining the assistant queue, before upgrading, and ends with `bf status --check`; its libyaml reinstall names `'brain-framework[mcp]'` so MCP users keep the extra. [Troubleshooting](https://fmind.github.io/brain-framework/docs/troubleshooting/) no longer sends `unexpected assistant queue schema` to the v19 steps.
+- **Packaged skills.** `bf-maintain` follows the same upgrade order, installs the `mcp` extra when a host starts `bf mcp`, updates the watch service or timer you wrote instead of regenerating schedules and explains `assistant queue predates this release`. `bf-use` and the starter `AGENTS.md` that `bf init` writes search the brain before querying a source tool. `bf-use`, `bf-action` and `bf-setup` point agents to the Markdown documentation at [llms.txt](https://fmind.github.io/brain-framework/llms.txt), and `bf-setup` warns that a `CLAUDE.md` in a parent folder also replaces `AGENTS.md`.
+
 ## [v20.0.0](https://github.com/fmind/brain-framework/releases/tag/v20.0.0) - 2026-10-31
 
 A major release that trims BF's surface and settles deferred input rules. `bf schedule` and assistant triggers are removed, MCP becomes an optional extra (13 runtime packages instead of 36 on Linux and macOS), disabled programs stop reporting failures, and six ambiguous inputs that loaded before now fail with a message naming the fix. The brain format (`version: 8`), records and notes are unchanged; the assistant queue needs one manual SQL statement and the search cache rebuilds once. From this release on, breaking changes ship together in at most one major release per quarter. Follow the upgrade steps below.

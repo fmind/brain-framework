@@ -54,7 +54,7 @@ Start a new session and ask: “Search my brain for why we chose a single produc
 
 ## The everyday loop
 
-Consult the brain before repeating source queries when a task depends on saved context. Use live tools only for missing or current evidence and authorized actions.
+Consult the brain before repeating source queries when a task depends on saved context. Use live tools only for missing or current evidence and authorized actions. Search, read and check with the `bf` on PATH even when the brain has a `pyproject.toml`: its pinned runtime would install and run code the brain supplies.
 
 1. **Orient:** `bf read` shows what needs attention, projects needing review first; `bf read concepts` and `bf read actions` flag notes that set `stale_after` the same way. `bf read tasks` lists open work; `bf read 7d` shows recent activity.
 1. **Find:** search a few subject words, with variants in one query; quote phrases and use `word*` for prefixes. `unmatched` names words to rephrase.
@@ -139,4 +139,4 @@ The generated file is the same for every brain, so no output means your instruct
 
 ## Boundaries
 
-Search and read never collect. Updating sources needs the user's authority or an established schedule. Agents edit notes; sensors own records. Keep private content out of public outputs, and choose the intended brain explicitly. See [What BF does not do](concepts.md#what-bf-does-not-do) and [privacy](privacy.md).
+Search and read never collect. Running programs needs the user's explicit authority; a service the user installed runs them on its own. Agents edit notes; sensors own records. Keep private content out of public outputs, and choose the intended brain explicitly. See [What BF does not do](concepts.md#what-bf-does-not-do) and [privacy](privacy.md).

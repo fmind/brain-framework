@@ -24,6 +24,7 @@ Agents read `bf status`, a JSON snapshot that runs nothing, never the interactiv
 | `silent` source              | Runs succeed but bring nothing new: within live authority, check its account, filter or query with `bf collect SENSOR --dry-run`; raise `silent_after` only for a genuine quiet spell.                                                                                                                           |
 | Snapshot removal rejected    | `snapshot would remove N of M records`: check account, scope and mounts with `bf collect SENSOR --dry-run`; for an intended removal, run `bf collect SENSOR --allow-removal` once.                                                                                                                               |
 | Moved or renamed brain       | `assistant queue holds unresolved work admitted under this brain's previous path or name`: restore the old path or name, resolve the work with `bf queue`, then move again. A drained queue reports nothing and rebinds at the next `bf queue` or execution command.                                             |
+| Queue from an older release  | `assistant queue predates this release`: preserve the queue and follow the changelog's upgrade steps; never delete it ([troubleshooting](https://fmind.github.io/brain-framework/docs/troubleshooting/)).                                                                                                        |
 | Brain not found              | `PATH has no bf.yaml`: pass the brain's root. `registered brain directory is absent on this machine` or `bf.yaml is missing`: restore it, or run `bf register` at its new place.                                                                                                                                 |
 | Interrupted write            | `pending_transaction: true`: preserve `memories/.pending/` and run `bf build`, or let the next `bf update` recover it. If `bf build` refuses the journal itself, follow [recover an interrupted write](https://fmind.github.io/brain-framework/docs/troubleshooting/#recover-the-cache-or-an-interrupted-write). |
 | Skipped files                | `problems` name the file; `bf build` and `bf update` exit 1 until it is fixed. Fix a skipped record's sensor, then collect a window returning it.                                                                                                                                                                |
@@ -43,16 +44,17 @@ For mutable window sources, use a short `refresh` and an `overlap`, plus `reconc
 
 ## Upgrade Brain Framework
 
-Upgrade only with the user's consent. Stop watchers and schedules, read the release's changelog and back up the idle brain with its local assistant queue (`$XDG_STATE_HOME/bf/runtime/`); resolve `bf queue` work before changing assistant or channel configuration. Run `uv tool upgrade brain-framework`, which keeps an installed `mcp` extra, and, in a pinned brain the user created or reviewed, `uv add "brain-framework==X.Y.Z"` so `runtime.pinned` keeps the installed major version. Apply the changelog's manual steps, then:
+Upgrade only with the user's consent. Stop watchers and schedules, read the release's changelog and back up the idle brain with its local assistant queue (`$XDG_STATE_HOME/bf/runtime/`); resolve `bf queue` work before changing assistant or channel configuration. Run the changelog's steps that need the previous release, such as draining the queue, before upgrading. Run `uv tool upgrade brain-framework`, which keeps an installed `mcp` extra; if a host starts `bf mcp` and `uv tool list --show-extras` shows no `[extras: mcp]`, install `'brain-framework[mcp]'` instead. In a pinned brain the user created or reviewed, run `uv add "brain-framework==X.Y.Z"` so `runtime.pinned` keeps the installed major version. Apply the remaining manual steps, then:
 
 ```bash
 bf --version
 bf validate
 bf eval
+bf status --check
 bf skills ~/.agents/skills --check
 ```
 
-`bf skills DIR` then updates `outdated` and `missing` skills but leaves unchanged, exiting 1, a folder the user edited (`modified`), one BF did not install (`unmanaged`) and one a newer `bf`, such as a pinned runtime, installed (`newer`). Pass `--force` for the first two only when the user accepts; for `newer`, upgrade this `bf` instead. Regenerate schedules when the changelog asks, then restart watchers and agent hosts.
+`bf skills DIR` then updates `outdated` and `missing` skills but leaves unchanged, exiting 1, a folder the user edited (`modified`), one BF did not install (`unmanaged`) and one a newer `bf`, such as a pinned runtime, installed (`newer`). Pass `--force` for the first two only when the user accepts; for `newer`, upgrade this `bf` instead. Update the watch service or timer the user wrote when the changelog asks or the `bf` path changes, then restart watchers and agent hosts.
 
 ## Refresh brain instructions
 
