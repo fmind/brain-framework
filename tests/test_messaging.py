@@ -1472,7 +1472,10 @@ CREATE TABLE messages (id TEXT PRIMARY KEY, channel TEXT NOT NULL, conversation 
 CREATE INDEX conversation_messages ON messages(channel,conversation,at);
 PRAGMA user_version=1;
 """
-UPGRADE = "BEGIN; DROP TABLE triggers; PRAGMA user_version=2; COMMIT;"
+UPGRADE = (
+    "BEGIN; CREATE TEMP TABLE drained(n INTEGER CHECK (n = 0)); INSERT INTO drained SELECT count(*) FROM jobs "
+    "WHERE state NOT IN ('complete','cancelled'); DROP TABLE triggers; PRAGMA user_version=2; COMMIT;"
+)
 CURRENT = f"{runtime._SCHEMA}PRAGMA user_version={runtime.VERSION};"  # noqa: SLF001
 
 
@@ -1558,6 +1561,16 @@ def test_a_drained_v19_queue_upgrades_with_the_documented_statements(messaging: 
         queue.report()
     db = sqlite3.connect(path)
     try:
+        # An undrained queue refuses the statements and keeps its v19 schema, so a leftover job never strands.
+        db.execute("UPDATE jobs SET state='failed' WHERE id=?", ("f" * 32,))
+        db.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            db.executescript(UPGRADE)
+        db.rollback()
+        assert db.execute("SELECT count(*) FROM sqlite_master WHERE name='triggers'").fetchone() == (1,)
+        assert db.execute("PRAGMA user_version").fetchone() == (1,)
+        db.execute("UPDATE jobs SET state='complete' WHERE id=?", ("f" * 32,))
+        db.commit()
         db.executescript(UPGRADE)
     finally:
         db.close()

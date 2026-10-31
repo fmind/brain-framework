@@ -2,7 +2,7 @@
 name: bf-setup
 description: Install Brain Framework (bf), create a brain, connect an agent, install the skills, choose sources worth connecting and import documents or notes. Use for "set up my brain", "install bf", "which sources should I connect", "import this vault or folder", or when bf or a brain is missing.
 license: MIT
-compatibility: Requires Brain Framework 19 (the bf command) on Linux or macOS.
+compatibility: Requires Brain Framework 20 (the bf command) on Linux or macOS.
 ---
 
 # bf-setup

@@ -189,7 +189,10 @@ def test_yaml_other_than_utf8_is_named_not_decoded(encoding: str) -> None:
     assert yaml_object("\ufeffname: café\n".encode(), "bf.yaml") == {"name": "café"}
 
 
-LIBYAML = r"^reading YAML needs PyYAML built with libyaml, which this installation lacks; .*: uv tool install --reinstall --python 3\.14 brain-framework$"
+LIBYAML = (
+    r"^reading YAML needs PyYAML built with libyaml, which this installation lacks; .*: "
+    r"uv tool install --reinstall --python 3\.14 brain-framework, or 'brain-framework\[mcp\]' with MCP$"
+)
 
 
 def test_yaml_is_read_only_through_libyaml(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:

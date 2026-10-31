@@ -2,7 +2,7 @@
   "$defs": {
     "Assistant": {
       "additionalProperties": false,
-      "description": "One harness with independent acquisition, delivery, schedules and event reactions.",
+      "description": "One harness with independent acquisition, delivery and schedules.",
       "properties": {
         "command": {
           "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
@@ -23,6 +23,12 @@
           "default": true,
           "description": "Allow execution and input subscriptions.",
           "title": "Enabled",
+          "type": "boolean"
+        },
+        "idempotent": {
+          "default": false,
+          "description": "Retry failed or interrupted pre-answer harness attempts automatically with backoff instead of leaving the job uncertain.",
+          "title": "Idempotent",
           "type": "boolean"
         },
         "inputs": { "items": { "$ref": "#/$defs/AssistantInput" }, "maxItems": 32, "title": "Inputs", "type": "array" },
@@ -75,13 +81,6 @@
           "minimum": 1,
           "title": "Timeout",
           "type": "integer"
-        },
-        "triggers": {
-          "maxProperties": 32,
-          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/AssistantTrigger" } },
-          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-          "title": "Triggers",
-          "type": "object"
         }
       },
       "required": ["command", "prompt"],
@@ -107,21 +106,37 @@
     "AssistantSchedule": {
       "additionalProperties": false,
       "properties": {
-        "every": { "maximum": 31536000, "minimum": 1, "title": "Every", "type": "integer" },
-        "lookback": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" }
+        "at": {
+          "anyOf": [{ "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$", "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "Optional 24-hour wall-clock time (HH:MM) for daily or weekday-filtered runs.",
+          "title": "At"
+        },
+        "days": {
+          "anyOf": [
+            {
+              "items": { "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "type": "string" },
+              "maxItems": 7,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "Optional weekdays when the schedule may run; omitted means every day.",
+          "title": "Days"
+        },
+        "every": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Every", "type": "integer" },
+        "lookback": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" },
+        "timezone": {
+          "anyOf": [{ "maxLength": 128, "minLength": 1, "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "IANA timezone for at and days, such as Europe/Paris; defaults to local time.",
+          "title": "Timezone"
+        }
       },
-      "required": ["every"],
       "title": "AssistantSchedule",
-      "type": "object"
-    },
-    "AssistantTrigger": {
-      "additionalProperties": false,
-      "properties": {
-        "event": { "const": "sensor.changed", "title": "Event", "type": "string" },
-        "sensor": { "$ref": "#/$defs/SensorReference" }
-      },
-      "required": ["event", "sensor"],
-      "title": "AssistantTrigger",
       "type": "object"
     },
     "BrainReference": {
@@ -243,8 +258,8 @@
         "when": {
           "anyOf": [
             {
-              "items": { "enum": ["input", "schedule", "trigger", "manual"], "type": "string" },
-              "maxItems": 4,
+              "items": { "enum": ["input", "schedule", "manual"], "type": "string" },
+              "maxItems": 3,
               "minItems": 1,
               "type": "array",
               "uniqueItems": true
@@ -455,6 +470,12 @@
           "title": "Examples",
           "type": "array"
         },
+        "path": {
+          "anyOf": [{ "maxLength": 4096, "pattern": "^/(?:[^~]|~[01])*$", "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "Optional default JSON Pointer into sensor output when a sensor does not specify its own mapping.",
+          "title": "Path"
+        },
         "relation": {
           "default": false,
           "description": "Create directed graph claims; requires type: identity.",
@@ -592,6 +613,12 @@
           "title": "Max Bytes",
           "type": "integer"
         },
+        "max_text_bytes": {
+          "anyOf": [{ "maximum": 4194304, "minimum": 1, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Maximum UTF-8 bytes of a record's text before truncation; sets truncated: true in attributes.",
+          "title": "Max Text Bytes"
+        },
         "mode": {
           "default": "window",
           "description": "Window upserts returned ids; snapshot replaces the complete selected catalog.",
@@ -640,25 +667,17 @@
           "minimum": 1,
           "title": "Timeout",
           "type": "integer"
+        },
+        "truncate_text": {
+          "default": false,
+          "description": "Truncate oversized record text on a UTF-8 codepoint boundary instead of failing the batch.",
+          "title": "Truncate Text",
+          "type": "boolean"
         }
       },
       "required": ["command"],
       "then": { "properties": { "mode": { "const": "window" } } },
       "title": "Sensor",
-      "type": "object"
-    },
-    "SensorReference": {
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "not": { "pattern": "[^a-z0-9-]" },
-          "pattern": "^[a-z][a-z0-9-]{0,63}$",
-          "title": "Name",
-          "type": "string"
-        }
-      },
-      "required": ["name"],
-      "title": "SensorReference",
       "type": "object"
     },
     "Stream": {
@@ -714,6 +733,54 @@
       },
       "required": ["name", "mode"],
       "title": "StreamInput",
+      "type": "object"
+    },
+    "ValidateSettings": {
+      "additionalProperties": false,
+      "description": "Optional declarative validation policies enforced by `bf validate`.",
+      "properties": {
+        "forbid_patterns": {
+          "description": "Regular expressions forbidden across tracked Markdown notes.",
+          "items": { "maxLength": 1024, "minLength": 1, "type": "string" },
+          "maxItems": 64,
+          "title": "Forbid Patterns",
+          "type": "array"
+        },
+        "index_note": {
+          "anyOf": [{ "maxLength": 4096, "minLength": 1, "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "Bundle index note, such as concepts/index.md, that must link every entry note in its folder.",
+          "title": "Index Note"
+        },
+        "max_stale_days": {
+          "anyOf": [{ "maximum": 36500, "minimum": 1, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Maximum days in the future allowed for a note's stale_after date.",
+          "title": "Max Stale Days"
+        },
+        "required_status": {
+          "anyOf": [
+            {
+              "items": { "enum": ["draft", "stable", "deprecated"], "type": "string" },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "Allowed OKF statuses that entry notes must explicitly declare in frontmatter.",
+          "title": "Required Status"
+        },
+        "warn_stale_days": {
+          "anyOf": [{ "maximum": 36500, "minimum": 0, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Warn when a note's stale_after date is within this many days.",
+          "title": "Warn Stale Days"
+        }
+      },
+      "title": "ValidateSettings",
       "type": "object"
     },
     "WatchSettings": {
@@ -846,6 +913,10 @@
       ],
       "description": "Reviewed evidence collectors.",
       "title": "Sensors"
+    },
+    "validate": {
+      "anyOf": [{ "$ref": "#/$defs/ValidateSettings" }, { "type": "null" }],
+      "description": "Optional declarative note and OKF validation rules enforced by bf validate."
     },
     "version": {
       "const": 8,

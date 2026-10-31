@@ -82,7 +82,7 @@
         },
         "scope": {
           "default": "",
-          "description": "Optional search scope; unavailable for read cases.",
+          "description": "Optional search scope, as bf search --scope takes it: never a #section; unavailable for read cases.",
           "title": "Scope",
           "type": "string"
         },

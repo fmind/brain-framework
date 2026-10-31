@@ -86,6 +86,8 @@ Update the owning docs, skills and examples with public behavior. An adapter cha
 
 Any other change to a bound, pattern, format or condition, such as `not` or `allOf`, fails closed and waits for the next major release. That release refreshes `tests/contract/` from `docs/*.schema.json` and lists the manual upgrade steps in the changelog.
 
+Each major release costs every installation a manual upgrade, so breaking changes ship together, in at most one major release per quarter; v20.0.0 opened the first window. Until the next window, keep each deferred change and its upgrade step on a list and ship minor releases. A new rule that rejects input loading today warns first where it can, through `bf validate` or a `bf:` diagnostic, and fails in the next major release. Input that BF previously misread is a bug: fix it in a patch release.
+
 ### Version the search cache
 
 A brain's cache is reused while `index.SCHEMA` is unchanged, so `tests/test_cache_version.py` digests the tables, indexes and rows that a full build of a fixed brain stores. When indexing output or the cache layout changes, that test fails: bump `index.SCHEMA` once per release, unless it already changed since the last one, and record the `PROJECTION` its message prints.

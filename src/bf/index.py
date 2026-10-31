@@ -436,7 +436,7 @@ def _supported() -> None:
         raise Error(
             f"the search cache needs SQLite {'.'.join(map(str, _SQLITE))} or newer with FTS5 and JSON functions, which "
             f"this Python's SQLite {sqlite3.sqlite_version} lacks; reinstall bf on a uv-managed Python: "
-            "uv tool install --reinstall --managed-python --python 3.14 brain-framework"
+            "uv tool install --reinstall --managed-python --python 3.14 brain-framework, or 'brain-framework[mcp]' with MCP"
         )
 
 

@@ -27,7 +27,7 @@ _HEADER = "# https://fmind.github.io/brain-framework/docs/configuration/\n"
 # accepts: BF reads YAML only through libyaml, so one file loads alike on every installation.
 LIBYAML = (
     "reading YAML needs PyYAML built with libyaml, which this installation lacks; reinstall bf with a PyYAML wheel "
-    "that bundles it: uv tool install --reinstall --python 3.14 brain-framework"
+    "that bundles it: uv tool install --reinstall --python 3.14 brain-framework, or 'brain-framework[mcp]' with MCP"
 )
 # One command reads bf.yaml many times: reuse validated configurations by content digest.
 _LOADED: dict[str, Config] = {}

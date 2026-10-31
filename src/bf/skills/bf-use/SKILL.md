@@ -2,7 +2,7 @@
 name: bf-use
 description: Answer from and save to the user's Brain Framework brain (bf) — project notes, decisions, concepts and collected mail, calendar, chat and Git records. Use for "my brain", "what did we decide", "why did we choose", "what is open", "remember this", "save this decision", or to review, consolidate or share knowledge. Actions belong to bf-action.
 license: MIT
-compatibility: Requires Brain Framework 19 (the bf command) on Linux or macOS.
+compatibility: Requires Brain Framework 20 (the bf command) on Linux or macOS.
 ---
 
 # bf-use

@@ -4,6 +4,49 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v20.0.0](https://github.com/fmind/brain-framework/releases/tag/v20.0.0) - 2026-10-31
+
+A major release that trims BF's surface and settles deferred input rules. `bf schedule` and assistant triggers are removed, MCP becomes an optional extra (13 runtime packages instead of 36 on Linux and macOS), disabled programs stop reporting failures, and six ambiguous inputs that loaded before now fail with a message naming the fix. The brain format (`version: 8`), records and notes are unchanged; the assistant queue needs one manual SQL statement and the search cache rebuilds once. From this release on, breaking changes ship together in at most one major release per quarter. Follow the upgrade steps below.
+
+### Breaking changes
+
+- **`bf schedule` is removed.** BF no longer writes systemd, launchd or cron files. To run unattended, keep `bf watch --json --brain BRAIN` running as a user service you write yourself, as [Watch and schedule updates](https://fmind.github.io/brain-framework/docs/schedule/#run-watch-as-a-service) shows for systemd and launchd. A timer that runs `bf update --brain BRAIN` also still works.
+- **MCP is an optional extra.** `uv tool install brain-framework` no longer installs the MCP SDK, which cuts the base install from 36 to 13 runtime packages on Linux and macOS. Without the extra, `bf mcp` exits 1 and names `uv tool install --python 3.14 'brain-framework[mcp]'`. `uv tool upgrade` keeps the extra once it is installed.
+- **Assistant triggers are removed.** `triggers`, the `sensor.changed` event and the `trigger` kind of run are gone: `bf validate` reports `assistants.NAME.triggers: Extra inputs are not permitted` and rejects `trigger` in an output's `when`. Sensor changes start no assistant and record writes never touch the queue, so a collection can no longer fail after saving with `SOURCE records were committed but their assistant event is not queued`.
+- **Queue format 2.** The assistant queue drops its `triggers` table. Execution and `bf status` refuse a v19 queue with `assistant queue predates this release; preserve it and follow the upgrade steps in the changelog`.
+- **Assistant replies and runs.** `bf queue` and status `messaging` drop `triggers` and `trigger_counts`, and `bf update` rows no longer name a `trigger`. A record's `attributes.trigger` is `input`, `schedule` or `manual`. Neither records nor `{{context}}` carry `event`, and harnesses no longer receive `BF_ASSISTANT_RUN`.
+- **No program is named `bf`.** A sensor, routine, channel or assistant named `bf` stops `bf.yaml` from loading with `sensors.bf: the name bf is reserved for BF addresses; rename the sensor and move memories/bf/ to its new name`, because its records' `bf:ID` refs read as BF addresses. Records left in `memories/bf/` are skipped and reported until moved.
+- **A BF address ending in a bare `#` is invalid.** `bf read`, `bf search` and the MCP tools reject `bf://brain/projects/plan.md#` as invalid input (exit 2), as they have rejected a plain ref ending in `#` since 18.5.0; before, it read and scoped the whole note. A note writing one in a link, frontmatter `links`, `sources`, `entity` or `aliases` is invalid and unsearchable, and a record holding one in its `links` or `aliases` is skipped and reported. A relative link such as `plan.md#` still links the whole file.
+- **Search scopes take no section.** `--scope bf://brain/projects/plan.md#decision` and `--scope memories/SOURCE#x` are invalid input (exit 2) in the CLI, the MCP `search` tool and eval suites, like a section's path. A suite holding one fails to load and names the field, such as `cases.1.scope`.
+- **`bf init --name ""` is invalid.** An empty or blank name exits 2 and creates nothing. Omit `--name` to derive the name from the folder.
+- **libyaml is required.** Without it, every command that reads YAML exits 1 and names the fix, `uv tool install --reinstall --python 3.14 brain-framework`. BF used to fall back to PyYAML's slower pure-Python parser, which rejects some YAML that libyaml accepts.
+- **OKF `sources` resources hold at most 8,192 characters**, like frontmatter `links`. A longer one fails as `invalid frontmatter: sources: reference exceeds 8192 characters`.
+
+### Changed
+
+- **Disabled programs report no failure.** A disabled sensor, routine or assistant shows no `failed`, `error`, `failures` or `log` in status, coverage or watch, adds no `attention` entry and never fails `bf status --check`. Its unresolved jobs stay in `bf queue` and `messaging`, and count again once re-enabled; a removed assistant's jobs still fail the check. This reverses v19's "even once disabled".
+- **One breaking window per quarter.** Breaking changes now wait for one batched major release, at most once a quarter, and a new rule that rejects input loading today warns first where it can ([Contributing](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md#keep-the-contract)). The `bf watch` terminal dashboard is frozen: it gets fixes only, and new run information goes to `bf watch --json` and `bf status`.
+- The search cache rebuilds once on first search or read.
+
+### Upgrade from v19
+
+1. With v19 still installed, stop `bf watch`, its service or timers and any script calling `bf run`, `bf channel` or `bf queue`, including jobs `bf schedule` installed: they run `bf update` and keep working after the upgrade, so re-enable them at the end or replace them with a watch service. Already upgraded? Reinstall the previous release with `uv tool install --python 3.14 'brain-framework==19.1.0'`, do steps 1 and 2, then upgrade again: v20 cannot drain a v19 queue or recover a v19 `memories/.pending` journal.
+1. Drain the assistant queue: run `bf update --kind assistant`, then retry or cancel each pending, failed or uncertain job, including those of disabled assistants, until `bf queue` `counts` show only `complete` and `cancelled`; deliveries may stay. If `memories/.pending` exists, run v19's `bf build`.
+1. Back up the brain and the state directory's `runtime/` folder, then upgrade with `uv tool upgrade brain-framework`, or update a pinned brain's pin, and check `bf --version`. If an agent host starts `bf mcp`, install `uv tool install --python 3.14 'brain-framework[mcp]'` instead and check that `uv tool list --show-extras` shows `[extras: mcp]`. If a command reports `reading YAML needs PyYAML built with libyaml`, run `uv tool install --reinstall --python 3.14 brain-framework`, or `'brain-framework[mcp]'` when you use MCP: a reinstall without the extra drops it.
+1. Update the queue in place; never delete it. It lives under `$XDG_STATE_HOME/bf/runtime/` (normally `~/.local/state/bf/runtime/`), in the folder `stat -L -c %d-%i ~/brain` names (`stat -L -f %d-%i ~/brain` on macOS). Skip this step when that folder holds no `queue.sqlite3`: running `sqlite3` would create an empty file BF then refuses.
+
+   ```bash
+   queue=~/.local/state/bf/runtime/"$(stat -L -c %d-%i ~/brain)"/queue.sqlite3
+   [ -s "$queue" ] && sqlite3 -bail "$queue" "BEGIN; CREATE TEMP TABLE drained(n INTEGER CHECK (n = 0)); INSERT INTO drained SELECT count(*) FROM jobs WHERE state NOT IN ('complete','cancelled'); DROP TABLE triggers; PRAGMA user_version=2; COMMIT;"
+   ```
+
+   The statement refuses a queue that still holds unresolved jobs, and a rerun exits 1; both change nothing. Python's `sqlite3` module can run the same statements.
+1. In `bf.yaml`, delete `triggers:` and `trigger` from each output's `when`. Give a trigger-only assistant a schedule, such as `schedules: {review: {every: 3600}}`, with a prompt that reads `bf read memories/SENSOR/24h`. Rename any program named `bf`, also in the inputs, outputs and `--sensor`, `--routine` or `--assistant` selectors that name it, and move its records with `mv memories/bf memories/NEW`, renaming any `memories/bf` exception in `.gitignore`; its log and run history start again under the new name.
+1. Run `bf validate`: it names each note holding a BF address that ends in a bare `#` or an OKF `sources` resource over 8,192 characters, and each record whose `links` or `aliases` hold such an address. Remove each `#` or name the section, shorten the resource, and fix the sensor that printed the record before collecting it again.
+1. In scripts, host configuration and `evals/*.yaml`, scope the whole note and `expect` the section, drop the `#…` from `memories/SOURCE#…` scopes and set or omit `bf init --name`. Update prompts and scripts that read `event`, `attributes.trigger == "trigger"`, `messaging.triggers`, `trigger_counts` or `BF_ASSISTANT_RUN`.
+1. To run unattended, re-enable the jobs you stopped in step 1, or replace them with the user service from [Run watch as a service](https://fmind.github.io/brain-framework/docs/schedule/#run-watch-as-a-service). Never run both on one brain.
+1. Run `bf skills DIR` for each skills folder, then `bf validate`, `bf eval` and `bf status --check`, and restart watch.
+
 ## [v19.1.0](https://github.com/fmind/brain-framework/releases/tag/v19.1.0) - 2026-10-29
 
 A feature and fix release. The brain format (`version: 8`) and the reply schemas are unchanged; the search cache rebuilds once on first search or read. Upgrade with `uv tool upgrade brain-framework` (or update a brain's pin) and run `bf skills DIR` to refresh installed skills.
