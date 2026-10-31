@@ -14,7 +14,7 @@ from bf import __version__, index, usage
 from bf.config import Selection, brain_name, load, related
 from bf.history import ASSISTANTS, ROUTINES, log_path, state
 from bf.models import CACHE, Assistant, Config, Error, Program, Sensor, decode, timestamp
-from bf.runtime import DATABASE, Queue, check_schema
+from bf.runtime import DATABASE, Queue, check_schema, check_version
 from bf.storage import Store
 
 # Counters of the last committed collection, reported apart from indexed totals.
@@ -89,7 +89,7 @@ def source_health(
             item: dict[str, object] = {"state": "active" if assistant.enabled else "disabled", "freshness": "unknown"}
             if success:
                 item["last_collected"] = success
-            # Its failed or uncertain work, unresolved until retried or cancelled, even once disabled. An unreadable
+            # Its failed or uncertain work, unresolved until retried or cancelled, while enabled. An unreadable
             # queue, which names no log, leaves the freshness unknown instead.
             if health.get("failed") and "log" in health:
                 item["failed"] = True
@@ -111,7 +111,8 @@ def source_health(
             item["mode"] = settings.mode
         if (settings is None or settings.mode == "window") and entry.get("start") and entry.get("end"):
             item["window"] = {"since": entry["start"], "until": entry["end"]}
-        if entry.get("error"):
+        # A disabled sensor's last failure is history, not a current fault.
+        if entry.get("error") and (settings is None or settings.enabled):
             item["failed"] = True
         if _silent(settings, success, changed.get(name, ""), now):
             item["silent"] = True
@@ -149,7 +150,7 @@ def routine_health(
             item["last_success"] = success
         if entry.get("action"):
             item["action"] = entry["action"]
-        result[name] = {**item, **_failure(name, entry)}
+        result[name] = {**item, **(_failure(name, entry) if settings.enabled else {})}
     return result
 
 
@@ -180,8 +181,7 @@ class _Reader(Queue):
                 connection.execute("PRAGMA trusted_schema=OFF")
                 # One snapshot for every query of this read.
                 connection.execute("BEGIN")
-                if connection.execute("PRAGMA user_version").fetchone()[0] != 1:
-                    raise Error("unsupported assistant queue version; preserve it and use its matching BF release")
+                check_version(connection.execute("PRAGMA user_version").fetchone()[0])
                 check_schema(connection)
                 # The binding execution writes and checks: a queue it refuses reports nothing either. A drained
                 # queue follows a moved or renamed brain at its next execution, so reading it is safe now.
@@ -296,9 +296,10 @@ def assistant_health(
             item["last_success"] = entry["success"]
         if entry.get("record"):
             item["record"] = entry["record"]
-        if unavailable:
+        # A disabled assistant reports no failure; its unresolved jobs stay listed in bf queue until resolved.
+        if settings.enabled and unavailable:
             item.update(failed=True, error=unavailable)
-        elif name in failures:
+        elif settings.enabled and name in failures:
             item.update(failed=True, error=failures[name], log=log_path(name))
         result[name] = item
     return result
@@ -326,7 +327,7 @@ def _attention(
                 and settings.enabled
                 and (
                     # An assistant's failed work stays queued until retried or cancelled, however it was asked.
-                    (failed or bool(settings.schedules or settings.inputs or settings.triggers))
+                    (failed or bool(settings.schedules or settings.inputs))
                     if isinstance(settings, Assistant)
                     else settings.refresh
                 )
@@ -379,22 +380,17 @@ def _messaging(store: Store, config: Config) -> tuple[dict[str, object] | None, 
     if not queue.exists():
         return None, [], []
     messaging = queue.report()
-    assistants, channels = queue.failing()
+    failing, channels = queue.failing()
+    # A disabled assistant's failed work stays listed until resolved but alerts no one while it is paused; a removed
+    # assistant's still does, since only bf queue can resolve it.
+    assistants = [name for name in failing if name not in config.assistants or config.assistants[name].enabled]
     transports = cast(dict[str, object], messaging["transports"])
-    # Work that cannot start counts too: a schedule or trigger the queue refused, a trigger waiting for its prompt,
-    # and a dispatcher pass that fails for every assistant.
-    blocked = {
-        str(item.get("assistant"))
-        for item in cast(list[dict[str, object]], messaging.get("triggers", []))
-        if item.get("state") == "pending" and item.get("error")
-    }
+    # Work that cannot start counts too: a schedule the queue refused and a dispatcher pass that fails for every
+    # assistant.
     for name, settings in config.assistants.items():
-        if settings.enabled and (
-            name in blocked
-            or any(
-                isinstance(value := transports.get(key), dict) and value.get("error")
-                for key in (f"health:assistant:{name}", "health:dispatcher")
-            )
+        if settings.enabled and any(
+            isinstance(value := transports.get(key), dict) and value.get("error")
+            for key in (f"health:assistant:{name}", "health:dispatcher")
         ):
             assistants = sorted({*assistants, name})
     for name, settings in config.assistants.items():
@@ -456,7 +452,8 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
                 entry["last_run"] = counters
             if run.get("reconciled"):
                 entry["reconciled"] = run["reconciled"]
-            entry.update(_failure(name, run))
+            if (sensor := config.sensors.get(name)) is None or sensor.enabled:
+                entry.update(_failure(name, run))
             sources[name] = {key: value for key, value in entry.items() if value != ""}
         problems = cast("list[dict[str, object]]", summary["problems"])
         try:

@@ -20,7 +20,7 @@ from bf.config import load
 from bf.messages import Message, Outgoing
 from bf.models import Config, Error, ReadInput, Send, encode, timestamp
 from bf.runtime import Queue, QueueFullError
-from bf.storage import BusyError, Store, collecting, writer
+from bf.storage import BusyError, Store, collecting
 
 
 @pytest.fixture
@@ -46,12 +46,10 @@ assistants:
       - channel: {name: chat, mode: stream}
     outputs:
       - reply: {}
-      - channel: {name: chat, when: [schedule, trigger]}
+      - channel: {name: chat, when: [schedule]}
       - channel: {name: desktop, when: [schedule]}
     schedules:
       review: {every: 1800}
-    triggers:
-      calendar: {event: sensor.changed, sensor: {name: calendar}}
 """,
     )
     brain.write("prompts/personal.md", b"Review {{start}} to {{end}}.\n{{context}}\nMessage: {{input}}\n")
@@ -70,7 +68,7 @@ def message(key: str = "message-1", *, own: bool = False) -> Message:
 
 
 def claim(queue: Queue, key: str) -> bool:
-    return queue.claim(key, str(queue.get(key)["payload"]))
+    return queue.claim(key)
 
 
 def test_replayed_input_creates_one_job_and_replies_in_its_thread(messaging: Store) -> None:
@@ -174,36 +172,6 @@ def test_quiet_schedule_sends_nothing_but_empty_input_stays_unresolved(messaging
     with pytest.raises(Error, match="no response"):
         assistants.execute(messaging, key, runner=lambda *_: b"")
     assert queue.get(key)["state"] == "failed"
-
-
-def test_committed_sensor_event_recovers_after_queue_failure(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    from bf.history import SENSORS, state
-
-    original = records.admit
-    monkeypatch.setattr(records, "admit", lambda *_: (_ for _ in ()).throw(Error("queue unavailable")))
-    start = timestamp((datetime.now(UTC) - timedelta(days=1)).isoformat())
-    end = timestamp(datetime.now(UTC).isoformat())
-    with pytest.raises(Error, match="calendar records were committed but their assistant event is not queued: queue"):
-        collect(
-            messaging,
-            "calendar",
-            start=start,
-            end=end,
-            runner=lambda *_: b'[{"id":"event-1","title":"Changed calendar","text":"New time"}]',
-        )
-    assert len(records.files(messaging, "calendar")) == 1
-    # Run history names the cause, as for any failed collection.
-    assert "queue unavailable" in str(state(messaging, SENSORS)["calendar"]["error"])
-    monkeypatch.setattr(records, "admit", original)
-    with writer(messaging):
-        records.recover(messaging)
-    queue = Queue(messaging)
-    assert queue.report()["trigger_counts"] == {"pending": 1}
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    assert queue.report()["counts"] == {"pending": 1}
-    key = queue.next(False, {"personal"})
-    assert key
-    assert queue.work(key).event["added"] == 1
 
 
 def test_read_is_passive_and_checks_complete_window(messaging: Store) -> None:
@@ -312,7 +280,8 @@ def test_reactive_capacity_remains_available_during_proactive_run(
         {"outputs": [{"reply": {}, "channel": {"name": "chat"}}]},
         {"outputs": [{"reply": {}}, {"reply": {}}]},
         {"outputs": [{"channel": {"name": "chat"}}, {"channel": {"name": "chat"}}]},
-        {"triggers": {"chain": {"event": "assistant.completed", "sensor": {"name": "calendar"}}}},
+        # Sensor triggers no longer exist, nor does their kind of run.
+        {"outputs": [{"channel": {"name": "chat", "when": ["schedule", "trigger"]}}]},
     ],
 )
 def test_invalid_configuration_fails_before_execution(messaging: Store, change: dict) -> None:
@@ -320,6 +289,13 @@ def test_invalid_configuration_fails_before_execution(messaging: Store, change: 
     config["assistants"]["personal"].update(change)
     with pytest.raises(ValidationError):
         Config.model_validate(config)
+
+
+def test_a_v19_trigger_fails_with_the_unknown_field_diagnostic(messaging: Store) -> None:
+    trigger = {"calendar": {"event": "sensor.changed", "sensor": {"name": "calendar"}}}
+    configure(messaging, lambda config: config["assistants"]["personal"].update(triggers=trigger))
+    with pytest.raises(Error, match=re.escape("assistants.personal.triggers: Extra inputs are not permitted")):
+        load(messaging)
 
 
 def test_channel_identity_is_required_and_own_echo_is_not_queued(messaging: Store) -> None:
@@ -366,17 +342,6 @@ def test_unresolved_delivery_blocks_later_replies_until_cancelled(messaging: Sto
     assert queue.next(True, {"personal"}) is not None
 
 
-def test_sensor_journal_already_admitted_recovers_after_configuration_edit(messaging: Store) -> None:
-    event = assistants.sensor_event(load(messaging), "calendar", "2026-10-15T00:00:00Z", "2026-10-16T00:00:00Z")
-    assert event
-    queue = Queue(messaging)
-    queue.admit_event(event)
-    messaging.write("bf.yaml", messaging.read("bf.yaml").replace(b"command: [harness]", b"command: [changed]"))
-    messaging.root.joinpath("prompts/personal.md").unlink()
-    queue.admit_event(event)
-    assert queue.report()["trigger_counts"] == {"pending": 1}
-
-
 def test_edited_message_keeps_its_admitted_version_and_never_stalls_its_input(messaging: Store) -> None:
     source = message()
     queue = Queue(messaging)
@@ -398,7 +363,7 @@ def test_unrelated_assistant_edits_keep_queued_and_answered_jobs_runnable(messag
     assistants.accept(messaging, "chat", [message()], {"personal"})
     key = queue.next(True, {"personal"})
     assert key
-    # Schedules, triggers, inputs and keep only decide when jobs start, not what a queued job runs.
+    # Schedules, inputs and keep only decide when jobs start, not what a queued job runs.
     messaging.write("bf.yaml", messaging.read("bf.yaml").replace(b"every: 1800", b"every: 3600"))
     assistants.execute(messaging, key, runner=lambda *_: b"Answer")
     assert queue.get(key)["state"] == "complete"
@@ -416,16 +381,6 @@ def test_unrelated_assistant_edits_keep_queued_and_answered_jobs_runnable(messag
     queue.retry(later)
     configure(messaging, lambda config: config["assistants"]["personal"].update(enabled=True))
     assert assistants.execute(messaging, later, runner=lambda *_: pytest.fail("must reuse"))["text"] == "Saved answer"
-    # A scheduling edit while a trigger job is pending still extends that job instead of queuing a second one.
-    start, end = window()
-    collect(messaging, "calendar", start=start, end=end, runner=changed("event-1"))
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    configure(messaging, lambda config: config["assistants"]["personal"].update(keep=5))
-    collect(messaging, "calendar", start=start, end=end, runner=changed("event-2"))
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    assert [row["kind"] for row in cast("list[dict]", queue.report()["jobs"]) if row["state"] == "pending"] == [
-        "trigger"
-    ]
 
 
 def test_a_harness_or_send_command_that_never_started_is_failed_not_uncertain(messaging: Store) -> None:
@@ -707,40 +662,6 @@ def test_cancelled_work_cannot_be_resurrected_by_a_late_failure(messaging: Store
     assert queue.inspect("late-send")["state"] == "cancelled"
 
 
-def test_changed_trigger_configuration_preserves_separate_obligations(messaging: Store) -> None:
-    queue = Queue(messaging)
-    first = assistants.sensor_event(load(messaging), "calendar", "2026-10-15T00:00:00Z", "2026-10-16T00:00:00Z")
-    assert first
-    queue.admit_event(first)
-    assistants.materialize(messaging, {"personal"}, load(messaging))
-    messaging.write("bf.yaml", messaging.read("bf.yaml").replace(b"command: [harness]", b"command: [another-harness]"))
-    second = assistants.sensor_event(load(messaging), "calendar", "2026-10-16T00:00:00Z", "2026-10-17T00:00:00Z")
-    assert second
-    queue.admit_event(second)
-    assistants.materialize(messaging, {"personal"}, load(messaging))
-    assert queue.report()["counts"] == {"pending": 2}
-
-
-def test_compatible_trigger_events_coalesce_window_and_counts(messaging: Store) -> None:
-    queue = Queue(messaging)
-    for day in (15, 16):
-        event = assistants.sensor_event(
-            load(messaging), "calendar", f"2026-10-{day}T00:00:00Z", f"2026-10-{day + 1}T00:00:00Z"
-        )
-        assert event
-        event.data["added"] = 1
-        queue.admit_event(event)
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    key = queue.next(False, {"personal"})
-    assert key
-    work = queue.work(key)
-    assert work.event["added"] == 2
-    assert work.start.startswith("2026-10-15")
-    assert work.end.startswith("2026-10-17")
-    assert work.event["end"] == work.end
-    assert queue.report()["counts"] == {"pending": 1}
-
-
 def test_compaction_bounds_terminal_bodies_and_keeps_deduplication(
     messaging: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -935,12 +856,9 @@ def test_default_queue_admits_a_full_read_batch_and_hundreds_of_jobs(messaging: 
     assistants.poll(messaging, "personal", ReadInput(name="chat", mode="read", every=60), runner=lambda *_: raw)
     assert queue.report()["counts"] == {"pending": 1000}
     assert str(queue.progress("read:personal:chat")["end"]) > since
-    # Schedules and sensor triggers are still admitted beside that backlog.
+    # Schedules are still admitted beside that backlog.
     assert assistants.schedule(messaging, {"personal"}, datetime.now(UTC))[1] == []
-    start, end = window()
-    collect(messaging, "calendar", start=start, end=end, runner=changed())
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    assert queue.report()["counts"] == {"pending": 1002}
+    assert queue.report()["counts"] == {"pending": 1001}
 
 
 def test_read_batch_beyond_capacity_admits_a_prefix_and_resumes(
@@ -979,28 +897,6 @@ def test_read_batch_beyond_capacity_admits_a_prefix_and_resumes(
         queue.retry(str(item["id"]), cancel=True)
     assistants.poll(messaging, "personal", binding, runner=read)
     assert queue.report()["counts"] == {"cancelled": 3, "pending": 2}
-
-
-def test_full_queue_never_blocks_collection_and_its_trigger_waits(
-    messaging: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(runtime, "MAX_PENDING", 2)
-    assistants.accept(messaging, "chat", [message()], {"personal"})
-    queue = Queue(messaging)
-    start, end = window()
-    collect(messaging, "calendar", start=start, end=end, runner=changed())
-    assert not messaging.root.joinpath("memories/.pending").exists()
-    [failure] = assistants.materialize(messaging, {"personal"}, load(messaging))
-    assert failure["trigger"] == "calendar"
-    assert "unfinished-work slots" in str(failure["error"])
-    [waiting] = cast("list[dict]", queue.report()["triggers"])
-    assert waiting["state"] == "pending"
-    assert "unfinished-work slots" in waiting["error"]
-    key = queue.next(True, {"personal"})
-    assert key
-    queue.retry(key, cancel=True)
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    assert queue.report()["counts"] == {"cancelled": 1, "pending": 1}
 
 
 def test_job_waits_for_answer_space_instead_of_starting_its_harness(
@@ -1057,60 +953,6 @@ def test_identity_tombstones_expire_after_retention(messaging: Store, monkeypatc
         assert db.execute("SELECT count(*) FROM events").fetchone()[0] == 0
     # Unresolved work never expires.
     assert queue.report()["counts"] == {"pending": 1}
-
-
-def test_configuration_edit_during_triggered_collection_never_blocks_writers(messaging: Store) -> None:
-    def editing(*_):
-        configure(messaging, lambda config: config["sensors"].update(mail={"command": ["mail"]}))
-        return changed()()
-
-    start, end = window()
-    collect(messaging, "calendar", start=start, end=end, runner=editing)
-    assert not messaging.root.joinpath("memories/.pending").exists()
-    collect(messaging, "mail", start=start, end=end, runner=lambda *_: b'[{"id":"m-1","title":"Mail","text":"x"}]')
-    assistants.accept(messaging, "chat", [message()], {"personal"})
-    queue = Queue(messaging)
-    key = queue.next(True, {"personal"})
-    assert key
-    assistants.execute(messaging, key, runner=answers)
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    assert queue.report()["counts"] == {"complete": 1, "pending": 1}
-
-
-def test_missing_prompt_or_removed_trigger_never_blocks_writers(messaging: Store) -> None:
-    queue = Queue(messaging)
-    prompt = messaging.read("prompts/personal.md")
-    messaging.root.joinpath("prompts/personal.md").unlink()
-    start, end = window()
-    collect(messaging, "calendar", start=start, end=end, runner=changed())
-    [failure] = assistants.materialize(messaging, {"personal"}, load(messaging))
-    assert "prompts/personal.md: cannot read" in str(failure["error"])
-    assert cast("list[dict]", queue.report()["triggers"])[0]["state"] == "pending"
-    collect(messaging, "calendar", start=start, end=end, runner=changed("event-2"))
-    assert len(records.files(messaging, "calendar")) == 2
-    messaging.write("prompts/personal.md", prompt)
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    # Both changes extend one pending review.
-    assert queue.report()["counts"] == {"pending": 1}
-    collect(messaging, "calendar", start=start, end=end, runner=changed("event-3"))
-    configure(messaging, lambda config: config["assistants"]["personal"].update(triggers={}))
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    assert queue.report()["trigger_counts"] == {"dispatched": 2, "dropped": 1}
-    assert "dropped sensor event" in messaging.read("logs/personal.log").decode()
-
-
-def test_only_sensors_an_enabled_trigger_names_emit_events(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    config = load(messaging)
-    assert assistants.sensor_event(config, "mail", "2026-10-15T00:00:00Z", "2026-10-16T00:00:00Z") is None
-    event = assistants.sensor_event(config, "calendar", "2026-10-15T00:00:00Z", "2026-10-16T00:00:00Z")
-    assert event
-    assert [(target.assistant, target.trigger) for target in event.targets] == [("personal", "calendar")]
-    # A collection the harness itself runs never triggers assistants.
-    monkeypatch.setenv("BF_ASSISTANT_RUN", "job")
-    assert assistants.sensor_event(config, "calendar", "2026-10-15T00:00:00Z", "2026-10-16T00:00:00Z") is None
-    start, end = window()
-    collect(messaging, "calendar", start=start, end=end, runner=changed())
-    assert not Queue(messaging).exists()
 
 
 def test_cycle_reports_one_assistants_failures_and_runs_the_others(messaging: Store) -> None:
@@ -1234,9 +1076,7 @@ def test_drained_queue_follows_a_renamed_or_moved_brain(messaging: Store) -> Non
     messaging.root.rename(moved)
     store = Store(moved)
     assert Queue(store).report()["counts"] == {}
-    start, end = window()
-    collect(store, "calendar", start=start, end=end, runner=changed())
-    assert assistants.materialize(store, {"personal"}, load(store)) == []
+    assistants.accept(store, "chat", [message()], {"personal"})
     assert Queue(store).report()["counts"] == {"pending": 1}
 
 
@@ -1249,8 +1089,9 @@ def test_renamed_brain_with_unresolved_work_refuses_execution_but_never_record_w
     start, end = window()
     collect(messaging, "calendar", start=start, end=end, runner=changed())
     assert not messaging.root.joinpath("memories/.pending").exists()
+    assert len(records.files(messaging, "calendar")) == 1
     messaging.write("bf.yaml", original)
-    assert Queue(messaging).report()["trigger_counts"] == {"pending": 1}
+    assert Queue(messaging).report()["counts"] == {"pending": 1}
 
 
 def test_interrupted_idempotent_delivery_retries_but_others_wait_for_inspection(messaging: Store) -> None:
@@ -1367,38 +1208,6 @@ def test_message_text_reaches_the_prompt_once_and_oversized_input_fails_visibly(
     assert "exceeds 120000 bytes" in failed["error"]
 
 
-def test_trigger_window_extended_while_starting_runs_with_the_merged_window(
-    messaging: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    queue = Queue(messaging)
-
-    def admit(day: int) -> None:
-        event = assistants.sensor_event(
-            load(messaging), "calendar", f"2026-10-{day}T00:00:00Z", f"2026-10-{day + 1}T00:00:00Z"
-        )
-        assert event
-        queue.admit_event(event)
-        assistants.materialize(messaging, {"personal"}, load(messaging))
-
-    admit(15)
-    key = queue.next(False, {"personal"})
-    assert key
-    current, raced = assistants._current, []  # noqa: SLF001 - the gap between reading and claiming a job
-
-    def racing(store, work, **options):
-        current(store, work, **options)
-        if not raced:
-            raced.append(True)
-            admit(16)
-
-    monkeypatch.setattr(assistants, "_current", racing)
-    prompts: list[str] = []
-    assistants.execute(messaging, key, runner=lambda *call: prompts.append(call[4].decode()) or b"")
-    assert len(prompts) == 1
-    assert "2026-10-17" in prompts[0]
-    assert queue.report()["counts"] == {"complete": 1}
-
-
 def test_finished_jobs_and_deliveries_leave_no_lock_files(messaging: Store) -> None:
     from bf.storage import lock_file
 
@@ -1411,20 +1220,6 @@ def test_finished_jobs_and_deliveries_leave_no_lock_files(messaging: Store) -> N
         assert assistants.deliver(messaging, runner=answers)
     locks, _ = lock_file(messaging, "write.lock")
     assert not [path.name for path in locks.root.iterdir() if ".job-" in path.name or ".delivery-" in path.name]
-
-
-def test_every_harness_run_carries_the_recursion_guard(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    guards = []
-
-    def harness(_argv, _program, _store, _name, _stdin=b"", /, *, overrides=None, **_):
-        guards.append(dict(overrides or {}).get("BF_ASSISTANT_RUN"))
-        return b"Answer"
-
-    monkeypatch.setattr(assistants, "run", harness)
-    assert assistants.manual(messaging, "personal", text="Hi", dry_run=True, runner=harness)["ok"]
-    assert assistants.manual(messaging, "personal", text="Hi", runner=harness)["ok"]
-    assert guards[0] == "dry-run"
-    assert guards[1]
 
 
 def test_queue_commits_are_durable_when_they_return(messaging: Store) -> None:
@@ -1465,57 +1260,6 @@ def test_direct_run_keeps_its_job_and_deliveries_from_background_workers(
     assert [item["status"] for item in background if item.get("job")] == ["skipped"]
     [run] = cast("list[dict]", result["assistants"])
     assert [item["state"] for item in run["deliveries"]] == ["delivered"]
-
-
-def failing_harness(_argv: list[str], program: object, *_: object) -> bytes:
-    """A harness that fails after it might have acted, and a channel accepting every send."""
-    if isinstance(program, Send):
-        return b'{"id":"sent","conversation":"thread-1"}'
-    raise Error("program exited with status 3")
-
-
-def test_failed_trigger_job_is_inspected_retried_and_cancelled_apart_from_its_trigger(messaging: Store) -> None:
-    from typer.testing import CliRunner
-
-    from bf.cli import app
-
-    def invoke(*args: str) -> dict:
-        result = CliRunner().invoke(app, ["queue", *args, "--brain", str(messaging.root)])
-        assert result.exit_code == 0, result.output + str(result.exception)
-        return json.loads(result.stdout)
-
-    queue = Queue(messaging)
-    start, end = window()
-    collect(messaging, "calendar", start=start, end=end, runner=changed())
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    key = queue.next(False, {"personal"})
-    assert key
-    with queue.connect() as db:
-        [trigger] = [row[0] for row in db.execute("SELECT id FROM triggers")]
-    assert key != trigger
-    with pytest.raises(Error, match="status 3"):
-        assistants.execute(messaging, key, runner=failing_harness)
-    detail = invoke(key)
-    assert (detail["kind"], detail["state"]) == ("trigger", "uncertain")
-    assert invoke(trigger)["state"] == "dispatched"
-    assert invoke(key, "--retry") == {"id": key, "status": "pending"}
-    with pytest.raises(Error, match="status 3"):
-        assistants.execute(messaging, key, runner=failing_harness)
-    assert invoke(key, "--cancel") == {"id": key, "status": "cancelled"}
-    # The next change to the sensor is reviewed instead of waiting behind the cancelled job.
-    collect(messaging, "calendar", start=start, end=end, runner=changed("event-2"))
-    assert assistants.materialize(messaging, {"personal"}, load(messaging)) == []
-    assert queue.next(False, {"personal"}) not in {None, key}
-
-
-def test_a_removed_assistants_pending_trigger_is_dropped_by_any_pass(messaging: Store) -> None:
-    start, end = window()
-    collect(messaging, "calendar", start=start, end=end, runner=changed())
-    configure(messaging, lambda config: config["assistants"].update(other=config["assistants"].pop("personal")))
-    config = load(messaging)
-    assert assistants.materialize(messaging, set(config.assistants), config) == []
-    assert Queue(messaging).report()["trigger_counts"] == {"dropped": 1}
-    assert "dropped sensor event" in messaging.read("logs/personal.log").decode()
 
 
 def test_watch_records_an_attempt_another_process_abandoned(messaging: Store) -> None:
@@ -1702,43 +1446,48 @@ def test_watch_repolls_a_read_input_while_it_catches_up(messaging: Store, monkey
     assert polls == ["personal:chat"] * 3
 
 
-# The pre-release v19 queue: no triggers table and fewer indexes, under the same user_version.
-PRERELEASE = """
+# The queue v19 released, with its sensor triggers table, and the manual upgrade step the v20 changelog gives for it.
+V19 = """
 CREATE TABLE events (id TEXT PRIMARY KEY, kind TEXT NOT NULL, source TEXT NOT NULL, at TEXT NOT NULL,
                      digest TEXT NOT NULL, data TEXT NOT NULL);
+CREATE TABLE triggers (id TEXT PRIMARY KEY, event TEXT NOT NULL, assistant TEXT NOT NULL, trigger TEXT NOT NULL,
+                       source TEXT NOT NULL, at TEXT NOT NULL, data TEXT NOT NULL, state TEXT NOT NULL,
+                       error TEXT NOT NULL DEFAULT '');
+CREATE INDEX trigger_states ON triggers(state,at);
 CREATE TABLE jobs (id TEXT PRIMARY KEY, assistant TEXT NOT NULL, kind TEXT NOT NULL, slot TEXT NOT NULL,
                    state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, payload TEXT NOT NULL,
-                   raw BLOB, prepared TEXT, error TEXT NOT NULL DEFAULT '');
+                   raw BLOB, prepared TEXT, error TEXT NOT NULL DEFAULT '', slots INTEGER NOT NULL);
 CREATE INDEX ready_jobs ON jobs(state,kind,created);
 CREATE INDEX job_slots ON jobs(assistant,slot,state);
 CREATE TABLE deliveries (id TEXT PRIMARY KEY, job TEXT REFERENCES jobs(id), channel TEXT NOT NULL,
-                         state TEXT NOT NULL, payload TEXT NOT NULL, command TEXT NOT NULL,
-                         receipt TEXT, error TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0,
-                         due TEXT NOT NULL);
+                         state TEXT NOT NULL, payload TEXT NOT NULL, command TEXT NOT NULL, digest TEXT NOT NULL,
+                         receipt TEXT, receipt_id TEXT, error TEXT NOT NULL DEFAULT '',
+                         attempts INTEGER NOT NULL DEFAULT 0, due TEXT NOT NULL);
 CREATE INDEX ready_deliveries ON deliveries(state,due);
+CREATE INDEX job_deliveries ON deliveries(job);
+CREATE INDEX delivery_receipts ON deliveries(channel,receipt_id);
 CREATE TABLE checkpoints (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE messages (id TEXT PRIMARY KEY, channel TEXT NOT NULL, conversation TEXT NOT NULL,
                        role TEXT NOT NULL, at TEXT NOT NULL, text TEXT NOT NULL);
 CREATE INDEX conversation_messages ON messages(channel,conversation,at);
 PRAGMA user_version=1;
 """
+UPGRADE = "BEGIN; DROP TABLE triggers; PRAGMA user_version=2; COMMIT;"
+CURRENT = f"{runtime._SCHEMA}PRAGMA user_version={runtime.VERSION};"  # noqa: SLF001
 
 
 @pytest.mark.parametrize(
     ("script", "refusal"),
     [
-        (PRERELEASE, "unexpected assistant queue schema; preserve it and repair it"),
+        (V19, "assistant queue predates this release; preserve it and follow the upgrade steps in the changelog"),
+        (CURRENT + "CREATE TABLE extra (x);", "unexpected assistant queue schema; preserve it and repair it"),
         (
-            runtime._SCHEMA + "CREATE TABLE extra (x);",  # noqa: SLF001
-            "unexpected assistant queue schema; preserve it and repair it",
-        ),
-        (
-            runtime._SCHEMA.replace("user_version=1", "user_version=2"),  # noqa: SLF001
+            CURRENT.replace(f"user_version={runtime.VERSION}", f"user_version={runtime.VERSION + 1}"),
             "unsupported assistant queue version; preserve it and use its matching BF release",
         ),
         ("CREATE TABLE notes (x);", "unknown assistant queue format; preserve the queue and repair it"),
     ],
-    ids=["pre-release", "extra-table", "newer-version", "foreign"],
+    ids=["v19", "extra-table", "newer-version", "foreign"],
 )
 def test_another_queue_format_is_refused_and_preserved(messaging: Store, script: str, refusal: str) -> None:
     import sqlite3
@@ -1757,7 +1506,7 @@ def test_another_queue_format_is_refused_and_preserved(messaging: Store, script:
     with pytest.raises(Error, match=re.escape(refusal)):
         queue.report()
     assert path.read_bytes() == before
-    if "schema" in refusal:
+    if not refusal.startswith("unknown"):
         from bf.health import report
 
         # bf status reads the queue read-only, yet names the same refusal and leaves it as it is.
@@ -1765,3 +1514,63 @@ def test_another_queue_format_is_refused_and_preserved(messaging: Store, script:
         problems = [problem["error"] for problem in entry["problems"]]
         assert refusal in problems
         assert path.read_bytes() == before
+
+
+def test_a_drained_v19_queue_upgrades_with_the_documented_statements(messaging: Store) -> None:
+    import sqlite3
+
+    from bf.health import report
+
+    # A v19 queue drained as the upgrade steps require: a complete input job whose reply is still to deliver, the
+    # body of a complete trigger job and a pending trigger, beside the conversation, checkpoints and tombstones.
+    incoming = message()
+    assistants.accept(messaging, "chat", [incoming], {"personal"})
+    queue = Queue(messaging)
+    key = queue.next(True, {"personal"})
+    assert key
+    assistants.execute(messaging, key, runner=answers)
+    path = queue.store.root / runtime.DATABASE
+    built = path.with_name("v19.sqlite3")
+    db = sqlite3.connect(built)
+    try:
+        db.executescript(V19)
+        db.execute("ATTACH DATABASE ? AS current", (str(path),))
+        for table in ("events", "jobs", "deliveries", "checkpoints", "messages"):
+            db.execute(f"INSERT INTO main.{table} SELECT * FROM current.{table}")  # noqa: S608 - fixed table names
+        db.execute("UPDATE jobs SET payload=json_set(payload,'$.event',json('{}'),'$.settings.triggers',json('{}'))")
+        db.execute(
+            "INSERT INTO jobs SELECT ?,assistant,'trigger','trigger:calendar',state,created,updated,"
+            "json_set(payload,'$.kind','trigger','$.event',json('{\"type\":\"sensor.changed\"}')),raw,prepared,error,"
+            "slots FROM jobs WHERE id=?",
+            ("f" * 32, key),
+        )
+        db.execute(
+            "INSERT INTO triggers VALUES (?,?,'personal','calendar','calendar',?,'{}','pending','')",
+            ("e" * 32, "d" * 32, runtime.now()),
+        )
+        db.commit()
+        db.execute("DETACH DATABASE current")
+    finally:
+        db.close()
+    built.replace(path)
+    path.chmod(0o600)
+    with pytest.raises(Error, match="predates this release; preserve it and follow the upgrade steps"):
+        queue.report()
+    db = sqlite3.connect(path)
+    try:
+        db.executescript(UPGRADE)
+    finally:
+        db.close()
+    # Status and execution accept the upgraded queue, and the obligations v19 left keep their meaning.
+    entry = cast("dict", report([messaging]))["brains"][0]
+    assert entry["problems"] == []
+    assert entry["messaging"]["counts"] == {"complete": 2}
+    assert entry["messaging"]["delivery_counts"] == {"pending": 1}
+    assert assistants.deliver(messaging, runner=answers)
+    assistants.accept(messaging, "chat", [incoming], {"personal"})
+    assert queue.report()["counts"] == {"complete": 2}
+    assistants.accept(messaging, "chat", [message("message-2")], {"personal"})
+    later = queue.next(True, {"personal"})
+    assert later
+    assistants.execute(messaging, later, runner=answers)
+    assert queue.report()["counts"] == {"complete": 3}

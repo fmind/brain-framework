@@ -127,7 +127,7 @@ ASSISTANTS = b"""assistants:
 
 def test_update_names_the_manual_programs_it_skips(selected: Store) -> None:
     selected.write("bf.yaml", CONFIG + ASSISTANTS)
-    # An assistant without schedules, inputs or triggers runs only through bf run, so update names it as skipped.
+    # An assistant without schedules or inputs runs only through bf run, so update names it as skipped.
     assert update(selected, dry_run=True)["manual"] == ["ask", "manual"]
     assert update(selected, assistants=("ask",), dry_run=True)["manual"] == ["ask"]
     assert "manual" not in update(selected, assistants=("reviewer", "idle"), dry_run=True)

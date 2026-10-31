@@ -51,4 +51,4 @@ bf watch --brain /path/to/channel-demo --json
 
 The fixture emits `hello-1` immediately. Watch durably accepts it, acknowledges the stream, runs the assistant and sends `Acknowledged.` with `conversation: thread-1` and `reply_to: hello-1`. A scheduled review can run beside it. Stop with Ctrl-C. Restarting watch redelivers the fixture message, but its stable ID creates no second reply while its 35-day identity tombstone lasts. The automated example test checks these observable results and stops the subprocess.
 
-[Channel contracts](../../docs/docs/channels.md) define send receipts, bounded reads and stream ACKs. [Assistant configuration](../../docs/docs/prompts.md) explains schedules, trigger coalescing, reply routing, fan-out and recovery. The fixture is deliberately a local demonstration, not a production provider adapter.
+[Channel contracts](../../docs/docs/channels.md) define send receipts, bounded reads and stream ACKs. [Assistant configuration](../../docs/docs/prompts.md) explains schedules, reply routing, fan-out and recovery. The fixture is deliberately a local demonstration, not a production provider adapter.

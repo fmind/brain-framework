@@ -10,7 +10,7 @@ from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from threading import Lock
-from typing import Annotated, Literal, cast
+from typing import Annotated, cast
 from uuid import uuid4
 
 from pydantic import Field, JsonValue, ValidationError, field_validator
@@ -21,8 +21,8 @@ from bf.models import Assistant, Error, Invocation, Model, Name, Record, Send, d
 from bf.storage import BusyError, Store, collecting, lock_file, runtime_store
 
 DATABASE = "queue.sqlite3"
-# Settings that only decide when jobs start or how many runs stay: editing them leaves queued jobs compatible.
-SCHEDULING = {"inputs", "schedules", "triggers", "keep", "idempotent"}
+# The queue format this release reads and writes; any other is preserved, never adapted.
+VERSION = 2
 MAX_PENDING = 10_000
 MAX_DATABASE = 256 << 20
 BODY_BUDGET = 8 << 20
@@ -77,28 +77,9 @@ class Work(Model):
     template: str
     text: str = ""
     origin: Origin | None = None
-    event: dict[str, JsonValue] = Field(default_factory=dict)
     routes: list[Route] = Field(default_factory=list)
 
     _time = field_validator("start", "end")(timestamp)
-
-
-class EventTarget(Model):
-    assistant: Name
-    trigger: Name
-
-
-class EventIntent(Model):
-    """A committed sensor change and the triggers that named its sensor then: names only, never configuration."""
-
-    id: Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")]
-    kind: Literal["sensor.changed"] = "sensor.changed"
-    source: Name
-    at: str
-    data: dict[str, JsonValue] = Field(default_factory=dict)
-    targets: list[EventTarget] = Field(default_factory=list, max_length=1024)
-
-    _time = field_validator("at")(timestamp)
 
 
 class Prepared(Model):
@@ -108,10 +89,6 @@ class Prepared(Model):
 _SCHEMA = """
 CREATE TABLE events (id TEXT PRIMARY KEY, kind TEXT NOT NULL, source TEXT NOT NULL, at TEXT NOT NULL,
                      digest TEXT NOT NULL, data TEXT NOT NULL);
-CREATE TABLE triggers (id TEXT PRIMARY KEY, event TEXT NOT NULL, assistant TEXT NOT NULL, trigger TEXT NOT NULL,
-                       source TEXT NOT NULL, at TEXT NOT NULL, data TEXT NOT NULL, state TEXT NOT NULL,
-                       error TEXT NOT NULL DEFAULT '');
-CREATE INDEX trigger_states ON triggers(state,at);
 CREATE TABLE jobs (id TEXT PRIMARY KEY, assistant TEXT NOT NULL, kind TEXT NOT NULL, slot TEXT NOT NULL,
                    state TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, payload TEXT NOT NULL,
                    raw BLOB, prepared TEXT, error TEXT NOT NULL DEFAULT '', slots INTEGER NOT NULL);
@@ -128,7 +105,6 @@ CREATE TABLE checkpoints (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE messages (id TEXT PRIMARY KEY, channel TEXT NOT NULL, conversation TEXT NOT NULL,
                        role TEXT NOT NULL, at TEXT NOT NULL, text TEXT NOT NULL);
 CREATE INDEX conversation_messages ON messages(channel,conversation,at);
-PRAGMA user_version=1;
 """
 _OBJECTS = "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
 
@@ -144,6 +120,14 @@ def _expected() -> frozenset[tuple[str, str, str]]:
         return frozenset(db.execute(_OBJECTS).fetchall())
     finally:
         db.close()
+
+
+def check_version(version: int) -> None:
+    """Refuse a queue another release wrote: an older one needs that release's upgrade steps, never adaptation."""
+    if 0 < version < VERSION:
+        raise Error("assistant queue predates this release; preserve it and follow the upgrade steps in the changelog")
+    if version != VERSION:
+        raise Error("unsupported assistant queue version; preserve it and use its matching BF release")
 
 
 def check_schema(connection: sqlite3.Connection) -> None:
@@ -204,8 +188,8 @@ class Queue:
         return True
 
     @contextmanager
-    def connect(self, *, bound: bool = True) -> Generator[sqlite3.Connection]:
-        """One immediate transaction; `bound` checks, or rebinds, the brain path and name the queue serves."""
+    def connect(self) -> Generator[sqlite3.Connection]:
+        """One immediate transaction that checks, or rebinds, the brain path and name the queue serves."""
         try:
             # Never open/close a live SQLite inode ourselves: POSIX close drops this process's locks,
             # including another thread's transaction. Serialize creation before SQLite can see the file.
@@ -245,11 +229,11 @@ class Queue:
                     for statement in _SCHEMA.split(";"):
                         if statement.strip():
                             connection.execute(statement)
-                elif version != 1:
-                    raise Error("unsupported assistant queue version; preserve it and use its matching BF release")
+                    connection.execute(f"PRAGMA user_version={VERSION}")
+                else:
+                    check_version(version)
                 check_schema(connection)
-                if bound:
-                    self._bind(connection)
+                self._bind(connection)
                 yield connection
                 connection.commit()
             except BaseException:
@@ -290,7 +274,7 @@ class Queue:
 
     @staticmethod
     def unresolved(db: sqlite3.Connection) -> bool:
-        """Whether any job or delivery still waits; pending sensor events are not bound to a path."""
+        """Whether any job or delivery still waits."""
         return (
             db.execute(
                 "SELECT 1 FROM jobs WHERE state NOT IN ('complete','cancelled') UNION ALL "
@@ -446,71 +430,6 @@ class Queue:
                 self.checkpoint(db, *checkpoint)
             self.trim(db)
 
-    def admit_event(self, event: EventIntent) -> None:
-        """Record a committed sensor change for each trigger that named its sensor; dispatch admits the jobs.
-
-        Record writers call this: it reads no configuration or prompt, reserves nothing and ignores the path
-        binding, so only an unavailable queue can delay it. A record journal is portable evidence, not an
-        executable configuration or prompt carrier.
-        """
-        with self.connect(bound=False) as db:
-            self.event(db, event.id, event.kind, event.source, event.data, event.at)
-            for target in event.targets:
-                db.execute(
-                    "INSERT OR IGNORE INTO triggers(id,event,assistant,trigger,source,at,data,state) "
-                    "VALUES (?,?,?,?,?,?,?,'pending')",
-                    (
-                        digest(f"{event.id}:{target.assistant}:{target.trigger}".encode())[:32],
-                        event.id,
-                        target.assistant,
-                        target.trigger,
-                        event.source,
-                        event.at,
-                        encode(event.data).decode(),
-                    ),
-                )
-
-    def pending_triggers(self) -> list[dict[str, object]]:
-        with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT * FROM triggers WHERE state='pending' ORDER BY at,id")]
-
-    def settle(self, key: str, state: str, error: str = "") -> None:
-        """Mark a pending trigger dispatched or dropped, or keep it pending with the reason it waits."""
-        with self.connect() as db:
-            db.execute("UPDATE triggers SET state=?,error=? WHERE id=? AND state='pending'", (state, error, key))
-
-    def dispatch(self, key: str, work: Work) -> None:
-        """Admit one pending trigger once; it extends a compatible pending job of its slot instead of adding one."""
-        with self.connect() as db:
-            row = db.execute("SELECT state FROM triggers WHERE id=?", (key,)).fetchone()
-            if row is None or row[0] != "pending":
-                return
-            # Keep at most one pending successor to a running trigger, extending its evidence window.
-            previous = db.execute(
-                "SELECT id,payload FROM jobs WHERE assistant=? AND slot=? AND state='pending' ORDER BY created LIMIT 1",
-                (work.assistant, work.slot),
-            ).fetchone()
-            combined = Work.model_validate_json(previous["payload"]) if previous is not None else None
-            if combined is not None and (
-                combined.settings.model_dump(exclude=SCHEDULING),
-                combined.routes,
-                combined.template,
-            ) == (
-                work.settings.model_dump(exclude=SCHEDULING),
-                work.routes,
-                work.template,
-            ):
-                combined.settings = work.settings
-                combined.start = min(combined.start, work.start)
-                combined.end = max(combined.end, work.end)
-                combined.event.update(start=combined.start, end=combined.end)
-                for name in ("added", "updated", "removed"):
-                    combined.event[name] = int(str(combined.event.get(name, 0))) + int(str(work.event.get(name, 0)))
-                db.execute("UPDATE jobs SET payload=? WHERE id=?", (combined.model_dump_json(), previous["id"]))
-            else:
-                self.put(db, work)
-            db.execute("UPDATE triggers SET state='dispatched',error='' WHERE id=?", (key,))
-
     def lifecycle(self, kind: str, source: str, data: dict[str, JsonValue]) -> None:
         with self.connect() as db:
             self.event(db, uuid4().hex, kind, source, data, now())
@@ -525,7 +444,6 @@ class Queue:
     def inspect(self, key: str) -> dict[str, object]:
         with self.connect() as db:
             row = db.execute("SELECT * FROM deliveries WHERE id=?", (key,)).fetchone()
-            row = row or db.execute("SELECT * FROM triggers WHERE id=?", (key,)).fetchone()
         return dict(row) if row is not None else self.get(key)
 
     @staticmethod
@@ -569,17 +487,15 @@ class Queue:
             ).fetchall()
         return next((row[0] for row in rows if row[1] in names and row[0] not in excluding), None)
 
-    def claim(self, key: str, payload: str) -> bool:
-        """Start a pending job exactly as its worker read it, reserving its answer space first.
-
-        False when the job changed meanwhile, as when a sensor change extended its window, or is no longer pending.
-        """
+    def claim(self, key: str) -> bool:
+        """Start a pending job, reserving its answer space first; False when it is no longer pending, as when cancelled
+        meanwhile. A pending job's body never changes, so the worker runs the job it read."""
         with self.connect() as db:
             row = db.execute("SELECT state,payload FROM jobs WHERE id=?", (key,)).fetchone()
-            if row is None or row[0] != "pending" or row[1] != payload:
+            if row is None or row[0] != "pending":
                 return False
             work = self.parse(dict(row))
-            space = answer_space(work.settings.max_bytes, len(payload.encode()), len(work.routes))
+            space = answer_space(work.settings.max_bytes, len(str(row[1]).encode()), len(work.routes))
             if space > answer_limit():
                 raise Error(
                     f"assistant {work.assistant} needs {space >> 20} MiB of queue space per answer, more than one "
@@ -833,20 +749,9 @@ class Queue:
                     (limit,),
                 )
             ]
-            triggers = [
-                dict(row)
-                for row in db.execute(
-                    "SELECT id,assistant,trigger,source,state,at,error FROM triggers "
-                    "WHERE state IN ('pending','dropped') ORDER BY at DESC LIMIT ?",
-                    (limit,),
-                )
-            ]
             counts = {row[0]: row[1] for row in db.execute("SELECT state,count(*) FROM jobs GROUP BY state")}
             delivery_counts = {
                 row[0]: row[1] for row in db.execute("SELECT state,count(*) FROM deliveries GROUP BY state")
-            }
-            trigger_counts = {
-                row[0]: row[1] for row in db.execute("SELECT state,count(*) FROM triggers GROUP BY state")
             }
             failures = db.execute(
                 "SELECT count(*) FROM deliveries WHERE state NOT IN ('delivered','cancelled') AND error!=''"
@@ -861,10 +766,8 @@ class Queue:
         return {
             "jobs": jobs,
             "deliveries": deliveries,
-            "triggers": triggers,
             "counts": counts,
             "delivery_counts": delivery_counts,
-            "trigger_counts": trigger_counts,
             "delivery_failures": failures,
             "transports": health,
         }
@@ -885,7 +788,6 @@ class Queue:
             (horizon,),
         )
         db.execute("DELETE FROM events WHERE at<?", (horizon,))
-        db.execute("DELETE FROM triggers WHERE state!='pending' AND at<?", (horizon,))
         db.execute(
             "UPDATE jobs SET payload='{}',raw=NULL,prepared=NULL WHERE state IN ('complete','cancelled') "
             "AND id IN (SELECT id FROM (SELECT id,sum(length(CAST(payload AS BLOB))+coalesce(length(raw),0)+coalesce(length(CAST(prepared AS BLOB)),0)) "
@@ -926,7 +828,7 @@ class Queue:
             )
 
     def retry(self, key: str, *, cancel: bool = False) -> None:
-        """Explicitly retry or cancel a job, delivery or pending sensor trigger.
+        """Explicitly retry or cancel a job or delivery.
 
         An attempt whose process ended without recording it, such as an interrupted `bf run`, is recorded first.
         """
@@ -934,7 +836,6 @@ class Queue:
         lock = ""
         with self.connect() as db:
             delivery = db.execute("SELECT state FROM deliveries WHERE id=?", (key,)).fetchone()
-            trigger = db.execute("SELECT state FROM triggers WHERE id=?", (key,)).fetchone()
             if delivery is not None:
                 if delivery[0] == "sending":
                     raise Error("delivery is still being sent; retry or cancel it once its attempt ends")
@@ -946,13 +847,6 @@ class Queue:
                     ("cancelled" if cancel else "pending", now(), key),
                 )
                 lock = f".delivery-{digest(key.encode())}"
-            elif trigger is not None:
-                if trigger[0] not in {"pending", "dropped"}:
-                    raise Error("only pending or dropped sensor triggers can be retried or cancelled")
-                db.execute(
-                    "UPDATE triggers SET state=?,error='' WHERE id=?", ("cancelled" if cancel else "pending", key)
-                )
-                return
             else:
                 row = db.execute("SELECT state,raw,prepared,payload FROM jobs WHERE id=?", (key,)).fetchone()
                 if row is not None and row[0] == "running":
@@ -987,8 +881,3 @@ class Queue:
             # A worker holding the lock removes it itself once it sees the cancellation.
             with suppress(BusyError), collecting(self.brain, lock):
                 forget(self.brain, lock)
-
-
-def admit(store: Store, event: EventIntent) -> None:
-    """Idempotent handoff called while the committed record journal is still durable."""
-    Queue(store).admit_event(event)

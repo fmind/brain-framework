@@ -23,7 +23,6 @@ import pytest
 
 from bf import assistants, channels, health, records
 from bf.collect import collect
-from bf.config import load
 from bf.messages import Message
 from bf.models import Command, Error, Send, Stream, encode, timestamp
 from bf.runtime import Queue
@@ -53,8 +52,6 @@ assistants:
       - channel: {name: desktop, when: [schedule]}
     schedules:
       review: {every: 1800}
-    triggers:
-      calendar: {event: sensor.changed, sensor: {name: calendar}}
 """
 
 
@@ -221,36 +218,18 @@ def test_channel_edited_after_the_answer_blocks_only_its_delivery(store: Store) 
     assert queue.report()["delivery_counts"] == {"delivered": 2}
 
 
-def test_collection_inside_an_assistant_run_triggers_no_assistant(
-    store: Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    queue = Queue(store)
+def test_collection_never_opens_the_assistant_queue(store: Store) -> None:
     end = datetime.now(UTC)
-    window = timestamp((end - timedelta(days=1)).isoformat()), timestamp(end.isoformat())
-    monkeypatch.setenv("BF_ASSISTANT_RUN", "job")
     collect(
         store,
         "calendar",
-        start=window[0],
-        end=window[1],
+        start=timestamp((end - timedelta(days=1)).isoformat()),
+        end=timestamp(end.isoformat()),
         runner=lambda *_: b'[{"id":"event-1","title":"Moved","text":"New time"}]',
     )
     assert len(records.files(store, "calendar")) == 1
-    # Trigger jobs are admitted by the next dispatch pass, from the current bf.yaml.
-    assert assistants.materialize(store, NAMES, load(store)) == []
-    assert queue.next(False, NAMES) is None
-    monkeypatch.delenv("BF_ASSISTANT_RUN")
-    collect(
-        store,
-        "calendar",
-        start=window[0],
-        end=window[1],
-        runner=lambda *_: b'[{"id":"event-1","title":"Moved","text":"Later time"}]',
-    )
-    assert assistants.materialize(store, NAMES, load(store)) == []
-    key = queue.next(False, NAMES)
-    assert key
-    assert queue.work(key).kind == "trigger"
+    # Record commits never reach the assistant queue: collection creates none and queues no job.
+    assert not Queue(store).exists()
 
 
 def run_stream(

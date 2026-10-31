@@ -223,7 +223,7 @@ def local(value: str) -> str:
 # Provider data and declared field values: replies return them exactly as the record or note stores them.
 _VERBATIM = frozenset({"attributes", "fields"})
 # Status maps keyed by program name: a sensor may be named `time` or `fields`, so only the entries are presented.
-_NAMED = frozenset({"assistants", "channels", "schedules", "triggers", "routines", "sources"})
+_NAMED = frozenset({"assistants", "channels", "schedules", "routines", "sources"})
 
 
 def present(value: object) -> object:
@@ -961,13 +961,13 @@ class AssistantInput(Model):
     channel: Annotated[ReadInput | StreamInput, Field(discriminator="mode")]
 
 
-Invocation = Literal["input", "schedule", "trigger", "manual"]
+Invocation = Literal["input", "schedule", "manual"]
 
 
 class OutputChannel(Model):
     name: Name
     when: (
-        Annotated[list[Invocation], Field(min_length=1, max_length=4, json_schema_extra={"uniqueItems": True})] | None
+        Annotated[list[Invocation], Field(min_length=1, max_length=3, json_schema_extra={"uniqueItems": True})] | None
     ) = Field(default=None, description="Invocation kinds to deliver; omitted means every kind.")
 
     @field_validator("when")
@@ -1053,18 +1053,8 @@ class AssistantSchedule(Model):
         return now
 
 
-class SensorReference(Model):
-    name: Name
-
-
-class AssistantTrigger(Model):
-    # Assistant/output events are observable, but cannot start other assistants.
-    event: Literal["sensor.changed"]
-    sensor: SensorReference
-
-
 class Assistant(Command):
-    """One harness with independent acquisition, delivery, schedules and event reactions."""
+    """One harness with independent acquisition, delivery and schedules."""
 
     PLACEHOLDERS: ClassVar[tuple[str, ...]] = ("brain", "home", "start", "end", "prompt")
 
@@ -1096,7 +1086,6 @@ class Assistant(Command):
     inputs: Annotated[list[AssistantInput], Field(max_length=32)] = Field(default_factory=list)
     outputs: Annotated[list[ChannelOutput | ReplyOutput], Field(max_length=32)] = Field(default_factory=list)
     schedules: dict[Name, AssistantSchedule] = Field(default_factory=dict, max_length=32)
-    triggers: dict[Name, AssistantTrigger] = Field(default_factory=dict, max_length=32)
 
     @field_validator("prompt")
     @classmethod
@@ -1315,9 +1304,6 @@ class Config(Model):
                         raise ValueError(f"assistants.{name}.outputs: unknown channel {item.channel.name}")
                     if channel.send is None:
                         raise ValueError(f"assistants.{name}.outputs: channel {item.channel.name} requires send")
-            for trigger, settings in assistant.triggers.items():
-                if settings.sensor.name not in self.sensors:
-                    raise ValueError(f"assistants.{name}.triggers.{trigger}: unknown sensor {settings.sensor.name}")
         if TAGGED in self.ontology:
             raise ValueError(f"fields.{TAGGED} is reserved for tag membership")
         if LINKS in self.ontology:

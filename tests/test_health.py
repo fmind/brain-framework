@@ -586,3 +586,54 @@ def test_status_and_coverage_describe_one_bf_yaml_while_it_is_saved(
     assert attention(brain) == []
     loads = iter([original])
     assert set(source_health(brain)) == {"notes", "personal"}
+
+
+def test_disabled_programs_report_no_failure_while_their_queued_work_stays_listed(brain: Store) -> None:
+    configured = ASSISTED.replace(
+        b"sensors: {}\n",
+        b"sensors:\n  mail:\n    command: [mail]\n    refresh: 3600\n"
+        b"routines:\n  review:\n    command: [review]\n    refresh: 3600\n",
+    )
+    assisted(brain).write("bf.yaml", configured)
+
+    def failing(*_: object) -> bytes:
+        raise Error("provider timed out")
+
+    start, end = "2026-10-30T00:00:00Z", "2026-10-31T00:00:00Z"
+    with pytest.raises(Error, match="provider timed out"):
+        collect(brain, "mail", start=start, end=end, runner=failing)
+    with pytest.raises(Error, match="provider timed out"):
+        routine(brain, "review", start=start, end=end, runner=failing)
+    assert not assistants.manual(brain, "notes", runner=failing)["ok"]
+    status = cast("dict", report([brain]))
+    entry = status["brains"][0]
+    assert not status["healthy"]
+    assert {"failed", "error", "log"} <= entry["sources"]["mail"].keys()
+    assert {"failed", "error", "log"} <= entry["routines"]["review"].keys()
+    assert {"failed", "error", "log"} <= entry["assistants"]["notes"].keys()
+    assert entry["sources"]["notes"]["failed"] is True
+    # Disabled, each program keeps its history and its queued job, but no longer reports a failure or fails the check.
+    disabled = configured.replace(b"    refresh: 3600\n", b"    refresh: 3600\n    enabled: false\n").replace(
+        b"  notes:\n    prompt: prompts/personal.md\n",
+        b"  notes:\n    enabled: false\n    prompt: prompts/personal.md\n",
+    )
+    brain.write("bf.yaml", disabled)
+    status = cast("dict", report([brain]))
+    entry = status["brains"][0]
+    failure = {"failed", "error", "failures", "log"}
+    assert not failure & entry["sources"]["mail"].keys()
+    assert not failure & entry["routines"]["review"].keys()
+    assert not failure & entry["assistants"]["notes"].keys()
+    assert not failure & entry["sources"]["notes"].keys()
+    assert (entry["sources"]["mail"]["state"], entry["assistants"]["notes"]["state"]) == ("disabled", "disabled")
+    assert entry["attention"] == []
+    assert status["healthy"]
+    assert [job["state"] for job in entry["messaging"]["jobs"]] == ["uncertain"]
+    coverage = {item["source"]: item for item in cast("list[dict]", search([brain], Query(text="anything"))["sources"])}
+    assert not failure & coverage["mail"].keys()
+    assert not failure & coverage["notes"].keys()
+    result = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
+    assert result.exit_code == 0, result.output
+    # Enabled again, the unresolved failures are reported again.
+    brain.write("bf.yaml", configured)
+    assert not cast("dict", report([brain]))["healthy"]

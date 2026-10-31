@@ -189,7 +189,7 @@ def update(
     if config.assistants:
         report["assistants"] = asked
     # Enabled programs that never run here are named, so an empty cycle is not mistaken for current evidence: sensors and
-    # routines with refresh: 0, and assistants without schedules, inputs or triggers, which only bf run starts.
+    # routines with refresh: 0, and assistants without schedules or inputs, which only bf run starts.
     manual = sorted(
         [
             name
@@ -199,9 +199,7 @@ def update(
         + [
             name
             for name, assistant in config.assistants.items()
-            if assistant.enabled
-            and not (assistant.schedules or assistant.inputs or assistant.triggers)
-            and name in selected_assistants
+            if assistant.enabled and not (assistant.schedules or assistant.inputs) and name in selected_assistants
         ]
     )
     if manual:

@@ -34,7 +34,7 @@ Run from the Brain Framework checkout after `uv sync --locked`. This subshell co
 Expect, in order:
 
 1. Validation returns `"valid":true`: the prompt file exists. Validation does not look up `cat` or your harness on PATH, which varies by machine: a run whose command is missing fails with `COMMAND is not on PATH` and writes no record.
-1. The dry run runs nothing and lists the assistant under `manual`, as `"manual":["assistant"]`: it has no inputs, schedules or triggers, so only `bf run` starts it.
+1. The dry run runs nothing and lists the assistant under `manual`, as `"manual":["assistant"]`: it has no inputs or schedules, so only `bf run` starts it.
 1. The run returns `"status":"ran"`, the `record` it wrote, such as `assistant:20261014T090000Z-1a2b3c4d`, and its reply as `text`. Here the reply is the expanded prompt: the brain's absolute path, the 24 hours ending now and `Owner message: What changed in the launch?`.
 1. The source page lists that one record, titled `Brain assistant`, the reply's first line without its heading mark.
 1. The scoped search finds the record by a word of the owner's message. Like any record, an assistant run is evidence the next run, `bf search` and your agents read back.

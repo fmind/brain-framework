@@ -152,7 +152,6 @@ def run(
     /,
     *,
     cancelled: Callable[[], bool] | None = None,
-    overrides: Mapping[str, str] | None = None,
 ) -> bytes:
     """Execute one sensor, routine, assistant harness or channel command from the brain root, feeding it `stdin`;
     returns its stdout.
@@ -160,7 +159,7 @@ def run(
     Its stderr, and a `log` routine's stdout, go to the program's bounded log in logs/, never to errors.
     """
     # A nested bf call without --brain reads the executing brain, never an inherited selection.
-    env = {**environment(), "BF_BRAIN": str(store.root), **(overrides or {})}
+    env = {**environment(), "BF_BRAIN": str(store.root)}
     if cancelled is not None and cancelled():
         raise NotStartedError("program cancelled")
     command = executable(store, argv[0], env)
@@ -472,17 +471,7 @@ def collect(
                 records.recover(store)
                 if snapshot and not allow_removal and (refusal := _shrink(store, name, incoming)):
                     raise Error(refusal)
-                # Local import avoids coupling the low-level process runner to the assistant dispatcher.
-                from bf.assistants import sensor_event
-
-                # The triggers configured now, not when the sensor started, decide which assistants this change
-                # concerns; dispatch checks them again. A bf.yaml mid-edit keeps the run's own configuration.
-                try:
-                    current = load(store)
-                except Error:
-                    current = config
-                event = sensor_event(current, name, start, end)
-                result.update(records.upsert(store, name, incoming, snapshot=snapshot, event=event))
+                result.update(records.upsert(store, name, incoming, snapshot=snapshot))
                 committed = True
                 result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
                 coverage, latest = _coverage(state(store).get(name, {}), start, end, observed, sensor)
@@ -504,12 +493,12 @@ def collect(
                 if isinstance(error, Error)
                 else "collector files are inaccessible; check its executable, record permissions and free space"
             )
-            # A failed collection never changes evidence: say so, unless the records were already committed,
-            # as when only their assistant event could not be queued.
-            if committed:
-                message = "records were committed but local run history could not be saved; retry is safe"
-            elif not (isinstance(error, records.DispatchPendingError) and error.source == name):
-                message = f"{message}; nothing was written"
+            # A failed collection never changes evidence: say so, unless the records were already committed.
+            message = (
+                "records were committed but local run history could not be saved; retry is safe"
+                if committed
+                else f"{message}; nothing was written"
+            )
             _failed(store, name, SENSORS, started, message, error, dry_run=dry_run)
         counts = ", ".join(f"{result.get(key, 0)} {key}" for key in ("added", "updated", "unchanged", "removed"))
         with suppress(Error, OSError):

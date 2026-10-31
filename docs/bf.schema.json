@@ -2,7 +2,7 @@
   "$defs": {
     "Assistant": {
       "additionalProperties": false,
-      "description": "One harness with independent acquisition, delivery, schedules and event reactions.",
+      "description": "One harness with independent acquisition, delivery and schedules.",
       "properties": {
         "command": {
           "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
@@ -81,13 +81,6 @@
           "minimum": 1,
           "title": "Timeout",
           "type": "integer"
-        },
-        "triggers": {
-          "maxProperties": 32,
-          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/AssistantTrigger" } },
-          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-          "title": "Triggers",
-          "type": "object"
         }
       },
       "required": ["command", "prompt"],
@@ -144,16 +137,6 @@
         }
       },
       "title": "AssistantSchedule",
-      "type": "object"
-    },
-    "AssistantTrigger": {
-      "additionalProperties": false,
-      "properties": {
-        "event": { "const": "sensor.changed", "title": "Event", "type": "string" },
-        "sensor": { "$ref": "#/$defs/SensorReference" }
-      },
-      "required": ["event", "sensor"],
-      "title": "AssistantTrigger",
       "type": "object"
     },
     "BrainReference": {
@@ -275,8 +258,8 @@
         "when": {
           "anyOf": [
             {
-              "items": { "enum": ["input", "schedule", "trigger", "manual"], "type": "string" },
-              "maxItems": 4,
+              "items": { "enum": ["input", "schedule", "manual"], "type": "string" },
+              "maxItems": 3,
               "minItems": 1,
               "type": "array",
               "uniqueItems": true
@@ -695,20 +678,6 @@
       "required": ["command"],
       "then": { "properties": { "mode": { "const": "window" } } },
       "title": "Sensor",
-      "type": "object"
-    },
-    "SensorReference": {
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "not": { "pattern": "[^a-z0-9-]" },
-          "pattern": "^[a-z][a-z0-9-]{0,63}$",
-          "title": "Name",
-          "type": "string"
-        }
-      },
-      "required": ["name"],
-      "title": "SensorReference",
       "type": "object"
     },
     "Stream": {

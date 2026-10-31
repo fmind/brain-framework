@@ -97,7 +97,8 @@ def snapshot(
         history = state(store, file)
         for name, program in sorted(programs.items()):
             entry = history.get(name, {})
-            success, error = str(entry.get("success", "")), str(entry.get("error", ""))
+            # A disabled program's last failure is history, as in bf status: it shows no error.
+            success, error = str(entry.get("success", "")), str(entry.get("error", "")) if program.enabled else ""
             # The same due rule as update, including failure backoff.
             due_at = next_due(program, entry, now)
             status = (
@@ -421,7 +422,7 @@ class Dashboard:
                 detail.append("Wider reconciliation window\n", style="cyan")
         # An observer suggests no executing command, and neither bf collect nor bf run runs a disabled program.
         if row.kind == "assistant" and not (self.observe or row.error) and row.status is not State.DISABLED:
-            detail.append(f"Inputs, named schedules and triggers queue work. Use bf run {clean(row.name)} to ask now.")
+            detail.append(f"Inputs and named schedules queue work. Use bf run {clean(row.name)} to ask now.")
         elif not (self.observe or row.error or row.action) and row.status is not State.DISABLED:
             # bf collect runs only sensors and bf run routines.
             command = "bf collect" if row.kind == "sensor" else "bf run"
@@ -666,7 +667,7 @@ def _settle(store: Store) -> None:
 
 
 def _failing(dispatcher: Dispatcher) -> str:
-    """Why assistant work waits, or "": a failing pass, an assistant whose schedules or triggers cannot start, a
+    """Why assistant work waits, or "": a failing pass, an assistant whose schedules cannot start, a
     failing read or stream input, then a delivery that failed or is uncertain.
 
     Read failures are the dispatcher's own; stream workers and deliveries record theirs in the queue.

@@ -121,6 +121,7 @@ def test_snapshot_reads_counts_and_status_without_executing(brain: Store) -> Non
                     "failures": 2,
                     "error": "program exited with status 1",
                 },
+                "disabled": {"run": now.isoformat(), "failures": 1, "error": "program exited with status 1"},
             }
         ),
     )
@@ -146,6 +147,8 @@ def test_snapshot_reads_counts_and_status_without_executing(brain: Store) -> Non
     assert rows["manual"].status is State.MANUAL
     assert not rows["manual"].next_due
     assert rows["disabled"].status is State.DISABLED
+    # A disabled program's last failure is history: like bf status, the row reports no error.
+    assert (rows["disabled"].error, rows["disabled"].log) == ("", "")
     assert rows["review"].action.endswith("ACTION.md")
     state_store(brain.root).write(
         "sensors.json", encode({"calendar": {"success": (now - timedelta(days=1)).isoformat()}})
