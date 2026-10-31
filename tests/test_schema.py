@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
+import yaml
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
+from bf import markdown
 from bf.cli import app
 from bf.collect import collect
 from bf.config import load, user_path, yaml_object
@@ -187,29 +189,77 @@ def test_yaml_other_than_utf8_is_named_not_decoded(encoding: str) -> None:
     assert yaml_object("\ufeffname: café\n".encode(), "bf.yaml") == {"name": "café"}
 
 
-@pytest.mark.parametrize("loader", ["default", "pure"])
-def test_yaml_constructor_failures_are_safe_with_either_parser(loader: str) -> None:
+LIBYAML = r"^reading YAML needs PyYAML built with libyaml, which this installation lacks; .*: uv tool install --reinstall --python 3\.14 brain-framework$"
+
+
+def test_yaml_is_read_only_through_libyaml(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # PyYAML built without libyaml lacks CSafeLoader: its pure-Python parser is slower and rejects some YAML libyaml
+    # accepts, so BF names the reinstall instead of loading a file differently.
+    brain.write("projects/plan.md", b"---\ntype: project\n---\n# Plan\n")
+    brain.write("evals/retrieval.yaml", b"version: 8\ncases: [{name: plan, query: plan, expect: [projects/plan.md]}]\n")
+    monkeypatch.delattr(yaml, "CSafeLoader")
+    # A configuration this process already validated is reused by its digest: drop them, as a new process would.
+    monkeypatch.setattr("bf.config._LOADED", {})
+    # bf.yaml, the registry, eval suites and note frontmatter all parse through yaml_object; none names its file.
+    for name, data, kwargs in (
+        ("bf.yaml", b"version: 8\nname: brain\n", {}),
+        ("config.yaml", b"brains: {}\n", {}),
+        ("evals/retrieval.yaml", b"version: 8\n", {}),
+        ("projects/plan.md", b"type: project\n", {"line": 2}),
+    ):
+        with pytest.raises(Error, match=LIBYAML):
+            yaml_object(data, name, **kwargs)
+    for arguments in (["search", "plan"], ["validate"], ["eval"]):
+        result = CliRunner().invoke(app, [*arguments, "--brain", str(brain.root)])
+        assert result.exit_code == 1, arguments
+        assert re.match(LIBYAML, str(result.exception)), arguments
+    with pytest.raises(Error, match=LIBYAML):
+        markdown.parse("projects/plan.md", brain.read("projects/plan.md"))
+
+
+def test_a_pyyaml_without_libyaml_fails_with_one_diagnostic(brain: Store) -> None:
+    # A fresh process imports BF after removing the C loader, as a PyYAML built without libyaml installs: BF still
+    # imports and prints its version, and each command reading YAML names the fix on one line.
     program = """
 import sys, yaml
-if sys.argv[1] == "pure" and hasattr(yaml, "CSafeLoader"):
-    del yaml.CSafeLoader
-from bf.config import yaml_object
-from bf.models import Error
-assert yaml_object(b"name: brain\\nversion: 6\\n") == {"name": "brain", "version": 6}
-for value in [b"!!bool PRIVATE", b'!!int ""', b'!!float ""', b"!!map [PRIVATE]"]:
-    try:
-        yaml_object(b"field: " + value, "bf.yaml")
-    except Error as error:
-        assert "PRIVATE" not in str(error)
-        assert str(error).startswith("bf.yaml: invalid YAML")
-    else:
-        raise AssertionError("malformed tagged value accepted")
+del yaml.CSafeLoader
+from bf.cli import main
+sys.argv = ["bf", *sys.argv[1:]]
+main()
 """
-    result = subprocess.run(  # noqa: S603 - fresh process selects the installed parser before importing BF
-        [sys.executable, "-c", program, loader], capture_output=True, text=True, timeout=120, check=False
-    )
-    assert result.returncode == 0, result.stderr
-    assert not result.stdout
+    for arguments, code in ((["--version"], 0), (["validate", "--brain", str(brain.root)], 1)):
+        result = subprocess.run(  # noqa: S603 - fresh process selects the installed parser before importing BF
+            [sys.executable, "-c", program, *arguments], capture_output=True, text=True, timeout=120, check=False
+        )
+        assert result.returncode == code, result.stderr
+        if code:
+            assert not result.stdout
+            assert len(result.stderr.splitlines()) == 1
+            assert re.match(LIBYAML, result.stderr.removeprefix("bf: ").rstrip("\n"))
+
+
+@pytest.mark.parametrize(
+    ("kind", "program", "fix"),
+    [
+        ("sensors", "{command: [echo]}", "rename the sensor and move memories/bf/ to its new name"),
+        ("routines", "{command: [echo]}", "rename the routine$"),
+        ("channels", "{send: {command: [echo]}}", "rename the channel$"),
+        ("assistants", "{command: [echo], prompt: prompts/a.md}", "rename the assistant and move memories/bf/"),
+    ],
+)
+def test_no_program_is_named_bf(brain: Store, kind: str, program: str, fix: str) -> None:
+    # A sensor's or assistant's name is its records' source, whose `bf:ID` refs would read as BF addresses; one
+    # rule covers the whole program namespace.
+    brain.write("bf.yaml", f"version: 8\nname: fixture\n{kind}:\n  bf: {program}\n".encode())
+    with pytest.raises(Error, match=rf"^invalid bf\.yaml: {kind}\.bf: the name bf is reserved for BF addresses; {fix}"):
+        load(brain)
+    result = CliRunner().invoke(app, ["validate", "--brain", str(brain.root)])
+    assert result.exit_code == 1
+    assert f"{kind}.bf: the name bf is reserved" in str(result.exception)
+    # Only the exact name: a longer one starting with bf stays valid.
+    for name in ("bfx", "bf-notes"):
+        brain.write("bf.yaml", f"version: 8\nname: fixture\n{kind}:\n  {name}: {program}\n".encode())
+        assert name in getattr(load(brain), kind)
 
 
 def test_starter_keeps_relations_without_serializing_redundant_defaults(tmp_path: Path) -> None:

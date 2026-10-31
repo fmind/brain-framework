@@ -1,4 +1,5 @@
-"""Documented limits hold at their edges: routine input, skipped files and evaluation suites (docs/docs/limits.md)."""
+"""Documented limits hold at their edges: routine input, skipped files, evaluation suites and frontmatter references
+(docs/docs/limits.md)."""
 
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from bf.history import log_path
 from bf.models import Error, Query
 from bf.retrieve import search
 from bf.storage import Store
+from bf.validate import validate
 
 MIB = 1 << 20
 ROUTINES = b"""version: 8
@@ -119,3 +121,23 @@ def test_evaluation_runs_at_most_100_suites(brain: Store) -> None:
     (brain.root / "evals/suite-100.yaml").unlink()
     with pytest.raises(Error, match=r"invalid evals/suite-000\.yaml"):
         evaluate(brain)
+
+
+@pytest.mark.parametrize(
+    ("key", "template"),
+    [("links", "links: [{}]"), ("sources", "sources: [{{resource: {}}}]"), ("resource", "resource: {}")],
+)
+def test_frontmatter_references_hold_at_most_8192_characters(brain: Store, key: str, template: str) -> None:
+    # Before 20 an OKF sources resource had no bound, unlike frontmatter links and the note's own resource.
+    def plan(size: int) -> bytes:
+        value = "https://example.test/" + "a" * (size - len("https://example.test/"))
+        return f"---\ntype: project\n{template.format(value)}\n---\n# Plan\n\nboundneedle\n".encode()
+
+    brain.write("projects/plan.md", plan(8192))
+    assert validate(brain)["valid"]
+    brain.write("projects/plan.md", plan(8193))
+    (problem,) = cast("list[dict[str, str]]", validate(brain)["problems"])
+    assert problem["file"] == "projects/plan.md"
+    assert problem["error"].startswith(f"invalid frontmatter: {key}: ")
+    assert "8192 characters" in problem["error"]
+    assert not search([brain], Query(text="boundneedle"))["items"]

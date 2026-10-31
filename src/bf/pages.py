@@ -191,10 +191,15 @@ def _scope(value: str, now: datetime | None) -> Scope:
         # scope nothing, a complete-looking empty reply.
         tagged = links.tag(value)
         _syntax(value)
-        if not tagged and (parsed := links.parse(value)) and links.reserved(parsed.path):
+        parsed = links.parse(value)
+        if not tagged and parsed and links.reserved(parsed.path):
             # A page's address, such as bf://brain/projects or bf://brain/7d, is never a link target: it would
             # scope nothing. Its brain-relative form, such as projects or 7d, scopes every selected brain.
             raise Error(_SCOPE)
+        if parsed and parsed.fragment:
+            # A section's address, as a result's uri gives it, would scope only the links naming that section, an
+            # empty-looking answer about the note: scope the whole note, as for its path.
+            raise Error(_WHOLE)
         return {"target": links.identity(value)}
     path = value.rstrip("/")
     try:
@@ -202,6 +207,9 @@ def _scope(value: str, now: datetime | None) -> Scope:
     except Error:
         raise Error(_SCOPE) from None
     if parts[0] not in (*AUTHORED, "memories"):
+        raise Error(_SCOPE)
+    if parts[0] == "memories" and len(parts) > 1 and "#" in parts[1]:
+        # A source has no sections, and no source name holds `#`: memories/gmail#x would fail as an unknown source.
         raise Error(_SCOPE)
     if authored(note := split_ref(path)[0]) and note != path:
         # Items carry a note's path, never a section's: a section ref, as search returns it, would scope nothing.
@@ -1061,8 +1069,8 @@ def _syntax(ref: str) -> tuple[str, bool]:
             return parsed.path, True
     path = parsed.path if parsed else value
     note, fragment = split_ref(path)
-    # A trailing `#` names no section: like a scope, a read rejects it instead of echoing it as part of the ref.
-    # A BF address decodes its empty fragment to the whole note, and a record id may itself end in `#`.
+    # A trailing `#` names no section: like a scope, a read rejects it instead of echoing it as part of the ref, as
+    # links.parse rejects a BF address's. A BF address's decoded path, like a record id, may itself end in `#`.
     bare = parsed is None and note != path and not fragment
     # A page, such as tasks or 7d, has no sections; a folder below a root may hold `#` in its name.
     if (fragment or bare) and links.reserved(note.rstrip("/")):

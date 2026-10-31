@@ -567,6 +567,11 @@ def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
         # A trailing # names no section: it used to read the whole note under a ref no backlink or reminder matched.
         (lambda: retrieve.read([brain], "projects/offline.md#"), "ref", "a ref ending in # names no section"),
         (lambda: retrieve.read([brain], "projects/offline.md#", rel="links"), "ref", "ending in # names no"),
+        # Nor does a BF address's empty fragment, which read the whole note under another spelling before 20.
+        (lambda: retrieve.read([brain], "bf://fixture/projects/offline.md#"), "ref", "remove the trailing #"),
+        (lambda: retrieve.read([brain], "bf://fixture/#"), "ref", "remove the trailing #"),
+        (lambda: pages.query("bf://fixture/projects/offline.md#"), "query", "remove the trailing #"),
+        (lambda: pages.query("x", "bf://fixture/projects/offline.md#"), "scope", "remove the trailing #"),
         (lambda: retrieve.read([brain], "projects/offline.md", rel="owner"), "rel", "undeclared relation"),
         (lambda: pages.query("!!!"), "query", "give words or an identity"),
         (lambda: pages.query("bf://Me/x"), "query", "invalid BF link"),
@@ -575,7 +580,15 @@ def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
         # Items carry note paths: a section ref, as search returns it, would scope nothing.
         (lambda: pages.query("x", "projects/offline.md#decision"), "scope", "whole note without its #section"),
         # A section is never an identity: its address, as a result's uri, would scope only links naming it.
+        *(
+            (lambda section=section: pages.query("x", section), "scope", "whole note without its #section")
+            for section in ("bf://fixture/projects/offline.md#decision", "bf://fixture/people/alice#contact")
+        ),
         # A page has no sections: no source name, period or record file holds `#`.
+        *(
+            (lambda page=page: pages.query("x", page), "scope", "scope accepts a folder")
+            for page in ("memories/gmail#x", "memories/gmail#x/7d", "memories#x")
+        ),
         # A page's address is never a link target: it would scope nothing, a complete-looking empty reply.
         *(
             (lambda page=page: pages.query("x", page), "scope", "scope accepts a folder")
@@ -589,6 +602,7 @@ def test_invalid_input_names_the_argument_it_rejects(brain: Store) -> None:
     assert pages.scope("projects/x#y") == {"prefix": "projects/x#y"}
     assert pages.scope("projects/offline.md") == {"prefix": "projects/offline.md"}
     assert pages.scope("bf://fixture/tags/x") == {"target": "bf://fixture/tags/x"}
-    # An empty fragment names the whole note, and a record id may hold `#`.
-    assert pages.scope("bf://fixture/projects/offline.md#") == {"target": "bf://fixture/projects/offline.md"}
+    # A record id may hold `#`: a plain ref keeps it, and a BF address encodes it.
     assert pages.scope("mail:thread#2") == {"target": "mail:thread#2"}
+    assert pages.scope("bf://fixture/mail:thread%232") == {"target": "bf://fixture/mail:thread%232"}
+    assert pages.scope("bf://fixture/people/alice") == {"target": "bf://fixture/people/alice"}

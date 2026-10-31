@@ -130,12 +130,24 @@ def test_mcp_exposes_two_read_only_tools_with_cli_payloads(brain: Store) -> None
             # Before 18 the reply named the model field behind the scope: prefix.
             ("search", {"query": "x", "scope": "projects/" + "a" * 5000}, "invalid input: scope: String should"),
             ("search", {"query": "x", "scope": "projects/offline.md#decision"}, "invalid input: scope: scope takes"),
+            (
+                "search",
+                {"query": "x", "scope": "bf://fixture/projects/offline.md#decision"},
+                "invalid input: scope: scope takes",
+            ),
+            ("search", {"query": "x", "scope": "memories/meetings#x"}, "invalid input: scope: scope accepts"),
+            (
+                "search",
+                {"query": "x", "scope": "bf://fixture/projects/offline.md#"},
+                "invalid input: scope: invalid BF link; remove the trailing #",
+            ),
             ("search", {"query": "bf://Me/x"}, "invalid input: query: invalid BF link"),
             # Before 18 these looked like failed operations, although the CLI exits 2 for each.
             ("read", {"ref": "2026-13"}, "invalid input: ref: invalid period: 2026-13"),
             ("read", {"ref": "projects/../bf.yaml"}, "invalid input: ref: expected a normalized"),
             ("read", {"ref": "bf://"}, "invalid input: ref: invalid BF link"),
             ("read", {"ref": "projects/offline.md#"}, "invalid input: ref: a ref ending in # names no section"),
+            ("read", {"ref": "bf://fixture/projects/offline.md#"}, "invalid input: ref: invalid BF link; remove the"),
             # A hint naming `bf read tags` used to read "use a ref returned by the read tool tags" here.
             ("read", {"ref": "tags/a\\b"}, "invalid input: ref: invalid tag label; read the tags page and use one"),
             ("read", {"offset": 1}, "invalid input: offset: offset applies to listing pages"),

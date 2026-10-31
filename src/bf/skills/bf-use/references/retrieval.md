@@ -12,7 +12,7 @@ An exact read above 32 KiB returns its text in pages; the first carries the back
 
 - Quote refs in shell commands and read them as returned. A section ref uses the heading slug or explicit `{#id}`; pages have no sections.
 - A record ref keeps a `#` or `?` of its id as written (`bf read 'mail:thread#2'`); only a `bf://` address percent-encodes them as `%23` and `%3F`.
-- A `--scope` takes a whole note, never its `#section`: search the note, then read the section.
+- A `--scope` takes a whole note, never its `#section` or a result's section `uri`: search the note, then read the section.
 
 ## Search gotchas
 

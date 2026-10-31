@@ -107,12 +107,21 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
         (["search", "word", "--scope", "soon"], "--scope"),
         # Search results carry section refs; as a scope, one would silently match nothing.
         (["search", "word", "--scope", "projects/plan.md#next"], "--scope"),
+        # Before 20 a section's address scoped only the links naming it, and a source's fragment named no source.
+        (["search", "word", "--scope", "bf://fixture/projects/plan.md#next"], "--scope"),
+        (["search", "word", "--scope", "memories/mail#next"], "--scope"),
+        # Before 20 an empty fragment read, and scoped, the whole note under another spelling.
+        (["search", "word", "--scope", "bf://fixture/projects/plan.md#"], "--scope"),
+        (["read", "bf://fixture/projects/plan.md#"], "REF"),
         (["collect", "source", "--since", "soon"], "--since"),
         (["collect", "source", "--since", "2026-09-02", "--until", "2026-09-01"], "--since"),
         (["watch", "--notify", "unknown"], "--notify"),
         # A NaN compares false with both bounds of a range.
         (["watch", "--poll-interval", "nan"], "--poll-interval"),
         (["init", "fresh", "--name", "INVALID"], "--name"),
+        # Before 20 an empty name, as an unset variable gives, silently derived one from the directory.
+        (["init", "fresh", "--name", ""], "--name"),
+        (["init", "fresh", "--name", " "], "--name"),
         # Before 17 a mistyped option reached the routine as an argument, and the routine ran for real.
         (["run", "review", "--dryrun"], "--dryrun"),
         (["read", "projects", "--rel", "related-to"], "--rel"),

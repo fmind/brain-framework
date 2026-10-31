@@ -431,6 +431,9 @@ def _sources(path: str, attributes: dict[str, object]) -> list[str]:
         for source in sources
     ):
         raise Error(f"{path}: OKF sources require mappings with a nonempty resource string")
+    # Bounded like frontmatter `links` and the note's own `resource`, whether or not a resource is a link.
+    if any(len(str(source["resource"])) > 8192 for source in sources):
+        raise Error(f"{path}: invalid frontmatter: sources: reference exceeds 8192 characters")
     # OKF lets a resource describe a population, such as "all pull requests of a repository": only a link-shaped
     # resource, a URL, identity or path, is cited and checked.
     return [

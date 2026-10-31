@@ -41,7 +41,7 @@ from bf.models import (
 )
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, unread, writer
 
-SCHEMA = 37
+SCHEMA = 38
 CACHE = ".bf/index.sqlite"
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"

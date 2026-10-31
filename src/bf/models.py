@@ -36,6 +36,8 @@ SLUG = r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
 # JSON Schema regex engines may match `$` before a final newline; Rust's validator does not.
 Name = Annotated[str, Field(pattern=NAME, json_schema_extra={"not": {"pattern": "[^a-z0-9-]"}})]
 Slug = Annotated[str, Field(pattern=SLUG, max_length=64, json_schema_extra={"not": {"pattern": "[^a-z0-9-]"}})]
+# No program, and so no record source, takes this name: a `bf:ID` ref would read as a BF address.
+RESERVED = "bf"
 # An explicit, case-sensitive `scheme:value`; BF addresses are identities of the `bf` scheme.
 IDENTITY = r"[a-z][a-z0-9+.-]*:\S+"
 # A record id or note path must fit a BF address with the longest brain and source names plus a `?rel=` query.
@@ -1275,6 +1277,19 @@ class Config(Model):
     def mapped(self) -> Config:
         if self.name in self.brains:
             raise ValueError("a brain cannot reference its own name")
+        # One rule for the whole program namespace: a sensor's or assistant's name is its records' source, and a
+        # `bf:ID` ref reads as a BF address; routines and channels share the rule, so no rename can reach it.
+        for kind, programs in (
+            ("sensors", self.sensors),
+            ("routines", self.routines),
+            ("channels", self.channels),
+            ("assistants", self.assistants),
+        ):
+            if RESERVED in programs:
+                move = f" and move memories/{RESERVED}/ to its new name" if kind in {"sensors", "assistants"} else ""
+                raise ValueError(
+                    f"{kind}.{RESERVED}: the name {RESERVED} is reserved for BF addresses; rename the {kind[:-1]}{move}"
+                )
         if shared := sorted(self.sensors.keys() & self.routines.keys()):
             raise ValueError(
                 f"sensors.{shared[0]} and routines.{shared[0]}: sensor and routine names must be distinct; they share "

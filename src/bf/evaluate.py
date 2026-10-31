@@ -75,7 +75,10 @@ class Case(Model):
     query: Annotated[str, Field(max_length=4096)] = Field(
         default="", description="Search words; use either query or read."
     )
-    scope: str = Field(default="", description="Optional search scope; unavailable for read cases.")
+    scope: str = Field(
+        default="",
+        description="Optional search scope, as bf search --scope takes it: never a #section; unavailable for read cases.",
+    )
     limit: Annotated[int, Field(ge=1, le=50)] = Field(
         default=10, description="Maximum search hits; unavailable for read cases."
     )

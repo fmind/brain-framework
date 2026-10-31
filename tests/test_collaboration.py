@@ -66,6 +66,25 @@ def test_stray_memory_files_stay_visible_and_duplicate_inputs_fail_without_write
     assert not records.files(brain, "other")
 
 
+def test_records_of_the_reserved_source_bf_are_reported_wherever_they_are_read(brain: Store) -> None:
+    # No program is named bf: records left under memories/bf/ would answer to `bf:ID` refs that read as BF addresses.
+    reserved = "memories/bf/" + records.path("x", "kept").rsplit("/", 1)[1]
+    brain.write(reserved, json.dumps({"id": "kept", "title": "Kept reservedneedle evidence"}).encode())
+    problem = {
+        "file": reserved,
+        "error": "source bf is reserved for BF addresses; move memories/bf/ to the folder of its renamed sensor or "
+        "assistant",
+    }
+    found = search([brain], Query(text="reservedneedle"))
+    assert [{"brain": "fixture", **problem}] == found["problems"]
+    assert not found["items"]
+    # A longer name starting with bf is an ordinary source.
+    records.upsert(brain, "bf-notes", [Record(id="kept", title="Kept reservedneedle evidence")], snapshot=False)
+    assert validate(brain)["problems"] == [problem]
+    items = cast("list[dict[str, object]]", search([brain], Query(text="reservedneedle"))["items"])
+    assert [item["ref"] for item in items] == ["bf-notes:kept"]
+
+
 def test_hidden_record_like_files_are_reported_wherever_they_are_read(brain: Store) -> None:
     # A macOS AppleDouble file ends in .json: collection and search read it, so validation reports it too.
     hidden = "memories/team/._" + records.path("team", "x").rsplit("/", 1)[1]

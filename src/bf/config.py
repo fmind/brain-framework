@@ -7,6 +7,7 @@ import re
 import stat
 from collections.abc import Iterable
 from contextlib import suppress
+from functools import cache
 from itertools import takewhile
 from pathlib import Path
 from typing import cast
@@ -22,20 +23,17 @@ from bf.storage import Store, expand, writer, xdg
 _HEADER = "# https://fmind.github.io/brain-framework/docs/configuration/\n"
 
 
-# libyaml parses bf.yaml about nine times faster; the pure-Python loader remains the fallback.
-_SafeLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+# libyaml is about nine times faster than PyYAML's pure-Python parser, which also rejects some YAML that libyaml
+# accepts: BF reads YAML only through libyaml, so one file loads alike on every installation.
+LIBYAML = (
+    "reading YAML needs PyYAML built with libyaml, which this installation lacks; reinstall bf with a PyYAML wheel "
+    "that bundles it: uv tool install --reinstall --python 3.14 brain-framework"
+)
 # One command reads bf.yaml many times: reuse validated configurations by content digest.
 _LOADED: dict[str, Config] = {}
-
-
-class _Loader(_SafeLoader):
-    """Reject duplicate mappings rather than accepting a hidden override."""
-
-
-# The YAML 1.2 core schema, as in editor tooling: `on`, `no` and `off` stay strings, `017` is decimal
-# and `1:30` is text. Both loaders resolve plain scalars through this Python table.
-_Loader.yaml_implicit_resolvers = {}
-for _tag, _pattern, _first in (
+# The YAML 1.2 core schema, as in editor tooling: `on`, `no` and `off` stay strings, `017` is decimal and `1:30` is
+# text. libyaml parses; this Python table resolves the plain scalars it reports.
+_CORE = (
     ("null", r"^(?:~|null|Null|NULL|)$", ["~", "n", "N", ""]),
     ("bool", r"^(?:true|True|TRUE|false|False|FALSE)$", list("tTfF")),
     ("int", r"^(?:[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+)$", list("-+0123456789")),
@@ -44,11 +42,10 @@ for _tag, _pattern, _first in (
         r"^(?:[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$",
         list("-+.0123456789"),
     ),
-):
-    _Loader.add_implicit_resolver(f"tag:yaml.org,2002:{_tag}", re.compile(_pattern), _first)
+)
 
 
-def _integer(loader: _Loader, node: yaml.ScalarNode) -> int:
+def _integer(loader: yaml.constructor.SafeConstructor, node: yaml.ScalarNode) -> int:
     """YAML 1.2 integers: a leading zero is decimal, never YAML 1.1 octal.
 
     Every base keeps Python's digit limit for decimal text: replies, the cache and records print integers in decimal.
@@ -68,7 +65,7 @@ class _KeyError(yaml.constructor.ConstructorError):
     """A duplicate or non-string mapping key: its position and fixed reason name it without quoting it."""
 
 
-def _mapping(loader: _Loader, node: yaml.MappingNode) -> dict[str, object]:
+def _mapping(loader: yaml.constructor.SafeConstructor, node: yaml.MappingNode) -> dict[str, object]:
     result: dict[str, object] = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node)
@@ -78,27 +75,51 @@ def _mapping(loader: _Loader, node: yaml.MappingNode) -> dict[str, object]:
     return result
 
 
-_Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
-_Loader.add_constructor("tag:yaml.org,2002:int", _integer)
-# Dates are validated by their owning models; even an explicit tag must not turn them into other types.
-_Loader.add_constructor("tag:yaml.org,2002:timestamp", lambda loader, node: loader.construct_scalar(node))
+@cache
+def _strict(base: type[yaml.CSafeLoader]) -> type[yaml.CSafeLoader]:
+    """libyaml's safe loader with the core schema; it rejects duplicate mappings rather than accept a hidden override."""
+    # A subclass, so the resolvers and constructors below leave PyYAML's own loader unchanged.
+    loader = cast("type[yaml.CSafeLoader]", type("StrictLoader", (base,), {}))
+    loader.yaml_implicit_resolvers = {}
+    for tag, pattern, first in _CORE:
+        loader.add_implicit_resolver(f"tag:yaml.org,2002:{tag}", re.compile(pattern), first)
+    loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
+    loader.add_constructor("tag:yaml.org,2002:int", _integer)
+    # Dates are validated by their owning models; even an explicit tag must not turn them into other types.
+    loader.add_constructor("tag:yaml.org,2002:timestamp", lambda constructor, node: constructor.construct_scalar(node))
+    return loader
+
+
+def _loaders() -> tuple[type[yaml.CSafeLoader], type[yaml.CSafeLoader]]:
+    """libyaml's safe loader, to scan events, and its strict subclass, to build values; never the pure-Python ones.
+
+    PyYAML built from source without libyaml, as on a Python it publishes no wheel for, lacks `CSafeLoader`.
+    """
+    base = getattr(yaml, "CSafeLoader", None)
+    if base is None:
+        raise Error(LIBYAML)
+    return base, _strict(base)
 
 
 def yaml_object(data: bytes, name: str = "", *, line: int = 1) -> dict[str, object]:
     """No aliases, anchors, duplicate keys, deep documents or large node graphs.
 
     Errors name the file and, for syntax errors, the position: `line` is the file line of the first
-    YAML line, such as 2 for Markdown frontmatter. They never quote the document's content.
+    YAML line, such as 2 for Markdown frontmatter. They never quote the document's content. A PyYAML without
+    libyaml fails every document alike, without naming one.
     """
+    loaders = _loaders()
     try:
-        return _yaml_object(data, line)
+        return _yaml_object(data, line, *loaders)
     except Error as error:
         if not name:
             raise
         raise Error(f"{name}: {error}") from error
 
 
-def _yaml_object(data: bytes, line: int) -> dict[str, object]:
+def _yaml_object(
+    data: bytes, line: int, scanner: type[yaml.CSafeLoader], loader: type[yaml.CSafeLoader]
+) -> dict[str, object]:
     if len(data) > 1 << 20:
         raise Error("YAML exceeds 1 MiB")
     try:
@@ -108,7 +129,7 @@ def _yaml_object(data: bytes, line: int) -> dict[str, object]:
         raise Error("YAML is not UTF-8") from None
     try:
         depth = 0
-        for count, event in enumerate(yaml.parse(data, Loader=_SafeLoader), 1):
+        for count, event in enumerate(yaml.parse(data, Loader=scanner), 1):
             if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
                 raise Error("YAML anchors and aliases are not supported")
             if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
@@ -117,9 +138,9 @@ def _yaml_object(data: bytes, line: int) -> dict[str, object]:
                 depth -= 1
             if depth > 32 or count > 20_000:
                 raise Error("YAML structure exceeds its limit")
-        value = yaml.load(data, Loader=_Loader)  # noqa: S506 - restricted SafeLoader subclass
+        value = yaml.load(data, Loader=loader)  # noqa: S506 - restricted CSafeLoader subclass
     except (yaml.YAMLError, ValueError, OverflowError, LookupError, TypeError) as error:
-        # SafeLoader's explicit tags can raise conversion, indexing or node-shape errors.
+        # The safe constructor's explicit tags can raise conversion, indexing or node-shape errors.
         # Keep their possibly sensitive values behind the same private diagnostic boundary.
         mark = getattr(error, "problem_mark", None)
         reason = "YAML mapping keys must be unique strings" if isinstance(error, _KeyError) else "invalid YAML"

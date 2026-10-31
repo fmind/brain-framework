@@ -16,6 +16,7 @@ Look up exact limits for a skipped file, a partial reply or a stopped program. F
 | Authored note                                                 | 4 MiB                                                                                                                                     |
 | Note or record title                                          | 4,096 characters; listings show 200, then `…`                                                                                             |
 | Note `aliases`, `links`, `tags`                               | 1,000 each                                                                                                                                |
+| Note alias, `links` or `sources` entry, `entity`, `resource`  | 8,192 characters each                                                                                                                     |
 | Search or page reply                                          | Items end early near 32 KiB and continue at `next_offset`; home lists as many projects as fit the reply as printed, with `projects_total` |
 | Any search or read reply                                      | 4 MiB; a larger one fails with `response exceeds its byte limit; narrow the request`                                                      |
 | Exact read                                                    | Text pages near 32 KiB; the first page adds all other fields, such as `attributes`                                                        |

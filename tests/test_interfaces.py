@@ -356,6 +356,24 @@ def test_encoding_failures_name_the_note_and_replies_stay_utf8(brain: Store) -> 
             "cases.1.scope",
             "String should have at most 4096",
         ),
+        # Before 20 these loaded: a section's address scoped only the links naming it, and a source's fragment, or
+        # an empty one, named nothing searchable.
+        (
+            "    query: offline\n    scope: bf://fixture/projects/offline.md#decision\n    empty: true\n",
+            "cases.1.scope",
+            "scope takes a whole note without its #section",
+        ),
+        ("    query: offline\n    scope: memories/meetings#x\n    empty: true\n", "cases.1.scope", "scope accepts"),
+        (
+            '    query: offline\n    scope: "bf://fixture/projects/offline.md#"\n    empty: true\n',
+            "cases.1.scope",
+            "invalid BF link; remove the trailing #",
+        ),
+        (
+            '    query: offline\n    expect: ["bf://fixture/projects/offline.md#"]\n',
+            "cases.1.expect",
+            "invalid BF link; remove",
+        ),
         ('    query: offline\n    expect: ["bf://B1/x"]\n', "cases.1.expect", "invalid BF link"),
         ('    query: offline\n    forbid: ["bf://fixture/../x"]\n    text: [x]\n', "cases.1.forbid", "invalid BF link"),
         # A read case uses bf read's syntax: malformed refs abort the run like `bf read REF` exits 2.
@@ -364,7 +382,20 @@ def test_encoding_failures_name_the_note_and_replies_stay_utf8(brain: Store) -> 
         # A query needs a word or an identity, as bf search does.
         ("    query: '!!!'\n    empty: true\n", "cases.1", "case malformed: give words or an identity"),
     ],
-    ids=["scope", "empty-window", "long-prefix", "expect", "forbid", "read-period", "read-path", "wordless"],
+    ids=[
+        "scope",
+        "empty-window",
+        "long-prefix",
+        "section-address",
+        "source-fragment",
+        "empty-fragment",
+        "expect-empty-fragment",
+        "expect",
+        "forbid",
+        "read-period",
+        "read-path",
+        "wordless",
+    ],
 )
 def test_eval_rejects_malformed_cases_before_any_retrieval(brain: Store, case: str, location: str, reason: str) -> None:
     brain.write(

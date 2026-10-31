@@ -53,6 +53,10 @@ def parse(value: str) -> Address | None:
         if not uri.path.startswith("/"):
             hint = "end a brain's address with /, as in bf://brain/ for its home"
             raise ValueError
+        if "#" in value and not uri.fragment:
+            # An empty fragment names no section: it would pass for the whole note under another spelling.
+            hint = "remove the trailing # or name a section after it, as in bf://brain/projects/note.md#section"
+            raise ValueError
         # An empty path, as in bf://brain/, is the home page. A page's fragment selects nothing: `bf validate` names
         # such a link, like one to a missing section, instead of failing the note that holds it.
         path = unquote(uri.path[1:], errors="strict")

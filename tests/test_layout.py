@@ -63,6 +63,19 @@ def test_initialization_creates_the_layout_and_private_namespaces(tmp_path: Path
     }
 
 
+@pytest.mark.parametrize("name", ["", " ", "\t"])
+def test_initialization_rejects_an_empty_name_before_creating_anything(tmp_path: Path, name: str) -> None:
+    # Before 20 an empty --name, as an unset variable gives, silently took the directory's name.
+    target = tmp_path / "new-brain"
+    result = CliRunner().invoke(app, ["init", str(target), "--name", name])
+    assert result.exit_code == 2
+    assert "--name" in result.output
+    assert not target.exists()
+    # Omitting --name still derives one.
+    result = CliRunner().invoke(app, ["init", str(target)])
+    assert json.loads(result.stdout)["brain"] == "new-brain"
+
+
 def test_sensor_commands_reject_unknown_placeholders() -> None:
     with pytest.raises(ValidationError, match="unknown placeholder"):
         Sensor(command=["echo", "{{unknown}}"])

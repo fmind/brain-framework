@@ -546,9 +546,20 @@ def test_body_links_keep_their_written_form(brain: Store) -> None:
     for data, where in (
         (b"# Bad\n\n[c](bf://fixture/projects/100%.md)\n", "line 3"),
         (b'---\nlinks: ["bf://fixture/projects/100%.md"]\n---\n# Bad\n', "links"),
+        # An empty fragment names no section, like a read ref ending in a bare #: it once linked the whole note.
+        (b"# Bad\n\n[c](bf://fixture/projects/docs.md#)\n", "line 3"),
+        (b'---\nlinks: ["bf://fixture/projects/docs.md#"]\n---\n# Bad\n', "links"),
+        (b'---\nsources: [{resource: "bf://fixture/projects/docs.md#"}]\n---\n# Bad\n', "sources"),
+        (b"---\nentity: bf://fixture/people/eric#\n---\n# Bad\n", "entity"),
     ):
         brain.write("projects/bad.md", data)
-        assert any(p.startswith(f"projects/bad.md: {where}: invalid BF link") for p in problems(brain))
+        assert any(p.startswith(f"projects/bad.md: {where}: invalid BF link") for p in problems(brain)), data
+        assert "projects/bad.md" not in {
+            i["ref"] for i in cast(list[dict], search([brain], Query(text="bad"))["items"])
+        }
+    # A relative file link keeps Markdown's meaning: its empty fragment links the whole file.
+    brain.write("projects/bad.md", b"---\ntype: project\n---\n# Good\n\n[c](docs.md#)\n")
+    assert not [p for p in problems(brain) if p.startswith("projects/bad.md")]
 
 
 def test_ordinary_markdown_declares_no_identity_or_membership(brain: Store) -> None:

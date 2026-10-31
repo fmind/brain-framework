@@ -28,7 +28,7 @@ Sensors, routines and assistants are named by their keys in `bf.yaml`, and each 
 | Sensor, assistant, channel | A lowercase letter, then lowercase letters, digits or hyphens.                                                                               |
 | Routine                    | Lowercase letters and digits in words joined by single hyphens, starting with a letter; it also names the action folders the routine writes. |
 
-Never name a sensor or assistant `bf`: refs starting with `bf:` read as [BF addresses](link-reference.md#bf-links), so its records could not be read by ref. [Limits](limits.md#size-bounds) gives the length bound.
+No program, whether sensor, routine, channel or assistant, may be named `bf`: refs starting with `bf:` read as [BF addresses](link-reference.md#bf-links), so a sensor's or assistant's records could not be read by ref. `bf.yaml` then fails to load, as `sensors.bf: the name bf is reserved for BF addresses; rename the sensor and move memories/bf/ to its new name`, and records left in `memories/bf/` are skipped and reported until you move them. [Limits](limits.md#size-bounds) gives the length bound.
 
 ## Editor schemas
 
@@ -56,7 +56,7 @@ Projects, concepts and `ACTION.md` notes are OKF notes. [Write notes and actions
 
 - `type` must be nonempty; `status`, when set, must be `draft`, `stable` or `deprecated`, and omitted means `stable`. `bf validate` enforces both.
 - Frontmatter must be valid YAML closed by a `---` line, and the title must be nonblank and at most 4,096 characters. A note breaking either rule is invalid and unsearchable, reported under `problems`.
-- A frontmatter key with an invalid value, such as `tags` that is not a list or `updated` that is not a real `YYYY-MM-DD`, also makes the note invalid and unsearchable. So does a link that cannot be parsed, such as `http://[your-host]/` or a `bf://` link with malformed encoding or another query key; the problem names its `line N` or frontmatter key, such as `links`.
+- A frontmatter key with an invalid value, such as `tags` that is not a list or `updated` that is not a real `YYYY-MM-DD`, also makes the note invalid and unsearchable. So does a link that cannot be parsed, such as `http://[your-host]/` or a `bf://` link with malformed encoding, another query key or an empty `#` fragment; the problem names its `line N` or frontmatter key, such as `links`.
 - `stale_after` is an ISO 8601 date-time with a timezone; a date alone is invalid.
 - `aliases` are namespaced `scheme:value` identities, never display names. A URI in `resource` is an identity too. Entities, aliases and resources follow the [identity rules](link-reference.md#identity-rules); `aliases`, `links` and `tags` hold at most 1,000 items each.
 - `fields` holds values of fields declared in `bf.yaml`, checked like a record's: an invalid value claims nothing and fails `bf validate`, while the note stays searchable. A declared relation written at the top level instead is reported, because OKF ignores unknown keys.

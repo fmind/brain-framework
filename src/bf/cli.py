@@ -275,22 +275,20 @@ def initialize(
         typer.Argument(file_okay=False, metavar="PATH", help="New, empty or freshly cloned brain directory."),
     ],
     name: Annotated[
-        str,
+        str | None,
         typer.Option(
             help="Stable BF link namespace; default: the directory name, lowercased with accents folded, each run of "
             "other characters as one hyphen."
         ),
-    ] = "",
+    ] = None,
     full: Annotated[
         bool, typer.Option("--full", help="Also create the optional folders, such as sensors/, routines/ and assets/.")
     ] = False,
 ) -> None:
     """Create a brain at PATH (recommended: ~/brain); no global registration is needed."""
     path = expand(path)
-    if name:
-        _name(name)
-    else:
-        name = _derived(path.resolve().name)
+    # Only an omitted --name derives one: an empty or blank value is invalid, never the directory's name.
+    name = _derived(path.resolve().name) if name is None else _name(name)
     config = Config(
         version=FORMAT,
         name=name,

@@ -12,7 +12,20 @@ from typing import Annotated, Literal
 
 from pydantic import Field, ValidationError
 
-from bf.models import MAX_FILES, MAX_RECORD, NAME, RECORD_KEYS, Error, Model, Record, decode, digest, encode, explain
+from bf.models import (
+    MAX_FILES,
+    MAX_RECORD,
+    NAME,
+    RECORD_KEYS,
+    RESERVED,
+    Error,
+    Model,
+    Record,
+    decode,
+    digest,
+    encode,
+    explain,
+)
 from bf.storage import BusyError, Store, reader
 
 _PENDING = "memories/.pending"
@@ -320,6 +333,12 @@ def source_of(name: str) -> str:
         or not re.fullmatch(r"[0-9a-f]{64}\.json", parts[2])
     ):
         raise Error(f"{name}: expected memories/<source>/<sha256-id>.json")
+    if parts[1] == RESERVED:
+        # No program takes this name: its records' `bf:ID` refs would read as BF addresses, so none could be read.
+        raise Error(
+            f"{name}: source {RESERVED} is reserved for BF addresses; move memories/{RESERVED}/ to the folder of its "
+            "renamed sensor or assistant"
+        )
     return parts[1]
 
 

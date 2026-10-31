@@ -999,10 +999,12 @@ def test_relation_pages_list_every_link_of_one_relation(brain: Store, monkeypatc
         with pytest.raises(InputError, match="pages have no sections"):
             pages.readable(ref)
     assert pages.readable("projects/sub#x") == "projects/sub#x"
-    # A BF address decodes an empty fragment to the whole note, and a record id may end in `#`.
-    whole = read([brain], "bf://fixture/projects/offline.md#")
-    assert (whole["ref"], whole["text"]) == ("projects/offline.md", read([brain], "projects/offline.md")["text"])
+    # A BF address's empty fragment names no section, as a plain ref's does: before 20 it read the whole note. A
+    # record id may end in `#`, which its BF address encodes.
+    with pytest.raises(InputError, match="invalid BF link; remove the trailing #"):
+        read([brain], "bf://fixture/projects/offline.md#")
     assert pages.readable("meetings:x#") == "meetings:x#"
+    assert pages.readable("bf://fixture/meetings:x%23") == "bf://fixture/meetings:x%23"
     for ref in ("repo:example/nothing", "projects/absent.md"):
         with pytest.raises(NotFoundError):
             read([brain], ref, rel="links")
