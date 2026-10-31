@@ -63,7 +63,7 @@ Keep provider credentials and scheduled collection on the designated owner's lap
 
 1. Add a reviewed [sensor](sensors.md) for information the whole team may retain.
 1. Test it locally, then set its `refresh` if regular updates help.
-1. Run `bf watch` on that laptop, or a [native schedule](schedule.md#generate-a-native-schedule) kept outside the brain's Git history.
+1. Run `bf watch` on that laptop, or [run it as a service](schedule.md#run-watch-as-a-service) whose file stays outside the brain's Git history.
 1. Inspect the collected files before sharing them.
 
 New brains ignore `memories/` in Git. To share only a reviewed `github-issues` source, replace the `/memories/` line in `.gitignore` with:

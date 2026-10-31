@@ -11,9 +11,9 @@ Sensors collect records from providers, routines are deterministic brain program
 
 ## Select one brain and its runtime
 
-- `bf collect`, `bf run`, `bf channel`, `bf queue`, `bf update`, `bf watch` and `bf schedule` act on exactly one brain: `--brain`, then `BF_BRAIN`, then the enclosing brain, never its `brains:` references or other registered brains. Pass a path: a bare name resolves through the registry first and fails when ambiguous.
+- `bf collect`, `bf run`, `bf channel`, `bf queue`, `bf update` and `bf watch` act on exactly one brain: `--brain`, then `BF_BRAIN`, then the enclosing brain, never its `brains:` references or other registered brains. Pass a path: a bare name resolves through the registry first and fails when ambiguous.
 - Diagnose with the installed `bf`, whose major version must match this skill's `compatibility`. When `bf status` shows a `runtime.pinned`, the version the brain's `uv.lock` names, whose major version differs from `runtime.installed`, report it and ask.
-- A pin installs and runs code the brain supplies. Run `uv run --project PATH --locked bf ...` only for execution (`collect`, `run`, `channel`, delivery retries, `update`, `watch`, `schedule`), with the same authority as `bf collect`, in a brain the user created or whose `pyproject.toml`, `uv.lock`, `uv.toml` and `.python-version` they reviewed. uv runs an existing `.venv/` as is: delete one the user did not create before the first pinned run, and never run the pin of a brain whose Git tracks one (`git ls-files .venv` prints files) ([pinned runtime](https://fmind.github.io/brain-framework/docs/upgrades/#pin-a-brains-runtime)).
+- A pin installs and runs code the brain supplies. Run `uv run --project PATH --locked bf ...` only for execution (`collect`, `run`, `channel`, delivery retries, `update`, `watch`), with the same authority as `bf collect`, in a brain the user created or whose `pyproject.toml`, `uv.lock`, `uv.toml` and `.python-version` they reviewed. uv runs an existing `.venv/` as is: delete one the user did not create before the first pinned run, and never run the pin of a brain whose Git tracks one (`git ls-files .venv` prints files) ([pinned runtime](https://fmind.github.io/brain-framework/docs/upgrades/#pin-a-brains-runtime)).
 
 ## Diagnose before executing
 
@@ -46,7 +46,7 @@ Core commands:
 - `bf collect SENSOR` runs one sensor now; `--since`/`--until` bound a backfill, and `--allow-removal` accepts a snapshot removal for one run.
 - `bf build` recovers interrupted record writes and rebuilds the disposable `.bf/` cache; `--reproject SENSOR` re-applies current `fields:` mappings without running the sensor.
 - `bf run ROUTINE [ARGS]...` runs one routine, `bf run ASSISTANT` one assistant (`--stdin` passes piped text as its input) and `bf run --hook EVENT` every routine listing that hook.
-- `bf update` runs due sensors, routines and assistants, then refreshes the cache; `bf watch` does so continuously (`--json` for rows); `bf schedule` writes native scheduler files and activates nothing.
+- `bf update` runs due sensors, routines and assistants, then refreshes the cache; `bf watch` does so continuously (`--json` for rows, or as a user service).
 
 For a retrieval miss, save the question as an `evals/` case before changing the owning note or sensor, and never weaken an assertion to make a case pass.
 

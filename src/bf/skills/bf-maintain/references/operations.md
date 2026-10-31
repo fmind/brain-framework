@@ -35,7 +35,7 @@ Agents read `bf status`, a JSON snapshot that runs nothing, never the interactiv
 
 `bf watch` is the primary refresh mode: it runs due sensors, then routines, with independent assistant workers and channel streams, until the user quits; `--sensor NAME`, `--routine NAME` or `--assistant NAME` restrict it. Restart it after editing its `watch:` preferences, adding or renaming an assistant, or changing stream subscriptions or channel commands in `bf.yaml`. Agents observe with `bf status`, or stream `bf watch --json` when authorized to collect. Keep one execution owner per program and one collecting machine per shared source ([watch and schedule](https://fmind.github.io/brain-framework/docs/schedule/)).
 
-With recurring-execution authority, `bf schedule --sensor SENSOR --output ~/.config/bf-schedules` writes native systemd, launchd or cron files and returns the commands to activate, inspect and remove them; it activates nothing. Give assistants a job of their own, such as `bf schedule --assistant NAME --name assistants`, so a long agent run never delays collection. That job admits the pending triggers of the assistants it names, so include trigger-only ones; a stream input needs watch instead ([schedule and overlap](https://fmind.github.io/brain-framework/docs/prompts/#schedule-and-overlap)). The files capture this machine's `PATH` and XDG locations: keep them out of a shared brain's Git, generate them through the pin for a pinned brain and regenerate them after an upgrade moves `bf`. Report generated, enabled and observed runs separately.
+With recurring-execution authority, propose a systemd user service or LaunchAgent running `bf watch --json --brain PATH`, written from the [service guide](https://fmind.github.io/brain-framework/docs/schedule/#run-watch-as-a-service): absolute paths, a `PATH` that finds `bf` and every provider CLI the programs call, and the user's `XDG_CONFIG_HOME` and `XDG_STATE_HOME` when set. Keep the file out of a shared brain's Git, run it through the pin for a pinned brain and edit it when an upgrade moves `bf`. Install or enable it only with the user's consent. Report written, enabled and observed runs separately.
 
 ## Windows and freshness
 
@@ -43,7 +43,7 @@ For mutable window sources, use a short `refresh` and an `overlap`, plus `reconc
 
 ## Upgrade Brain Framework
 
-Upgrade only with the user's consent. Stop watchers and schedules, read the release's changelog and back up the idle brain with its local assistant queue (`$XDG_STATE_HOME/bf/runtime/`); resolve `bf queue` work before changing assistant or channel configuration. Run `uv tool upgrade brain-framework` and, in a pinned brain the user created or reviewed, `uv add "brain-framework==X.Y.Z"` so `runtime.pinned` keeps the installed major version. Apply the changelog's manual steps, then:
+Upgrade only with the user's consent. Stop watchers and schedules, read the release's changelog and back up the idle brain with its local assistant queue (`$XDG_STATE_HOME/bf/runtime/`); resolve `bf queue` work before changing assistant or channel configuration. Run `uv tool upgrade brain-framework`, which keeps an installed `mcp` extra, and, in a pinned brain the user created or reviewed, `uv add "brain-framework==X.Y.Z"` so `runtime.pinned` keeps the installed major version. Apply the changelog's manual steps, then:
 
 ```bash
 bf --version

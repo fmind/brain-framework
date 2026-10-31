@@ -62,17 +62,6 @@ Try the sorting controls after that first cycle:
 
 The selected program stays selected as sorting or new history moves it. Items counts the records the last committed collection returned, even a backfill, not the stored total. Press `?` for every sort field, or see [dashboard sorting](../../docs/docs/schedule.md#sort-the-dashboard); view choices last only for the session and also work in the observation dashboard below.
 
-Choose only the successful sensors and generate a one-minute native schedule without activating it:
-
-```bash
-env -u BF_BRAIN XDG_CONFIG_HOME="$watch_demo/config" XDG_STATE_HOME="$watch_demo/state" \
-  bf schedule --brain "$watch_demo/brain" \
-  --sensor calendar --sensor git --every 1 \
-  --output "$watch_demo/schedules"
-```
-
-The JSON reply contains the native files and literal argv lists for installation, status and removal. Inspect the files; this example does not require installing them. Their PATH, XDG paths and executable point to the environment used to generate them, so regenerate a real schedule from the installation you intend to keep. The reply's `warnings` include `calendar refreshes every 30s, but checks happen every 60s`: one-minute checks collect the 30-second calendar late, and `bf status` can report it `overdue`. The scheduler checks eligibility; it does not override it.
-
 Observe the same local history without executing programs; its footer offers `u reread` instead of `f refresh` and no pause:
 
 ```bash
@@ -87,4 +76,4 @@ rm -rf -- "$watch_demo"
 unset watch_demo
 ```
 
-See [Watch and schedule updates](../../docs/docs/schedule.md) for real installations and platform limits.
+See [Watch and schedule updates](../../docs/docs/schedule.md#run-watch-as-a-service) to keep watch running as a service, and its platform limits.

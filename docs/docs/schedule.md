@@ -1,17 +1,17 @@
 ---
 icon: lucide/calendar-clock
-description: Run or observe due sensors, routines and assistants, set watch preferences and generate native schedules.
+description: Run or observe due sensors, routines and assistants, set watch preferences and keep watch running as a service.
 ---
 
 # Watch and schedule updates
 
 Keep reviewed sensors and routines current with `enabled` and `refresh`; [assistants](prompts.md) declare separate inputs, outputs, schedules and triggers in `bf.yaml`; [timing and health](#timing-and-health) says when each one is due and how failures retry. Start inside your brain.
 
-| You want to…                              | Use                                                                       |
-| ----------------------------------------- | ------------------------------------------------------------------------- |
-| Run due programs while a terminal is open | `bf watch`                                                                |
-| Observe another collector                 | `bf status --watch`; it executes nothing.                                 |
-| Run unattended on a running machine       | `bf schedule`, then install the generated systemd, launchd or cron files. |
+| You want to…                              | Use                                                                         |
+| ----------------------------------------- | --------------------------------------------------------------------------- |
+| Run due programs while a terminal is open | `bf watch`                                                                  |
+| Observe another collector                 | `bf status --watch`; it executes nothing.                                   |
+| Run unattended on a running machine       | `bf watch --json` as a [user service](#run-watch-as-a-service) you install. |
 
 BF installs no background service. First run your programs once by hand.
 
@@ -63,7 +63,7 @@ bf status --watch   # observe only; never runs programs
 bf watch --json     # run due work and stream JSON Lines
 ```
 
-Observation shows local history alongside a native scheduler. It offers `u` to reread and has no pause. Without an interactive terminal, it fails and suggests `bf status`.
+Observation shows local history alongside a service or timer. It offers `u` to reread and has no pause. Without an interactive terminal, it fails and suggests `bf status`.
 
 `bf watch --json` writes a snapshot every `poll_interval` with `brain`, `running`, `assisting` (assistant work is active), `message` and `programs`, one row per program. A row's `status` is the dashboard state: `failed`, `never`, `due`, `fresh`, `manual` or `disabled`. Times show your local offset, and absent values are empty strings or null. The [`Row` class](https://github.com/fmind/brain-framework/blob/main/src/bf/watch.py) defines every row field. A JSON watcher always collects and fails while another watcher owns the brain. It writes each new reason assistant work waits as one `bf:` line on stderr.
 
@@ -95,41 +95,103 @@ Command-line options override `bf.yaml`, then defaults apply. Every command load
 
 ## Select programs
 
-Repeat `--sensor`, `--routine` and `--assistant` on `update`, `watch` or `schedule`:
+Repeat `--sensor`, `--routine` and `--assistant` on `update` or `watch`:
 
 ```bash
 bf update --sensor git-commits --dry-run
 bf watch --sensor git-commits --routine weekly-review
-bf schedule --sensor git-commits --name git-only
 ```
 
-With no selector, every configured program is eligible, including sensors and routines added later; restart watch after adding or renaming an assistant or changing stream subscriptions. `bf update --kind KIND`, repeatable, keeps only sensors, routines or assistants. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run. To keep a long assistant run from delaying a native schedule's collection, [give assistants their own job](prompts.md#schedule-and-overlap).
+With no selector, every configured program is eligible, including sensors and routines added later; restart watch after adding or renaming an assistant or changing stream subscriptions. `bf update --kind KIND`, repeatable, keeps only sensors, routines or assistants. With any selector, **only the named programs** are. An unknown name fails before anything runs and suggests a close one. Selectors never force a disabled or manual program to run.
 
-## Generate a native schedule
+## Run watch as a service
+
+To keep collecting without an open terminal, run `bf watch --json` as a user service that restarts after a failure. BF installs nothing: write the file, then start it with your system's commands. A service does not read your shell profile, so give it a `PATH` listing the folders of `bf` and of every provider CLI your programs call, as `command -v bf` and `command -v gh` print them; prefer stable folders, such as mise or asdf shims, to version-specific ones. When your shell sets `XDG_CONFIG_HOME` or `XDG_STATE_HOME`, set them in the service too, so it shares registration, run history and the assistant queue with your terminal. Edit the file by hand when `bf`, the brain or a provider CLI moves, and keep it out of a shared brain's Git history: it holds your paths.
+
+On Linux, save a systemd user service as `~/.config/systemd/user/bf-watch.service`:
+
+```ini
+# https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html
+[Unit]
+Description=Brain Framework watch
+
+[Service]
+# %h is your home folder. List every folder holding bf and the provider CLIs your programs call.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/bf watch --json --brain %h/brain
+# Watch prints a JSON snapshot every poll_interval; its bf: diagnostics on stderr reach the journal.
+StandardOutput=null
+Restart=on-failure
+RestartSec=60
+# A stop request ends watch with status 130 once its programs have stopped.
+SuccessExitStatus=130
+
+[Install]
+WantedBy=default.target
+```
 
 ```bash
-bf schedule --every 15 --output ~/.config/bf-schedules
+systemd-analyze --user verify ~/.config/systemd/user/bf-watch.service
+systemctl --user daemon-reload
+systemctl --user enable --now bf-watch.service
+journalctl --user -u bf-watch.service -n 30 --no-pager
 ```
 
-The reply lists the generated `files`, the `written` paths and literal argument lists to `install`, check the `status` of and `remove` the job. BF runs none of them. Without `--output`, the reply previews the files and warns that nothing was written; its install commands copy from `~/.config/bf-schedules`, where the suggested rerun writes them. A relative `--output` resolves against the brain folder. Differing existing files are kept and generation fails naming the first one, so your edits survive.
+On macOS, save a LaunchAgent as `~/Library/LaunchAgents/bf-watch.plist`, replacing `/Users/me` with your home folder: launchd expands neither `~` nor variables.
 
-The files hold home and brain paths and the `PATH` that `bf schedule` runs with, plus its `XDG_CONFIG_HOME` and `XDG_STATE_HOME` when set: keep them out of a shared brain's Git history. Credentials and other environment variables are not copied. Sensors and routines find commands such as `uv` through that `PATH`: when it lists version-specific tool folders, such as those of mise, asdf, pyenv or nvm, put stable shims in their place or regenerate the schedule after upgrading those tools. In a brain that [pins its runtime](upgrades.md#pin-a-brains-runtime), generate them with `uv run --locked bf schedule ...`, so jobs and nested `bf` calls use the pinned release.
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>bf-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/me/.local/bin/bf</string>
+    <string>watch</string>
+    <string>--json</string>
+    <string>--brain</string>
+    <string>/Users/me/brain</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/me/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/me/Library/Logs/bf-watch.log</string>
+</dict>
+</plist>
+```
 
-| Option or default   | Meaning                                                                                               |
-| ------------------- | ----------------------------------------------------------------------------------------------------- |
-| `--backend auto`    | launchd on macOS; systemd on Linux when `systemctl` is present; otherwise cron.                       |
-| `--every 15`        | Check every 15 minutes; the interval must divide an hour: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60. |
-| `--name update`     | Job name; use different names for different selections.                                               |
-| `--executable PATH` | The installed `bf`; the default sits beside the running Python. Regenerate if it moves.               |
+```bash
+plutil -lint ~/Library/LaunchAgents/bf-watch.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/bf-watch.plist
+launchctl print "gui/$(id -u)/bf-watch"
+```
 
-Review the programs and the generated environment, then follow the returned commands. For cron, copy the single job line into `crontab -e`; **never run `crontab FILE`**, which replaces your existing jobs. Check systemd files with `systemd-analyze --user verify` and launchd files with `plutil -lint` before installing.
+Stop and remove the service with `systemctl --user disable --now bf-watch.service` or `launchctl bootout "gui/$(id -u)/bf-watch"`, then delete its file. Check it with `bf status --check`, or follow it with `bf status --watch`. A plain timer, such as a systemd timer, a launchd `StartCalendarInterval` job or a cron line, that runs `bf update --brain BRAIN` every few minutes also works, but never starts a channel stream.
 
 <details markdown="1">
-<summary>Scheduler behavior and host lifecycle</summary>
+<summary>Service behavior and host lifecycle</summary>
 
-Systemd timers run a trigger missed while the machine was off once after it starts again (`Persistent=true`), and add up to 30 seconds of jitter. LaunchAgents coalesce triggers missed during sleep into one run, but do not replay those missed while powered off. Cron skips missed triggers. Stopping a job allows 60 seconds for an update to roll back an interrupted record write. Each program's `timeout` bounds its run; there is no total job timeout.
+A systemd user service runs while your user manager does, from your first login to your last logout, unless `loginctl enable-linger` keeps it running. A LaunchAgent runs while you are logged in. After a failure, both start watch again a minute later; a stop request leaves watch at least a minute to roll back an interrupted record write and stop its programs. Watch catches up due work after sleep or power-off, up to 30 days. Each program's `timeout` bounds its run.
 
-Use a running systemd user manager on Linux and a logged-in user's LaunchAgent on macOS. ChromeOS stops its Linux environment at logout, and WSL needs a running distribution. See the [ChromeOS lifecycle](https://www.chromium.org/chromium-os/developer-library/guides/containers/containers-and-vms/#lifecycles), [WSL systemd](https://learn.microsoft.com/en-us/windows/wsl/systemd) and [Apple scheduling](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html) guides.
+ChromeOS stops its Linux environment at logout, and WSL needs a running distribution. See the [ChromeOS lifecycle](https://www.chromium.org/chromium-os/developer-library/guides/containers/containers-and-vms/#lifecycles), [WSL systemd](https://learn.microsoft.com/en-us/windows/wsl/systemd), [systemd lingering](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html) and [Apple launch agent](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) guides.
 
 </details>
 
@@ -137,7 +199,7 @@ Use a running systemd user manager on Linux and a logged-in user's LaunchAgent o
 
 Use one execution owner per program. A second interactive `bf watch` on the same brain observes the first instead of collecting, and does not take over when it exits. Timers cannot be detected by watch: use `bf status --watch` while a timer owns collection.
 
-Updates of one brain run one at a time. A second update waits up to 10 minutes, then computes its own due list, or fails with `another update is still active`. `bf collect` keeps its own lock per sensor. Removing a systemd or launchd job with the returned commands also stops an active update; removing a cron line stops future runs only.
+Updates of one brain run one at a time. A second update waits up to 10 minutes, then computes its own due list, or fails with `another update is still active`. `bf collect` keeps its own lock per sensor. Stopping a systemd or launchd service or timer also stops an active update; removing a cron line stops future runs only.
 
 ## Timing and health
 
@@ -162,4 +224,4 @@ sensors:
 
 `bf status` gives each source's `changed`: the newest time this brain gained a new or changed record of it, whatever the records' event times. An enabled scheduled source whose `changed` is older than its `silent_after` is `"silent": true` in `bf status`, `memories` pages and search [coverage](retrieval.md#source-coverage), joins `attention` and the home page, and fails `bf status --check`, while its freshness stays as it is. Collecting a new or changed record ends the silence. A source without any record is never silent: its count already shows it. Set `silent_after` above the longest quiet spell the source really has, such as a weekend for a daily feed.
 
-Choose a timer interval shorter than the smallest nonzero `refresh`: `bf schedule` warns, naming that program, when `--every` reaches it, and so does `bf watch` for its `interval`, in the dashboard header and guide or as one `bf:` line on stderr with `--json`. With an hourly sensor and a 15-minute timer, a check 59 minutes after the last success skips the sensor, and the next check, at 74 minutes, runs it. A success timestamp in the future, after a clock correction, makes the program due at once. Long pauses catch up at most 30 days.
+Choose a watch `interval`, or a timer's, shorter than the smallest nonzero `refresh`: `bf watch` warns, naming that program, when its `interval` reaches it, in the dashboard header and guide or as one `bf:` line on stderr with `--json`. With an hourly sensor and a 15-minute timer, a check 59 minutes after the last success skips the sensor, and the next check, at 74 minutes, runs it. A success timestamp in the future, after a clock correction, makes the program due at once. Long pauses catch up at most 30 days.

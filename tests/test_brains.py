@@ -340,7 +340,7 @@ def test_registered_brains_are_searched_but_never_run_implicitly(
         "personal",
         "team",
     }
-    for command in (["update", "--dry-run"], ["collect", "pulled", "--dry-run"], ["schedule"], ["watch", "--json"]):
+    for command in (["update", "--dry-run"], ["collect", "pulled", "--dry-run"], ["watch", "--json"]):
         result = CliRunner().invoke(app, command)
         assert result.exit_code == 1, command
         assert "registered brains are selected for retrieval only" in str(result.exception)

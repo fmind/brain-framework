@@ -24,12 +24,12 @@ Each brain's `bf.yaml` holds its format `version`, its `name` and optional `brai
 
 Commands take the first selection available, in this order. An invalid explicit choice fails instead of falling through:
 
-| Selection                   | `search`, `read`, `export`, `mcp`, `status` | `validate`, `eval`, `build`, `status --watch`            | `collect`, `run`, `channel`, `queue`, `update`, `watch`, `schedule` |
-| --------------------------- | ------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------- |
-| 1. `--brain NAME` or `PATH` | That brain.                                 | That brain.                                              | That brain; a name must be registered or the enclosing brain's.     |
-| 2. `BF_BRAIN`               | That brain.                                 | That brain.                                              | That brain, under the same rule.                                    |
-| 3. The enclosing brain      | The nearest folder above with a `bf.yaml`.  | The same.                                                | The same.                                                           |
-| 4. Otherwise                | Every registered brain present here.        | The only registered brain present, or ask for `--brain`. | Fail: `pass --brain PATH or run inside the brain`.                  |
+| Selection                   | `search`, `read`, `export`, `mcp`, `status` | `validate`, `eval`, `build`, `status --watch`            | `collect`, `run`, `channel`, `queue`, `update`, `watch`         |
+| --------------------------- | ------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------- |
+| 1. `--brain NAME` or `PATH` | That brain.                                 | That brain.                                              | That brain; a name must be registered or the enclosing brain's. |
+| 2. `BF_BRAIN`               | That brain.                                 | That brain.                                              | That brain, under the same rule.                                |
+| 3. The enclosing brain      | The nearest folder above with a `bf.yaml`.  | The same.                                                | The same.                                                       |
+| 4. Otherwise                | Every registered brain present here.        | The only registered brain present, or ask for `--brain`. | Fail: `pass --brain PATH or run inside the brain`.              |
 
 Retrieval also includes each selected brain's direct `brains:` references: `search`, `read`, `export`, `mcp` and the cases of `eval`. `status --check` fails while one is unavailable. `validate` and `build` act on the selected brain only; validation lists targets in other brains under [`unresolved`](link-reference.md#across-brains). Execution never includes references: programs run in exactly one brain.
 

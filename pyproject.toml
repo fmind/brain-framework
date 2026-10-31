@@ -31,12 +31,15 @@ classifiers = [
 ]
 dependencies = [
   "markdown-it-py>=4.2.0,<5",
-  "mcp>=2.1.1,<3",
   "pydantic>=2.13.5,<3",
   "pyyaml>=6.0.3,<7",
   "rich>=15.0.0,<16",
   "typer>=0.27.2,<1",
 ]
+
+[project.optional-dependencies]
+# `bf mcp` only: most people call the CLI, and the MCP SDK brings most of the runtime closure.
+mcp = ["mcp>=2.1.1,<3"]
 
 [project.urls]
 Changelog = "https://fmind.github.io/brain-framework/changelog/"
@@ -56,6 +59,8 @@ module-name = "bf"
 
 [dependency-groups]
 dev = [
+  # The checkout tests and documents `bf mcp`, so its environment always holds the optional MCP SDK.
+  "brain-framework[mcp]",
   "jsonschema>=4.26.0,<5",
   # Imported directly by tests/test_readme.py: Zensical slugs headings with Python-Markdown.
   "markdown>=3.11",

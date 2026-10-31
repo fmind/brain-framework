@@ -109,9 +109,6 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
         (["search", "word", "--scope", "projects/plan.md#next"], "--scope"),
         (["collect", "source", "--since", "soon"], "--since"),
         (["collect", "source", "--since", "2026-09-02", "--until", "2026-09-01"], "--since"),
-        (["schedule", "--backend", "unknown"], "--backend"),
-        (["schedule", "--every", "7"], "--every"),
-        (["schedule", "--name", "INVALID"], "--name"),
         (["watch", "--notify", "unknown"], "--notify"),
         # A NaN compares false with both bounds of a range.
         (["watch", "--poll-interval", "nan"], "--poll-interval"),
@@ -132,14 +129,13 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
         (["init", ""], "PATH"),
         (["register", ""], "PATH"),
         (["skills", ""], "DIR"),
-        (["schedule", "--output", ""], "--output"),
         # Before 18.1.4 these rebuilt the whole cache, collected the default window or named an unknown program "".
         (["build", "--reproject", ""], "--reproject"),
         (["collect", "calendar", "--since", ""], "--since"),
         (["collect", ""], "SENSOR"),
         (["run", ""], "PROGRAM"),
         (["update", "--sensor", "calendar", "--sensor", ""], "--sensor"),
-        (["schedule", "--routine", " "], "--routine"),
+        (["update", "--routine", " "], "--routine"),
         # Checked before a brain is selected, and quoted like Click's choices: an empty kind used to read as a blank.
         (["update", "--kind", ""], "--kind: '' is not one of 'sensor', 'routine', 'assistant'"),
         # A suite path is relative to the brain, never the working directory: it keeps its own reason.
@@ -229,7 +225,7 @@ def test_repeated_flags_and_multiple_options_stay_valid(tmp_path: Path) -> None:
     [
         ["init", "", "-h"],
         ["skills", "", "--help"],
-        ["schedule", "--output", "", "-h"],
+        ["update", "--sensor", "", "-h"],
         ["search", "x", "--brain", "", "-h"],
         ["search", "-h", "x", "--brain", ""],
         ["search", "x", "--scope", "a", "--scope", "b", "-h"],

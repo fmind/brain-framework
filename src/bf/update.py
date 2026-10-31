@@ -122,7 +122,7 @@ def update(
     One failing program never blocks the others; the report names it and its private log. Routines run after the
     sensors, and assistant work after both, so each sees this run's evidence. Collection cycles are serialized per
     brain so watch and timers cannot repeat a stale due list: sensors and routines hold the brain's update lock,
-    waiting up to `wait` seconds for another cycle of the same brain, such as a schedule for another selection firing
+    waiting up to `wait` seconds for another cycle of the same brain, such as a timer for another selection firing
     at the same minute, then compute their due list inside it. Assistant work, due batch reads, schedules, queued jobs
     and deliveries, runs after its release.
     """

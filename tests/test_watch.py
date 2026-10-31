@@ -606,9 +606,7 @@ def test_watch_rejects_non_tty_and_cli_invalid_options(brain: Store) -> None:
         watch(brain, interval=1)
     assert CliRunner().invoke(app, ["watch", "--interval", "1"]).exit_code == 2
     assert CliRunner().invoke(app, ["status", "--watch", "--check"]).exit_code == 2
-    for command in ("watch", "schedule"):
-        result = CliRunner().invoke(app, [command, "--help"])
-        assert result.exit_code == 0
+    assert CliRunner().invoke(app, ["watch", "--help"]).exit_code == 0
 
 
 def assert_terminal_restored(master: int, slave: int, previous: list[object]) -> None:
@@ -1189,7 +1187,7 @@ def test_a_check_interval_slower_than_a_refresh_is_flagged(
     brain.write("bf.yaml", CONFIG)
     monkeypatch.setattr("bf.watch.time", SimpleNamespace(monotonic=iter([0.0]).__next__, sleep=lambda _: None))
     monkeypatch.setattr(Job, "start", lambda _: None)
-    # Like bf schedule: a program is due only at a check, so checking slower than its refresh runs it late.
+    # A program is due only at a check, so checking slower than its refresh runs it late.
     with pytest.raises(StopIteration):
         watch(brain, interval=7200, json_output=True)
     late = capsys.readouterr().err

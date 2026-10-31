@@ -13,7 +13,7 @@ Ask an agent, “Why did we choose a single product page?” It should find the 
 | ------------------ | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
 | CLI                | Commands a terminal agent runs inside the brain.                         | [Command reference](commands.md).                                                              |
 | Skills             | Procedures to find and write knowledge, set up brains and maintain them. | [Install the skills](#install-the-skills).                                                     |
-| MCP                | The same retrieval through two tools, for hosts that prefer tool calls.  | [MCP setup](mcp.md).                                                                           |
+| MCP                | The same retrieval through two tools, for hosts that prefer tool calls.  | [MCP setup](mcp.md), with the optional `mcp` extra.                                            |
 | Brain instructions | The brain's `AGENTS.md`, written by `bf init`.                           | Load it with your host's project instructions; [keep it current](#refresh-brain-instructions). |
 | Hooks              | Optional context at session start or with each prompt.                   | [Hooks](#bring-context-into-every-session).                                                    |
 

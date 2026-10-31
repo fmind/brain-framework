@@ -1,6 +1,6 @@
 # Third-party notices
 
-Brain Framework depends on the following non-development Python distributions on its declared Linux and macOS platforms. The inventory is the complete locked closure selected by `uv tree --no-dev`; build and test dependencies are intentionally excluded.
+Brain Framework depends on the following non-development Python distributions on its declared Linux and macOS platforms, including those its optional `mcp` extra installs. The inventory is the complete locked closure selected by `uv tree --no-dev`; build and test dependencies are intentionally excluded.
 
 License expressions come from the installed distribution metadata. Legal text is copied from the corresponding installed wheel files and formatted only as Markdown text blocks. The Brain Framework project itself is licensed separately in `LICENSE`.
 

@@ -15,7 +15,7 @@ SITE = ROOT / "docs/third-party-notices.md"
 SITE_FILES = ROOT / "docs/third-party"
 INTRODUCTION = """# Third-party notices
 
-Brain Framework depends on the following non-development Python distributions on its declared Linux and macOS platforms. The inventory is the complete locked closure selected by `uv tree --no-dev`; build and test dependencies are intentionally excluded.
+Brain Framework depends on the following non-development Python distributions on its declared Linux and macOS platforms, including those its optional `mcp` extra installs. The inventory is the complete locked closure selected by `uv tree --no-dev`; build and test dependencies are intentionally excluded.
 
 License expressions come from the installed distribution metadata. Legal text is copied from the corresponding installed wheel files and formatted only as Markdown text blocks. The Brain Framework project itself is licensed separately in `LICENSE`.
 """
@@ -51,10 +51,12 @@ OMITTED = {
 
 
 def closure() -> list[metadata.Distribution]:
-    """The runtime distributions required by brain-framework on this platform, following requested extras."""
+    """The runtime distributions required by brain-framework and every extra it declares on this platform, following
+    requested extras: users install the extras too, so the notices cover them."""
     selected: dict[str, metadata.Distribution] = {}
     extras: dict[str, set[str]] = {}
-    pending: list[tuple[str, set[str]]] = [("brain-framework", set())]
+    declared = set(metadata.distribution("brain-framework").metadata.get_all("Provides-Extra") or [])
+    pending: list[tuple[str, set[str]]] = [("brain-framework", declared)]
     while pending:
         name, wanted = pending.pop()
         if name in selected and wanted <= extras[name]:

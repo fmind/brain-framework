@@ -9,7 +9,16 @@ description: Connect an agent through local MCP search and read tools, then veri
 
 ## Before connecting
 
-Complete [Getting started](getting-started.md), then check the same decision from your terminal:
+Complete [Getting started](getting-started.md), then add MCP support. It is an optional extra, since only `bf mcp` needs the MCP SDK and the packages it brings:
+
+```bash
+uv tool install --python 3.14 'brain-framework[mcp]'
+uv tool list --show-extras
+```
+
+uv replaces your installation with one that includes the extra, and the list shows `brain-framework` with `[extras: mcp]`. `uv tool upgrade brain-framework` keeps the extra; a reinstall without `[mcp]` drops it. Without it, `bf mcp` exits 1 with `bf: bf mcp needs the mcp extra; install it with uv tool install --python 3.14 'brain-framework[mcp]'`.
+
+Then check the same decision from your terminal:
 
 ```bash
 cd ~/brain
@@ -82,13 +91,14 @@ The answer should cite the ref. A configured entry does not prove the server run
 
 ## If the connection fails
 
-| Symptom                     | Check                                                                                     |
-| --------------------------- | ----------------------------------------------------------------------------------------- |
-| Executable not found        | Use the absolute `bf` path, and confirm the host's account can run it.                    |
-| Brain unavailable           | Read the decision in your terminal with the same absolute brain path.                     |
-| No tools, or old behavior   | Restart the host after changing its configuration or updating BF.                         |
-| Empty or incomplete results | Inspect `problems`, `stale` and [source coverage](retrieval.md#source-coverage).          |
-| Cache write access error    | Make the brain's `.bf/` folder writable for the host's account, or serve a writable copy. |
+| Symptom                      | Check                                                                                     |
+| ---------------------------- | ----------------------------------------------------------------------------------------- |
+| Executable not found         | Use the absolute `bf` path, and confirm the host's account can run it.                    |
+| `bf mcp needs the mcp extra` | Install it as [Before connecting](#before-connecting) shows, then restart the host.       |
+| Brain unavailable            | Read the decision in your terminal with the same absolute brain path.                     |
+| No tools, or old behavior    | Restart the host after changing its configuration or updating BF.                         |
+| Empty or incomplete results  | Inspect `problems`, `stale` and [source coverage](retrieval.md#source-coverage).          |
+| Cache write access error     | Make the brain's `.bf/` folder writable for the host's account, or serve a writable copy. |
 
 ## What the host can read
 

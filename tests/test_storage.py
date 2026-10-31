@@ -195,12 +195,12 @@ def test_missing_brain_is_named(tmp_path: Path) -> None:
 
 
 def test_a_bare_tilde_without_a_home_directory_says_to_set_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    # As for a container user without HOME or a passwd entry, such as bf schedule's default ~/.config/bf-schedules:
-    # the hint once said to check a user name the path never gave.
+    # As for a container user without HOME or a passwd entry, such as bf init ~/brain: the hint once said to check a
+    # user name the path never gave.
     monkeypatch.delenv("HOME")
     monkeypatch.setattr(pwd, "getpwuid", lambda uid: {}[uid])
     with pytest.raises(Error, match=r"^a path's ~ or ~user home directory cannot be resolved; set HOME$"):
-        storage.expand(Path("~/.config/bf-schedules"))
+        storage.expand(Path("~/brain"))
     with pytest.raises(Error, match=r"; check the user name$"):
         storage.expand(Path("~bf-no-such-user/brain"))
 

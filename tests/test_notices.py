@@ -80,7 +80,9 @@ def _runtime_distributions(platform: str) -> dict[str, str]:
         assert name not in packages, f"uv.lock contains multiple entries for {name}"
         packages[name] = package
 
-    requested_extras: dict[str, set[str]] = {"brain-framework": set()}
+    # The notices cover every extra the package declares, as users install them too.
+    declared = _mapping(packages["brain-framework"].get("optional-dependencies", {}), "brain-framework extras")
+    requested_extras: dict[str, set[str]] = {"brain-framework": set(declared)}
     processed_extras: dict[str, set[str]] = {}
     selected: set[str] = set()
     pending = ["brain-framework"]

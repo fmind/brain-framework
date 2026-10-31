@@ -1,4 +1,4 @@
-"""Install both release artifacts with locked dependencies and exercise the public CLI.
+"""Install both release artifacts with locked dependencies and exercise the public CLI, then add the mcp extra.
 
 With --unlocked, resolve the newest dependencies the package allows, as `uv tool install` does for users; this needs
 network access and runs weekly in the security workflow.
@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 UV = shutil.which("uv")
-# The installed `bf mcp` over stdio, with the installed mcp SDK: the other public interface and its dependency.
+# The installed `bf mcp` over stdio, with the mcp SDK its extra installs: the other public interface.
 MCP = """
 import asyncio, os, sys
 import bf
@@ -54,6 +54,8 @@ async def check() -> None:
 
 asyncio.run(check())
 """
+# Only `bf mcp` needs the extra: without it, the command fails with this one line and no reply.
+MISSING = "bf: bf mcp needs the mcp extra; install it with uv tool install --python 3.14 'brain-framework[mcp]'\n"
 
 
 def run(*args: str, cwd: Path, env: dict[str, str], capture: bool = False, timeout: int = 180) -> str:
@@ -105,24 +107,14 @@ def main() -> None:
             env.pop("UV_PROJECT_ENVIRONMENT", None)
             run(UV, "venv", "--python", args.python, str(venv), cwd=home, env=env)
             python = str(venv / "bin/python")
+            # The package alone first, as `uv tool install brain-framework` installs it, then with the mcp extra.
+            locked = [UV, "sync", "--project", str(ROOT), "--locked", "--offline", "--no-dev", "--no-install-project"]
             if args.unlocked:
                 # A new Python can lack dependency wheels, such as PyYAML's on 3.15, as users would find: allow a
                 # source build, which the second artifact reuses from the cache, within the job's 15 minutes.
                 run(UV, "pip", "install", "--python", python, str(artifact), cwd=home, env=env, timeout=600)
             else:
-                run(
-                    UV,
-                    "sync",
-                    "--project",
-                    str(ROOT),
-                    "--locked",
-                    "--offline",
-                    "--no-dev",
-                    "--no-install-project",
-                    "--active",
-                    cwd=home,
-                    env=env,
-                )
+                run(*locked, "--active", cwd=home, env=env)
                 run(
                     UV, "pip", "install", "--offline", "--no-deps", "--python", python, str(artifact), cwd=home, env=env
                 )
@@ -153,7 +145,6 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             bf = str(venv / "bin/bf")
             brain = home / "brain"
             run(bf, "watch", "--help", cwd=home, env=env)
-            run(bf, "schedule", "--help", cwd=home, env=env)
             run(bf, "--version", cwd=home, env=env)
             run(bf, "init", str(brain), cwd=home, env=env)
             if (home / "config/bf/config.yaml").exists():
@@ -203,6 +194,26 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             }
             if failed := [name for name, passed in checks.items() if not passed]:
                 raise SystemExit(f"{artifact.name}: incorrect package smoke results: {', '.join(failed)}")
+            # Callers supply the installed bf and a local brain path; no shell is used.
+            missing = subprocess.run(  # noqa: S603
+                [bf, "mcp", "--brain", str(brain)],
+                cwd=home,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if (missing.returncode, missing.stdout, missing.stderr) != (1, "", MISSING):
+                raise SystemExit(f"{artifact.name}: bf mcp without the mcp extra did not name the install")
+            if args.unlocked:
+                extra = f"brain-framework[mcp] @ {artifact.as_uri()}"
+                run(UV, "pip", "install", "--python", python, extra, cwd=home, env=env, timeout=600)
+            else:
+                # Inexact: keep the artifact installed above, which the lock's editable project is not.
+                run(*locked, "--extra", "mcp", "--inexact", "--active", cwd=home, env=env)
+            run(UV, "pip", "check", "--python", python, cwd=home, env=env)
             run(python, "-I", "-c", MCP, bf, str(brain), cwd=home, env=env)
 
 

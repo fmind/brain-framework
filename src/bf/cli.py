@@ -229,7 +229,7 @@ def _finite(value: float | None) -> float | None:
 def _name(value: str) -> str:
     if not re.fullmatch(NAME, value):
         raise typer.BadParameter(
-            "choose a brain name or job name of 1-64 characters: a lowercase letter, then lowercase letters, digits or hyphens",
+            "choose a brain name of 1-64 characters: a lowercase letter, then lowercase letters, digits or hyphens",
             param_hint="--name",
         )
     return value
@@ -349,11 +349,18 @@ def enroll(
 
 @app.command("mcp", rich_help_panel="Set up")
 def serve(brain: BrainOption = "") -> None:
-    """Serve search and read over MCP stdio for agents that prefer tools to the CLI."""
+    """Serve search and read over MCP stdio for agents that prefer tools to the CLI; needs the mcp extra."""
+    try:
+        from bf.mcp import server
+    except ModuleNotFoundError as error:
+        # The MCP SDK, or a package it needs, is missing: installing the `mcp` extra brings both, and uv replaces an
+        # installation without it.
+        raise Error(
+            "bf mcp needs the mcp extra; install it with uv tool install --python 3.14 'brain-framework[mcp]'"
+        ) from error
     if sys.stdin is None:
         # Descriptor 0 was closed at startup, as main() refuses for descriptor 1: no request could arrive.
         raise Error("standard input is closed; an MCP host sends its requests through it")
-    from bf.mcp import server
 
     # Resolved again for each call, so registry changes and newly available brains need no restart.
     tools = server(lambda: select(brain))
@@ -771,56 +778,6 @@ def monitor(
     )
 
 
-@app.command("schedule", rich_help_panel="Collect and automate")
-def scheduling(
-    brain: RunOption = "",
-    sensor: SensorOption = None,
-    routine: RoutineOption = None,
-    assistant: AssistantOption = None,
-    backend: Annotated[
-        Literal["auto", "systemd", "launchd", "cron"],
-        typer.Option(help="Scheduler format; auto detects available platform tools."),
-    ] = "auto",
-    every: Annotated[
-        int, typer.Option(min=1, max=60, help="Check every N minutes; N must divide 60. Source refresh still applies.")
-    ] = 15,
-    name: Annotated[
-        str, typer.Option(help="Job name; use distinct names for different program selections.")
-    ] = "update",
-    output: Annotated[
-        Path | None,
-        typer.Option(
-            metavar="DIR",
-            help="Save native files here, relative to the brain; default previews them as JSON. Never activates jobs.",
-        ),
-    ] = None,
-    executable: Annotated[
-        Path | None, typer.Option(help="Installed bf executable; default is beside the running Python.")
-    ] = None,
-) -> None:
-    """Generate native scheduler files and activation commands for one brain; execute nothing."""
-    from bf.schedule import generate
-
-    _name(name)
-    if 60 % every:
-        raise typer.BadParameter(
-            "must divide 60: choose 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60", param_hint="--every"
-        )
-    emit(
-        generate(
-            execution(brain),
-            backend=backend,
-            every=every,
-            name=name,
-            output=output,
-            executable=executable,
-            sensors=tuple(sensor or ()),
-            routines=tuple(routine or ()),
-            assistants=tuple(assistant or ()),
-        )
-    )
-
-
 @app.command("status", rich_help_panel="Check and repair")
 def report(
     brain: BrainOption = "",
@@ -971,7 +928,6 @@ _GIVEN = {
     "--brain": "give a brain name or path; an empty value would select another brain",
     "--hook": "give an event name; an empty value would run the first argument as a routine",
     "--assistant": "give an assistant name; an empty value names none",
-    "--output": "give a directory; an empty value would name the brain's root",
     "--reproject": "give a sensor name; an empty value would rebuild the cache instead",
     "--routine": "give a routine name; an empty value names none",
     "--sensor": "give a sensor name; an empty value names none",

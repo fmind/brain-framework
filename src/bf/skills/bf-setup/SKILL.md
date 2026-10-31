@@ -37,7 +37,7 @@ Start from one project and a few questions the user keeps reconstructing across 
    ```
 
    A folder reported `modified` (the user edited it), `unmanaged` (BF did not install it) or `newer` (a newer `bf` installed it) stays unchanged and the command exits 1. Pass `--force` only when the user accepts replacing the first two; for `newer`, upgrade this `bf` instead ([statuses](https://fmind.github.io/brain-framework/docs/agents/#install-the-skills)).
-1. For a host that prefers tools, `bf mcp --brain PATH` serves only `search` and `read`; configure absolute paths ([MCP guide](https://fmind.github.io/brain-framework/docs/mcp/)).
+1. For a host that prefers tools, `bf mcp --brain PATH` serves only `search` and `read`; configure absolute paths ([MCP guide](https://fmind.github.io/brain-framework/docs/mcp/)). It needs the optional MCP SDK: with the user's consent, run `uv tool install --python 3.14 'brain-framework[mcp]'` when `bf mcp` reports `needs the mcp extra`.
 1. Optional [hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add the repository's project at session start and matching refs to each prompt.
 
 Before connecting a cloud agent, explain that its provider receives the notes and records it reads, although retrieval is offline, and that a related brain widens what it can read.

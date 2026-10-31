@@ -220,6 +220,25 @@ def test_mcp_stdio_handshake(tmp_path: Path) -> None:
         assert errlog.read() == ""
 
 
+def test_mcp_without_its_extra_names_the_install_command(brain: Store) -> None:
+    # The MCP SDK is the optional `mcp` extra. A None entry in sys.modules makes `import mcp` fail as if it were not
+    # installed; help still answers, since only serving imports the SDK.
+    missing = "import sys; sys.modules['mcp'] = None; sys.argv[0] = 'bf'; from bf import main; main()"
+    command = [sys.executable, "-c", missing, "mcp"]
+    result = subprocess.run(  # noqa: S603 - the test interpreter with synthetic CLI arguments
+        [*command, "--brain", str(brain.root)], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        "bf: bf mcp needs the mcp extra; install it with uv tool install --python 3.14 'brain-framework[mcp]'\n"
+    )
+    shown = subprocess.run(  # noqa: S603 - the test interpreter with synthetic CLI arguments
+        [*command, "--help"], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert (shown.returncode, shown.stderr) == (0, "")
+    assert "needs the mcp extra" in " ".join(shown.stdout.split())
+
+
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT], ids=["stop", "interrupt"])
 def test_mcp_stops_at_once_while_its_input_stays_open(brain: Store, signum: int) -> None:
     with subprocess.Popen(  # noqa: S603 - synthetic CLI boundary
