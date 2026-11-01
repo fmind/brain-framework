@@ -248,21 +248,20 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
     for schema in sorted(clone.glob("docs/*.schema.json")):
         shutil.copy2(schema, clone / "tests/contract" / schema.name)
     # Mentions of the previous major that may mean the current release; historical ones, such as upgrade notes, stay.
-    pattern = rf"(Brain Framework|bf`?) {old_major}\b|\b{old_major}\.[0-9]+\.[0-9]+"
-    found = run(
-        "git",
-        "grep",
-        "-nE",
-        pattern,
-        "--",
-        "src/bf/skills",
-        "examples",
-        "docs/docs",
-        "README.md",
-        cwd=clone,
-        check=False,
+    # Python's regex, not `git grep -E`: macOS's POSIX regex has no `\b`, so the search found nothing there.
+    pattern = re.compile(rf"(Brain Framework|bf`?) {old_major}\b|\b{old_major}\.[0-9]+\.[0-9]+")
+    listed = run(
+        "git", "ls-files", "-z", "--", "src/bf/skills", "examples", "docs/docs", "README.md", cwd=clone, strip=False
     )
-    return found.splitlines()
+    found = []
+    for name in sorted(filter(None, listed.split("\0"))):
+        try:
+            lines = (clone / name).read_text(encoding="utf-8").splitlines()
+        except OSError, UnicodeDecodeError:
+            # Binary or unreadable files hold no prose to review.
+            continue
+        found.extend(f"{name}:{number}:{line}" for number, line in enumerate(lines, start=1) if pattern.search(line))
+    return found
 
 
 def check() -> None:
