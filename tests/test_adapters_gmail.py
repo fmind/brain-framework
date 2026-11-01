@@ -75,8 +75,8 @@ def test_gmail_headers_collect_participants_threads_and_message_ids(provider: Pr
     assert launch.attributes == {
         "thread": "f1",
         "labels": ["IMPORTANT", "INBOX"],
-        "from_refs": ["person:email/alice@example.test"],
-        "to_refs": ["person:email/bob@example.test", "person:email/carol@example.test"],
+        "sender_refs": ["person:email/alice@example.test"],
+        "recipient_refs": ["person:email/bob@example.test", "person:email/carol@example.test"],
         "cc_refs": [],
     }
     # Both messages link their thread: reading gmail-thread:f1 lists the conversation.
@@ -173,13 +173,13 @@ def test_gmail_headers_reject_inconsistent_replies_and_queries(
 
 def test_gmail_headers_keep_each_address_list_within_the_mapped_field_bound(provider: Provider) -> None:
     # A mapped `cardinality: many` field holds at most 1,000 values: 18.5.0 kept every sender, so one message from
-    # 1,001 addresses failed each collection that mapped `from_refs`, and its window never advanced.
+    # 1,001 addresses failed each collection that mapped `sender_refs`, and its window never advanced.
     senders = [f"sender{index:04d}@example.test" for index in range(1001)]
     headers = {"From": ", ".join(senders), "To": "bob@example.test"}
     provider.install("gws", [LISTED, {"match": ["get"], "stdout": message("a1", "f1", 1788256800000, headers)}])
     [record] = provider.records("gmail-headers.py", START, END)
-    assert record.attributes["from_refs"] == [f"person:email/{sender}" for sender in senders[:1000]]
-    assert record.attributes["to_refs"] == ["person:email/bob@example.test"]
+    assert record.attributes["sender_refs"] == [f"person:email/{sender}" for sender in senders[:1000]]
+    assert record.attributes["recipient_refs"] == ["person:email/bob@example.test"]
     assert (len(record.links), record.links[0]) == (1000, "gmail-thread:f1")
     # The text still names every address.
     assert record.text.count("@example.test") == 1002

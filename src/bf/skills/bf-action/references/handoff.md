@@ -7,7 +7,7 @@ Use with an open action when handing work to another session or before a planned
 Run the checker with the action ref you will resume, optionally brain-qualified (`bf://NAME/actions/...`):
 
 ```bash
-python3 "$SKILL_DIR/scripts/check-handoff.py" 'actions/2026-09-27_website-review/ACTION.md' --brain ~/brain
+python3 SKILL_DIR/scripts/check-handoff.py 'actions/2026-09-27_website-review/ACTION.md' --brain ~/brain
 ```
 
 It reads `#context` and `#resume` with the installed `bf read`, offline, and replies with `checked`, `passed` and, per section, its exact `ref`, `words`, UTF-8 `bytes` and `limits`. Exit 0 means the sizes passed, 1 a failed check or an unavailable section, 2 invalid arguments. Headings count; an empty, missing or incomplete section, or one above the 32 KiB page budget, fails. It judges neither freshness, accuracy nor the six-ref convention: review those yourself, and rerun it after editing.

@@ -22,17 +22,17 @@ bf read projects/new-website.md
 bf validate
 ```
 
-The project's `backlinks` include the concept in the `cites` group: an OKF `sources` entry means “derived from”, unlike a plain mention. The body link to the same note adds no second entry. A link from a note without that source would appear in the `links` group, which holds untyped links. Validation catches a missing target.
+The project's `backlinks` include the concept in the `cites` group, because an OKF `sources` entry means “derived from”. The body link to the same note adds no second entry. Without that source, the link would appear in the `links` group of untyped links. Validation catches a missing target.
 
-Each group previews its five newest items. A relation page lists all of them, newest first, with an excerpt of each:
+Each group previews its five newest items. A relation page lists them all, newest first, with an excerpt of each:
 
 ```bash
 bf read projects/new-website.md --rel cites
 ```
 
-It returns `"relation":"cites"` and the concept among its `items`; `total` counts every item citing the project or its sections, such as the [review action](brain.md#actions) if you created it. `--rel links` lists untyped links the same way.
+It returns `"relation":"cites"` and the concept among its `items`. `total` counts every item citing the project or its sections, such as the [review action](brain.md#actions) if you created it. `--rel links` lists untyped links the same way.
 
-Relative links start from the containing file: `../projects/` goes up from `concepts/`, then into `projects/`. `#decision` selects the Decision section; write `## Decision {#decision}` to keep that address when the heading is renamed. Link upstream evidence by its URL, or a collected record by its ref, such as `[Product brief](brief:website-brief)`.
+Relative links start from the containing file: `../projects/` goes up from `concepts/`, then into `projects/`. `#decision` selects the Decision section; write `## Decision {#decision}` to keep that address when the heading is renamed. Link upstream evidence by its URL, and a collected record by its ref, such as `[Product brief](brief:website-brief)`. [Sections and encoding](link-reference.md#sections-and-encoding) cover anchors, special characters and spaces.
 
 ## Name a relation
 
@@ -42,7 +42,7 @@ A relation says what a connection means. For example, a website review action de
 [Website decision](bf://brain/projects/new-website.md?rel=depends-on#decision)
 ```
 
-A `bf://` address names a brain by the `name` in its `bf.yaml`, so it works in every clone. `?rel=` names the relation; only `bf://` links take it. Create the [example action](brain.md#actions), put that link in its Context section, then read both notes:
+A `bf://` address names a brain by the `name` in its `bf.yaml`, so it works in every clone. `?rel=` names the relation, and only `bf://` links take it. Create the [example action](brain.md#actions), put that link in its Context section, then read both notes:
 
 ```bash
 bf read projects/new-website.md
@@ -62,7 +62,7 @@ New brains declare four relations under `fields:` in `bf.yaml`:
 | `depends-on` | What it needs to operate or remain valid.          | `[Decision](bf://brain/projects/new-website.md?rel=depends-on#decision)` |
 | `related-to` | A connection with no more specific known relation. | `[Related project](bf://brain/projects/new-website.md?rel=related-to)`   |
 
-The Alice examples need the [person note](link-reference.md#bf-links). Use a plain Markdown link for a mention, and an OKF `sources` entry when the note derives from its target.
+The Alice examples need the [person note](link-reference.md#bf-links). For a mere mention, use a plain Markdown link; when the note derives from its target, use an OKF `sources` entry.
 
 ### Declare your own relation
 
@@ -84,7 +84,7 @@ Put this in the action's Outcome section after recording the actual check:
 [Checked project](bf://brain/projects/new-website.md?rel=verifies)
 ```
 
-`bf read projects/new-website.md --rel verifies` then lists the action. To list these checks on the project's `related-to` page too, add `broader: related-to` to `verifies`; see [narrower relations](schema.md#narrower-relations-and-allowed-targets). A link naming an undeclared relation stays searchable as an untyped link, and `bf validate` names the relation to declare.
+`bf read projects/new-website.md --rel verifies` then lists the action. To list these checks on the project's `related-to` page too, add `broader: related-to` to `verifies`; see [narrower relations](schema.md#narrower-relations-and-allowed-targets). A link naming an undeclared relation stays an untyped link, and `bf validate` names the relation to declare.
 
 - Write the link in the note making the claim: that note, or its entity, is the subject.
 - Keep supporting observations in the same section, so readers can inspect them.
@@ -99,9 +99,9 @@ fields:
   owner: [person:email/alice@example.test]
 ```
 
-`owner` is a relation, so the project now claims Alice as its owner, with the whole note as origin. `bf read person:email/alice@example.test --rel owner` lists the project. Values are checked like a record's: an identity must be a `scheme:value`, and a relation's `targets` apply. Each declared single-value field, such as a `status` string or a single-value relation, shows beside the note in listings and backlink previews when its value fits 200 characters.
+`owner` is a relation, so the project now claims Alice as its owner, with the whole note as origin. `bf read person:email/alice@example.test --rel owner` lists the project. Values are checked like a record's: an identity must be a `scheme:value`, and a relation's `targets` apply. A declared single-value field, such as a `status` string, shows beside the note in listings and backlink previews when its value fits [200 characters](limits.md#size-bounds).
 
-Write declared fields only under `fields:`. `bf validate` reports a declared relation written at the top of the frontmatter, such as `owner:`, because OKF would ignore it.
+Write declared fields only under `fields:`. OKF ignores unknown top-level keys, so `bf validate` reports a declared relation written there, such as `owner:`.
 
 ## Give a subject a stable identity
 
@@ -120,16 +120,16 @@ bf read bf://brain/projects/new-website
 bf read repo:github.com/example/new-website
 ```
 
-| Field      | Meaning                                                                                                                           |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `entity`   | The subject's own identity, usually a logical `bf://` name; it creates no folder, and the note's claims name it as their subject. |
-| `aliases`  | Other exact identities of the subject, such as a repository or an email address.                                                  |
-| `resource` | OKF: the URI of the asset the note describes. Links to that URI count as backlinks of the note.                                   |
+| Field      | Meaning                                                                                                                       |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `entity`   | The subject's own identity, usually a logical `bf://` name. It creates no folder; the note's claims name it as their subject. |
+| `aliases`  | Other exact identities of the subject, such as a repository or an email address.                                              |
+| `resource` | OKF: the URI of the asset the note describes. Links to that URI count as backlinks of the note.                               |
 
-Identities are case-sensitive: write them as your sensors emit them, such as lowercase GitHub owners. Each names a whole subject, so a BF `entity`, alias or `resource` stays in this brain's namespace and never names a `#section`, a note's file, a page or a record. No identity may hold an invisible format character, such as U+200B. `bf validate` reports those mistakes and [warns](checks.md#warnings) about identities that differ only by letter case. Declare only identities you have verified.
+Declare only identities you have verified. They are case-sensitive: write them as your sensors emit them, such as lowercase GitHub owners. `bf validate` checks the [identity rules](link-reference.md#identity-rules), such as naming a whole subject rather than a `#section`. It also [warns](checks.md#warnings) about identities that differ only by letter case.
 
 ## Connect records and other brains
 
 [Field mappings](schema.md#shared-fields-and-sensor-mappings) turn explicit provider fields, such as a commit's author identity, into relations. A field named `author` then connects a commit to a person's note without reading prose.
 
-To follow a link into another brain, include that brain in your [selection](configuration.md#related-brains). A `bf://` address never downloads a brain or grants access. The [link reference](link-reference.md) defines address syntax, encoding and cross-brain rules.
+To follow a link into another brain, include that brain in your [selection](configuration.md#related-brains). A `bf://` address never downloads a brain or grants access. The [link reference](link-reference.md) defines address syntax, encoding and [cross-brain rules](link-reference.md#across-brains).

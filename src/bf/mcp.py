@@ -124,7 +124,8 @@ def server(stores: list[Store] | Callable[[], list[Store]]) -> MCPServer:
             Field(
                 max_length=8192,
                 description="Optional bound: a folder or a whole note (projects, memories/gmail), a period (today, "
-                "7d, 2026-09, 2026-09-25, 2026-09-21..2026-09-25), an identity or an exact tag (bf://NAME/tags/LABEL).",
+                "7d, 2026-09, 2026-09-25, 2026-09-21..2026-09-25), an identity or an exact tag (bf://NAME/tags/LABEL); "
+                "a period, a space, then one other bound narrows it (7d repo:github.com/owner/name).",
             ),
         ] = "",
         limit: Annotated[

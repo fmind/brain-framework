@@ -15,20 +15,37 @@ version: 8
 name: brain
 ```
 
-`version` is the brain format of `bf.yaml`, `evals/*.yaml`, record files and the `memories/` layout; it is independent of the package version. A missing or different version fails before any other field, naming the supported one: `bf.yaml declares version 6; this release reads version: 8`. The changelog lists the upgrade steps of each format.
+`version` is the brain format of `bf.yaml`, `evals/*.yaml`, record files and the `memories/` layout. It is independent of the package version. A missing or different version fails before any other field, naming the supported one: `bf.yaml declares version 6; this release reads version: 8`. The changelog lists the upgrade steps of each format.
 
-Add `fields`, [sensors](sensors.md#sensor-settings), [routines](routines.md#routine-settings), [assistants](prompts.md#assistant-settings), [channels](channels.md), related `brains`, [watch preferences](schedule.md#watch-preferences) and a [`validate`](checks.md#validate) policy only as needed. `bf init` writes the version, the name and the [starter relations](links.md#choose-the-right-relation). A program's `command` starts with a bare command name found on PATH, or a normalized path below `sensors/` or `routines/` or `channels/`; absolute paths, other folders, `..` and placeholders there are errors.
+Add `fields`, [sensors](sensors.md#sensor-settings), [routines](routines.md#routine-settings), [assistants](prompts.md#assistant-settings), [channels](channels.md), related `brains`, [watch preferences](schedule.md#watch-preferences) and a [`validate`](checks.md#validate) policy only as needed. `bf init` writes the version, the name and the [starter relations](links.md#choose-the-right-relation).
+
+A program's `command` starts with either:
+
+- a bare command name found on PATH;
+- or a normalized path below `sensors/`, `routines/` or `channels/`.
+
+Absolute paths, other folders, `..` and placeholders in that first position are errors.
 
 ## Program names
 
-Sensors, routines and assistants are named by their keys in `bf.yaml`, and each name is unique across all three: programs share logs and locks by name, and a sensor's or assistant's name is also the source of its records, as in `brief:website-brief`. A clash fails naming both entries, such as `sensors.mail and assistants.mail: program names must be distinct`.
+Sensors, routines and assistants are named by their keys in `bf.yaml`. Each name is unique across all three, because:
+
+- programs share logs and locks by name;
+- a sensor's or assistant's name is also the source of its records, as in `brief:website-brief`.
+
+A clash fails naming both entries, such as `sensors.mail and assistants.mail: program names must be distinct`.
 
 | Program                    | Name                                                                                                                                         |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | Sensor, assistant, channel | A lowercase letter, then lowercase letters, digits or hyphens.                                                                               |
 | Routine                    | Lowercase letters and digits in words joined by single hyphens, starting with a letter; it also names the action folders the routine writes. |
 
-No program, whether sensor, routine, channel or assistant, may be named `bf`: refs starting with `bf:` read as [BF addresses](link-reference.md#bf-links), so a sensor's or assistant's records could not be read by ref. `bf.yaml` then fails to load, as `sensors.bf: the name bf is reserved for BF addresses; rename the sensor and move memories/bf/ to its new name`, and records left in `memories/bf/` are skipped and reported until you move them. [Limits](limits.md#size-bounds) gives the length bound.
+No program, whether sensor, routine, channel or assistant, may be named `bf`. Refs starting with `bf:` read as [BF addresses](link-reference.md#bf-links), so a sensor's or assistant's records could not be read by ref.
+
+- `bf.yaml` then fails to load, as `sensors.bf: the name bf is reserved for BF addresses; rename the sensor and move memories/bf/ to its new name`.
+- Records left in `memories/bf/` are skipped and reported until you move them.
+
+[Limits](limits.md#size-bounds) gives the length bound.
 
 ## Editor schemas
 
@@ -48,23 +65,43 @@ Their `title` values are `Config`, `UserConfig` and `Suite`. `--kind search-repl
 | Machine registry `bf/config.yaml` | [Registry](../registry.schema.json) |
 | `evals/*.yaml`                    | [Evaluation](../eval.schema.json)   |
 
-The schemas check names, types, limits and structure. BF also checks meanings that depend on the brain, such as declared fields, distinct program names and valid identities: run `bf validate` and `bf update --dry-run`. YAML parsing rejects duplicate keys, anchors, aliases, unsafe tags and oversized documents. Configuration and frontmatter follow the YAML 1.2 core schema: only `true` and `false`, also spelled `True`, `TRUE`, `False` or `FALSE`, are booleans, so `on` and `no` are strings, `017` is decimal and `1:30` is text.
+The schemas check names, types, limits and structure. BF also checks meanings that depend on the brain, such as declared fields, distinct program names and valid identities: run `bf validate` and `bf update --dry-run`.
+
+YAML parsing rejects duplicate keys, anchors, aliases, unsafe tags and oversized documents. Configuration and frontmatter follow the YAML 1.2 core schema:
+
+- Only `true` and `false`, also spelled `True`, `TRUE`, `False` or `FALSE`, are booleans.
+- `on` and `no` are strings.
+- `017` is decimal.
+- `1:30` is text.
 
 ## Note format
 
 Projects, concepts and `ACTION.md` notes are OKF notes. [Write notes and actions](brain.md#notes) describes their fields; these rules settle edge cases:
 
-- `type` must be nonempty; `status`, when set, must be `draft`, `stable` or `deprecated`, and omitted means `stable`. `bf validate` enforces both.
-- Frontmatter must be valid YAML closed by a `---` line, and the title must be nonblank and at most 4,096 characters. A note breaking either rule is invalid and unsearchable, reported under `problems`.
-- A frontmatter key with an invalid value, such as `tags` that is not a list or `updated` that is not a real `YYYY-MM-DD`, also makes the note invalid and unsearchable. So does a link that cannot be parsed, such as `http://[your-host]/` or a `bf://` link with malformed encoding, another query key or an empty `#` fragment; the problem names its `line N` or frontmatter key, such as `links`.
+- `type` must be nonempty. `status`, when set, must be `draft`, `stable` or `deprecated`; omitted means `stable`. `bf validate` enforces both.
+- Frontmatter must be valid YAML closed by a `---` line. The title must be nonblank and at most 4,096 characters. A note breaking either rule is invalid and unsearchable, reported under `problems`.
+- A frontmatter key with an invalid value also makes the note invalid and unsearchable, such as `tags` that is not a list or `updated` that is not a real `YYYY-MM-DD`.
+- So does a link that cannot be parsed, such as `http://[your-host]/` or a `bf://` link with malformed encoding, another query key or an empty `#` fragment. The problem names its `line N` or frontmatter key, such as `links`.
 - `stale_after` is an ISO 8601 date-time with a timezone; a date alone is invalid.
-- `aliases` are namespaced `scheme:value` identities, never display names. A URI in `resource` is an identity too. Entities, aliases and resources follow the [identity rules](link-reference.md#identity-rules); `aliases`, `links` and `tags` hold at most 1,000 items each.
-- `fields` holds values of fields declared in `bf.yaml`, checked like a record's: an invalid value claims nothing and fails `bf validate`, while the note stays searchable. A declared relation written at the top level instead is reported, because OKF ignores unknown keys.
-- `sources` entries need a nonempty `resource`. Only one written as a [link](link-reference.md#relation-links), without spaces, is cited and checked; other text may describe a population. `verified` events need `by` and `at`.
+- `aliases` are namespaced `scheme:value` identities, never display names. A URI in `resource` is an identity too.
+- Entities, aliases and resources follow the [identity rules](link-reference.md#identity-rules).
+- `aliases`, `links` and `tags` hold at most 1,000 items each.
+- `fields` holds values of fields declared in `bf.yaml`, checked like a record's. An invalid value claims nothing and fails `bf validate`, while the note stays searchable.
+- A declared relation written at the top level instead of under `fields` is reported, because OKF ignores unknown keys.
+- `sources` entries need a nonempty `resource`. Only one written as a [link](link-reference.md#relation-links), without spaces, is cited and checked; other text may describe a population.
+- `verified` events need `by` and `at`.
 
 In `projects/` and `concepts/`, `index.md` lists a folder's notes and permits only `okf_version` at a folder root; `log.md` groups changes under `YYYY-MM-DD` headings without frontmatter. Neither gets reminders or tasks.
 
-Other Markdown, such as files in an action's `inputs/` and `outputs/`, stays ordinary: only valid `title`, `type`, `status` (any word), `updated`, `summary` and `description` apply. Identities, tags, fields, `sources` and `stale_after` apply only to OKF notes, so a copied document cannot claim an identity. Ordinary frontmatter that is not valid YAML is ignored and the file is searched without it, a block that never closes is searched as text, and a title longer than 4,096 characters, or blank, gives way to the file name. A link URL that cannot be parsed, such as `http://[your-host]/`, connects nothing while the file stays searchable; a malformed `bf://` link still makes it invalid.
+Other Markdown, such as files in an action's `inputs/` and `outputs/`, stays ordinary:
+
+- Only valid `title`, `type`, `status` (any word), `updated`, `summary` and `description` apply.
+- Identities, tags, fields, `sources` and `stale_after` apply only to OKF notes, so a copied document cannot claim an identity.
+- Frontmatter that is not valid YAML is ignored, and the file is searched without it.
+- A frontmatter block that never closes is searched as text.
+- A title longer than 4,096 characters, or blank, gives way to the file name.
+- A link URL that cannot be parsed, such as `http://[your-host]/`, connects nothing while the file stays searchable.
+- A malformed `bf://` link still makes the file invalid.
 
 In OKF and ordinary Markdown alike, Git conflict markers (`<<<<<<<`, `|||||||`, `>>>>>>>`) at the start of a line make the file invalid and unsearchable, even inside a code block: indent them by one space to show them. A leading byte order mark is ignored.
 
@@ -79,15 +116,33 @@ A source keeps one record per id. Collecting the same id again replaces it; its 
 | `attributes.observed` | When BF first collected this revision.           | BF received the edit 15 minutes later.     |
 | `attributes.partial`  | `true` when the text is deliberately incomplete. | The sensor kept only an excerpt.           |
 
-These timestamps need a timezone. The edited message stays in its event period and appears in the `changed` list of the day it was modified. Like a new event, an upstream edit made after a linked note's last edit flags that note for [review](retrieval.md#ordering-and-review-signals); `observed` never does. Collection keeps `observed` while the content is unchanged. When both revisions declare `updated`, an older revision cannot replace a newer one, unless the stored revision's `updated` is later than its `observed`, as from a clock or file date in the future: such a revision never freezes the record.
+These timestamps need a timezone.
+
+- The edited message stays in its event period and appears in the `changed` list of the day it was modified.
+- Like a new event, an upstream edit made after a linked note's last edit flags that note for [review](retrieval.md#ordering-and-review-signals). `observed` never does.
+- Collection keeps `observed` while the content is unchanged.
+- When both revisions declare `updated`, an older revision cannot replace a newer one.
+- That rule skips a stored revision whose `updated` is later than its `observed`, as from a clock or file date in the future: such a revision never freezes the record.
 
 `updated`, `observed` and `partial` are reserved: BF validates their types and sets `observed`. Map provider fields to them explicitly, such as Drive's `modifiedTime` to `updated`, rather than passing a raw payload.
 
-Only `<sha256-id>.json` files under `memories/SOURCE/` are records. A file whose id does not match its name is invalid: `bf validate` reports it, search skips it and collection never replaces or removes it. `bf validate` also reports other visible files under `memories/`.
+Only `<sha256-id>.json` files under `memories/SOURCE/` are records. A file whose id does not match its name is invalid:
+
+- `bf validate` reports it;
+- search skips it;
+- collection never replaces or removes it.
+
+`bf validate` also reports other visible files under `memories/`.
 
 ## Shared fields and sensor mappings
 
-Fields give provider-specific values a shared meaning. You declare them under `fields:` in `bf.yaml`; each sensor's `fields` maps its output into them; collection validates the values and builds the declared relations. The [four-tool example](context-hub.md#how-the-four-tools-share-one-project) maps four differently named project fields to one identity. BF never learns fields or infers identities from prose.
+Fields give provider-specific values a shared meaning:
+
+1. You declare them under `fields:` in `bf.yaml`.
+2. Each sensor's `fields` maps its output into them.
+3. Collection validates the values and builds the declared relations.
+
+The [four-tool example](context-hub.md#how-the-four-tools-share-one-project) maps four differently named project fields to one identity. BF never learns fields or infers identities from prose.
 
 For example, map a Git record's author identities to `author`, and label its kind:
 
@@ -115,13 +170,47 @@ sensors:
       kind: { value: commit }
 ```
 
-For a commit by Alice, the reviewed [Git history sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/git-history.py) prints `"attributes": {"author_refs": ["person:email/alice@example.test"]}`; the address is fictional, since the sensor itself skips commits by authors at reserved test domains such as `example.test`. BF stores `"fields": {"author": ["person:email/alice@example.test"], "kind": "commit"}` in the record, and `author` becomes a relation from the commit to Alice's identity.
+For a commit by Alice, the reviewed [Git history sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/git-history.py) prints `"attributes": {"author_refs": ["person:email/alice@example.test"]}`. The address is fictional: the sensor itself skips commits by authors at reserved test domains such as `example.test`. BF stores `"fields": {"author": ["person:email/alice@example.test"], "kind": "commit"}` in the record, and `author` becomes a relation from the commit to Alice's identity.
+
+### Standard vocabulary
+
+Sensors written by different people line up when they print the same attribute names. `bf init` declares these fields with a default `path`, so a sensor printing them needs no `fields:` setting in a new brain:
+
+| Field         | Type, cardinality        | Default path                   | Meaning                                                                             |
+| ------------- | ------------------------ | ------------------------------ | ----------------------------------------------------------------------------------- |
+| `author`      | identity, many, relation | `/attributes/author_refs`      | Account explicitly credited as author; not ownership.                               |
+| `owner`       | identity, many, relation | `/attributes/owner_refs`       | Account or organization the provider declares responsible.                          |
+| `assignee`    | identity, many, relation | `/attributes/assignee_refs`    | Account assigned responsibility for the item.                                       |
+| `participant` | identity, many, relation | `/attributes/participant_refs` | Any account in a message, event or meeting, including the roles below.              |
+| `sender`      | identity, many, relation | `/attributes/sender_refs`      | Account that sent the message; narrower than `participant`.                         |
+| `recipient`   | identity, many, relation | `/attributes/recipient_refs`   | Direct recipients, without copies; narrower than `participant`.                     |
+| `cc`          | identity, many, relation | `/attributes/cc_refs`          | Accounts copied on a message; narrower than `participant`.                          |
+| `organizer`   | identity, many, relation | `/attributes/organizer_refs`   | Organizer declared by a calendar; narrower than `participant`.                      |
+| `attendee`    | identity, many, relation | `/attributes/attendee_refs`    | Accounts listed as attendees, not proof of attendance; narrower than `participant`. |
+| `repository`  | identity, many, relation | `/attributes/repository_refs`  | Repository the item belongs to.                                                     |
+| `project`     | identity, many, relation | `/attributes/project_refs`     | Project the source names for the item.                                              |
+| `kind`        | string, one              | `/attributes/kind`             | Provider-declared kind within a source mixing several kinds.                        |
+| `status`      | string, one              | `/attributes/status`           | The item's state in its own tool.                                                   |
+
+`bf init` also declares the note relations `depends-on`, `related-to` and `supersedes`, without a path. Identity values follow the formats the reviewed sensors use: `person:email/` with a lowercase address, `person:HOST/LOGIN` for a provider account such as `person:github.com/octocat`, and lowercase `repo:HOST/OWNER/NAME`. A sensor's own `fields:` mapping still overrides a default path, as the [four-tool example](context-hub.md#how-the-four-tools-share-one-project) shows for differently named project fields. A default path applies to every sensor of the brain: a sensor printing `attributes.status` as an object, or `author_refs` as a single string, fails its whole collection until it prints the declared type or the field's path changes. A brain created before this vocabulary keeps its own fields: add the rows it lacks to use sensors that print them.
 
 ### Types and cardinality
 
-Every field needs a `description` and a `type`: `string`, `integer`, `number`, `boolean`, `timestamp` or `identity`. Defaults are `cardinality: optional`, `relation: false` and no `examples`. A relation needs `type: identity`. Field names start with a lowercase letter and hold lowercase letters, digits or hyphens, up to 64 characters. `tagged-with`, `links` and `cites` are reserved.
+| Setting       | Rule                                                                                                                                                 |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `description` | Required.                                                                                                                                            |
+| `type`        | Required: `string`, `integer`, `number`, `boolean`, `timestamp` or `identity`.                                                                       |
+| `cardinality` | `one`, `optional` or `many`; defaults to `optional`.                                                                                                 |
+| `relation`    | Defaults to `false`. A relation needs `type: identity`.                                                                                              |
+| `examples`    | None by default.                                                                                                                                     |
+| Field name    | Starts with a lowercase letter and holds lowercase letters, digits or hyphens, up to 64 characters. `tagged-with`, `links` and `cites` are reserved. |
 
-Types are strict: `"42"` is a string, not a number. Strings are nonempty, without control characters, up to 8,192 characters. A timestamp needs a timezone. An identity is an exact, case-sensitive `scheme:value` without invisible characters, as the [identity rules](link-reference.md#identity-rules) define; sensors normalize it, such as lowercasing an email address.
+Types are strict:
+
+- `"42"` is a string, not a number.
+- Strings are nonempty, without control characters, up to 8,192 characters.
+- A timestamp needs a timezone.
+- An identity is an exact, case-sensitive `scheme:value` without invisible characters, as the [identity rules](link-reference.md#identity-rules) define. Sensors normalize it, such as lowercasing an email address.
 
 | Cardinality | Mapped value                                                                                            |
 | ----------- | ------------------------------------------------------------------------------------------------------- |
@@ -129,7 +218,9 @@ Types are strict: `"42"` is a string, not a number. Strings are nonempty, withou
 | `optional`  | One value when present; missing or null omits the field.                                                |
 | `many`      | A list of up to 1,000 values, duplicates removed; missing or null omits it, an empty list records none. |
 
-A note's `fields` follow the same types and cardinality, which `bf validate` checks; only collection requires a `one` value, so a note may omit it. Each example is a complete field value checked against the type and cardinality; examples never supply defaults. Listings and backlink previews show single-value fields of up to 200 characters, so sources that disagree appear side by side.
+- A note's `fields` follow the same types and cardinality, which `bf validate` checks. Only collection requires a `one` value, so a note may omit it.
+- Each example is a complete field value checked against the type and cardinality. Examples never supply defaults.
+- Listings and backlink previews show single-value fields of up to 200 characters, so sources that disagree appear side by side.
 
 ### Narrower relations and allowed targets
 
@@ -160,7 +251,7 @@ fields:
 | `broader` | Another declared relation without its own `broader`. It changes relation pages at read time, never stored records.                                                                                                                                                                    |
 | `targets` | 1 to 64 quoted prefixes, each a scheme, a colon and optionally the start of the value, such as `repo:github.com/`. Collected values and record links must start with one as written; a note's typed links and fields may also name a target whose owner declares a matching identity. |
 
-With `targets`, a collection whose mapped value falls outside them fails before saving, naming the record's position and field, never the value: `record 3: field organizer: identity outside the declared targets`. `bf validate` reports stored records, note fields and typed links outside them.
+With `targets`, a collection whose mapped value falls outside them fails before saving. The error names the record's position and field, never the value: `record 3: field organizer: identity outside the declared targets`. `bf validate` reports stored records, note fields and typed links outside them.
 
 ### Mapping rules
 
@@ -172,7 +263,11 @@ Each sensor's `fields` maps a declared field to exactly one `path` or literal `v
 | `/links`                  | The record's link list.              |
 | `/attributes/people/0`    | The first item in the `people` list. |
 
-Escape `/` in a key as `~1` and `~` as `~0`. Missing members are absent; traversing a scalar fails. There are no wildcards, expressions or implicit conversions. Every record a sensor prints follows the fixed format below; a sensor cannot supply `fields` itself.
+- Escape `/` in a key as `~1` and `~` as `~0`.
+- Missing members are absent; traversing a scalar fails.
+- There are no wildcards, expressions or implicit conversions.
+
+Every record a sensor prints follows the fixed format below. A sensor cannot supply `fields` itself.
 
 | Record key   | Rule                                                                                                                                                                                                  |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -185,7 +280,11 @@ Escape `/` in a key as `~1` and `~` as `~0`. Missing members are absent; travers
 | `aliases`    | Namespaced identities, never display names, following the [identity rules](link-reference.md#identity-rules).                                                                                         |
 | `attributes` | JSON values; `updated`, `observed` and `partial` are [reserved](#record-revisions-and-provenance).                                                                                                    |
 
-[Limits](limits.md#size-bounds) bounds each key's length and count, and the size of the fields other than `text`, including the mapped `fields` and the `observed` time BF adds. Text must be valid Unicode: a lone surrogate, as from a non-UTF-8 file name, is rejected with its field named. One invalid record fails the whole collection before anything is saved, and the error names the first one, such as `1.id: Field required`. Only mapped fields apply to a sensor, and `bf validate` checks stored fields against the current declarations, including sources no longer configured.
+- [Limits](limits.md#size-bounds) bounds each key's length and count, and the size of the fields other than `text`, including the mapped `fields` and the `observed` time BF adds.
+- Text must be valid Unicode: a lone surrogate, as from a non-UTF-8 file name, is rejected with its field named.
+- One invalid record fails the whole collection before anything is saved. The error names the first one, such as `1.id: Field required`.
+- Only mapped fields apply to a sensor.
+- `bf validate` checks stored fields against the current declarations, including sources no longer configured.
 
 ## Graph and evidence
 
@@ -196,9 +295,18 @@ bf read person:email/alice@example.test
 bf search "website" --scope person:email/alice@example.test
 ```
 
-The read groups incoming links by relation, such as `author`, with their supporting records. The search covers the identity's owning note and the evidence linked to it. Each `relation: true` field creates claims from the record to its identity values, keeping the record as their origin. Field values are searchable; field names and `attributes` are not.
+The read groups incoming links by relation, such as `author`, with their supporting records. The search covers the identity's owning note and the evidence linked to it.
 
-The graph lives in the disposable cache. Replacing a record replaces its claims, and structural changes to `fields:`, such as a `type` or `cardinality`, rebuild the cache; `description`, `examples`, `broader` and `targets` apply without one. A field no longer declared as a relation adds no claims; `bf validate` names stored values the current fields reject. [`bf export`](commands.md#export-the-graph) prints every claim.
+- Each `relation: true` field creates claims from the record to its identity values, keeping the record as their origin.
+- Field values are searchable; field names and `attributes` are not.
+
+The graph lives in the disposable cache. [`bf export`](commands.md#export-the-graph) prints every claim.
+
+- Replacing a record replaces its claims.
+- Structural changes to `fields:`, such as a `type` or `cardinality`, rebuild the cache.
+- `description`, `examples`, `broader` and `targets` apply without a rebuild.
+- A field no longer declared as a relation adds no claims.
+- `bf validate` names stored values the current fields reject.
 
 ### Reproject stored records
 
@@ -209,8 +317,20 @@ bf build --reproject git-commits --dry-run
 bf build --reproject git-commits
 ```
 
-For example, after renaming `author` to `creator` in `fields:` and in the sensor's mapping, `bf validate` reports `field author is not declared in bf.yaml fields` for each stored commit. The preview counts the changes without writing, such as `{"sensor":"git-commits","dry_run":true,"records":2,"changed":2,"unchanged":0,"failed":0}`. The second command rewrites those records' `fields` and refreshes the cache; validation then passes and `bf read person:email/alice@example.test --rel creator` lists the commits.
+For example, rename `author` to `creator` in `fields:` and in the sensor's mapping:
 
-Reprojection reads each record as its sensor printed it and keeps every other value, including `observed`; it never removes a record. It cannot map a value the sensor never printed: a record the mappings reject keeps its fields, counts as `failed` and appears under `problems` (up to 200, then `"problems_truncated":true`), and the command exits 1.
+1. `bf validate` reports `field author is not declared in bf.yaml fields` for each stored commit.
+2. The preview counts the changes without writing, such as `{"sensor":"git-commits","dry_run":true,"records":2,"changed":2,"unchanged":0,"failed":0}`.
+3. The second command rewrites those records' `fields` and refreshes the cache.
+4. Validation then passes, and `bf read person:email/alice@example.test --rel creator` lists the commits.
 
-Recollect those records after updating the sensor. Changes commit in transactions of up to 1,000 records; after an interruption, `bf build` recovers and a rerun completes the reprojection.
+Reprojection reads each record as its sensor printed it and keeps every other value, including `observed`. It never removes a record.
+
+It cannot map a value the sensor never printed. A record the mappings reject:
+
+- keeps its fields;
+- counts as `failed`;
+- appears under `problems` (up to 200, then `"problems_truncated":true`);
+- makes the command exit 1.
+
+Recollect those records after updating the sensor. Changes commit in transactions of up to 1,000 records. After an interruption, `bf build` recovers and a rerun completes the reprojection.

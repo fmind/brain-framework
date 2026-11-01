@@ -78,7 +78,7 @@ def test_github_old_closed_issues_and_merged_pulls_are_separate(provider: Provid
             ],
         )
         [record] = provider.records("github-history.py", "example/project", kind, START, END)
-        assert record.attributes["state"] == expected
+        assert record.attributes["status"] == expected
         assert record.time.startswith("2015-01-01")
         assert record.updated.startswith("2026-09-01")
         assert "inspect the evidence" in record.text
@@ -194,7 +194,7 @@ def test_github_pull_state_comes_from_the_listing(provider: Provider) -> None:
     pulls = [pull(1, "closed", START), pull(2, "closed", None), pull(3, "open", None), ISSUE]
     provider.install("gh", [{"match": ["issues"], "stdout": response(pulls)}])
     records = provider.records("github-history.py", "example/project", "pulls", START, END)
-    assert [(record.id, record.attributes["state"]) for record in records] == [
+    assert [(record.id, record.attributes["status"]) for record in records] == [
         ("example/project/pulls/1", "merged"),
         ("example/project/pulls/2", "closed"),
         ("example/project/pulls/3", "open"),

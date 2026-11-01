@@ -69,6 +69,8 @@ class _Run(Model):
     updated: int = Field(default=0, ge=0)
     unchanged: int = Field(default=0, ge=0)
     removed: int = Field(default=0, ge=0)
+    forgotten: int = Field(default=0, ge=0)
+    expired: int = Field(default=0, ge=0)
     requested_start: str = ""
     requested_end: str = ""
     reconciled: str = ""

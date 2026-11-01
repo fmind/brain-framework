@@ -7,7 +7,7 @@ import re
 import time
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import ExitStack, suppress
+from contextlib import AbstractContextManager, ExitStack, suppress
 from datetime import UTC, datetime, timedelta
 from threading import Event
 from typing import cast
@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from pydantic import JsonValue, ValidationError
 
-from bf import channels, records
+from bf import channels, ontology, records
 from bf.collect import (
     MAX_ARGUMENT,
     RUN_ID,
@@ -23,6 +23,7 @@ from bf.collect import (
     Runner,
     arguments,
     enabled,
+    exposing,
     home_folder,
     parse_reply,
     reply_title,
@@ -42,6 +43,7 @@ from bf.models import (
     ReplyOutput,
     Send,
     Stream,
+    decode,
     digest,
     encode,
     timestamp,
@@ -65,6 +67,8 @@ _TEMPLATE = re.compile(r"\{\{(brain|home|start|end|input|context)\}\}")
 SCHEDULING = {"inputs", "schedules", "keep", "idempotent"}
 # Seconds a dispatcher leaves work that was busy, waiting for space or failing to start before trying it again.
 BACKOFF = 10
+# A harness status an error may name: a bare word carries no provider text.
+_STATUS_WORD = re.compile(r"[A-Za-z_]{1,32}")
 
 
 class StreamStoppedError(Error):
@@ -186,10 +190,15 @@ def accept(
     queue.admit(channel, messages, jobs, checkpoint=checkpoint)
 
 
+def _schedule(work: Work) -> str:
+    """The name of the schedule that queued `work`, or ""."""
+    return work.slot.removeprefix("schedule:") if work.kind == "schedule" and work.slot.startswith("schedule:") else ""
+
+
 def _body(store: Store, work: Work, history: list[dict[str, str]] | None) -> str:
     context: dict[str, object] = {"kind": work.kind, "start": work.start, "end": work.end}
-    if work.kind == "schedule" and work.slot.startswith("schedule:"):
-        context["schedule"] = work.slot.removeprefix("schedule:")
+    if schedule := _schedule(work):
+        context["schedule"] = schedule
     if work.origin is not None:
         # The text reaches the prompt once: through {{input}} when the template uses it, otherwise here.
         hidden = {"cursor", "text"} if "{{input}}" in work.template else {"cursor"}
@@ -237,6 +246,42 @@ def expanded(store: Store, work: Work, queue: Queue | None = None) -> tuple[list
     if passed and max(len(os.fsencode(argument)) for argument in argv) > MAX_ARGUMENT:
         raise Error("the argument holding the prompt exceeds Linux's 128 KiB limit")
     return argv, b"" if passed else body.encode()
+
+
+def _verdict(raw: bytes, work: Work) -> None:
+    """Fail an attempt whose harness reported its own failure; the error names at most a bare status word."""
+    status = work.settings.status
+    if status is None:
+        return
+    try:
+        document = decode(raw)
+        value = ontology.pointer(cast(JsonValue, document), status.path) if isinstance(document, dict) else None
+    except Error:
+        value = None
+    if any(type(value) is type(accepted) and value == accepted for accepted in status.success):
+        return
+    if value is None:
+        raise Error(f"assistant harness reported no status at {status.path}; see {log_path(work.assistant)}")
+    if isinstance(value, bool):
+        word = "true" if value else "false"
+    elif isinstance(value, str) and _STATUS_WORD.fullmatch(value):
+        word = value
+    else:
+        raise Error(f"assistant harness reported an unexpected status; see {log_path(work.assistant)}")
+    raise Error(f"assistant harness reported status {word}; see {log_path(work.assistant)}")
+
+
+def _exposed(work: Work) -> AbstractContextManager[None]:
+    """The run's trigger, schedule and window as BF_* variables for its harness."""
+    return exposing(BF_TRIGGER=work.kind, BF_SCHEDULE=_schedule(work), BF_START=work.start, BF_END=work.end)
+
+
+def _attempt(store: Store, work: Work, runner: Runner, argv: list[str], stdin: bytes) -> bytes:
+    """Run the harness once, telling it why it runs; a failure it reports itself fails the attempt."""
+    with _exposed(work):
+        raw = runner(argv, work.settings, store, work.assistant, stdin)
+    _verdict(raw, work)
+    return raw
 
 
 def _current(store: Store, work: Work, *, started: bool) -> None:
@@ -293,7 +338,7 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                 if not queue.claim(key):
                     raise Error("assistant job is no longer pending; inspect bf queue")
                 queue.lifecycle("assistant.started", work.assistant, {"job": key, "kind": work.kind})
-                queue.answer(key, runner(argv, work.settings, store, work.assistant, stdin))
+                queue.answer(key, _attempt(store, work, runner, argv, stdin))
                 row = queue.get(key)
             if row["state"] == "answered":
                 reply, metadata = parse_reply(cast(bytes, row["raw"]), work.settings.text)
@@ -487,7 +532,7 @@ def manual(
     try:
         if dry_run:
             argv, stdin = expanded(store, work)
-            reply, _ = parse_reply(runner(argv, work.settings, store, work.assistant, stdin), work.settings.text)
+            reply, _ = parse_reply(_attempt(store, work, runner, argv, stdin), work.settings.text)
             result.update(text=reply)
         else:
             queue = Queue(store)

@@ -28,7 +28,7 @@ from pydantic import ValidationError
 from typer.completion import completion_init
 from typer.core import TyperCommand, TyperGroup, TyperOption
 
-from bf import __version__, assistants, channels, health, index, pages
+from bf import __version__, assistants, channels, health, index, pages, records
 from bf.collect import collect, hooked
 from bf.collect import reproject as remap
 from bf.config import execution, load, one, register, select
@@ -50,9 +50,10 @@ from bf.models import (
     moment,
     present,
     printable,
+    suggest,
     terminal,
 )
-from bf.retrieve import edges, identities, read, search
+from bf.retrieve import edges, identities, items, read, search
 from bf.runtime import Queue
 from bf.schemas import Kind, document
 from bf.storage import Store, expand, relative, writer
@@ -268,6 +269,77 @@ def _vacant(directory: Path) -> None:
         raise Error("initialization requires a new, empty or freshly cloned directory")
 
 
+# The standard vocabulary (docs/docs/schema.md#standard-vocabulary): sensors that print these attributes plug into a
+# new brain without mappings, and notes link with the relations at the end.
+_PEOPLE = {
+    "author": "Account explicitly credited as author; authorship is not ownership.",
+    "owner": "Account or organization the provider declares responsible for the item.",
+    "assignee": "Account assigned responsibility for the item.",
+    "participant": "Any account in a message, event or meeting; the specific roles list here too.",
+}
+_ROLES = {
+    "sender": "Account that sent the message.",
+    "recipient": "Direct recipients; excludes copy recipients.",
+    "cc": "Accounts explicitly copied on a message.",
+    "organizer": "Organizer declared by the calendar provider.",
+    "attendee": "Accounts listed as attendees; not proof of attendance.",
+}
+STANDARD_FIELDS = {
+    **{
+        name: SchemaField(
+            description=description,
+            type="identity",
+            cardinality="many",
+            relation=True,
+            path=f"/attributes/{name}_refs",
+        )
+        for name, description in _PEOPLE.items()
+    },
+    **{
+        name: SchemaField(
+            description=description,
+            type="identity",
+            cardinality="many",
+            relation=True,
+            broader="participant",
+            path=f"/attributes/{name}_refs",
+        )
+        for name, description in _ROLES.items()
+    },
+    "repository": SchemaField(
+        description="Repository the item belongs to.",
+        type="identity",
+        cardinality="many",
+        relation=True,
+        path="/attributes/repository_refs",
+    ),
+    "project": SchemaField(
+        description="Project the source names for the item.",
+        type="identity",
+        cardinality="many",
+        relation=True,
+        path="/attributes/project_refs",
+    ),
+    "kind": SchemaField(
+        description="Provider-declared kind of item within a source that mixes several kinds.",
+        type="string",
+        cardinality="one",
+        path="/attributes/kind",
+    ),
+    "status": SchemaField(
+        description="The item's state in its own tool.", type="string", cardinality="one", path="/attributes/status"
+    ),
+    **{
+        name: SchemaField(description=description, type="identity", cardinality="many", relation=True)
+        for name, description in {
+            "depends-on": "The subject requires the target to operate or remain valid.",
+            "related-to": "An explicit association without a more specific known relation.",
+            "supersedes": "The subject replaces the target, which remains historical evidence.",
+        }.items()
+    },
+}
+
+
 @app.command("init", rich_help_panel="Set up")
 def initialize(
     path: Annotated[
@@ -289,19 +361,7 @@ def initialize(
     path = expand(path)
     # Only an omitted --name derives one: an empty or blank value is invalid, never the directory's name.
     name = _derived(path.resolve().name) if name is None else _name(name)
-    config = Config(
-        version=FORMAT,
-        name=name,
-        fields={
-            relation: SchemaField(description=description, type="identity", cardinality="many", relation=True)
-            for relation, description in {
-                "author": "Person explicitly credited as author; not ownership.",
-                "owner": "Person or organization explicitly responsible for the subject.",
-                "depends-on": "The subject requires the target to operate or remain valid.",
-                "related-to": "An explicit association without a more specific known relation.",
-            }.items()
-        },
-    )
+    config = Config(version=FORMAT, name=name, fields=STANDARD_FIELDS)
     if path.exists():
         _vacant(path)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -313,7 +373,7 @@ def initialize(
             "bf.yaml",
             (
                 "# https://fmind.github.io/brain-framework/\n"
-                + yaml.safe_dump(config.model_dump(by_alias=True, exclude_defaults=True), sort_keys=False)
+                + yaml.safe_dump(config.model_dump(by_alias=True, exclude_defaults=True), sort_keys=False, width=1000)
             ).encode(),
         )
         for target, source in STARTER.items():
@@ -422,7 +482,9 @@ def find(
     scope: Annotated[
         str,
         typer.Option(
-            help="Search within a folder or a whole note (projects, memories/gmail), a period (today, 7d, 2026-09, 2026-09-21..2026-09-25), an identity or a tag (bf://NAME/tags/LABEL)."
+            help="Search within a folder or a whole note (projects, memories/gmail), a period (today, 7d, 2026-09, "
+            "2026-09-21..2026-09-25), an identity or a tag (bf://NAME/tags/LABEL); a period, a space, then another "
+            "scope narrows it, as in '7d repo:github.com/owner/name'."
         ),
     ] = "",
     limit: Annotated[int, typer.Option(min=1, max=50, help="Maximum number of results.")] = 10,
@@ -466,17 +528,17 @@ def exact(
 @app.command("export", rich_help_panel="Find and read")
 def export(
     kind: Annotated[
-        Literal["edges", "identities"],
+        Literal["edges", "identities", "items"],
         typer.Option(
             help="edges: one claim per line; identities: each note or record that answers to more than its own "
-            "address, with every name."
+            "address, with every name; items: each note and record with its metadata, fields and text."
         ),
     ] = "edges",
     brain: BrainOption = "",
 ) -> None:
     """Print the graph of the selected brains as JSON Lines from their caches; exit 1 when evidence was skipped."""
     with ExitStack() as stack:
-        stream, extra = {"edges": edges, "identities": identities}[kind](select(brain), stack)
+        stream, extra = {"edges": edges, "identities": identities, "items": items}[kind](select(brain), stack)
         for row in stream:
             _write(terminal(present(row)), flush=False)
         _write(b"")
@@ -510,6 +572,15 @@ def capture(
             "than 10 records.",
         ),
     ] = False,
+    input_file: Annotated[
+        str,
+        typer.Option(
+            "--input",
+            metavar="FILE",
+            help="Check saved sensor output (FILE, or - for stdin) with this sensor's mappings instead of running it; "
+            "previews like --dry-run and saves no record.",
+        ),
+    ] = "",
 ) -> None:
     """Run one sensor now, for a backfill or to debug a collector."""
     now = datetime.now(UTC)
@@ -525,7 +596,75 @@ def capture(
         raise typer.BadParameter(
             "must be later than the start; set --since for a historical window", param_hint="--until"
         )
-    emit(collect(store, sensor, start=start, end=end, dry_run=dry_run, allow_removal=allow_removal, clock=lambda: now))
+    fixture = None
+    if input_file:
+        limit = (settings.max_bytes if settings else 64 << 20) + 1
+        try:
+            if input_file == "-":
+                fixture = sys.stdin.buffer.read(limit)
+            else:
+                with Path(input_file).expanduser().open("rb") as stream:
+                    fixture = stream.read(limit)
+        except OSError as error:
+            raise typer.BadParameter(f"cannot read the file ({error.strerror})", param_hint="--input") from None
+        if len(fixture) >= limit:
+            raise typer.BadParameter("exceeds the sensor's max_bytes", param_hint="--input")
+    emit(
+        collect(
+            store,
+            sensor,
+            start=start,
+            end=end,
+            dry_run=dry_run,
+            allow_removal=allow_removal,
+            clock=lambda: now,
+            fixture=fixture,
+        )
+    )
+
+
+def _stored_source(store: Store, source: str) -> bool:
+    """Whether memories/ holds a folder for a source that bf.yaml no longer declares."""
+    try:
+        return stat.S_ISDIR(store.mode(f"memories/{source}"))
+    except Error, OSError:
+        return False
+
+
+@app.command("forget", rich_help_panel="Check and repair")
+def forget_records(
+    refs: Annotated[
+        list[str],
+        typer.Argument(
+            metavar="REF...", help="Records to remove: SOURCE:ID refs or memories/SOURCE/SHA256.json paths."
+        ),
+    ],
+    brain: OneBrainOption = "",
+    dry_run: Annotated[bool, typer.Option(help="List what would be removed; change nothing.")] = False,
+) -> None:
+    """Remove collected records and keep their sensors from storing them again; Git history keeps old copies."""
+    targets: dict[str, dict[str, str]] = {}
+    for ref in refs:
+        try:
+            source, entry = records.target(ref)
+        except Error as error:
+            raise typer.BadParameter(str(error), param_hint="REF") from None
+        targets.setdefault(source, {})[ref] = entry
+    store = one(brain)
+    config = load(store)
+    for source in targets:
+        # A mistyped source would list a digest nothing reads and report success.
+        if source not in config.sensors and source not in config.assistants and not _stored_source(store, source):
+            known = [*config.sensors, *config.assistants]
+            raise Error(f"unknown source {source}; check names in bf.yaml{suggest(source, known)}")
+    removed: list[dict[str, object]] = []
+    with writer(store, wait=120):
+        for source, named in targets.items():
+            removed.extend(records.forget(store, source, named, dry_run=dry_run))
+    result: dict[str, object] = {"ok": True, "dry_run": dry_run, "records": removed}
+    if not dry_run:
+        result["index"] = index.refresh(store, recover=True)
+    emit(result)
 
 
 @app.command("run", rich_help_panel="Collect and automate")

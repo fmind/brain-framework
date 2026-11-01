@@ -1,88 +1,32 @@
 # Release checklist
 
-Use only for an explicitly authorized release. [CD](../../../../.github/workflows/cd.yml) owns PyPI and GitHub publication; never create a competing release, move a tag or replace published assets. Keep private-brain details out of outgoing commits, release notes and proposals. Most of a release is waiting on the gate, CI and CD: run them in the background.
+Use only for an explicitly authorized release. [CD](../../../../.github/workflows/cd.yml) owns PyPI and GitHub publication: never create a competing release, move a tag or replace published assets. Keep private-brain details out of outgoing commits and release notes. [`scripts/release.py`](../../../../scripts/release.py) runs the mechanical steps; this checklist owns the judgment between them. Run long steps in the background.
 
-1. **Prepare the release worktree**: Inspect staged, unstaged and untracked work; confirm the release scope and reconcile `main` with the remote. Check that the proposed tag is absent locally and remotely. `main` rejects merge commits, so stack or cherry-pick parallel work into a linear history; `git rev-list --merges origin/main..HEAD` must print nothing. When another session holds uncommitted work on `main` in the primary checkout, release from a separate `git clone --no-local` instead of a linked worktree: point its `origin` at GitHub with `git remote set-url origin`, run the steps below there, and sync the primary checkout only once its uncommitted diff still hashes to the released snapshot. [Build the release worktree](#build-the-release-worktree) and work there from now on. [Inspect outgoing history](#inspect-outgoing-history), including binaries and files deleted by later commits.
-1. **Update version and changelog**: Run `uv version X.Y.Z` to update `pyproject.toml` and `uv.lock`. Match `src/bf/__init__.py`. For a new major, update each `src/bf/skills/*/SKILL.md` `compatibility`, which `tests/test_skills.py` checks, then search the skills, examples and docs for the previous major: update the mentions that mean the current release and keep historical ones, such as upgrade notes. Before 18.0.0, for example:
-
-   ```bash
-   git grep -nE '(Brain Framework|bf`?) 17\b|\b17\.[0-9]+\.[0-9]+' -- src/bf/skills examples docs/docs README.md
-   ```
-
-   Move `Unreleased` entries into `## [vX.Y.Z](https://github.com/fmind/brain-framework/releases/tag/vX.Y.Z) - YYYY-MM-DD`, including breaking changes and manual upgrade steps, leaving an empty `## Unreleased` above it. Open the section with one paragraph naming what stays unchanged and the upgrade step, such as `bf skills DIR` when a packaged skill changed: “A documentation release. The brain format (`version: 8`), `bf.yaml`, the reply schemas and the search cache are unchanged; no upgrade step is needed.” Confirm `scripts/release-notes.sh vX.Y.Z` returns only that section, which ends at the next level-2 heading: `check:changelog` catches a missing, duplicate or empty section.
-1. **Verify or refresh the contract**: A major release refreshes the contract after `mise run generate:schema`, with `cp docs/*.schema.json tests/contract/`, so `tests/test_contract.py` guards the new contract. A minor or patch release keeps `tests/contract/` unchanged, so the gate rejects [any incompatible schema change](../../../../CONTRIBUTING.md#keep-the-contract). A patch or documentation release skips this step and the previous-major search.
-1. **Qualify the release candidate**: Follow the [contribution verification procedure](../../../../CONTRIBUTING.md#set-up-and-check-a-change), including applicable generated files, then run the full gate as CI does, after `uv sync --locked`: `GITHUB_ACTIONS=true mise run all`. GitHub Actions makes Typer color its errors, which once failed a tag's gate that had passed locally. When task settings change, [check them with the pinned mise](#check-tasks-with-the-pinned-mise). Run `dot agent context --check` when available. Ask for an independent review of `git diff --cached -M`, such as a second agent with read-only instructions: it catches overclaims and stale references that tests miss. Inspect the final diff and qualify the exact release candidate; never weaken checks to publish.
-1. **Push, wait for CI, and tag**: Check that the primary checkout still matches the patch, then commit the authorized scope on `main` in the worktree with Conventional Commits and hooks enabled. [Push and tag](#push-and-tag) with `scripts/push-and-tag.sh X.Y.Z`: it pushes `main`, waits for CI on that commit across all platforms, then tags that same commit. Wait for CD to rerun the shared gate and publish its tested artifacts to PyPI and GitHub without rebuilding them:
+1. **Write the changelog**: In the primary checkout, complete `## Unreleased` and open it with one paragraph naming what stays unchanged and the upgrade step, such as `bf skills DIR` when a packaged skill changed: “A documentation release. The brain format (`version: 8`), `bf.yaml`, the reply schemas and the search cache are unchanged; no upgrade step is needed.” A breaking change makes the release a major and needs manual upgrade steps.
+1. **Prepare the clone**: From the primary checkout on `main`, name the changed paths the release ships, or `--all` when every change belongs to it. Other sessions may hold uncommitted work there, so name paths whenever in doubt:
 
    ```bash
-   gh run watch "$(gh run list --workflow cd.yml --branch vX.Y.Z --limit 1 --json databaseId -q '.[0].databaseId')" --exit-status
+   python3 scripts/release.py prepare X.Y.Z CHANGELOG.md src/bf/cli.py docs/docs/commands.md
    ```
 
-   Then [sync the primary checkout](#sync-the-primary-checkout).
-1. **Verify published artifacts**: Run `scripts/verify-release.sh X.Y.Z` from the checkout. It checks that origin holds the annotated tag, reporting its commit, then a non-draft, non-prerelease GitHub release holding exactly the wheel and source archive, PyPI listing just those two files with matching SHA-256 digests, and their build attestations from CD at the tag's commit, then installs that verified wheel in a temporary folder and runs version, initialization, validation, search and exact read. Installing the downloaded wheel sidesteps PyPI's index, which can refuse a version for minutes after its JSON API lists it; `tests/test_release.py` checks a draft or prerelease, the asset list, a missing PyPI version or an extra PyPI file, digest and attestation mismatches, a failed install and an installed `bf` reporting another version. Confirm CI's Pages deployment separately.
-1. **Report verified boundaries**: Provide the release URL, version, commit, [verified boundaries and remaining limits](../../../../CONTRIBUTING.md#release). Release tests use synthetic data and fake providers; provider freshness and native host routing require separate evidence.
+   It refuses a merge commit, an existing tag or a HEAD behind `origin/main`, then clones HEAD into `~/.cache/bf-release/vX.Y.Z`, copies those paths, bumps the version and dates the changelog section. For a new major it also updates each skill's `compatibility`, regenerates the schemas and refreshes `tests/contract/`; review each line in its `review` reply and update mentions of the previous major that mean the current release, keeping historical ones such as upgrade notes. Work in the clone from now on: pass `-C` or `cd` in the same command, since an agent's shell may reset its directory.
+1. **Review the outgoing history**: In the clone, compare `git status --short` with the intended scope and read `git diff --cached -M` and `git log -p origin/main..HEAD`, including files later commits deleted. Git only names binaries: open each `COMMIT:PATH` that the `binaries` reply lists (`staged:PATH` for the release's own files) with an appropriate viewer. Ask a second agent with read-only instructions to review the staged diff: it catches overclaims and stale references that tests miss.
+1. **Qualify the candidate**: Run `python3 scripts/release.py check` in the clone: the full gate as CI runs it. Fix failures in the clone, rerun it, and never weaken a check to publish. Then commit with a Conventional Commit, such as `chore(release): release vX.Y.Z`.
+1. **Publish**: Run the script file itself, never an inline copy of its commands, which once tagged a failed CI run:
 
-## Build the release worktree
+   ```bash
+   python3 scripts/release.py publish X.Y.Z
+   ```
 
-Several sessions may edit the shared checkout, so qualify and commit in a detached worktree holding exactly the release scope. From the primary checkout, with the release content staged, unstaged or untracked there:
-
-```bash
-git worktree add --detach ~/.cache/bf-release HEAD
-git diff HEAD --binary -M > ~/.cache/bf-release.patch
-sha256sum ~/.cache/bf-release.patch
-git -C ~/.cache/bf-release apply --index ~/.cache/bf-release.patch
-```
-
-Copy each untracked file that belongs to the release into the worktree and `git add` it, then compare `git -C ~/.cache/bf-release status --short` with the intended scope. Keep the worktree on disk, not in a RAM-backed `/tmp`: the gate's environments are large. Before committing, run `git diff HEAD --binary -M | sha256sum` in the primary checkout again: a different hash means another session changed it, so rebuild the patch. Commit with `git -C ~/.cache/bf-release checkout --ignore-other-worktrees main` followed by `git commit`; the agent's shell may reset its directory between commands, so pass `-C` or `cd` in the same command.
-
-## Sync the primary checkout
-
-Committing in the worktree moves `main` under the primary checkout, whose index and files still hold the old snapshot. There, `git diff HEAD --stat` must list only the edits made in the worktree after the patch, such as the version bump, and each untracked release file must match its commit, as `git show HEAD:PATH | cmp - PATH` shows. Then `git reset --hard HEAD` is safe; it keeps unrelated untracked files. Anything else belongs to another session: leave the checkout as it is and report it. Remove the worktree with `git worktree remove ~/.cache/bf-release`.
-
-## Check tasks with the pinned mise
-
-The workflows pin mise beside `jdx/mise-action` in `.github/workflows/verify.yml` and `security.yml`, and `tests/test_release.py` keeps every pin equal. A newer global configuration can break that version, so parse the tasks with the pinned binary and an empty configuration (Linux x64 shown; pick the archive matching your platform):
-
-```bash
-version=$(sed -nE 's/^ *version: (20[0-9.]+)( *#.*)?$/\1/p' .github/workflows/verify.yml | head -n 1)
-: "${version:?no mise version pin found in .github/workflows/verify.yml}"
-pinned=~/.cache/mise-$version
-mkdir -p "$pinned/empty"
-curl -fsSL "https://github.com/jdx/mise/releases/download/v$version/mise-v$version-linux-x64.tar.gz" | tar -xz -C "$pinned"
-env MISE_CONFIG_DIR="$pinned/empty" MISE_GLOBAL_CONFIG_FILE="$pinned/empty/config.toml" MISE_DATA_DIR="$pinned/data" \
-  MISE_CACHE_DIR="$pinned/cache" MISE_TRUSTED_CONFIG_PATHS="$PWD" "$pinned/mise/bin/mise" tasks info TASK --json
-env MISE_CONFIG_DIR="$pinned/empty" MISE_GLOBAL_CONFIG_FILE="$pinned/empty/config.toml" MISE_DATA_DIR="$pinned/data" \
-  MISE_CACHE_DIR="$pinned/cache" MISE_TRUSTED_CONFIG_PATHS="$PWD" "$pinned/mise/bin/mise" install --locked --dry-run
-rm -rf "$pinned"
-```
-
-## Push and tag
-
-From the clean release worktree on `main`, run the script file itself, never an inline copy of its commands. As its own process, its `set -euo pipefail` holds whatever shell calls it, so `cd ~/.cache/bf-release && scripts/push-and-tag.sh X.Y.Z` is safe. An inline copy is not: bash ignores `set -e`, even inside `( … )`, within any command whose status `if`, `&&` or `||` tests, and an agent's shell may wrap each command that way (`eval '…' && pwd`), which once let a failed CI run be tagged:
-
-```bash
-scripts/push-and-tag.sh X.Y.Z
-```
-
-It refuses a branch other than `main`, a dirty worktree, a version `pyproject.toml` does not declare and a tag that already exists locally or on origin, then pushes `main`, waits for the CI run of that exact commit and tags it only when the run succeeded. A failed push, a missing run or any other conclusion exits 1 with nothing tagged, and a failed tag push deletes the local tag again; `tests/test_release.py` checks each case.
-
-## Inspect outgoing history
-
-`git log -p origin/main..HEAD` shows outgoing text, including files later deleted, but only names binaries. List added or modified binaries with:
-
-```bash
-git log --diff-filter=AM --numstat --format='commit %h' origin/main..HEAD |
-  awk '/^commit /{c=$2; next} /^-\t-\t/{sub(/^-\t-\t/, ""); print c ":" $0}'
-```
-
-Inspect each listed `COMMIT:PATH` at that revision, extracting it with `git show COMMIT:PATH` into a temporary file and opening it with an appropriate viewer.
+   It runs [`push-and-tag.sh`](../../../../scripts/push-and-tag.sh), which tags only after CI succeeds on the pushed commit, waits for CD, runs [`verify-release.sh`](../../../../scripts/verify-release.sh) on the published wheel, source archive, digests and attestations, then syncs the primary checkout. The sync stops with nothing changed when another session edited a released path; integrate that checkout by hand, then rerun `python3 scripts/release.py sync`. Remove the clone afterwards. Confirm CI's Pages deployment separately.
+1. **Report verified boundaries**: Give the release URL, version, commit, [verified boundaries and remaining limits](../../../../CONTRIBUTING.md#release). Release tests use synthetic data and fake providers; provider freshness and native host routing need separate evidence.
 
 ## Recover a failed release
 
-- Retry failed CD jobs using the tested distributions retained for 30 days; do not rebuild successful distributions. The gate's vulnerability scans download advisory data: rerun a job that failed on a download, and fix a newly published advisory before publishing.
-- If a GitHub release already exists, creation deliberately fails. Inspect its assets and publication state, then finish a verified draft manually under release authorization. Never replace published assets or move the tag.
-- If pushing the tag failed, `push-and-tag` deleted the local tag: rerun `scripts/push-and-tag.sh X.Y.Z`. It repeats its checks, finds the successful CI run and tags the same commit, or stops if origin received the tag after all.
+- Before the tag exists, fix the cause in the clone, commit and rerun `publish`: it repeats every check.
+- If pushing the tag failed, `push-and-tag.sh` deleted the local tag: rerun `publish`. It tags the same commit, or stops if origin received the tag after all.
+- Retry failed CD jobs with `gh run rerun ID --failed`, which reuses the tested distributions retained for 30 days. The gate's vulnerability scans download advisory data: rerun a job that failed on a download, and fix a newly published advisory before publishing.
+- If a GitHub release already exists, creation deliberately fails. Inspect its assets and state, then finish a verified draft manually under release authorization.
 - If `verify-release.sh` reports a digest or attestation mismatch, stop and investigate before announcing the release.
-- For a manual documentation deployment, rerun CI on `main`.
 
-Add future release lessons only when they change a concrete step.
+Add future release lessons to the script and its tests, or here only when they change a judgment step.

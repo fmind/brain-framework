@@ -162,6 +162,7 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
                 store,
                 "search",
                 brain_results,
+                kind=usage.scope(query),
                 unmatched=cast("list[str]", reply.get("unmatched", ())) if brain_results == 0 else (),
             )
         if counts := cast("dict[str, dict[str, object]]", part["sources"]):
@@ -259,26 +260,60 @@ _IDENTITIES = """SELECT i.ref,i.kind,i.type,i.source,i.status,json_group_array(n
   JOIN items i ON i.id=n.item GROUP BY i.id HAVING count(*)>1 ORDER BY i.ref"""
 
 
+# Every indexed note and record, for retrievers outside BF such as embedding or multilingual search.
+_ITEMS = """SELECT ref,path,kind,source,title,time,type,status,url,updated,observed,fields FROM items ORDER BY ref"""
+
+
 def edges(stores: list[Store], stack: ExitStack) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
     """Stream the claims of the selected brains and their direct references from their caches, like search."""
     return _export(
         stores,
         stack,
-        lambda name, connection: (_edge(name, row) for row in connection.execute(_EDGES, {"links": LINKS})),
+        lambda _store, name, connection: (_edge(name, row) for row in connection.execute(_EDGES, {"links": LINKS})),
     )
 
 
 def identities(stores: list[Store], stack: ExitStack) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
     """Stream each note or record with every identity it answers to, so duplicates of one subject stand out."""
     return _export(
-        stores, stack, lambda name, connection: (_identity(name, row) for row in connection.execute(_IDENTITIES))
+        stores,
+        stack,
+        lambda _store, name, connection: (_identity(name, row) for row in connection.execute(_IDENTITIES)),
     )
+
+
+def items(stores: list[Store], stack: ExitStack) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
+    """Stream every note and record with its text, read from its file, so other tools can index the brain."""
+    return _export(
+        stores,
+        stack,
+        lambda store, name, connection: (_item(store, name, row) for row in connection.execute(_ITEMS)),
+    )
+
+
+def _item(store: Store, brain: str, row: sqlite3.Row) -> dict[str, object]:
+    """One note or record: its cache metadata, then the note's Markdown or the record's text from the file.
+
+    A file that changed or vanished since the cache refreshed keeps its metadata without `text`.
+    """
+    value: dict[str, object] = {"brain": brain}
+    for key in ("ref", "kind", "title", "time", "source", "type", "status", "url", "updated", "observed"):
+        if row[key]:
+            value[key] = row[key]
+    if row["fields"] and (fields := json.loads(row["fields"])):
+        value["fields"] = fields
+    with suppress(Error, OSError, UnicodeError):
+        if row["kind"] == "record":
+            value["text"] = records.load(store, str(row["path"])).text
+        else:
+            value["text"] = store.read(str(row["path"]), MAX_NOTE).decode("utf-8")
+    return value
 
 
 def _export(
     stores: list[Store],
     stack: ExitStack,
-    rows: Callable[[str, sqlite3.Connection], Iterator[dict[str, object]]],
+    rows: Callable[[Store, str, sqlite3.Connection], Iterator[dict[str, object]]],
 ) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
     """Stream rows of the selected brains and their direct references from their caches, like search.
 
@@ -287,8 +322,8 @@ def _export(
     """
     stores, problems = related(stores)
 
-    def build(_store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
-        return {"rows": rows(name, connection)}
+    def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+        return {"rows": rows(store, name, connection)}
 
     parts, extra = pages.brains(stores, build, counted=False, stack=stack)
     problems.extend(cast("list[dict[str, object]]", extra.get("problems", [])))
@@ -417,7 +452,7 @@ def _lookup(
         own = {**({"stale": value["stale"]} if "stale" in value else {}), **_problems(problems, {})}
         reply = {key: item for key, item in reply.items() if key not in {"problems", "stale"}} | own
     if counted:
-        usage.note(store, "read", 1)
+        usage.note(store, "read", 1, kind=usage.exact(value))
     return reply
 
 

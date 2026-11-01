@@ -318,6 +318,16 @@ class _Validation:
             and (records.stored(name) or not name.rsplit("/", 1)[1].startswith("."))
         ]
         self.stored = set(evidence)
+        # A forgotten list collection could not parse would fail every run of its source.
+        for name in store.files("memories", skipped=self.skipped, split=True):
+            parts = name.split("/")
+            if len(parts) == 3 and parts[2] == records.FORGOTTEN:
+                try:
+                    records.forgotten(store, parts[1])
+                except Error as error:
+                    self.problems.append(_problem(name, str(error)))
+                except OSError:
+                    self.problems.append(_problem(name, "inaccessible file; check permissions"))
         for name in evidence:
             try:
                 source = records.source_of(name)

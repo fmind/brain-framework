@@ -167,6 +167,10 @@ description = "Write an HTML branch-coverage report"
 depends = ["test"]
 run = "uv run --locked coverage html"
 
+[tasks."eval:skills"]
+description = "Grade the packaged skills in headless Claude Code (needs a login; spends tokens; not part of all)"
+run = "uv run --locked python scripts/eval_skills.py"
+
 [tasks."docs:build"]
 description = "Build the documentation site into site/brain-framework"
 run = "uv run --locked zensical build --clean --strict"

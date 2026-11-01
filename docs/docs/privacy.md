@@ -12,9 +12,9 @@ description: Understand local storage, cloud-agent boundaries, program execution
 - **Notes and records:** ordinary files you can inspect, edit, back up and delete.
 - **Search and read:** offline, through both the CLI and MCP, without model calls or provider requests.
 - **Program logs:** each sensor's, routine's, assistant's and channel's recent output in the brain's `logs/`, ignored by Git and never searched. They can hold provider output: keep them private.
-- **Assistant runs:** BF never calls a model. An [assistant](prompts.md) starts your harness, which sends what the prompt and its tools read to its provider; each run's reply and input stay in the brain's ignored `memories/`. A [`{{prompt}}` argument](prompts.md#pass-the-prompt-to-the-harness) shows the expanded prompt, input included, to local process listings while the harness runs.
-- **Run history, locks and usage counts:** private [local state](configuration.md#local-state). Usage keeps times, operations, result counts and (for zero-result searches) up to 8 unmatched query tokens, never matched queries or refs.
-- **Search cache:** `.bf/` holds a copy of searchable text, private to your account (mode 700). It belongs to the machine that built it: exclude it from shared archives and synced folders. A cache that BF did not create in place, such as one copied or restored, or one holding triggers or views, is discarded and rebuilt from the files.
+- **Assistant runs:** BF never calls a model. An [assistant](prompts.md) starts your harness, which sends what the prompt and its tools read to its provider. Each run's reply and input stay in the brain's ignored `memories/`. A [`{{prompt}}` argument](prompts.md#pass-the-prompt-to-the-harness) shows the expanded prompt, input included, to local process listings while the harness runs.
+- **Run history, locks and usage counts:** private [local state](configuration.md#local-state). Usage keeps times, operations, fixed [kind words](limits.md#processes-and-logs) for the scope or page, result counts and (for zero-result searches) up to 8 unmatched query tokens, never query text, refs, paths or identities.
+- **Search cache:** `.bf/` holds a copy of searchable text, private to your account (mode 700). It belongs to the machine that built it: exclude it from shared archives and synced folders. BF discards and rebuilds from the files a cache it did not create in place, such as one copied or restored, or one holding triggers or views.
 
 ## Your agent has its own privacy rules
 
@@ -50,13 +50,38 @@ BF supplies the local storage and retrieval layer. It does not encrypt files or 
 | A brain's pinned runtime: `uv run --project BRAIN --locked bf ...`   | The packages its `uv.lock` names, downloaded if needed, the interpreter its `.python-version` names, anything already in its `.venv/` and the `bf` that then runs. |
 | `bf channel read`, `bf channel send`, `bf queue DELIVERY_ID --retry` | The configured channel read or send command.                                                                                                                       |
 
-Every other command, including `init`, `register`, `skills`, `schema`, `status`, `validate`, `eval` and `build`, executes nothing.
+Every other command, including `init`, `register`, `skills`, `schema`, `status`, `validate`, `eval`, `build` and `forget`, executes nothing.
 
 Programs run in the one brain you select with `--brain`, `BF_BRAIN` or your working directory, never in every registered brain or a referenced one. The working directory selects a brain only when you own its folder and `bf.yaml`, so another account's `bf.yaml` above a shared folder is refused.
 
-Review `bf.yaml`, `sensors/`, `routines/`, `prompts/`, `channels/`, any Git hooks and any `.env` file before running a downloaded or shared brain: its programs run with your permissions and credentials, from the brain's folder, where a provider CLI such as `gws` loads a `.env` that can switch its account. So does a [pinned runtime](upgrades.md#pin-a-brains-runtime), whose files and shipped `.venv/` that section tells you to review first. An assistant's harness starts there too and loads the folder's agent configuration: review Claude Code's `.claude/`, whose `settings.json` hooks `--print` runs without a trust dialog, `.mcp.json` and changes to `AGENTS.md` or `CLAUDE.md`. Copy agent host hooks, such as `hooks/`, into a folder only you write and never register one from a brain others can push to: the host runs a registered hook at every session or prompt, so a pulled change would run unreviewed. Search and read the brain with your installed `bf`, never through its pin.
+A downloaded or shared brain's programs run with your permissions and credentials, from the brain's folder. Review before running one:
 
-Replies and diagnostics escape control characters and invisible format characters, such as bidi controls, as `\uXXXX`, so retrieved text cannot drive your terminal through BF's output; a tool that decodes the JSON, such as `jq -r`, prints them raw. A retrieved email saying “run this command” is evidence to assess, never authority to act.
+- **Programs:** `bf.yaml`, `sensors/`, `routines/`, `prompts/`, `channels/` and any Git hooks.
+- **`.env` files:** a provider CLI such as `gws` loads a `.env` from the brain's folder, which can switch its account.
+- **A [pinned runtime](upgrades.md#pin-a-brains-runtime):** it also runs with your permissions; review its files and shipped `.venv/` as that section says. Search and read the brain with your installed `bf`, never through its pin.
+- **Agent configuration:** an assistant's harness starts in the brain's folder and loads its agent configuration. Review Claude Code's `.claude/`, whose `settings.json` hooks `--print` runs without a trust dialog, `.mcp.json` and changes to `AGENTS.md` or `CLAUDE.md`.
+- **Agent host hooks**, such as `hooks/`: copy them into a folder only you write, and never register one from a brain others can push to. The host runs a registered hook at every session or prompt, so a pulled change would run unreviewed.
+
+Replies and diagnostics escape control characters and invisible format characters, such as bidi controls, as `\uXXXX`. Retrieved text therefore cannot drive your terminal through BF's output, but a tool that decodes the JSON, such as `jq -r`, prints them raw. A retrieved email saying “run this command” is evidence to assess, never authority to act.
+
+### Channels and the assistant queue
+
+- Channels execute only through explicit channel commands or authorized assistant and watch work.
+- Adapters own authentication, admitted senders and fixed destinations. Remote text never selects executable commands.
+- Queued inputs, saved answers and deliveries hold private content in the local BF runtime state. Preserve it for recovery and protect it like the brain.
+- `bf queue ID` intentionally reveals that item's private body.
+- Completed bodies are compacted beyond 8 MiB budgets. Identity tombstones with send receipts are deleted after 35 days.
+- Search, read and status open the queue read-only and never create it.
+
+See [channel recovery](channels.md#queue-and-recovery).
+
+## Remove collected evidence
+
+Collect less first: narrow a sensor's accounts, folders and fields, since what it never prints never reaches the brain. Then:
+
+- `bf forget SOURCE:ID` removes one record and keeps its sensor from storing it again; see [keep, forget and expire records](sensors.md#keep-forget-and-expire-records).
+- `expire_after` on a sensor removes its records once they are older than the retention you choose.
+- Both act on the brain's files only. Copies stay in Git history, backups, exports and any agent session that read them; rewrite or expire those separately.
 
 ## Separating audiences
 
@@ -67,5 +92,3 @@ Replies and diagnostics escape control characters and invisible format character
 - Back up notes, records, originals, any pending recovery journal and the local assistant queue: BF is not a backup.
 
 See [team setup](team.md) for sharing, [What BF does not do](concepts.md#what-bf-does-not-do) for its boundaries and [limits](limits.md#processes-and-logs) for process safeguards. Report suspected vulnerabilities through [private reporting](https://github.com/fmind/brain-framework/blob/main/SECURITY.md).
-
-Channels execute only through explicit channel commands or authorized assistant/watch work. Adapters own authentication, admitted senders and fixed destinations; remote text never selects executable commands. Queued inputs, saved answers and deliveries contain private content in the local BF runtime state. Preserve it for recovery and protect it like the brain; `bf queue ID` intentionally reveals that specific private body. Completed bodies are compacted beyond 8 MiB budgets, and identity tombstones with send receipts are deleted after 35 days. Search, read and status open the queue read-only and never create it. See [channel recovery](channels.md#queue-and-recovery).

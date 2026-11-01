@@ -16,7 +16,7 @@ A **brain** is a folder of notes and collected evidence that you own. People and
 | Concept | Knowledge reusable beyond one project, with evidence and limits. | “Explain before asking for signup.”  | `concepts/` |
 | Action  | One work session's objective, results and next step.             | A website review to resume tomorrow. | `actions/`  |
 
-Projects, concepts and action `ACTION.md` notes are Markdown with YAML metadata in the [OKF](brain.md#notes) format. Records are JSON files, one per collected item. A record shows what a source said, not that it is true.
+Projects, concepts and action `ACTION.md` notes are Markdown with YAML metadata in the [OKF](brain.md#notes) format. Records are JSON files, one per collected item; a record shows what a source said, not that it is true.
 
 ## From source to decision
 
@@ -43,7 +43,7 @@ A brain can hold four kinds of programs, all declared in `bf.yaml` and reviewed 
 | Assistant | Your agent harness run over a Markdown prompt; each run becomes a record.       | `bf run`, or `bf update` and `bf watch` when due.       |
 | Channel   | Send, read or stream messages for assistants, such as a chat thread.            | When an assistant answers or reads, or `bf channel`.    |
 
-Each program keeps its recent output and errors in `logs/`, such as `logs/NAME.log`. [Sensors](sensors.md), [routines](routines.md), [assistants](prompts.md) and [channels](channels.md) explain their setup; assistant work and deliveries wait in a local queue that `bf queue` inspects; [timing and health](schedule.md#timing-and-health) says when they run.
+Each program keeps its recent output and errors in `logs/NAME.log`. Assistant work and deliveries wait in a local queue that `bf queue` inspects. [Sensors](sensors.md), [routines](routines.md), [assistants](prompts.md) and [channels](channels.md) explain their setup; [timing and health](schedule.md#timing-and-health) says when they run.
 
 ## Retrieval and connections
 
@@ -75,10 +75,10 @@ These boundaries hold everywhere; other pages link here instead of repeating the
 - **It never runs a model itself.** Search matches words and exact identities, without embeddings, translation or generated answers; [assistants](prompts.md) start your agent harness, which does the reasoning.
 - **It infers nothing.** Similar names never establish an identity, and prose never creates a relation. Links, aliases and field mappings are explicit.
 - **It does not verify truth.** Validation checks structure and links; a passing retrieval case checks the chosen evidence. A record shows what its source said.
-- **Retrieval never collects.** `bf search` and `bf read` never contact providers or run programs. A fresh cache can hold old evidence: check source coverage before calling evidence current.
+- **Retrieval never collects.** `bf search` and `bf read` never contact providers or run programs. A fresh cache can still hold old evidence: check source coverage before calling evidence current.
 - **An incomplete result proves no absence.** A reply with `problems` or `stale`, a failed source or a missing period cannot show that something does not exist. One page of results is not the whole result.
 - **Reminders are not reviews.** A `review` flag comes from dates, file edits and linked evidence. It never marks a note as checked.
-- **Programs run only when you ask.** Sensors, routines, assistants and channels run through `bf collect`, `bf run`, `bf channel`, a delivery's `bf queue ID --retry`, `bf update`, `bf watch` or a schedule you install, in one selected brain. Registration and references never grant execution.
+- **Programs run only when you ask.** Sensors, routines, assistants and channels run in one selected brain, through `bf collect`, `bf run`, `bf channel`, a delivery's `bf queue ID --retry`, `bf update`, `bf watch` or a schedule you install. Registration and references never grant execution.
 - **It is not a sandbox or a backup.** Programs run with your account's permissions; keep backups of your brain.
 
 ## Glossary

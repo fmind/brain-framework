@@ -68,6 +68,11 @@
           "title": "Schedules",
           "type": "object"
         },
+        "status": {
+          "anyOf": [{ "$ref": "#/$defs/AssistantStatus" }, { "type": "null" }],
+          "default": null,
+          "description": "Where the harness's JSON stdout reports success, such as {path: /status, success: [SUCCESS]}; another value fails the attempt like a nonzero exit. Requires text."
+        },
         "text": {
           "anyOf": [{ "maxLength": 4096, "pattern": "^/(?:[^~\\x00]|~[01])*$", "type": "string" }, { "type": "null" }],
           "default": null,
@@ -137,6 +142,31 @@
         }
       },
       "title": "AssistantSchedule",
+      "type": "object"
+    },
+    "AssistantStatus": {
+      "additionalProperties": false,
+      "description": "Where a harness's JSON stdout reports its own outcome, and which values mean success.",
+      "properties": {
+        "path": {
+          "description": "JSON Pointer to the harness's status in its JSON stdout, such as /status.",
+          "maxLength": 4096,
+          "pattern": "^/(?:[^~\\x00]|~[01])*$",
+          "title": "Path",
+          "type": "string"
+        },
+        "success": {
+          "description": "Values at path that mean the harness succeeded, such as [SUCCESS] or [false]; any other value, or none, fails the attempt like a nonzero exit.",
+          "items": { "anyOf": [{ "maxLength": 256, "minLength": 1, "type": "string" }, { "type": "boolean" }] },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Success",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": ["path", "success"],
+      "title": "AssistantStatus",
       "type": "object"
     },
     "BrainReference": {
@@ -339,10 +369,9 @@
       "description": "A deterministic brain program: run when due, by a named hook, or now with `bf run`.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and {{lines:FILE}}. Optional only with enabled: false.",
           "items": { "type": "string" },
           "maxItems": 128,
-          "minItems": 1,
           "prefixItems": [
             {
               "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
@@ -417,7 +446,6 @@
           "type": "integer"
         }
       },
-      "required": ["command"],
       "title": "Routine",
       "type": "object"
     },
@@ -564,10 +592,9 @@
       "if": { "properties": { "reconcile": { "type": "object" } }, "required": ["reconcile"] },
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and {{lines:FILE}}. Optional only with enabled: false.",
           "items": { "type": "string" },
           "maxItems": 128,
-          "minItems": 1,
           "prefixItems": [
             {
               "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
@@ -583,6 +610,12 @@
           "description": "Allow manual and scheduled execution.",
           "title": "Enabled",
           "type": "boolean"
+        },
+        "expire_after": {
+          "anyOf": [{ "maximum": 3153600000, "minimum": 3600, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Seconds after which a record's event time (or, without one, when it was last observed) makes collection remove it and skip it when printed again; unset keeps records.",
+          "title": "Expire After"
         },
         "fields": {
           "anyOf": [
@@ -675,7 +708,6 @@
           "type": "boolean"
         }
       },
-      "required": ["command"],
       "then": { "properties": { "mode": { "const": "window" } } },
       "title": "Sensor",
       "type": "object"

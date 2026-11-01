@@ -56,7 +56,7 @@ Report the brain location, the questions answered with their refs, check results
 
 ## References and helpers
 
-`SKILL_DIR` is the folder holding this `SKILL.md`. Run a helper as `python3 "$SKILL_DIR/scripts/NAME.py"` (Python 3.11+); when `python3` is older, as on macOS Command Line Tools, use `"$(uv python find --system --no-config --no-project 3.14)"` in its place, never `uv run`. For a contract this skill does not give, read the [documentation](https://fmind.github.io/brain-framework/llms.txt) as Markdown; `bf COMMAND --help` wins where they differ.
+Run a helper as `python3 SKILL_DIR/scripts/NAME.py`, replacing `SKILL_DIR` with the absolute path of the folder holding this `SKILL.md`. Write commands literally, without shell variables, `$'…'` quoting or `cd … &&` chains, which hosts with strict permissions refuse, and pass multi-line text through files. It needs Python 3.11+: with an older `python3`, use `"$(uv python find --system --no-config --no-project 3.14)"` instead, never uv's run command, which adopts a `.venv` the brain may supply. For a contract this skill does not give, read the [documentation](https://fmind.github.io/brain-framework/llms.txt) as Markdown; `bf COMMAND --help` wins where they differ.
 
 - [references/scan.md](references/scan.md): agree on a scope, recommend sources, hand them off.
 - [references/discovery.md](references/discovery.md): bounded methods for tools, bookmarks and folders.

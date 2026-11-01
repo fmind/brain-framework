@@ -37,7 +37,24 @@ def test_initialization_creates_the_layout_and_private_namespaces(tmp_path: Path
     assert config.version == 8
     assert config.routines == {}
     assert config.name == "fresh"
-    assert set(config.ontology) == {"author", "owner", "depends-on", "related-to"}
+    assert set(config.ontology) == {
+        "author",
+        "owner",
+        "assignee",
+        "participant",
+        "sender",
+        "recipient",
+        "cc",
+        "organizer",
+        "attendee",
+        "repository",
+        "project",
+        "kind",
+        "status",
+        "depends-on",
+        "related-to",
+        "supersedes",
+    }
     assert config.sensors == {}
     # The instructions are the same for every brain; the starter suite reads through this brain's name.
     assert "bf://NAME/" in store.read("AGENTS.md").decode()

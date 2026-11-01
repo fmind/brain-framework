@@ -27,7 +27,7 @@ Look up exact limits for a skipped file, a partial reply or a stopped program. F
 | Record file                                                   | 16 MiB                                                                                                                                    |
 | Record fields other than `text`                               | 2 MiB as UTF-8 JSON, so an exact read's first page stays within the reply limit                                                           |
 | Record id                                                     | 1–4,096 characters and 7,988 once percent-encoded                                                                                         |
-| Record text                                                   | 4,194,304 characters                                                                                                                      |
+| Record text                                                   | 4,194,304 characters; longer text fails the run unless the sensor sets `truncate_text` or `max_text_bytes`                                |
 | Record links, aliases, field names                            | 1,000 each                                                                                                                                |
 | Record URL, link, field value                                 | 8,192 characters                                                                                                                          |
 | Listed field value                                            | 200 characters; longer values stay in the exact read                                                                                      |
@@ -55,18 +55,31 @@ Look up exact limits for a skipped file, a partial reply or a stopped program. F
 | Program name                                                  | 64 characters                                                                                                                             |
 | Program command                                               | The program and up to 127 arguments of at most 16,384 characters each                                                                     |
 | Routine `hooks`                                               | 16 events                                                                                                                                 |
-| Program `timeout`                                             | 1–3,600 seconds                                                                                                                           |
+| Program and channel `timeout`                                 | 1–3,600 seconds                                                                                                                           |
 | `refresh`, `lookback`, `overlap`, `reconcile`, `silent_after` | up to 365 days                                                                                                                            |
+| `expire_after`                                                | 1 hour to 100 years                                                                                                                       |
+| `memories/SOURCE/.forgotten`                                  | 8 MiB, about 120,000 forgotten records per source                                                                                         |
 | `keep`                                                        | 1–10,000 routine actions; 1–50,000 assistant records                                                                                      |
 | Program log                                                   | 1 MiB per `logs/NAME.log`; per run, the last 256 KiB of stderr and of a log routine's stdout                                              |
 
-Each record takes one folder entry. `bf status` warns above 80,000 entries without failing `--check`; a tree over the limit fails the scan and names the folder. Split a crowded source's sensor or archive its older records, and keep bulky imports in the brain's root `inputs/` or `originals/`, which are not scanned. A long pasted question matches only its first 32 distinct words after function words are dropped: keep the distinctive terms.
+Folder entries:
+
+- Each record takes one folder entry.
+- `bf status` warns above 80,000 entries without failing `--check`.
+- A tree over the limit fails the scan and names the folder.
+- Split a crowded source's sensor or archive its older records.
+- Keep bulky imports in the brain's root `inputs/` or `originals/`, which are not scanned.
+
+A long pasted question matches only its first 32 distinct words after function words are dropped: keep the distinctive terms.
 
 Page sizes bound one reply, not the result: follow `next_offset`. SQLite still ranks every match up to a deep offset, so very deep pages take longer.
 
 ## Processes and logs
 
-Sensors, routines and assistants run from the brain folder with direct arguments, without a shell. Their standard input is `/dev/null`, except for what a hook or `bf run --stdin` pipes to a routine and the expanded prompt of an assistant command without `{{prompt}}`. They receive `BF_BRAIN` set to that brain, so a nested `bf` call reads the brain running it.
+Sensors, routines and assistants run from the brain folder with direct arguments, without a shell.
+
+- Their standard input is `/dev/null`, with two exceptions: what a hook or `bf run --stdin` pipes to a routine, and the expanded prompt of an assistant command without `{{prompt}}`.
+- They receive `BF_BRAIN` set to that brain, so a nested `bf` call reads the brain running it.
 
 BF removes environment variables that could load code **before your program starts**, such as `BASH_ENV` or `PYTHONPATH`:
 
@@ -77,10 +90,58 @@ BF removes environment variables that could load code **before your program star
 | `PYTHON*`, Java, Node, Ruby, Perl and PHP startup options, `DOTNET_STARTUP_HOOKS`, `CORECLR_*`, `R_PROFILE*`, `R_ENVIRON*`, `LUA_INIT*`, `LUA_PATH*`, `LUA_CPATH*` | Can alter interpreter startup or module loading.       |
 | Relative or empty `PATH` entries                                                                                                                                   | Could run an unexpected program from the brain folder. |
 
-Other variables, including provider credentials and absolute `PATH` entries, remain. The list is best effort, not a sandbox. When a program needs dependencies, use an explicit runtime such as `uv run --no-project sensors/example.py`. A program that needs one of these variables sets it in its own command, such as `[env, R_ENVIRON_USER=/path/to/Renviron, Rscript, sensors/example.R]`.
+Other variables, including provider credentials and absolute `PATH` entries, remain. The list is best effort, not a sandbox.
 
-When a run ends, successful or not, BF kills the program's whole process group: background helpers end with it unless they leave that group, as daemons that start their own session do. A timeout, cancellation or closed terminal ends a run early, as does output beyond `max_bytes` from a sensor or action routine; partial output never replaces stored records. Cancellation during startup waits until BF owns the new process, then kills its group too. A program that another process kills, such as the out-of-memory killer, fails naming the signal: `program was killed by SIGKILL`. A run ends when the program exits and its standard output closes. A background helper that keeps standard output open more than a second after the exit fails the run: redirecting its output, for example to `/dev/null`, avoids that failure, not the kill. A helper holding only stderr never delays or fails the run. Watch, and the service files in [Run watch as a service](schedule.md#run-watch-as-a-service), allow at least 60 seconds after a stop request, so an interrupted record write can roll back.
+- When a program needs dependencies, use an explicit runtime such as `uv run --no-project sensors/example.py`.
+- A program that needs one of these variables sets it in its own command, such as `[env, R_ENVIRON_USER=/path/to/Renviron, Rscript, sensors/example.R]`.
 
-Each run appends entries to the program's `logs/NAME.log` in the brain: a `== TIME OUTCOME ==` heading when the program exits, followed by its stderr and a log routine's stdout, then another heading with the run's result, such as the records collected or the failure. The log keeps its newest whole entries within 1 MiB. Errors and run history name the log without quoting provider output. `bf init` ignores `logs/` in Git and search never reads it, but a log can hold provider output: keep it private and never paste it into a public issue. Search and read keep a local `usage.jsonl` with the time, operation, result count and (on zero-result searches) up to 8 unmatched tokens of at most 64 characters each, never matched queries or refs. Beyond 1 MiB, BF drops events older than 30 days, then the oldest ones beyond 768 KiB. `bf status` [summarizes](commands.md#status-sources-and-routines) 7 and 30 days and marks a window this cut shortened.
+How a run ends:
 
-Assistant inputs, outputs and schedules each allow at most 32 entries; a brain allows 32 assistants and 64 channels. Channel reads hold at most 1,000 messages; a read input catches up on a longer window in parts, at most 16 admitted parts per poll. Stream frames default to 1 MiB (1 KiB–1 MiB); healthy idle streams have no lifetime deadline, and each stream run ends with one timed entry in `logs/channel.NAME.stream.log`. The durable queue caps its database at 256 MiB and admits new work until it holds 96 MiB or 10,000 unfinished obligations. A started job reserves answer space of `max_bytes × (7 + 6 × routes)` and a little more, which must stay within 96 MiB: at most 14 routes per run at the 1 MiB default and 2 at 4 MiB, fewer for a large prompt or input. Completed bodies keep 8 MiB budgets and identity tombstones 35 days; see [channel limits and recovery](channels.md#queue-and-recovery).
+- A run ends when the program exits and its standard output closes.
+- When a run ends, successful or not, BF kills the program's whole process group. Background helpers end with it unless they leave that group, as daemons that start their own session do.
+- A timeout, cancellation or closed terminal ends a run early, as does output beyond `max_bytes` from a sensor or action routine. Partial output never replaces stored records.
+- Cancellation during startup waits until BF owns the new process, then kills its group too.
+- A program that another process kills, such as the out-of-memory killer, fails naming the signal: `program was killed by SIGKILL`.
+- A background helper that keeps standard output open more than a second after the exit fails the run. Redirecting its output, for example to `/dev/null`, avoids that failure, not the kill.
+- A helper holding only stderr never delays or fails the run.
+- Watch, and the service files in [Run watch as a service](schedule.md#run-watch-as-a-service), allow at least 60 seconds after a stop request, so an interrupted record write can roll back.
+
+Each run appends entries to the program's `logs/NAME.log` in the brain:
+
+1. a `== TIME OUTCOME ==` heading when the program exits;
+2. its stderr and a log routine's stdout;
+3. another heading with the run's result, such as the records collected or the failure.
+
+Log rules:
+
+- The log keeps its newest whole entries within 1 MiB.
+- Errors and run history name the log without quoting provider output.
+- `bf init` ignores `logs/` in Git, and search never reads it.
+- A log can still hold provider output: keep it private and never paste it into a public issue.
+
+Search and read keep a local `usage.jsonl`:
+
+- Each event holds the time, operation, kind and result count, plus, on zero-result searches, up to 8 unmatched tokens of at most 64 characters each.
+- A search's kind names its scope: `none`, `period`, `folder`, `note`, `memories`, `source`, `source-period`, `record`, `identity`, `tag`, or `combined` for a period with another scope. A source with a period, written either way, counts as `source-period`.
+- A read's kind names its page: `home`, `period`, `tasks`, `tags`, `tag`, `memories`, `source`, `source-period`, `record`, `folder`, `note`, `section`, `action`, `identity` or `relation`.
+- It never holds query text, refs, paths or identities.
+- Beyond 1 MiB, BF sums each earlier UTC day into one line, with up to 32 unmatched tokens, and drops days older than 30. Today's events stay as they are unless they alone pass 768 KiB.
+- `bf status` [summarizes](commands.md#status-sources-and-routines) today with the 6 or 29 UTC days before it. Events written before kinds existed count in the totals only, and a cut made by an older release still marks the windows it shortened with `since`.
+
+Assistants, channels and the queue:
+
+| Resource                             | Limit                                                                                                                                                             |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Assistant inputs, outputs, schedules | 32 entries each                                                                                                                                                   |
+| Assistants per brain                 | 32                                                                                                                                                                |
+| Channels per brain                   | 64                                                                                                                                                                |
+| Channel read                         | 1,000 messages; a read input catches up on a longer window in parts, at most 16 admitted parts per poll                                                           |
+| Stream frame                         | 1 MiB by default (1 KiB–1 MiB)                                                                                                                                    |
+| Stream lifetime                      | No deadline for a healthy idle stream; each stream run ends with one timed entry in `logs/channel.NAME.stream.log`                                                |
+| Queue database                       | 256 MiB                                                                                                                                                           |
+| Queue admission                      | New work until the queue holds 96 MiB or 10,000 unfinished obligations                                                                                            |
+| Answer space of a started job        | `max_bytes × (7 + 6 × routes)` and a little more, within 96 MiB: at most 14 routes per run at the 1 MiB default and 2 at 4 MiB, fewer for a large prompt or input |
+| Completed bodies                     | 8 MiB budgets                                                                                                                                                     |
+| Identity tombstones                  | 35 days                                                                                                                                                           |
+
+See [channel limits and recovery](channels.md#queue-and-recovery).

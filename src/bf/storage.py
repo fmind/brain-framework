@@ -503,6 +503,17 @@ def runtime_store(store: Store) -> Store:
     return _private("runtime", store.identity, root=store.root)
 
 
+def program_state(store: Store, name: str) -> Store:
+    """A program's private directory on this machine, for cursors and tokens kept between runs.
+
+    It follows the physical brain like its locks, never enters the brain, and may be deleted: a program must then
+    start again from its lookback.
+    """
+    if not name or name.startswith(".") or "/" in name or "\x00" in name:
+        raise Error("invalid program name")
+    return _private("programs", store.identity, name, root=store.root)
+
+
 def lock_file(store: Store, name: str) -> tuple[Store, str]:
     """Where a lock lives: every lock follows the physical brain, whatever path or mount reached it."""
     leaf = f"{store.identity}.lock" if name == "write.lock" else f"{store.identity}-{name}"

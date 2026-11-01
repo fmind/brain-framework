@@ -17,11 +17,13 @@ Ask an agent, “Why did we choose a single product page?” It should find the 
 | Brain instructions | The brain's `AGENTS.md`, written by `bf init`.                           | Load it with your host's project instructions; [keep it current](#refresh-brain-instructions). |
 | Hooks              | Optional context at session start or with each prompt.                   | [Hooks](#bring-context-into-every-session).                                                    |
 
-CLI and MCP are alternative retrieval routes. Skills explain the workflow; hooks automate one narrow step. None of them grants permission to collect, edit or publish. Start your terminal agent inside `~/brain` and ask: “Use `bf search` to find why we chose a single product page, then `bf read` the matching ref and cite it.” No skill is needed for this first check.
+CLI and MCP are alternative retrieval routes. Skills explain the workflow; hooks automate one narrow step. None of them grants permission to collect, edit or publish.
 
-Agents can also read this documentation as Markdown: [llms.txt](https://fmind.github.io/brain-framework/llms.txt) indexes every guide, [llms-full.txt](https://fmind.github.io/brain-framework/llms-full.txt) holds their full text, and each page's Markdown sits at its URL followed by `index.md`, such as [the MCP guide](https://fmind.github.io/brain-framework/docs/mcp/index.md). In a clone, the same guides are the Markdown files in `docs/docs/`.
+Start your terminal agent inside `~/brain` and ask: “Use `bf search` to find why we chose a single product page, then `bf read` the matching ref and cite it.” No skill is needed for this first check.
 
-Claude Code 2.1.277+ loads the brain's `AGENTS.md` when no `CLAUDE.md` sits in the brain or a folder above it; do not add one, because it would replace `AGENTS.md`. On an older version, or a session that [cannot load `AGENTS.md`](https://code.claude.com/docs/en/memory#when-agents-md-support-is-unavailable), give the brain a `CLAUDE.md` holding only `@AGENTS.md`, which imports it.
+Claude Code 2.1.277+ loads the brain's `AGENTS.md` when no `CLAUDE.md` sits in the brain or a folder above it. Do not add one: it would replace `AGENTS.md`. On an older version, or a session that [cannot load `AGENTS.md`](https://code.claude.com/docs/en/memory#when-agents-md-support-is-unavailable), give the brain a `CLAUDE.md` holding only `@AGENTS.md`, which imports it.
+
+Agents can also read this documentation as Markdown. [llms.txt](https://fmind.github.io/brain-framework/llms.txt) indexes every guide, and [llms-full.txt](https://fmind.github.io/brain-framework/llms-full.txt) holds their full text. Each page's Markdown sits at its URL followed by `index.md`, such as [the MCP guide](https://fmind.github.io/brain-framework/docs/mcp/index.md). In a clone, the same guides are the Markdown files in `docs/docs/`.
 
 ## Install the skills
 
@@ -40,7 +42,14 @@ The reply lists each skill with `"status":"installed"`. Each host looks in its o
 | [`bf-setup`](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-setup/SKILL.md)       | Onboard a brain, discover useful sources and import selected knowledge.    |
 | [`bf-maintain`](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-maintain/SKILL.md) | Build integrations, run collection and schedules, and keep checks passing. |
 
-Run the same command after each BF update: it updates the skills it installed and never overwrites your changes. An interrupted install or update reads `outdated` and finishes on the next run; an empty folder installs like a missing one. Three statuses leave a folder unchanged and make the command exit 1:
+Start a new session and ask: “Search my brain for why we chose a single product page. Read the source and cite its ref.” The agent should read `projects/new-website.md#decision` before answering.
+
+Run the same command after each BF update. It updates the skills it installed and never overwrites your changes.
+
+<details markdown="1">
+<summary>Update statuses, <code>--force</code> and <code>--check</code></summary>
+
+An interrupted install or update reads `outdated` and finishes on the next run. An empty folder installs like a missing one. Three statuses leave a folder unchanged and make the command exit 1:
 
 | Status      | Cause                                                                                                                           | Recovery                                                                         |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
@@ -48,13 +57,15 @@ Run the same command after each BF update: it updates the skills it installed an
 | `unmanaged` | It has no `.bf-skill.json` manifest, such as a copy made before 16.0.                                                           | Back it up, then rerun with `--force`.                                           |
 | `newer`     | A newer `bf`, such as a brain's pinned runtime sharing the folder, installed a different copy.                                  | Upgrade this `bf` or run the newer one: `--force` would install this older copy. |
 
-`--force` installs the packaged copies over those folders and keeps files BF does not ship; it refuses a folder that is a symbolic link, which you remove first. With `--force`, an `updated` entry still lists `edited`: the files it overwrote or restored, plus edited files it kept because this version no longer ships them. `bf skills ~/.agents/skills --check` writes nothing: it reports each skill as `current`, `outdated`, `modified`, `unmanaged`, `newer` or `missing` and exits 1 unless all are current.
+- `--force` installs the packaged copies over those folders and keeps files BF does not ship. It refuses a folder that is a symbolic link, which you remove first.
+- With `--force`, an `updated` entry still lists `edited`: the files it overwrote or restored, plus edited files it kept because this version no longer ships them.
+- `bf skills ~/.agents/skills --check` writes nothing. It reports each skill as `current`, `outdated`, `modified`, `unmanaged`, `newer` or `missing`, and exits 1 unless all are current.
 
-Start a new session and ask: “Search my brain for why we chose a single product page. Read the source and cite its ref.” The agent should read `projects/new-website.md#decision` before answering.
+</details>
 
 ## The everyday loop
 
-Consult the brain before repeating source queries when a task depends on saved context. Use live tools only for missing or current evidence and authorized actions. Search, read and check with the `bf` on PATH even when the brain has a `pyproject.toml`: its pinned runtime would install and run code the brain supplies.
+Consult the brain before repeating source queries when a task depends on saved context. Use live tools only for missing or current evidence and authorized actions. Search, read and check with the `bf` on PATH, even when the brain has a `pyproject.toml`: its pinned runtime would install and run code the brain supplies.
 
 1. **Orient:** `bf read` shows what needs attention, projects needing review first; `bf read concepts` and `bf read actions` flag notes that set `stale_after` the same way. `bf read tasks` lists open work; `bf read 7d` shows recent activity.
 1. **Find:** search a few subject words, with variants in one query; quote phrases and use `word*` for prefixes. `unmatched` names words to rephrase.
@@ -72,13 +83,15 @@ bf read projects/new-website.md#decision
 
 The exact read supplies the reason. Whether the product page now meets it needs the actual draft.
 
-When a host cannot detect another session's edit, write through the [guarded-write helper](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/scripts/guarded-write.py). It changes a note only while the note still has the `sha256` of your read (`--expect-sha256`): either one exact passage with `--old=TEXT --new=TEXT`, or the whole file with `--new-file FILE` alone. Concurrent helpers writing the same file take turns through a lock below `XDG_STATE_HOME`, so only one of two sessions that read the same digest succeeds; an editor that takes no lock can still save in between.
+When a host cannot detect another session's edit, write through the [guarded-write helper](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/scripts/guarded-write.py). It changes a note only while the note still has the `sha256` of your read (`--expect-sha256`). It replaces either one exact passage, with `--old=TEXT --new=TEXT`, or the whole file, with `--new-file FILE` alone. Concurrent helpers writing the same file take turns through a lock below `XDG_STATE_HOME`, so only one of two sessions that read the same digest succeeds. An editor that takes no lock can still save in between.
 
 ## Resume an action
 
-An action keeps one session's objective, inputs, outputs and next step in `actions/YYYY-MM-DD_topic/ACTION.md`. To start one, invoke the `bf-action` skill with a topic, such as `/bf-action website-review` in Claude Code: the invocation is the request, so no wording such as "start an action" is needed. The agent resumes an open action on that topic if one exists (an action is done once its Outcome is filled and its TODO has no open box; later work starts a new action linking it); otherwise it finds the owning project, creates the action and fills its Context, TODO and Resume, then reports a ref such as `actions/2026-09-27_website-review/ACTION.md`. Asking to start, track, resume or hand off a session selects the same skill.
+An action keeps one session's objective, inputs, outputs and next step in `actions/YYYY-MM-DD_topic/ACTION.md`. To start one, invoke the `bf-action` skill with a topic, such as `/bf-action website-review` in Claude Code. The invocation is the request, so no wording such as "start an action" is needed. Asking to start, track, resume or hand off a session selects the same skill.
 
-The skill's [new-action helper](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/scripts/new-action.py) creates that folder with an `ACTION.md` skeleton and never joins an existing one: it adds a 12-character suffix when the folder exists, or always with `--unique`, which suits shared brains. Create the [website-review action](brain.md#actions), then read its stopping point:
+The agent resumes an open action on that topic if one exists. Otherwise it finds the owning project, creates the action, fills its Context, TODO and Resume, then reports a ref such as `actions/2026-09-27_website-review/ACTION.md`. An action is done once its Outcome is filled and its TODO has no open box; later work starts a new action linking it.
+
+The skill's [new-action helper](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-action/scripts/new-action.py) creates that folder with an `ACTION.md` skeleton and never joins an existing one. It adds a 12-character suffix when the folder exists, or always with `--unique`, which suits shared brains. Create the [website-review action](brain.md#actions), then read its stopping point:
 
 ```bash
 bf read actions
@@ -114,19 +127,24 @@ The [evidence helper](https://github.com/fmind/brain-framework/blob/main/src/bf/
 | `unchanged` | The local evidence matches the capture; the provider may still have changed.                |
 | `unknown`   | An incomplete read, a partial record or uncertain freshness prevents a reliable comparison. |
 
-Keep each capture within its evidence's audience and Git policy: a capture of a record from a source Git ignores goes in the ignored `originals/` folder, and one of an authored note with the action's `inputs/`. The helper's `read REF --brain BRAIN` mode assembles a large reply from its text pages. The [evidence guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/references/evidence.md) gives the commands.
+Keep each capture within its evidence's audience and Git policy. A capture of a record from a source Git ignores goes in the ignored `originals/` folder; one of an authored note goes with the action's `inputs/`. The helper's `read REF --brain BRAIN` mode assembles a large reply from its text pages. The [evidence guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/references/evidence.md) gives the commands.
 
 ## Bring context into every session
 
-The [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add context without the agent asking. Copy them into a folder only you write, such as your personal brain's `hooks/`, review them and make them executable with `chmod +x hooks/*.py`: hosts run them as commands at every session or prompt, so never register a hook from a brain others can push to. The session hook prints the current repository's project: its status, review deadline, next task and linked notes, plus programs that are overdue, never collected or failed, and sources that [fell silent](schedule.md#silent-sources).
+The [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add context without the agent asking:
 
-The optional prompt hook searches at most eight content words of each prompt, waits up to 5 seconds and prints the refs of up to three matching notes. Both print nothing when retrieval is slow, unusable or empty.
+- The **session hook** prints the current repository's project: its status, review deadline, next task and linked notes. It also lists programs that are overdue, never collected or failed, and sources that [fell silent](schedule.md#silent-sources).
+- The optional **prompt hook** searches at most eight content words of each prompt, waits up to 5 seconds and prints the refs of up to three matching notes. It passes words of every prompt to `bf search` as an argument.
 
-The [hooks README](https://github.com/fmind/brain-framework/blob/main/examples/hooks/README.md#connect-the-host) configures Claude Code and Codex, with host timeouts of 30 seconds per session and 10 per prompt. The prompt hook passes words of every prompt to `bf search` as an argument. Both hooks can use a nonempty stale cache generation while collection runs, with an “Index refreshing” note; empty generations and other retrieval problems stay silent.
+Copy them into a folder only you write, such as your personal brain's `hooks/`, review them and make them executable with `chmod +x hooks/*.py`. Hosts run them as commands at every session or prompt, so never register a hook from a brain others can push to.
+
+The [hooks README](https://github.com/fmind/brain-framework/blob/main/examples/hooks/README.md#connect-the-host) configures Claude Code and Codex, with host timeouts of 30 seconds per session and 10 per prompt. Both hooks print nothing when retrieval is slow, unusable or empty. While collection runs, they can use a nonempty stale cache generation, with an “Index refreshing” note; empty generations and other retrieval problems stay silent.
 
 ## Refresh brain instructions
 
-The generated `AGENTS.md` is short, because every session loads it: the brain's layout, the orient, find, verify and answer loop, when a reply is incomplete, which commands need the user's authority and when to save an outcome. Authoring rules live in the `bf-use` skill. `bf init` writes it once, so it keeps the guidance of the BF version that created the brain. Compare it with the installed version's template:
+The generated `AGENTS.md` is short, because every session loads it. It covers the brain's layout, the orient, find, verify and answer loop, when a reply is incomplete, which commands need the user's authority and when to save an outcome. Authoring rules live in the `bf-use` skill.
+
+`bf init` writes it once, so it keeps the guidance of the BF version that created the brain. Compare it with the installed version's template:
 
 ```bash
 scratch="$(mktemp -d)"

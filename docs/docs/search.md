@@ -5,7 +5,7 @@ description: Find saved evidence, read exact sources and check whether results a
 
 # Search and read
 
-Use `bf search` to find evidence and `bf read` to open it. Both work offline and notice note edits and new collections automatically; after editing a record file by hand, run `bf build`. Run them inside your brain.
+Use `bf search` to find evidence and `bf read` to open it. Run them inside your brain. Both work offline and notice note edits and new collections; after editing a record file by hand, run `bf build`.
 
 **Search a few words → read the returned ref → check that the reply is complete.** Use [pages](#pages) to browse instead.
 
@@ -18,30 +18,29 @@ bf search "visitors clear explanation"
 bf search "product page" --scope projects
 ```
 
-The first search finds the decision's reason; the second searches project notes only. Any query word can match, and results matching more of the words rank higher. Put variants in one query, such as `signup "sign up" registration`: BF does not translate or expand words.
+The first search finds the decision's reason, and the second searches project notes only. Any query word can match; results matching more words rank higher. BF does not translate or expand words, so put variants in one query, such as `signup "sign up" registration`.
 
-| Write                                 | To match                                                                                       |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `visitors signup`                     | Either word, in any form English stemming relates, such as `visitor`.                          |
-| `"clear explanation"`                 | The exact phrase.                                                                              |
-| `synchro*`                            | Words starting with `synchro`, such as `synchronizes`.                                         |
-| `"son" checklist`                     | Either word: quoting keeps a function word, such as French `son`, that search otherwise drops. |
-| `repo:github.com/example/new-website` | The identity's owner and every item linking to it.                                             |
+| Write                                 | To match                                                              |
+| ------------------------------------- | --------------------------------------------------------------------- |
+| `visitors signup`                     | Either word, in any form English stemming relates, such as `visitor`. |
+| `"clear explanation"`                 | The exact phrase.                                                     |
+| `synchro*`                            | Words starting with `synchro`, such as `synchronizes`.                |
+| `repo:github.com/example/new-website` | The identity's owner and every item linking to it.                    |
 
-Each item has a `title`, an `excerpt` and a `ref`. A note states its `date`; a record states its event `time` with your local offset. `sections` lists up to three other matching sections of the same note, and `unmatched` names query words found nowhere, so you can rephrase; `suggestions` offers close words the brain holds for a misspelling:
+Each item has a `title`, an `excerpt` and a `ref`. A note states its `date`, and a record its event `time`. `unmatched` names query words found nowhere, so you can rephrase, and `suggestions` offers close words for a misspelling:
 
 ```bash
 bf search '"clear explanation" zebra'
 bf search 'explenation'
 ```
 
-The first reply returns the Decision section and `"unmatched":["zebra"]`. The second finds nothing and returns `"unmatched":["explenation"]` with `"suggestions":{"explenation":["explanation"]}`: search the suggested word to confirm. Section titles name their parent headings, such as `Portfolio review — Vega — Budget`, and a note's tags weigh more than body text, less than headings. Among equal scores, the newest item comes first. Records of several sources that share a URL appear once; `also` lists the other refs.
+The first reply returns the Decision section and `"unmatched":["zebra"]`. The second finds nothing and returns `"unmatched":["explenation"]` with `"suggestions":{"explenation":["explanation"]}`: search the suggested word to confirm. A note appears once, with other matching `sections`; records sharing a URL appear once, with the other refs in `also`. [Search rules](retrieval.md#search) explain ranking.
 
-If a query misses, use the evidence's own words and drop the scope. The sample says “visitors” and “signing up”, so “customer conversion” need not find it. Accents fold only in Latin script, and Chinese, Japanese, Thai or Devanagari text matches by runs or fragments rather than words; see [other scripts](retrieval.md#search).
+If a query misses, use the evidence's own words and drop the scope. The sample says “visitors” and “signing up”, so “customer conversion” need not find it. Search also drops function words such as `the` unless quoted, folds accents only in Latin script and matches some scripts by fragments; see [other scripts](retrieval.md#search).
 
 ### Narrow a search
 
-`--scope` takes one scope: a folder or note such as `projects`, a source such as `memories/brief`, a period such as `7d` or `2026-09-21..2026-09-25`, an identity or a tag address. [Scopes](retrieval.md#scopes) lists every form.
+`--scope` takes one scope: a folder or note such as `projects`, a source such as `memories/brief`, a period such as `7d` or `2026-09-21..2026-09-25`, an identity or a tag address. A period, a space, then one other scope narrows it in time, as in `bf search "launch" --scope "7d repo:github.com/example/new-website"`. [Scopes](retrieval.md#scopes) list every form.
 
 ## Read a ref
 
@@ -49,7 +48,7 @@ If a query misses, use the evidence's own words and drop the scope. The sample s
 bf read projects/new-website.md#decision
 ```
 
-The `text` field holds the original Decision section. Omit `#decision` to read the whole note with its backlinks. Use returned refs exactly:
+The `text` field holds the original Decision section; omit `#decision` to read the whole note with its backlinks. Use returned refs exactly:
 
 | Read     | Example                                       | Result                                                                                                                    |
 | -------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -59,15 +58,15 @@ The `text` field holds the original Decision section. Omit `#decision` to read t
 | Identity | `bf read repo:github.com/example/new-website` | Its owning note, after [declaring the alias](links.md#give-a-subject-a-stable-identity).                                  |
 | Relation | `bf read projects/new-website.md --rel cites` | Every item citing the note: a [relation page](retrieval.md#relation-pages).                                               |
 
-A whole read previews the five newest backlinks of each relation, each with a short `excerpt` and single-value `fields` such as a status. A note above 32 KiB returns its text in pages. The first page carries its backlinks and, when headings inside it divide the note, an `outline` of section refs with only the first 4 KiB of text: read the section you need, or follow `next_offset`.
+A whole read previews the five newest backlinks of each relation. A large note returns its text in pages, with an `outline` of section refs when headings divide it: read the section you need, or follow `next_offset` ([large exact reads](retrieval.md#large-exact-reads)).
 
 With several brains selected, each result also names its `brain` and a `uri` such as `bf://brain/projects/new-website.md#decision`. Read the `uri`: a plain ref that exists in two brains fails.
 
 ## Pages
 
-Pages are computed views for browsing. `bf read` alone opens the home page: projects needing review first, recent work and failing programs. `bf read projects`, `tasks`, `actions`, `7d`, `memories` and `tags` list the rest; [pages](retrieval.md#pages) lists every page and its rules.
+Pages are computed views for browsing; they use saved dates and never fetch anything. `bf read` alone opens the home page: projects needing review first, recent work and failing programs. `bf read projects`, `tasks`, `actions`, `7d`, `memories` and `tags` list the rest; [pages](retrieval.md#pages) lists every page and its rules.
 
-For the New website project, `bf read projects` shows `"next":"Draft the product page."` and `bf read tasks` lists that checkbox with its `ref` and `line`. A project with `"review":true` needs attention: `review_reasons` says why, and `newer` names linked evidence to read first; see [review reminders](brain.md#review-reminders). Pages use saved dates and never fetch anything.
+For the New website project, `bf read projects` shows `"next":"Draft the product page."` and `bf read tasks` lists that checkbox with its `ref` and `line`. A project with `"review":true` needs attention: `review_reasons` says why, and `newer` names linked evidence to read first; see [review reminders](brain.md#review-reminders).
 
 ## Check that a reply is complete
 
@@ -82,7 +81,7 @@ bf search "project" --limit 1
 bf search "project" --limit 1 --offset 1
 ```
 
-The first reply returns `concepts/welcome.md` with `"next_offset":1`; the second returns `projects/new-website.md` without `next_offset`, which ends the listing. Keep the query, scope, limit and brain selection unchanged, and stop when `next_offset` is absent. Listings and large exact reads continue the same way; see [continuations](retrieval.md#continuations).
+The first reply returns `concepts/welcome.md` with `"next_offset":1`. The second returns `projects/new-website.md` without `next_offset`, which ends the listing. Keep the query, scope, limit and brain selection unchanged. Listings and large exact reads continue the same way; see [continuations](retrieval.md#continuations).
 
 ## Keep answers findable
 

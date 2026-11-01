@@ -1,6 +1,6 @@
 ---
 name: bf-maintain
-description: Keep a Brain Framework brain (bf) healthy — add or fix sensors, field mappings, routines, assistants and Git hooks; collect, update, watch or schedule sources; diagnose overdue or failed collection; recover writes, fix bf validate problems, upgrade bf and resolve brain merge conflicts. Use for "connect this source", "collection failed", "my brain is out of date" or "upgrade bf".
+description: Keep a Brain Framework brain (bf) healthy — write or fix sensors, field mappings, routines, assistants and Git hooks; collect, update, watch or schedule them; diagnose failed or overdue collection, recover writes, fix bf validate problems, upgrade bf and resolve merge conflicts. Use for "add a sensor for this source", "collection failed", "my brain is out of date" or "upgrade bf"; choosing which sources to connect belongs to bf-setup.
 license: MIT
 compatibility: Requires Brain Framework 20 (the bf command) on Linux or macOS.
 ---
@@ -43,7 +43,8 @@ bf eval
 
 Core commands:
 
-- `bf collect SENSOR` runs one sensor now; `--since`/`--until` bound a backfill, and `--allow-removal` accepts a snapshot removal for one run.
+- `bf collect SENSOR` runs one sensor now; `--since`/`--until` bound a backfill, and `--allow-removal` accepts a snapshot removal for one run. `--input FILE` checks saved output against the current mappings without running the sensor.
+- `bf forget REF...` removes collected records and keeps their sensor from storing them again; `expire_after` on a sensor removes records past a retention. Both delete evidence: use them only when the user asks to remove that evidence, with `--dry-run` first.
 - `bf build` recovers interrupted record writes and rebuilds the disposable `.bf/` cache; `--reproject SENSOR` re-applies current `fields:` mappings without running the sensor.
 - `bf run ROUTINE [ARGS]...` runs one routine, `bf run ASSISTANT` one assistant (`--stdin` passes piped text as its input) and `bf run --hook EVENT` every routine listing that hook.
 - `bf update` runs due sensors, routines and assistants, then refreshes the cache; `bf watch` does so continuously (`--json` for rows, or as a user service).

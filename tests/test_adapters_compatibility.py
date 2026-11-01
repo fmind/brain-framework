@@ -28,9 +28,11 @@ def test_example_scripts_are_standalone_python311_scripts(script: Path) -> None:
         assert os.access(script, os.X_OK), "a script run through its shebang needs its executable bit"
     # The package's environment has PyYAML and pydantic; the python3 a user copies the script to has neither.
     modules = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    # A relative import keeps its dots, so it names no standard-library module: a copied script has no siblings.
+    # A relative import keeps its dots, so it names no standard-library module: a copied script has no package.
     modules |= {"." * node.level + (node.module or "") for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-    assert {module.partition(".")[0] for module in modules} <= sys.stdlib_module_names | {"__future__"}
+    # The sensor kit is the one sibling a copied sensor may import: owners copy `_sensor.py` beside it.
+    kit = {"_sensor"} if (script.parent / "_sensor.py").is_file() and script.name != "_sensor.py" else set()
+    assert {module.partition(".")[0] for module in modules} <= sys.stdlib_module_names | {"__future__"} | kit
 
 
 def test_example_scripts_use_only_the_python311_standard_library() -> None:

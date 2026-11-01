@@ -24,6 +24,8 @@ _COUNTERS = (
     "updated",
     "unchanged",
     "removed",
+    "forgotten",
+    "expired",
     "requested_start",
     "requested_end",
     "reconcile",

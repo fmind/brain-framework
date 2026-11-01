@@ -186,6 +186,14 @@ def _scope(value: str, now: datetime | None) -> Scope:
         return {}
     if (found := route(value, now).window) is not None:
         return {"since": found.since, "until": found.until}
+    head, _, rest = value.partition(" ")
+    if rest.strip() and (window := period(head, now)) is not None:
+        # A period, a space, then one other scope, such as `7d repo:github.com/owner/name`: no folder, identity or
+        # tag starts with a period followed by a space, so this form widens what a scope accepts.
+        inner = _scope(rest.strip(), now)
+        if {"since", "until", "undated"} & inner.keys():
+            raise Error("combine a period with a folder, note, source, identity or tag, not with another period")
+        return {**inner, "since": window.since, "until": window.until}
     if index.identity(value) or value.lower().startswith("bf:"):
         # A tag scope takes no relation, unlike a read. Otherwise as `bf read` takes it: a page's #fragment would
         # scope nothing, a complete-looking empty reply.
@@ -351,7 +359,13 @@ def _named(entry: object) -> object:
 
 
 def brains(
-    stores: list[Store], build: Build, *, strict: bool = True, counted: bool = True, stack: ExitStack | None = None
+    stores: list[Store],
+    build: Build,
+    *,
+    strict: bool = True,
+    counted: bool = True,
+    stack: ExitStack | None = None,
+    kind: str = "",
 ) -> tuple[Parts, dict[str, object]]:
     """Build one part per brain; a failing brain is reported unless it is the only one requested.
 
@@ -388,7 +402,7 @@ def brains(
             continue
         problems.extend(cast("list[dict[str, object]]", part.pop("problems", [])))
         if counted:
-            usage.note(store, "read", 1)
+            usage.note(store, "read", 1, kind=kind)
         parts.append((name, part))
     if strict and stores and not answered:
         raise Error("no selected brain could be read; run bf status with --brain for each brain")
@@ -456,6 +470,7 @@ def _paged(
     offset: int,
     *,
     counted: bool,
+    kind: str = "",
     reverse: bool = False,
     review: datetime | None = None,
 ) -> tuple[dict[str, object], Parts]:
@@ -473,7 +488,7 @@ def _paged(
         return build(store, name, connection, skip, offset + limit - skip)
 
     with ExitStack() as stack:
-        parts, extra = brains(stores, opened, counted=counted, stack=stack)
+        parts, extra = brains(stores, opened, counted=counted, stack=stack, kind=kind)
         streams = [cast("Iterator[dict[str, object]]", part.pop("rows")) for _, part in parts]
         try:
             merged = heapq.merge(*streams, key=key, reverse=reverse)
@@ -507,6 +522,7 @@ def _listing(
     offset: int,
     *,
     counted: bool,
+    kind: str = "",
     reverse: bool = True,
     review: datetime | None = None,
     summary: Build | None = None,
@@ -522,7 +538,7 @@ def _listing(
         rows, total = index.listing(connection, where, params, order, count, skip)
         return {**extra, "rows": (label(name, row) for row in rows), "total": total}
 
-    return _paged(stores, build, key, limit, offset, counted=counted, reverse=reverse, review=review)
+    return _paged(stores, build, key, limit, offset, counted=counted, reverse=reverse, review=review, kind=kind)
 
 
 def _time_key(item: dict[str, object]) -> tuple[str, str]:
@@ -662,7 +678,7 @@ def home(
             "attention": alerts,
         }
 
-    parts, extra = brains(stores, build, counted=counted)
+    parts, extra = brains(stores, build, counted=counted, kind="home")
     projects = _newest(_gather(parts, "projects"), None)
     reply: dict[str, object] = {
         "page": "",
@@ -722,7 +738,7 @@ def timeline(
         )
         return {"changed": changed, "sources": sources, "rows": (label(brain, row) for row in rows), "total": total}
 
-    reply, parts = _paged(stores, build, _period_key, PAGE, offset, counted=counted, reverse=True)
+    reply, parts = _paged(stores, build, _period_key, PAGE, offset, counted=counted, reverse=True, kind="period")
     return {
         "page": name,
         "since": found.since,
@@ -771,6 +787,7 @@ def folder(
         LISTING,
         offset,
         counted=counted,
+        kind="folder",
         reverse=top != "concepts",
         review=now,
     )
@@ -797,7 +814,7 @@ def memories(
                 ]
             }
 
-        found, extra = brains(stores, overview, counted=counted)
+        found, extra = brains(stores, overview, counted=counted, kind="memories")
         return {"page": "memories", "sources": _gather(found, "sources"), **extra}
     source = parts[1]
     if not re.fullmatch(NAME, source) or len(parts) > 3:
@@ -825,6 +842,7 @@ def memories(
             SECTION,
             offset,
             counted=counted,
+            kind="source",
             summary=coverage,
         )
         if not found:
@@ -851,6 +869,7 @@ def memories(
         PAGE,
         offset,
         counted=counted,
+        kind="source-period" if window or name == "undated" else "record",
         summary=coverage,
     )
     if not found:
@@ -906,6 +925,7 @@ def tasks(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict
         PAGE,
         offset,
         counted=counted,
+        kind="tasks",
     )
     summary = {
         key: sum(cast("dict[str, int]", part["summary"])[key] for _, part in parts) for key in ("open", "done", "notes")
@@ -928,7 +948,7 @@ def tags(stores: list[Store], *, offset: int = 0, counted: bool = True) -> dict[
         total = connection.execute("SELECT count(DISTINCT target) FROM tags").fetchone()[0]
         return {"rows": items(), "total": total}
 
-    reply, _ = _paged(stores, build, lambda item: (str(item["uri"]),), LISTING, offset, counted=counted)
+    reply, _ = _paged(stores, build, lambda item: (str(item["uri"]),), LISTING, offset, counted=counted, kind="tags")
     return {"page": "tags", **reply}
 
 
@@ -956,6 +976,7 @@ def tagged(stores: list[Store], name: str, *, offset: int = 0, counted: bool = T
         LISTING,
         offset,
         counted=counted,
+        kind="tag",
     )
     return {"page": f"tags/{name}", **reply}
 
@@ -1161,7 +1182,7 @@ def relation_page(
             "total": total,
         }
 
-    reply, _ = _paged(stores, build, _time_key, PAGE, offset, counted=counted, reverse=True)
+    reply, _ = _paged(stores, build, _time_key, PAGE, offset, counted=counted, reverse=True, kind="relation")
     return {"page": "relation", "relation": relation, **reply}
 
 
@@ -1312,7 +1333,7 @@ def identity(stores: list[Store], value: str, *, counted: bool = True) -> dict[s
         return None
     value = links.identity(value)
     targets, problems = graph.expand(stores, value)
-    parts, extra = brains(stores, _graph(targets), strict=False, counted=counted)
+    parts, extra = brains(stores, _graph(targets), strict=False, counted=counted, kind="identity")
     result = _related(parts)
     issues: list[dict[str, object]] = [*problems, *cast("list[dict[str, object]]", extra.get("problems", []))]
     if not result["backlinks"] and "claims" not in result:

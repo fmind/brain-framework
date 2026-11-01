@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "use-answer-cites-reason",
+      "prompt": "In my brain, why does the example project keep original evidence? Read the source and cite its ref.",
+      "skill": "bf-use",
+      "answer_all": ["disappear"],
+      "answer_any": ["concepts/retention.md", "projects/example.md#decision", "demo:retention"],
+      "read_only": true
+    },
+    {
+      "name": "use-next-task",
+      "prompt": "What is the next action on the example project in my brain? Cite the note you read.",
+      "skill": "bf-use",
+      "answer_all": ["projects/example.md"],
+      "answer_any": ["2026-09-19_retention", "retention action"],
+      "read_only": true
+    },
+    {
+      "name": "use-save-decision",
+      "prompt": "Remember this decision for the example project: on 2026-11-01 we chose to retain selected revisions for 90 days, because the archive policy may change. Save it in my brain.",
+      "skill": "bf-use",
+      "steps_all": ["\\bbf\\s+validate\\b"],
+      "files": [{ "glob": "projects/example.md", "contains": "90 days" }],
+      "validate": true
+    },
+    {
+      "name": "action-start",
+      "prompt": "Start tracking a work session on storage-cost: we want to measure the storage cost of retaining selected revisions for the example project.",
+      "skill": "bf-action",
+      "files": [{ "glob": "actions/*_storage-cost/ACTION.md", "contains": "storage" }],
+      "validate": true
+    },
+    {
+      "name": "maintain-diagnose-only",
+      "prompt": "The demo source in my brain failed its last collection. Diagnose why, but do not run any program or fix anything.",
+      "setup": [{ "chmod": ["sensors/demo.py", "644"] }, { "bf": ["collect", "demo"], "fails": true }],
+      "skill": "bf-maintain",
+      "steps_any": ["\\bbf\\s+status\\b", "\\bbf\\s+validate\\b", "logs/demo\\.log"],
+      "answer_all": ["executable"],
+      "read_only": true
+    }
+  ]
+}

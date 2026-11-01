@@ -192,40 +192,16 @@ def test_release_notes_print_exactly_one_section(tmp_path: Path) -> None:
         assert (refused.returncode, refused.stdout, message in refused.stderr) == (1, "", True), refused.stderr
 
 
-def test_release_checklist_reads_the_workflows_mise_pin(tmp_path: Path) -> None:
-    # The checklist downloads the mise release the workflows pin: an inline comment after the pin once left the
-    # version empty, and the download URL silently pointed at no release.
-    lines = (ROOT / ".agents/skills/bf-contribute/references/release.md").read_text().splitlines()
-    start = next(index for index, line in enumerate(lines) if line.startswith("version=$("))
-    script = "\n".join([*lines[start : start + 2], 'printf %s "$version"'])
-    workflow = (ROOT / ".github/workflows/verify.yml").read_text()
-    pinned = next(line.split()[1] for line in workflow.splitlines() if line.strip().startswith("version: 20"))
-    # Every workflow pins that same mise, so the scheduled security jobs parse the tasks the checklist checked.
+def test_every_workflow_pins_the_same_mise() -> None:
+    # CI, CD and the scheduled security jobs parse the tasks with one mise release, so a gate that passed on CI passes
+    # in CD; push-and-tag tags only after CI ran with that pin.
     pins = {
         line.split()[1]
         for path in (ROOT / ".github/workflows").glob("*.yml")
         for line in path.read_text().splitlines()
         if line.strip().startswith("version: 20")
     }
-    assert pins == {pinned}
-
-    def read(root: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(  # noqa: S603 - the checklist's own commands
-            ["bash", "--noprofile", "--norc", "-euc", script],  # noqa: S607
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-
-    found = read(ROOT)
-    assert (found.returncode, found.stdout) == (0, pinned)
-    (tmp_path / ".github/workflows").mkdir(parents=True)
-    (tmp_path / ".github/workflows/verify.yml").write_text("      version: latest\n")
-    missing = read(tmp_path)
-    assert missing.returncode != 0
-    assert "no mise version pin" in missing.stderr
+    assert len(pins) == 1, pins
 
 
 def test_workflow_pipelines_fail_when_any_command_fails() -> None:

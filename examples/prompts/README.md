@@ -28,6 +28,19 @@ Run from the Brain Framework checkout after `uv sync --locked`. This subshell co
   echo "What changed in the launch?" | bf run assistant --stdin
   bf read memories/assistant
   bf search "launch" --scope memories/assistant
+  cat >> bf.yaml <<'YAML'
+  why:
+    prompt: prompts/assistant.md
+    command: [printenv, BF_TRIGGER]
+  quota:
+    prompt: prompts/assistant.md
+    command: [printf, '{"status":"RESOURCE_EXHAUSTED","response":""}']
+    text: /response
+    status: {path: /status, success: [SUCCESS]}
+YAML
+  bf run why
+  bf run quota || echo "The harness reported a failure; its job waits in the queue."
+  bf queue
 )
 ```
 
@@ -38,6 +51,9 @@ Expect, in order:
 1. The run returns `"status":"ran"`, the `record` it wrote, such as `assistant:20261014T090000Z-1a2b3c4d`, and its reply as `text`. Here the reply is the expanded prompt: the brain's absolute path, the 24 hours ending now and `Owner message: What changed in the launch?`.
 1. The source page lists that one record, titled `Brain assistant`, the reply's first line without its heading mark.
 1. The scoped search finds the record by a word of the owner's message. Like any record, an assistant run is evidence the next run, `bf search` and your agents read back.
+1. The walkthrough then adds two assistants to `bf.yaml`. `why` runs `printenv BF_TRIGGER`, so its reply is `"text":"manual"`: BF tells the harness [why it runs](../../docs/docs/prompts.md#know-why-it-runs) through environment variables.
+1. `quota` stands in for a harness that exits 0 but reports a failed model call in its JSON. Its `status` setting turns that report into a failed attempt: `bf run quota` returns `"ok":false` with `"error":"assistant harness reported status RESOURCE_EXHAUSTED; see logs/quota.log"`, records nothing and exits 1.
+1. `bf queue` lists that job as `"state":"uncertain"`, because a harness that ran might already have acted: retry or cancel it with `bf queue ID --retry` or `--cancel`. See [detect harness failures](../../docs/docs/prompts.md#detect-harness-failures).
 
 ## Use your harness
 

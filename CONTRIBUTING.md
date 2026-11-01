@@ -67,6 +67,12 @@ For onboarding or workflow changes, follow the actual commands in a disposable b
 
 Update the owning docs, skills and examples with public behavior. An adapter change needs a fake-provider test and an entry in `examples/sensors/README.md`. Regenerate the schemas when configuration models or replies change and the notices when dependencies change. Record user-visible outcomes under `Unreleased` in `CHANGELOG.md`; change versions and tags only for an authorized release.
 
+### Evaluate the skills with an agent
+
+`tests/test_skills.py` checks what the packaged skills mention; `mise run eval:skills` checks what an agent does with them. It runs each case in `scripts/eval_skills.json` in headless Claude Code against a fresh copy of `examples/brain` with its demo sensor collected and grades the transcript and the brain afterwards: the expected skill invoked, the answer's ref and reason, no collection or execution command attempted (even a refused one), no file changed by a question, the requested note or action written and a valid brain afterwards. A tool use the session's permissions refused fails `permitted`: that trial hit the harness boundary, such as a compound shell command, and says little about the skill. The session loads only the brain's project settings and installed skills, never your user skills or `CLAUDE.md` files outside the brain, and its PATH holds only this checkout's `bf` and `/usr/bin:/bin`, so provider CLIs are out of reach.
+
+It needs a logged-in `claude` and spends tokens (about $0.30 per trial of every case with the default `sonnet`; `haiku` rarely loads the skills), so it stays out of `mise run all`. Pass options after `--`, such as `mise run eval:skills -- --trials 5 --case use-save-decision`. It prints a JSON summary with each case's pass rate and failed checks, exits 1 when a case falls below `--threshold` (default 1.0) and keeps every trial's `transcript.jsonl` and `grade.json` under `~/.cache/bf-skill-eval/RUN/`; delete old runs there. Run it before and after a skill change with the same model and trials, and judge a change on repeated trials, not one run. Add a case when a skill gains a workflow, with refs the example brain holds (`tests/test_eval_skills.py` checks them), and never loosen a check to make a case pass.
+
 ### Change an example program
 
 `examples/sensors/`, `examples/routines/` and `examples/hooks/` hold scripts users copy into their brains. `tests/test_adapters_*.py` runs each one as a process with fake providers and fake `bf` and `git` executables. Their READMEs tell users what each script collects or prints and its limits; these rules keep the scripts safe to copy:
@@ -86,7 +92,7 @@ Update the owning docs, skills and examples with public behavior. An adapter cha
 
 Any other change to a bound, pattern, format or condition, such as `not` or `allOf`, fails closed and waits for the next major release. That release refreshes `tests/contract/` from `docs/*.schema.json` and lists the manual upgrade steps in the changelog.
 
-Each major release costs every installation a manual upgrade, so breaking changes ship together, in at most one major release per quarter; v20.0.0 opened the first window. Until the next window, keep each deferred change and its upgrade step on a list and ship minor releases. A new rule that rejects input loading today warns first where it can, through `bf validate` or a `bf:` diagnostic, and fails in the next major release. Input that BF previously misread is a bug: fix it in a patch release.
+A breaking change ships in a major release whenever the design needs it, with no compatibility layer. Record it under `### Breaking changes` in `Unreleased` with its manual upgrade step; the next release is then a major. Each major costs every installation a manual upgrade, so batch related breaks into one release where practical, and let a stricter rule warn through `bf validate` or a `bf:` diagnostic first when that costs little. Input that BF previously misread is a bug: fix it in a patch release.
 
 ### Version the search cache
 
@@ -95,6 +101,12 @@ A brain's cache is reused while `index.SCHEMA` is unchanged, so `tests/test_cach
 ## Write documentation people can follow
 
 Keep tutorials focused on one working result, task guides on a practical goal, concepts on why the model works and reference pages on exact contracts ([Diátaxis](https://diataxis.fr/start-here/)). Put prerequisites before commands and observable results beside them. Label fictional evidence and optional steps; link to the canonical explanation instead of repeating it.
+
+Layer each page for its reader:
+
+- **Guides show the main path first**: open with what the reader achieves, write short sentences with one idea each and link to the exact rule. Put limits, error formats and rare edge cases in a reference section at the end of the page, a collapsed `<details>` block or the owning reference page.
+- **Reference pages stay complete**: `commands`, `configuration`, `schema`, `link-reference`, `retrieval` and `limits` keep every fact, one rule per table row or list item, never several sentences in one cell.
+- **Each rule has one home**: state it on its owning page and link to it elsewhere. Before removing a guide's copy, check that the owner states it completely.
 
 Use descriptive links, one page title, logical heading levels and text alternatives for images ([W3C guidance](https://www.w3.org/WAI/tutorials/page-structure/)). Preserve published documentation-site paths and heading anchors when reorganizing: redirect a merged page to its new section in `zensical.toml`. `tests/test_readme.py` checks the README's deep links and `tests/test_skills.py` the skills' links. Keep all guides in `zensical.toml`, with each guide's `llms.txt` summary matching its front matter `description` (`tests/test_docs.py`); after layout changes or a Zensical upgrade, check narrow screens, light and dark schemes, keyboard navigation, code copying and the search dialog. `docs/javascripts/accessibility.js` patches Zensical's search by structure because its class names are minified: rerun an accessibility audit, such as axe-core, with search open and closed after an upgrade.
 
@@ -126,4 +138,4 @@ Dependabot runs security updates only: when an alert has a patched release, it o
 
 CI deploys the shared check job's documentation from current `main` only after all verification jobs pass. Tag-triggered CD publishes the tested Linux x64 package artifacts after the same gate. Report local checks, hosted CI, published artifacts, installed runtime, provider freshness and agent-host integration as separate evidence. Commit, push and publish only when authorized.
 
-Follow the [release checklist](.agents/skills/bf-contribute/references/release.md) only with release authorization. See [SECURITY.md](SECURITY.md) for private vulnerability reports and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
+Follow the [release checklist](.agents/skills/bf-contribute/references/release.md), which drives `scripts/release.py`, only with release authorization. See [SECURITY.md](SECURITY.md) for private vulnerability reports and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.

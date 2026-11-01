@@ -14,7 +14,7 @@ from threading import Event
 
 from pydantic import ValidationError
 
-from bf.collect import Runner, arguments, executable, run, starting
+from bf.collect import PROGRAM_ENV, Runner, arguments, executable, run, starting
 from bf.config import load
 from bf.history import append_log, environment
 from bf.messages import Batch, Message, Outgoing, Receipt
@@ -104,7 +104,9 @@ def stream(
     `connected` runs once, when BF wrote the resume frame and the adapter still runs ESTABLISHED seconds after starting.
     Every run ends with one timed log entry naming its outcome and, when the adapter exited on its own, its status.
     """
-    env = {**environment(), "BF_BRAIN": str(store.root)}
+    # Like `run`: inherited values of the variables BF sets never reach an adapter.
+    env = {key: value for key, value in environment().items() if key not in PROGRAM_ENV}
+    env["BF_BRAIN"] = str(store.root)
     argv = arguments(store, command, resume.get("since", ""), "")
     argv[0] = executable(store, argv[0], env)
     child: subprocess.Popen[bytes] | None = None

@@ -48,6 +48,9 @@ def export() -> str:
                 '"record":"assistant:',
                 "Owner message: What changed in the launch?",
                 '"title":"Brain assistant"',
+                '"text":"manual"',
+                "reported status RESOURCE_EXHAUSTED",
+                '"state":"uncertain"',
             ],
         ),
         (

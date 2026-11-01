@@ -766,6 +766,9 @@ class Command(Model):
     @field_validator("command")
     @classmethod
     def valid_command(cls, values: list[str]) -> list[str]:
+        if not values:
+            # Only a disabled sensor or routine may omit its command; Program checks that rule.
+            return values
         for index, value in enumerate(values):
             if "\x00" in value or len(value) > 16_384:
                 raise ValueError("invalid command argument")
@@ -796,6 +799,15 @@ class Command(Model):
 class Program(Command):
     """A sensor or deterministic routine with a due rule."""
 
+    # A retired program keeps its records searchable without a command that could run.
+    command: Annotated[list[str], Field(max_length=128)] = Field(
+        default_factory=list,
+        description=(
+            "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments "
+            "supporting {{brain}}, {{home}}, {{start}}, {{end}} and {{lines:FILE}}. Optional only with enabled: false."
+        ),
+        json_schema_extra=Command.model_fields["command"].json_schema_extra,
+    )
     enabled: bool = Field(default=True, description="Allow manual and scheduled execution.")
     refresh: Annotated[int, Field(ge=0, le=31_536_000)] = Field(
         default=0, description="Seconds between due runs; zero keeps this program manual."
@@ -803,6 +815,12 @@ class Program(Command):
     lookback: Annotated[int, Field(ge=1, le=31_536_000)] = Field(
         default=86_400, description="Seconds covered by a first run or a snapshot."
     )
+
+    @model_validator(mode="after")
+    def runnable(self) -> Program:
+        if self.enabled and not self.command:
+            raise ValueError("command is required unless enabled: false")
+        return self
 
 
 class Reconciliation(Model):
@@ -860,6 +878,12 @@ class Sensor(Program):
     max_text_bytes: Annotated[int, Field(ge=1, le=4 << 20)] | None = Field(
         default=None,
         description="Maximum UTF-8 bytes of a record's text before truncation; sets truncated: true in attributes.",
+    )
+    # Retention, in seconds: evidence older than this leaves the brain at the sensor's next collection.
+    expire_after: Annotated[int, Field(ge=3600, le=3_153_600_000)] | None = Field(
+        default=None,
+        description="Seconds after which a record's event time (or, without one, when it was last observed) makes "
+        "collection remove it and skip it when printed again; unset keeps records.",
     )
 
     _empty = field_validator("fields", mode="before")(empty)
@@ -1055,6 +1079,28 @@ class AssistantSchedule(Model):
         return now
 
 
+class AssistantStatus(Model):
+    """Where a harness's JSON stdout reports its own outcome, and which values mean success."""
+
+    path: Annotated[str, Field(max_length=4096, pattern=r"^/(?:[^~\x00]|~[01])*$")] = Field(
+        description="JSON Pointer to the harness's status in its JSON stdout, such as /status."
+    )
+    success: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=256)] | bool],
+        Field(min_length=1, max_length=16, json_schema_extra={"uniqueItems": True}),
+    ] = Field(
+        description="Values at path that mean the harness succeeded, such as [SUCCESS] or [false]; any other value, "
+        "or none, fails the attempt like a nonzero exit."
+    )
+
+    @field_validator("success")
+    @classmethod
+    def distinct(cls, values: list[str | bool]) -> list[str | bool]:
+        if len({(type(value), value) for value in values}) != len(values):
+            raise ValueError("success values must be distinct")
+        return values
+
+
 class Assistant(Command):
     """One harness with independent acquisition, delivery and schedules."""
 
@@ -1074,6 +1120,11 @@ class Assistant(Command):
         default=None,
         description="JSON Pointer to the reply text in the command's JSON stdout, such as /response; the other "
         "members become the record's output attribute. Omitted, all of stdout is the reply.",
+    )
+    status: AssistantStatus | None = Field(
+        default=None,
+        description="Where the harness's JSON stdout reports success, such as {path: /status, success: [SUCCESS]}; "
+        "another value fails the attempt like a nonzero exit. Requires text.",
     )
     keep: Annotated[int, Field(ge=1, le=MAX_FILES // 2)] | None = Field(
         default=None,
@@ -1114,6 +1165,8 @@ class Assistant(Command):
         outputs = [item.channel.name for item in self.outputs if isinstance(item, ChannelOutput)]
         if len(outputs) != len(set(outputs)):
             raise ValueError("each output channel may appear once; combine its when values")
+        if self.status is not None and self.text is None:
+            raise ValueError("status requires text: set text to the reply's JSON Pointer so BF reads JSON stdout")
         return self
 
 

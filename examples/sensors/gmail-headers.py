@@ -206,8 +206,8 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
         "attributes": {
             "thread": thread,
             "labels": sorted(labels),
-            "from_refs": [ref for ref in map(person, people["from"]) if ref][:MAX_LINKS],
-            "to_refs": [ref for ref in map(person, people["to"]) if ref][:MAX_LINKS],
+            "sender_refs": [ref for ref in map(person, people["from"]) if ref][:MAX_LINKS],
+            "recipient_refs": [ref for ref in map(person, people["to"]) if ref][:MAX_LINKS],
             "cc_refs": [ref for ref in map(person, people["cc"]) if ref][:MAX_LINKS],
         },
     }

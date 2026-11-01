@@ -12,6 +12,7 @@ import subprocess
 import time
 from collections.abc import Callable, Generator, Mapping
 from contextlib import ExitStack, contextmanager, suppress
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import current_thread, main_thread
@@ -44,7 +45,7 @@ from bf.models import (
     suggest,
     timestamp,
 )
-from bf.storage import BusyError, Store, collecting, relative, writer
+from bf.storage import BusyError, Store, collecting, program_state, relative, writer
 from bf.validate import broken_links
 
 _LOG = 256 << 10
@@ -69,6 +70,23 @@ RUN_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}")
 _TITLE = 120
 # A routine's error quotes at most this many characters of its first broken link.
 _QUOTE = 200
+# The variables BF sets for a program: inherited values never leak into a run that does not set them.
+PROGRAM_ENV = ("BF_PROGRAM", "BF_STATE_DIR", "BF_START", "BF_END", "BF_TRIGGER", "BF_SCHEDULE")
+# Values the caller of `run` exposes to the program it starts, such as a sensor's window; each thread has its own.
+_EXPOSED: ContextVar[dict[str, str]] = ContextVar("bf_exposed", default={})  # noqa: B039 - never mutated
+
+
+@contextmanager
+def exposing(**values: str) -> Generator[None]:
+    """Expose `values` as BF_* environment variables to every program `run` starts in this context."""
+    unknown = set(values) - set(PROGRAM_ENV)
+    if unknown:
+        raise ValueError(f"unknown program variables: {sorted(unknown)}")
+    token = _EXPOSED.set({**_EXPOSED.get(), **{key: value for key, value in values.items() if value}})
+    try:
+        yield
+    finally:
+        _EXPOSED.reset(token)
 
 
 class Runner(Protocol):
@@ -159,9 +177,15 @@ def run(
     Its stderr, and a `log` routine's stdout, go to the program's bounded log in logs/, never to errors.
     """
     # A nested bf call without --brain reads the executing brain, never an inherited selection.
-    env = {**environment(), "BF_BRAIN": str(store.root)}
+    env = {key: value for key, value in environment().items() if key not in PROGRAM_ENV}
+    env["BF_BRAIN"] = str(store.root)
     if cancelled is not None and cancelled():
         raise NotStartedError("program cancelled")
+    try:
+        # Machine-local and private: cursors and tokens a program keeps between runs, never evidence.
+        env.update(BF_PROGRAM=name, BF_STATE_DIR=str(program_state(store, name).root), **_EXPOSED.get())
+    except (Error, OSError) as error:
+        raise NotStartedError(f"cannot prepare the program's state directory: {error}") from error
     command = executable(store, argv[0], env)
     started = time.monotonic()
     child: subprocess.Popen[bytes] | None = None
@@ -358,13 +382,14 @@ def _project(position: int, record: Record, sensor: Sensor, config: Config, obse
         raise Error(f"record {position}: {error}") from error
 
 
-def _shrink(store: Store, name: str, incoming: list[Record]) -> str:
+def _shrink(store: Store, name: str, retention: records.Retention) -> str:
     """Why a snapshot's removal needs --allow-removal, or "": a wrong account, a lost folder or a truncated listing
-    also looks like a smaller catalog."""
-    existing = records.files(store, name)
-    kept = {records.path(name, record.id) for record in incoming}
+    also looks like a smaller catalog. Forgotten and expired records leave on purpose and count neither way."""
+    exempt = set(retention.removals)
+    existing = [file for file in records.files(store, name) if file not in exempt]
+    kept = {records.path(name, record.id) for record in retention.kept}
     removed = sum(file not in kept for file in existing)
-    if removed and (not incoming or (removed > len(existing) / 2 and removed > SHRINK_FLOOR)):
+    if removed and (not retention.kept or (removed > len(existing) / 2 and removed > SHRINK_FLOOR)):
         return (
             f"snapshot would remove {removed} of {len(existing)} records; kept the existing catalog. "
             f"Check the sensor's scope, then run bf collect {name} --allow-removal to accept the removal"
@@ -383,15 +408,24 @@ def collect(
     allow_removal: bool = False,
     runner: Runner = run,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    fixture: bytes | None = None,
 ) -> dict[str, object]:
     """Run one sensor over [start, end) and upsert its records; failures write nothing.
 
     A snapshot that would empty its catalog, or remove more than half of it and more than SHRINK_FLOOR
-    records, fails unless `allow_removal` accepts it for this run.
+    records, fails unless `allow_removal` accepts it for this run. Records of the source's forgotten list, and with
+    `expire_after` records older than its cutoff, are removed and never stored again. A `fixture` replaces the
+    sensor's output in a preview that runs nothing, even for a disabled sensor: a contract test of saved output.
     """
     start, end = _window(start, end)
     config = load(store)
-    sensor = enabled(config.sensors, "sensor", name)
+    if fixture is None:
+        sensor = enabled(config.sensors, "sensor", name)
+    else:
+        if (declared := config.sensors.get(name)) is None:
+            raise Error(f"unknown sensor {name}; check names in bf.yaml{suggest(name, list(config.sensors))}")
+        sensor, dry_run = declared, True
+        runner = cast("Runner", lambda *_: fixture)
     if reconcile and sensor.reconcile is None:
         raise Error("reconciliation requires the sensor's reconcile setting")
     with collecting(store, name):
@@ -405,7 +439,8 @@ def collect(
         committed = False
         try:
             # A {{home}} that cannot resolve fails the run in its history, as for routines.
-            raw = runner(arguments(store, sensor, start, end), sensor, store, name, b"")
+            with exposing(BF_START=start, BF_END=end):
+                raw = runner(arguments(store, sensor, start, end), sensor, store, name, b"")
             printed = decode(raw)
             text_limit = sensor.max_text_bytes or (4 << 20)
             truncated_count = 0
@@ -415,11 +450,11 @@ def collect(
                     # 1,000-name bound instead of this rule.
                     if isinstance(item, dict) and item.get("fields"):
                         raise Error(f"record {position}: sensors must supply mapped output, not precomputed fields")
-                    if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    # Without opting in, oversized text reaches validation and fails the run, as documented.
+                    opted_in = sensor.truncate_text or sensor.max_text_bytes is not None
+                    if opted_in and isinstance(item, dict) and isinstance(item.get("text"), str):
                         text = item["text"]
-                        if (sensor.truncate_text or sensor.max_text_bytes is not None or len(text) > 4 << 20) and len(
-                            encoded_text := text.encode("utf-8")
-                        ) > text_limit:
+                        if len(encoded_text := text.encode("utf-8")) > text_limit:
                             cut = encoded_text[:text_limit].decode("utf-8", errors="ignore")
                             attrs = item.get("attributes")
                             updated_attrs = (
@@ -444,6 +479,9 @@ def collect(
             ]
             if len({r.id for r in incoming}) != len(incoming):
                 raise Error("collector returned duplicate record ids")
+            cutoff = (
+                timestamp((started - timedelta(seconds=sensor.expire_after)).isoformat()) if sensor.expire_after else ""
+            )
             result: dict[str, object] = {
                 "sensor": name,
                 "records": len(incoming),
@@ -457,21 +495,32 @@ def collect(
                 # What a real run would change, from the records as they are: an interrupted commit that the run
                 # would first recover fails the preview instead, as reads do.
                 with records.reading(store):
-                    counts, _ = records.plan(store, name, incoming, snapshot=snapshot)
-                    refused = snapshot and not allow_removal and bool(_shrink(store, name, incoming))
+                    kept = records.retention(store, name, incoming, cutoff=cutoff)
+                    counts, _ = records.plan(store, name, kept.kept, snapshot=snapshot)
+                    if snapshot:
+                        # The plan also removes these files; a real run counts them as forgotten or expired.
+                        counts["removed"] -= len(kept.removals)
+                    refused = snapshot and not allow_removal and bool(_shrink(store, name, kept))
                 return {
                     **result,
+                    "records": len(kept.kept),
                     **counts,
+                    **_retention(kept),
                     **({"removal_refused": True} if refused else {}),
                     "elapsed_seconds": round(time.monotonic() - measured, 6),
-                    "samples": [r.model_dump(exclude_defaults=True) for r in incoming[:3]],
+                    "samples": [r.model_dump(exclude_defaults=True) for r in kept.kept[:3]],
                 }
             with writer(store, wait=120):
                 # An interrupted commit may have removed files already: count the catalog it restores.
                 records.recover(store)
-                if snapshot and not allow_removal and (refusal := _shrink(store, name, incoming)):
+                # Read under the lock, so a concurrent bf forget is either seen or waits for this run.
+                kept = records.retention(store, name, incoming, cutoff=cutoff)
+                # Forgotten and expired records leave on purpose: only other removals need --allow-removal.
+                if snapshot and not allow_removal and (refusal := _shrink(store, name, kept)):
                     raise Error(refusal)
-                result.update(records.upsert(store, name, incoming, snapshot=snapshot))
+                records.remove(store, name, kept.removals)
+                result.update(records.upsert(store, name, kept.kept, snapshot=snapshot))
+                result.update(records=len(kept.kept), **_retention(kept))
                 committed = True
                 result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
                 coverage, latest = _coverage(state(store).get(name, {}), start, end, observed, sensor)
@@ -504,6 +553,12 @@ def collect(
         with suppress(Error, OSError):
             append_log(store, name, f"{_now()} collected {result['records']} records: {counts}")
         return result
+
+
+def _retention(retention: records.Retention) -> dict[str, int]:
+    """The distinct forgotten and expired records a run removed or skipped, when there are any."""
+    counts = (("forgotten", retention.forgotten), ("expired", retention.expired))
+    return {key: value for key, value in counts if value}
 
 
 def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, object]:
@@ -708,7 +763,8 @@ def routine(
         path = f"{folder}/ACTION.md"
         written = False
         try:
-            raw = runner([*arguments(store, program, start, end), *args], program, store, name, stdin)
+            with exposing(BF_START=start, BF_END=end):
+                raw = runner([*arguments(store, program, start, end), *args], program, store, name, stdin)
             result: dict[str, object] = {"routine": name}
             text = ""
             if program.output == "action":

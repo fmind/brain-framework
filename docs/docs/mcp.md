@@ -9,14 +9,14 @@ description: Connect an agent through local MCP search and read tools, then veri
 
 ## Before connecting
 
-Complete [Getting started](getting-started.md), then add MCP support. It is an optional extra, since only `bf mcp` needs the MCP SDK and the packages it brings:
+Complete [Getting started](getting-started.md), then add MCP support. It is an optional extra, because only `bf mcp` needs the MCP SDK and its dependencies:
 
 ```bash
 uv tool install --python 3.14 'brain-framework[mcp]'
 uv tool list --show-extras
 ```
 
-uv replaces your installation with one that includes the extra, and the list shows `brain-framework` with `[extras: mcp]`. `uv tool upgrade brain-framework` keeps the extra; a reinstall without `[mcp]` drops it. Without it, `bf mcp` exits 1 with `bf: bf mcp needs the mcp extra; install it with uv tool install --python 3.14 'brain-framework[mcp]'`.
+uv replaces your installation with one that includes the extra, and the list shows `brain-framework` with `[extras: mcp]`. `uv tool upgrade brain-framework` keeps the extra; a reinstall without `[mcp]` drops it. Without the extra, `bf mcp` exits 1 with `bf: bf mcp needs the mcp extra; install it with uv tool install --python 3.14 'brain-framework[mcp]'`.
 
 Then check the same decision from your terminal:
 
@@ -26,7 +26,9 @@ command -v bf
 bf read projects/new-website.md#decision
 ```
 
-Give the host absolute paths to `bf` and to the brain: hosts may start the server from another folder, so `--brain` is useful here. The server checks its brain at startup and selects it again for each call, so registering or restoring a brain needs no restart; an empty `--brain` is invalid input.
+Give the host absolute paths to `bf` and to the brain. Hosts may start the server from another folder, so `--brain` is useful here. An empty `--brain` is invalid input.
+
+The server checks its brain at startup and selects it again for each call, so registering or restoring a brain needs no restart.
 
 ## Claude Code
 
@@ -102,12 +104,17 @@ The answer should cite the ref. A configured entry does not prove the server run
 
 ## What the host can read
 
-- The selected brain and its direct `brains:` references: review their audience first. Started outside any brain without `--brain` or `BF_BRAIN`, the server reads every registered brain, including one registered while it runs.
-- Nothing else: BF's server exposes no collection, program, write or network tool. Retrieval only refreshes the disposable `.bf/` cache and private usage counts.
-- The host may have other tools and may send what it reads to a cloud model; see [privacy](privacy.md#your-agent-has-its-own-privacy-rules).
+- **The selected brain and its direct `brains:` references:** review their audience first.
+- **Every registered brain** when the server starts outside any brain without `--brain` or `BF_BRAIN`, including one registered while it runs.
+- **Nothing else:** BF's server exposes no collection, program, write or network tool. Retrieval only refreshes the disposable `.bf/` cache and private usage counts.
 
-Arguments match the CLI. To read from one brain when a ref exists in several, pass its `bf://NAME/...` address. To list every item linking to a note through one relation, pass it as `rel`, as `bf read REF --rel RELATION` does: `{"ref":"projects/new-website.md","rel":"cites"}`.
+The host may have other tools and may send what it reads to a cloud model; see [privacy](privacy.md#your-agent-has-its-own-privacy-rules).
+
+Arguments match the CLI:
+
+- To read from one brain when a ref exists in several, pass its `bf://NAME/...` address.
+- To list every item linking to a note through one relation, pass it as `rel`, as `bf read REF --rel RELATION` does: `{"ref":"projects/new-website.md","rel":"cites"}`.
 
 Hosts show the tools as **Search the brain** and **Read a brain page, note or record**, both annotated read-only.
 
-At connection, the server sends instructions with the loop the generated `AGENTS.md` teaches: orient, search a few words, read each ref relied on, follow `next_offset` and inspect `problems` and `stale`. Whether a host passes them to its model depends on the host. The [MCP tool contract](retrieval.md#mcp-tool-contract) lists parameters, reply schemas and errors.
+At connection, the server sends instructions with the loop the generated `AGENTS.md` teaches: orient, search a few words, read each ref relied on, follow `next_offset` and inspect `problems` and `stale`. Whether the model sees them depends on the host. The [MCP tool contract](retrieval.md#mcp-tool-contract) lists parameters, reply schemas and errors.

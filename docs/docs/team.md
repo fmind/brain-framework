@@ -55,7 +55,13 @@ bf validate
 bf eval
 ```
 
-Use `git pull` to receive changes; BF refreshes its search cache on its own. Review reminders follow each file's modification time on your machine, so a pull that rewrites a note restarts them: set `stale_after` for a deadline the team shares. To search the team brain from anywhere, register it with `bf register ~/team-brain`, then pass `--brain team-brain`. Registration and reading never run the brain's programs. Review `bf.yaml`, `sensors/`, `routines/`, `prompts/`, `channels/` and any [runtime pin](upgrades.md#pin-a-brains-runtime) before running them inside the clone, as with `bf update --brain ~/team-brain`: that update runs the harness command of every enabled assistant with a due schedule or read input, and the channel commands it uses. The harness starts in the clone and loads its agent configuration, so review `.claude/`, `.mcp.json` and changes to `AGENTS.md` or `CLAUDE.md` too. Register agent host hooks, such as `hooks/`, only from a reviewed copy outside the clone: the host runs them at every session, so a pulled change would run unreviewed.
+Use `git pull` to receive changes; BF refreshes its search cache on its own. Review reminders follow each file's modification time on your machine, so a pull that rewrites a note restarts them. Set `stale_after` for a deadline the team shares.
+
+To search the team brain from anywhere, register it with `bf register ~/team-brain`, then pass `--brain team-brain`. Registration and reading never run the brain's programs.
+
+Running programs inside the clone runs pulled code with your permissions. For example, `bf update --brain ~/team-brain` runs the harness command of every enabled assistant with a due schedule or read input, and the channel commands it uses. Review the clone first, as [Running code](privacy.md#running-code) lists: its programs, any [runtime pin](upgrades.md#pin-a-brains-runtime) and the agent configuration the harness loads, such as `.claude/`, `.mcp.json` and changes to `AGENTS.md` or `CLAUDE.md`.
+
+Register agent host hooks, such as `hooks/`, only from a reviewed copy outside the clone. The host runs them at every session, so a pulled change would run unreviewed.
 
 ## Collect on a laptop
 
@@ -82,7 +88,9 @@ git add .gitignore memories/github-issues
 git diff --cached
 ```
 
-Commit after review. Git history keeps committed evidence. A sleeping laptop does not collect, so set freshness expectations accordingly. `bf status` reports this machine's run history: on a teammate's clone, a scheduled source it did not collect shows `never` under `attention`, so `bf status --check` fails there, while a manual one shows `manual`; the records are still shared. Check health on the collecting laptop.
+Commit after review; Git history keeps committed evidence. A sleeping laptop does not collect, so set freshness expectations accordingly.
+
+Check health on the collecting laptop: `bf status` reports only this machine's run history. On a teammate's clone, a scheduled source it did not collect shows `never` under `attention`, so `bf status --check` fails there. A manual one shows `manual`. The records are still shared.
 
 ## Contribute without overwriting each other
 
@@ -97,9 +105,13 @@ Try the [two-contributor example](https://github.com/fmind/brain-framework/tree/
 
 ## Connect agents and personal brains
 
-Launch a terminal agent in the team brain, or configure [MCP](mcp.md) with its absolute path. A shared brain should not reference a personal one: its `brains:` references are readable too. To include team notes in your personal searches, add a [direct reference](configuration.md#related-brains) from the personal brain to the team clone; collection still acts on the selected brain only.
+Launch a terminal agent in the team brain, or configure [MCP](mcp.md) with its absolute path. A shared brain should not reference a personal one: its `brains:` references are readable too.
 
-Every clone keeps `name: team-brain`, so a link such as `[Product-page decision](bf://team-brain/projects/new-website.md#decision)` works wherever the clone lives. The target brain must be selected or referenced; a link never grants access. To move knowledge from a personal brain, the `bf-use` skill's [sharing guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/references/share.md) prepares a copy holding only what the team may read. Validation checks structure, not privacy.
+To include team notes in your personal searches, add a [direct reference](configuration.md#related-brains) from the personal brain to the team clone. Collection still acts on the selected brain only.
+
+Every clone keeps `name: team-brain`, so a link such as `[Product-page decision](bf://team-brain/projects/new-website.md#decision)` works wherever the clone lives. The target brain must be selected or referenced; a link never grants access.
+
+To move knowledge from a personal brain, the `bf-use` skill's [sharing guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/references/share.md) prepares a copy holding only what the team may read. Validation checks structure, not privacy.
 
 ## Evaluate a pilot
 
@@ -108,7 +120,13 @@ Test whether shared context helps before expanding it. Start with one project, t
 1. **Choose.** Ask each participant which recent question needed several tools, then pick five recurring ones, such as “What blocks this launch?”. Name the tool that owns each fact and the person who maintains each note and sensor.
 1. **Measure a baseline.** Before the introduction, time comparable questions with the usual tools and note correctness, sources consulted and upkeep.
 1. **Use it.** In week 1, follow the [four-tool walkthrough](context-hub.md), then answer a real question from a fresh session. In weeks 2 and 3, use BF during ordinary work without reminders.
-1. **Compare fairly.** On matched questions, compare the usual tools, the same curated files read directly, and BF retrieval, so organizing the files and BF's retrieval are judged separately. Count failures and abandoned attempts.
+1. **Compare fairly.** On matched questions, compare three ways: the usual tools, the same curated files read directly, and BF retrieval. This judges organizing the files and BF's retrieval separately. Count failures and abandoned attempts.
 1. **Decide.** In week 4, compare the time to a correct, cited answer and the upkeep cost. Continue, change or stop.
 
-Agree on decision rules before starting. For example: four of five people reach a cited answer without help, three return without reminders, and someone other than the author can retrieve and update the notes. Keep a short weekly note instead of telemetry, and share only aggregates, with permission. The fictional demo proves the mechanism, not a saving.
+Agree on decision rules before starting. For example:
+
+- Four of five people reach a cited answer without help.
+- Three return without reminders.
+- Someone other than the author can retrieve and update the notes.
+
+Keep a short weekly note instead of telemetry, and share only aggregates, with permission. The fictional demo proves the mechanism, not a saving.

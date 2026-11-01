@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -16,6 +17,7 @@ from bf.cli import app
 from bf.collect import parse_reply, reply_title
 from bf.health import report
 from bf.history import ASSISTANTS, log_path, state
+from bf.messages import Message
 from bf.models import Assistant, Config, Error, Program, Record
 from bf.retrieve import read
 from bf.runtime import Queue
@@ -337,3 +339,150 @@ def test_wall_clock_schedules_context_schedule_silent_noop_and_idempotent_retry(
     assert "record" not in noop
     assert records.files(configured, "brief") == []
     assert Queue(configured).progress("schedule:brief:schedule:morning")["end"] == "2026-08-31T08:05:00.000000Z"
+
+
+TOLD = b"""version: 8
+name: fixture
+channels:
+  chat:
+    stream: {command: [receive-chat]}
+assistants:
+  told:
+    prompt: prompts/assistant.md
+    command: [told]
+    inputs:
+      - channel: {name: chat, mode: stream}
+    schedules:
+      review: {every: 1800}
+"""
+
+
+def test_harness_learns_its_trigger_schedule_and_window(
+    configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured.write("bf.yaml", TOLD)
+    folder = tmp_path / "told-bin"
+    folder.mkdir()
+    script = folder / "told"
+    script.write_text(
+        "#!/bin/sh\ncat > /dev/null\n"
+        'printf "trigger=%s schedule=%s start=%s end=%s\\n" "$BF_TRIGGER" "$BF_SCHEDULE" "$BF_START" "$BF_END"\n'
+    )
+    script.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{folder}:/usr/bin:/bin")
+    # Values inherited from a calling program never reach a run that does not set them.
+    monkeypatch.setenv("BF_SCHEDULE", "inherited")
+    monkeypatch.setenv("BF_TRIGGER", "inherited")
+    queue = Queue(configured)
+    keys, failures = assistants.schedule(configured, {"told"}, datetime.now(UTC))
+    assert failures == []
+    work = queue.work(keys[0])
+    scheduled = cast("dict", assistants.execute(configured, keys[0]))["text"]
+    assert scheduled == f"trigger=schedule schedule=review start={work.start} end={work.end}"
+    message = Message(id="m-1", sender="owner", conversation="c-1", time=START, text="Hello")
+    assistants.accept(configured, "chat", [message], {"told"})
+    key = queue.next(True, {"told"})
+    assert key is not None
+    work = queue.work(key)
+    answered = cast("dict", assistants.execute(configured, key))["text"]
+    assert answered == f"trigger=input schedule= start={START} end={work.end}"
+    for dry_run in (False, True):
+        reply = run_assistant(configured, "told", dry_run=dry_run)
+        text = cast("list[dict]", reply["assistants"])[0]["text"]
+        assert re.fullmatch(r"trigger=manual schedule= start=\S+Z end=\S+Z", text), text
+
+
+CHECKED = b"""version: 8
+name: fixture
+assistants:
+  checked:
+    prompt: prompts/assistant.md
+    command: [agent]
+    text: /response
+    status: {path: /result/status, success: [SUCCESS]}
+  retried:
+    prompt: prompts/assistant.md
+    command: [agent]
+    text: /response
+    status: {path: /ok, success: [true]}
+    idempotent: true
+"""
+
+
+def test_harness_status_accepts_success_and_records_it(configured: Store) -> None:
+    configured.write("bf.yaml", CHECKED)
+    result = ask(configured, name="checked", output=b'{"result":{"status":"SUCCESS"},"response":"Done"}')
+    assert result["text"] == "Done"
+    assert stored(configured, "checked")[0].attributes["output"] == {"result": {"status": "SUCCESS"}}
+
+
+@pytest.mark.parametrize(
+    ("output", "message"),
+    [
+        (
+            b'{"result":{"status":"RESOURCE_EXHAUSTED"},"response":"secret quota"}',
+            "reported status RESOURCE_EXHAUSTED;",
+        ),
+        (b'{"result":{"status":"quota exceeded for secret"},"response":""}', "reported an unexpected status;"),
+        (b'{"result":{"status":["SUCCESS"]},"response":"secret"}', "reported an unexpected status;"),
+        (b'{"result":{"status":"SUCCESS_BUT_LONGER_THAN_THIRTY_TWO_CHARACTERS"}}', "reported an unexpected status;"),
+        (b'{"result":{"status":true},"response":"secret"}', "reported status true;"),
+        (b'{"result":"secret","response":"secret"}', "reported no status at /result/status;"),
+        (b'{"response":"secret"}', "reported no status at /result/status;"),
+        (b"secret plain text", "reported no status at /result/status;"),
+    ],
+)
+def test_harness_reported_failure_fails_the_attempt_without_quoting_it(
+    configured: Store, output: bytes, message: str
+) -> None:
+    configured.write("bf.yaml", CHECKED)
+    with pytest.raises(Error, match=re.escape(message)) as raised:
+        ask(configured, name="checked", output=output)
+    assert "secret" not in str(raised.value)
+    assert str(raised.value).endswith(f"see {log_path('checked')}")
+    queue = Queue(configured)
+    job = cast("list[dict]", queue.report()["jobs"])[0]
+    # Like a nonzero exit: the harness may have acted, so the job waits for inspection and saves no answer.
+    assert job["state"] == "uncertain"
+    assert "secret" not in job["error"]
+    assert not queue.get(job["id"])["raw"]
+    assert stored(configured, "checked") == []
+    assert "secret" not in configured.read(log_path("checked")).decode()
+
+
+def test_harness_reported_failure_retries_an_idempotent_assistant_and_fails_dry_runs(configured: Store) -> None:
+    configured.write("bf.yaml", CHECKED)
+    with pytest.raises(Error, match="reported status false;"):
+        ask(configured, name="retried", output=b'{"ok":false,"response":"secret"}')
+    job = cast("list[dict]", Queue(configured).report()["jobs"])[0]
+    assert job["state"] == "pending"
+    preview = assistants.manual(configured, "checked", dry_run=True, runner=lambda *_: b'{"response":"secret"}')
+    assert preview["assistants"] == [
+        {
+            "assistant": "checked",
+            "status": "failed",
+            "error": f"assistant harness reported no status at /result/status; see {log_path('checked')}",
+        }
+    ]
+
+
+def test_status_requires_a_json_reply_and_distinct_success_values() -> None:
+    base = {"prompt": "prompts/a.md", "command": ["agy"]}
+    status = {"path": "/status", "success": ["SUCCESS", False]}
+    accepted = Assistant.model_validate({**base, "text": "/response", "status": status})
+    assert accepted.status is not None
+    assert accepted.status.success == ["SUCCESS", False]
+    assert Assistant.model_validate(base).status is None
+    with pytest.raises(ValidationError, match="status requires text"):
+        Assistant.model_validate({**base, "status": status})
+    for invalid in (
+        {"path": "status", "success": ["SUCCESS"]},
+        {"path": "/status", "success": []},
+        {"path": "/status", "success": ["SUCCESS", "SUCCESS"]},
+        {"path": "/status", "success": [""]},
+        {"path": "/status", "success": [0]},
+        {"path": "/status"},
+        {"path": "/status", "success": ["SUCCESS"], "failure": ["ERROR"]},
+    ):
+        with pytest.raises(ValidationError):
+            Assistant.model_validate({**base, "text": "/response", "status": invalid})

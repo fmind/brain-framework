@@ -1130,6 +1130,20 @@ def test_line_list_file_expansion_and_oversized_text_truncation(configured: Stor
         Sensor(command=["echo", "{{lines:../escape.txt}}"])
 
 
+def test_oversized_text_fails_without_truncation_opt_in(configured: Store) -> None:
+    oversized = "x" * ((4 << 20) + 1)
+    with pytest.raises(Error, match=r"nothing was written"):
+        collect(
+            configured,
+            "sample",
+            start=START,
+            end=END,
+            runner=lambda *_: emit({"id": "big", "title": "Big", "text": oversized}),
+            clock=lambda: NOW,
+        )
+    assert records.find(configured, "sample", "big") is None
+
+
 def test_update_executes_due_sensors_concurrently(configured: Store) -> None:
     configured.write(
         "bf.yaml",

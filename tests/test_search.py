@@ -164,6 +164,20 @@ def test_scopes_bound_searches_to_a_folder_a_period_or_a_source(brain: Store) ->
     assert scope("") == {}
 
 
+def test_a_period_combines_with_one_other_scope(brain: Store) -> None:
+    # The decision record links the project's identity on 2026-08-30; the project note was edited on 2026-09-01.
+    assert refs(brain, "offline", **scope("2026-08 repo:example/project")) == ["meetings:decision-1"]
+    assert refs(brain, "offline", **scope("2026-09-01 repo:example/project")) == ["projects/offline.md"]
+    assert refs(brain, "offline", **scope("2026-08 memories/meetings")) == ["meetings:decision-1"]
+    assert refs(brain, "offline", **scope("2026-08 projects")) == []
+    assert scope("2026-08   projects") == {**scope("projects"), **scope("2026-08")}
+    for invalid in ("7d 7d", "7d memories/meetings/7d", "7d memories/meetings/undated"):
+        with pytest.raises(Error, match="combine a period with a folder"):
+            scope(invalid)
+    with pytest.raises(Error, match="scope accepts"):
+        scope("7d soon")
+
+
 def test_demoted_notes_rank_last_but_stay_visible(brain: Store) -> None:
     brain.write(
         "projects/old.md",
@@ -440,29 +454,35 @@ def test_usage_counts_searches_empty_results_and_reads_without_queries(brain: St
     read([brain], "meetings:lunch")
     search([brain], Query(text="offline"), counted=False)
     log = state_store(brain.root).root / usage.USAGE
-    # Matched searches and reads hold only a time, an operation and a count; zero-result searches also record unmatched terms.
+    # Matched searches and reads hold only a time, an operation, its kind and a count; zero-result searches also
+    # record unmatched terms.
     assert [set(json.loads(line)) for line in log.read_text().splitlines()] == [
-        {"at", "op", "results"},
-        {"at", "op", "results", "unmatched"},
-        {"at", "op", "results"},
+        {"at", "op", "kind", "results"},
+        {"at", "op", "kind", "results", "unmatched"},
+        {"at", "op", "kind", "results"},
     ]
     assert not any(word in log.read_text() for word in ("offline", "meetings", "lunch"))
     assert "zzabsent" in log.read_text()
-    assert usage.summary(brain) == {
-        "7d": {"search": 2, "empty": 1, "read": 1, "empty_terms": [{"term": "zzabsent", "count": 1}]},
-        "30d": {"search": 2, "empty": 1, "read": 1, "empty_terms": [{"term": "zzabsent", "count": 1}]},
+    counts = {
+        "search": 2,
+        "empty": 1,
+        "read": 1,
+        "kinds": {"search": {"none": 2}, "read": {"record": 1}},
+        "empty_kinds": {"none": 1},
+        "empty_terms": [{"term": "zzabsent", "count": 1}],
     }
+    assert usage.summary(brain) == {"7d": counts, "30d": counts}
     later = datetime.now(UTC) + timedelta(days=10)
     assert usage.summary(brain, now=later)["7d"] == {"search": 0, "empty": 0, "read": 0}
     log.write_text(log.read_text() + "not json\n" + '{"at": "x"}\n')
     assert usage.summary(brain)["30d"]["search"] == 2
     # Rotation drops events older than the largest window: only the new event remains.
     log.write_bytes(b'{"at":"2026-01-01T00:00:00+00:00","op":"search","results":1}\n' * 40_000)
-    usage.note(brain, "search", 3)
+    usage.note(brain, "search", 3, kind="none")
     assert len(log.read_text().splitlines()) == 1
     log.unlink()
     log.mkdir()
-    usage.note(brain, "search", 1)  # an unwritable log never breaks retrieval
+    usage.note(brain, "search", 1, kind="none")  # an unwritable log never breaks retrieval
     assert usage.summary(brain)["7d"]["search"] == 0
 
 

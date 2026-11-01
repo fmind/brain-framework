@@ -16,7 +16,7 @@ Never touch a file only to clear a review reminder. When two sessions changed th
 When your editor cannot detect another session's save, write through the guarded-write helper with the `sha256` of your read and a path relative to the working directory. Replace one passage, which must occur exactly once:
 
 ```bash
-python3 "$SKILL_DIR/scripts/guarded-write.py" projects/new-website.md --expect-sha256 "$read_sha256" \
+python3 SKILL_DIR/scripts/guarded-write.py projects/new-website.md --expect-sha256 SHA256 \
   --old="- [ ] Draft the product page." --new="- [x] Draft the product page."
 ```
 

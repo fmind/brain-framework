@@ -8,6 +8,7 @@ import re
 import stat
 from collections.abc import Generator
 from contextlib import ExitStack, contextmanager, suppress
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import Field, ValidationError
@@ -36,6 +37,11 @@ _MANIFEST_LIMIT = 16 << 20
 _UNLINKABLE = frozenset({errno.EXDEV, errno.EPERM, errno.EMLINK, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS})
 # Seconds an exact read waits for a writer before reading one whole file without the brain lock.
 WAIT = 3
+# A source's forgotten records: one SHA-256 of a record id per line, the record file's own name, so the list reveals
+# no id. Hidden, so search and validation never read it as a record.
+FORGOTTEN = ".forgotten"
+_FORGOTTEN_LIMIT = 8 << 20
+_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 class _Change(Model):
@@ -477,3 +483,130 @@ def find(
                     f"source {source} has unreadable records; run bf validate before concluding a record is absent"
                 ) from None
             return None
+
+
+def forgotten(store: Store, source: str) -> set[str]:
+    """The SHA-256 digests of the record ids `bf forget` removed from a source; collection never stores them again."""
+    name = f"memories/{source}/{FORGOTTEN}"
+    try:
+        data = store.read(name, _FORGOTTEN_LIMIT)
+    except FileNotFoundError:
+        return set()
+    digests = set()
+    for number, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), start=1):
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if not _DIGEST.fullmatch(entry):
+            raise Error(f"{name}:{number}: expected the SHA-256 of a forgotten record id")
+        digests.add(entry)
+    return digests
+
+
+def _digest(name: str) -> str:
+    return name.rsplit("/", 1)[1].removesuffix(".json")
+
+
+@dataclass(frozen=True)
+class Retention:
+    """What a collection keeps and removes on purpose: forgotten records and, with a cutoff, expired ones.
+
+    A dataclass, not a model: the printed records are validated already and may be many.
+    """
+
+    kept: list[Record]
+    # Stored files the run removes before saving `kept`.
+    removals: list[str]
+    forgotten: int
+    expired: int
+
+
+def retention(store: Store, source: str, printed: list[Record], *, cutoff: str) -> Retention:
+    """Split printed records and stored files by the source's forgotten list and, with a cutoff, by age.
+
+    Counts are distinct records, whether printed, stored or both. A record the sensor still prints is never expired
+    by when it was observed: only its own event time ages it. A stored file that does not load is left alone, as
+    `prune` does: `bf validate` reports it. The caller holds a brain lock, so `bf forget` cannot interleave.
+    """
+    hidden = forgotten(store, source)
+    forgot: set[str] = set()
+    expired: set[str] = set()
+    kept = []
+    for record in printed:
+        entry = digest(record.id.encode())
+        if entry in hidden:
+            forgot.add(entry)
+        elif cutoff and record.time and record.time < cutoff:
+            expired.add(entry)
+        else:
+            kept.append(record)
+    alive = {digest(record.id.encode()) for record in kept}
+    removals = []
+    for name in files(store, source):
+        entry = _digest(name)
+        if entry in hidden:
+            forgot.add(entry)
+            removals.append(name)
+            continue
+        if entry in alive:
+            continue
+        if entry in expired:
+            removals.append(name)
+            continue
+        if not cutoff:
+            continue
+        try:
+            record = load(store, name)
+        except Error, OSError:
+            continue
+        if (age := record.time or record.observed) and age < cutoff:
+            expired.add(entry)
+            removals.append(name)
+    return Retention(kept=kept, removals=removals, forgotten=len(forgot), expired=len(expired))
+
+
+def remove(store: Store, source: str, names: list[str]) -> None:
+    """Remove record files of one source in one transaction; the caller holds the writer lock."""
+    _commit(store, source, dict.fromkeys(names))
+
+
+def forget(store: Store, source: str, targets: dict[str, str], *, dry_run: bool = False) -> list[dict[str, object]]:
+    """Remove records and add their files' digests, keyed by the ref naming each, to the source's forgotten list, so
+    collection never stores them again; the caller holds the writer lock. A record not stored yet is still listed.
+    """
+    if not re.fullmatch(NAME, source):
+        raise Error("invalid record source")
+    recover(store)
+    hidden = forgotten(store, source)
+    result, present = [], []
+    for ref, entry in targets.items():
+        name = f"memories/{source}/{entry}.json"
+        try:
+            store.fingerprint(name)
+            stored_now = True
+        except FileNotFoundError:
+            stored_now = False
+        result.append({"ref": ref, "removed": stored_now, "listed": entry in hidden})
+        if stored_now:
+            present.append(name)
+        hidden.add(entry)
+    if dry_run:
+        return result
+    listed = "".join(f"{entry}\n" for entry in sorted(hidden)).encode()
+    if len(listed) > _FORGOTTEN_LIMIT:
+        raise Error(f"memories/{source}/{FORGOTTEN} would exceed {_FORGOTTEN_LIMIT:,} bytes; split the source")
+    # The list first: a crash before the removal leaves a listed record that the next collection removes.
+    store.write(f"memories/{source}/{FORGOTTEN}", listed)
+    remove(store, source, present)
+    return result
+
+
+def target(ref: str) -> tuple[str, str]:
+    """The source and record file digest a `SOURCE:ID` ref or a `memories/SOURCE/SHA256.json` path names."""
+    if ref.startswith("memories/"):
+        source_of(ref)
+        return ref.split("/")[1], _digest(ref)
+    source, separator, record_id = ref.partition(":")
+    if not separator or not record_id or not re.fullmatch(NAME, source) or source == RESERVED:
+        raise Error("expected a SOURCE:ID record ref or a memories/SOURCE/SHA256.json record path")
+    return source, digest(record_id.encode())

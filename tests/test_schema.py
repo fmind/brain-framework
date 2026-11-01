@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import get_args
+from typing import cast, get_args
 
 import pytest
 import yaml
@@ -274,7 +274,35 @@ def test_starter_keeps_relations_without_serializing_redundant_defaults(tmp_path
     assert not {"brains", "sensors", "routines", "watch"} & document.keys()
     assert "examples:" not in (root / "bf.yaml").read_text()
     config = load(Store(root))
-    assert set(config.ontology) == {"author", "owner", "depends-on", "related-to"}
+    assert set(config.ontology) == {
+        "author",
+        "owner",
+        "assignee",
+        "participant",
+        "sender",
+        "recipient",
+        "cc",
+        "organizer",
+        "attendee",
+        "repository",
+        "project",
+        "kind",
+        "status",
+        "depends-on",
+        "related-to",
+        "supersedes",
+    }
+    # The standard vocabulary maps printed attributes without per-sensor mappings.
+    assert cast("dict[str, dict[str, object]]", document)["fields"]["sender"] == {
+        "description": "Account that sent the message.",
+        "type": "identity",
+        "cardinality": "many",
+        "relation": True,
+        "broader": "participant",
+        "path": "/attributes/sender_refs",
+    }
+    assert config.ontology["status"].path == "/attributes/status"
+    assert config.ontology["depends-on"].path is None
     assert not config.sensors
     assert not config.routines
     assert not config.brains

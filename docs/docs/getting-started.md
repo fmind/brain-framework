@@ -7,7 +7,7 @@ description: Create a brain, save your first project decision, search its reason
 
 Save a decision, find its reason and check that it stays findable. You need Linux or macOS, a terminal and a text editor. No provider account or model is needed; an agent can help with the same steps.
 
-The example is a fictional New website project. BF prints compact JSON on one line; the JSON examples below show selected fields.
+The example is a fictional New website project. BF prints compact JSON on one line; the examples below show selected fields.
 
 ## Install and create a brain
 
@@ -35,7 +35,7 @@ These are alternatives, not additional brains:
 | `bf init ~/team-brain`                  | `~/team-brain`     | `team-brain` |
 | `bf init ~/brains/default --name brain` | `~/brains/default` | `brain`      |
 
-The name defaults to the folder name, lowercased with accents removed and each run of other characters turned into one hyphen, except at either end: `Équipe produit` becomes `equipe-produit`. When that gives no name starting with a letter within 64 characters, or would drop a letter such as `ø`, pass `--name`. The name is stored in `bf.yaml` and identifies the brain in links, so keep it stable. The rest of this guide runs inside `~/brain`.
+The name defaults to the folder name: lowercased, accents removed and each run of other characters turned into one hyphen, trimmed at both ends. `Équipe produit` becomes `equipe-produit`. Pass `--name` when this gives no name starting with a letter within 64 characters, or would drop a letter such as `ø`. The name is stored in `bf.yaml` and identifies the brain in links, so keep it stable. The rest of this guide runs inside `~/brain`.
 
 </details>
 
@@ -46,7 +46,22 @@ bf init ~/brain
 cd ~/brain
 ```
 
-Commands use the brain around your working directory, unless your shell exports `BF_BRAIN`, which takes precedence: check with `echo "$BF_BRAIN"`, and `unset BF_BRAIN` if it names another brain. The new folder holds `bf.yaml` (the brain's configuration), `AGENTS.md` (instructions for agents), `projects/`, `concepts/` with a welcome note, `actions/`, `evals/retrieval.yaml` (saved questions that `bf eval` checks) and `.gitignore`, which keeps the search cache, logs and private evidence (`memories/`, `inputs/`, `originals/`) out of Git. No global configuration is needed. Run `git init` here if you want Git history.
+The new folder holds:
+
+- `bf.yaml`: the brain's configuration.
+- `AGENTS.md`: instructions for agents.
+- `projects/`, `concepts/` (with a welcome note) and `actions/`: your notes.
+- `evals/retrieval.yaml`: saved questions that `bf eval` checks.
+- `.gitignore`: keeps the search cache, logs and private evidence (`memories/`, `inputs/`, `originals/`) out of Git.
+
+Commands act on the brain around your working directory, so no global configuration is needed. Run `git init` here if you want Git history.
+
+<details markdown="1">
+<summary>If commands act on another brain</summary>
+
+An exported `BF_BRAIN` takes precedence over the working directory. Check it with `echo "$BF_BRAIN"`, and run `unset BF_BRAIN` if it names another brain. [Select a brain](configuration.md#select-a-brain) gives the full order.
+
+</details>
 
 ## Save a decision
 
@@ -119,7 +134,9 @@ The projects page lists the note with its first open task, `"next":"Draft the pr
 { "notes": 3, "problems": [], "records": 0, "valid": true }
 ```
 
-A problem names the `file` to repair and its `error`; see [Check your brain](checks.md). `bf eval` runs the three starter checks, two questions about the welcome note and one check that an absent topic finds nothing, and returns `"score":"3/3"` and `"passed":true`. Add [three New website questions](checks.md#retrieval-cases) to check your own decision. Neither command runs a model.
+A problem names the `file` to repair and its `error`; see [Check your brain](checks.md).
+
+`bf eval` runs three starter checks and returns `"score":"3/3"` and `"passed":true`. Two ask about the welcome note; one checks that an absent topic finds nothing. Neither command runs a model. Add [three New website questions](checks.md#retrieval-cases) to check your own decision.
 
 Edit the project as work changes. Search notices edits automatically; update `updated` when the note's meaning changes.
 
@@ -130,7 +147,7 @@ Edit the project as work changes. Search notices edits automatically; update `up
 <details markdown="1">
 <summary>Optional exercise: collect a local brief, link it to your decision and notice when it changes</summary>
 
-A sensor is a small program that prints JSON records; BF saves each record as evidence. This one reads a fictional local brief and dates it by the file's modification time. uv supplies Python 3.14, and the exercise needs no network access once Python is installed.
+A sensor is a small program that prints JSON records; BF saves each record as evidence. This one reads a fictional local brief and dates it by the file's modification time. uv supplies Python 3.14; once it is installed, the exercise needs no network access.
 
 ```bash
 mkdir -p inputs sensors
@@ -173,7 +190,7 @@ sensors:
       kind: { value: document }
 ```
 
-`bf.yaml` already has a `fields:` key, which holds the [starter relations](links.md#choose-the-right-relation). Add `kind` beneath them instead of creating a second `fields:` key:
+`bf.yaml` already has a `fields:` key with the [starter relations](links.md#choose-the-right-relation). Add `kind` beneath them instead of creating a second `fields:` key:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schema/
@@ -197,7 +214,7 @@ bf search "product explanation" --scope memories/brief
 bf read brief:website-brief
 ```
 
-Collection reports `"records":1`. Search returns `brief:website-brief`, a record ref made of the sensor name and the record's id. Its exact read holds the saved item under `record`:
+Collection reports `"records":1`. Search returns `brief:website-brief`: a record ref made of the sensor name and the record's id. Its exact read holds the saved item under `record`:
 
 ```json
 {
@@ -234,7 +251,7 @@ bf collect brief
 bf read projects
 ```
 
-Collection reports `"updated":1`: the record keeps its ref and holds the new text. The brief changed after the project's last edit, so the projects page flags the project linking to it, and `newer` names the record to read:
+Collection reports `"updated":1`: the record keeps its ref and holds the new text. The brief changed after the project's last edit, so the projects page flags the project, and `newer` names the record to read:
 
 ```json
 {

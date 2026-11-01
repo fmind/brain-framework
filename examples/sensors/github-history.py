@@ -171,7 +171,7 @@ def record(repository: str, kind: str, item: dict[str, Any]) -> dict[str, Any]:
             instant(merged)
             state = "merged"
         body = "" if item["body"] is None else string(item["body"])
-        attributes = {"number": number, "state": state, "updated": updated}
+        attributes = {"number": number, "status": state, "updated": updated}
         if merged:
             attributes["merged"] = merged
         text = f"Repository: {repository}\n{kind.title()}: #{number}\nState: {state}\n\n{body}"

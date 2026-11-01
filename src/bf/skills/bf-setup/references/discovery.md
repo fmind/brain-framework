@@ -7,7 +7,7 @@ Use only methods within the agreed scope: never enumerate browser profiles or wa
 Check a short list of tools relevant to the user's questions:
 
 ```bash
-python3 "$SKILL_DIR/scripts/inventory.py" tools git gh gws
+python3 SKILL_DIR/scripts/inventory.py tools git gh gws
 ```
 
 It returns each name with `available: true|false` from a PATH lookup, without running anything, printing paths or checking credentials; it takes at most 32 bare names.
@@ -19,8 +19,8 @@ For graphical applications, list only the names of immediate children of approve
 Prefer a user-selected export: Netscape bookmark HTML or Chromium bookmark JSON. For a live profile, agree on the exact bookmark file, never open history or account databases and never copy the profile; Firefox databases are unsupported, so request an export. After checking that the approved file is regular, within the size limit and free of symlink components, run the helper on the quoted approved path, never interpolating a discovered filename into shell code:
 
 ```bash
-python3 "$SKILL_DIR/scripts/inventory.py" bookmarks --format html < "/approved/bookmarks.html"
-python3 "$SKILL_DIR/scripts/inventory.py" bookmarks --format chromium < "/approved/Bookmarks"
+python3 SKILL_DIR/scripts/inventory.py bookmarks --format html < "/approved/bookmarks.html"
+python3 SKILL_DIR/scripts/inventory.py bookmarks --format chromium < "/approved/Bookmarks"
 ```
 
 The helper reads at most 4 MiB, 20,000 entries and 200 distinct hosts and names an exceeded limit: export one folder, or delete folders in a copy, and retry within approval. Only lowercase hostnames and counts leave it, and they remain sensitive: review the report locally first if the agent may not receive them. Host counts describe the export, not usage or accounts.

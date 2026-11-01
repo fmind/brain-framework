@@ -832,6 +832,30 @@ def test_identities_export_lists_every_name_of_each_subject(brain: Store) -> Non
     assert "projects/plain.md" not in {json.loads(line)["ref"] for line in listed.splitlines()}
 
 
+def test_items_export_lists_notes_and_records_with_their_text(brain: Store) -> None:
+    records_file(brain, "mail", [Record(id="m1", title="Mail", text="Launch moved", attributes={"status": "open"})])
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nfields:\n  status:\n    description: State.\n"
+        b"    type: string\n    cardinality: one\n    path: /attributes/status\nsensors:\n  mail:\n"
+        b"    enabled: false\n",
+    )
+    CliRunner().invoke(app, ["build", "--reproject", "mail", "--brain", "fixture"])
+    result = CliRunner().invoke(app, ["export", "--kind", "items", "--brain", "fixture"])
+    assert result.exit_code == 0, result.output
+    lines = {row["ref"]: row for row in map(json.loads, result.stdout.splitlines())}
+    record = lines["mail:m1"]
+    assert (record["kind"], record["source"], record["text"], record["fields"]) == (
+        "record",
+        "mail",
+        "Launch moved",
+        {"status": "open"},
+    )
+    note = lines["projects/offline.md"]
+    assert note["kind"] == "note"
+    assert note["text"] == (brain.root / "projects/offline.md").read_text()
+
+
 def test_errors_name_what_exists(brain: Store) -> None:
     brain.write("bf.yaml", b"version: 8\nname: fixture\nsensors:\n  briefs:\n    command: [echo]\n")
     runner = CliRunner()

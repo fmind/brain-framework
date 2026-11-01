@@ -5,9 +5,9 @@ description: Run a fictional four-tool example that collects evidence, records a
 
 # Four-tool walkthrough
 
-Ask one question across Google Workspace, Jira, GitHub and Gcloud: **“Can the New website launch, what remains, and why did we choose one page?”** This walkthrough collects each tool's evidence into one brain, records the answer in the project, then shows BF flagging that answer when Jira changes.
+Ask one question across Google Workspace, Jira, GitHub and Gcloud: **“Can the New website launch, what remains, and why did we choose one page?”** You collect each tool's evidence into one brain and record the answer in the project. Then BF flags that answer when Jira changes.
 
-The four records are fictional fixtures: no provider account, credential or model is needed, and only the `git clone` below uses the network. URLs under `example.test` are illustrative. [Getting started](getting-started.md), including its [collection exercise](getting-started.md#collect-your-first-source), introduces the sensors, field mappings and identities this walkthrough combines.
+The four records are fictional fixtures, and URLs under `example.test` are illustrative. No provider account, credential or model is needed; only the `git clone` below uses the network. [Getting started](getting-started.md) and its [collection exercise](getting-started.md#collect-your-first-source) introduce the sensors, field mappings and identities combined here.
 
 ## Get the example
 
@@ -20,7 +20,9 @@ cp -R "$context_demo/source/examples/context-hub" "$context_demo/brain"
 cd "$context_demo/brain"
 ```
 
-The brain holds a minimal project note, `bf.yaml` and a small sensor, `sensors/demo.py`, that prints `fixtures/TOOL.json` as if each tool had returned it. Review `bf.yaml` and `sensors/demo.py` before running anything. From a source checkout, copy `examples/context-hub` instead and run each `bf` command as `uv run --project CHECKOUT bf`, where `CHECKOUT` is the checkout's path.
+The brain holds a minimal project note, `bf.yaml` and a small sensor, `sensors/demo.py`. The sensor prints `fixtures/TOOL.json` as if each tool had returned it. Review `bf.yaml` and `sensors/demo.py` before running anything.
+
+From a source checkout, copy `examples/context-hub` instead. Then run each `bf` command as `uv run --project CHECKOUT bf`, where `CHECKOUT` is the checkout's path.
 
 ## Collect four tools
 
@@ -55,7 +57,7 @@ bf validate
 bf eval
 ```
 
-The Jira review says launch is blocked until the keyboard navigation check passes. Validation reports `"valid":true`, and the example's retrieval cases report `"score":"10/10"`. The evidence supports a precise answer: **the implementation is merged and its preview is healthy, but accessibility review still blocks launch.** A healthy deployment alone cannot establish launch readiness. These reads reuse the saved records: no sensor runs again.
+The Jira review says launch is blocked until the keyboard navigation check passes. Validation reports `"valid":true`, and the example's retrieval cases report `"score":"10/10"`. These reads reuse the saved records; no sensor runs again. The evidence supports a precise answer: **the implementation is merged and its preview is healthy, but accessibility review still blocks launch.** A healthy deployment alone cannot establish launch readiness.
 
 ## How the four tools share one project
 
@@ -88,7 +90,7 @@ sensors:
       status: { path: /attributes/status }
 ```
 
-At collection, BF validates each mapped value, stores it under the record's `fields` and turns `project` into a relation to `project:new-website`. The mapping runs automatically; its meaning is configured by you. BF never guesses that similar names identify the same project. See [field mappings](schema.md#shared-fields-and-sensor-mappings).
+At collection, BF validates each mapped value, stores it under the record's `fields` and turns `project` into a relation to `project:new-website`. You configure what each mapping means; BF applies it automatically and never guesses that similar names identify the same project. See [field mappings](schema.md#shared-fields-and-sensor-mappings).
 
 ## Record the conclusion
 
@@ -125,7 +127,7 @@ The home page lists the project under `projects`, with its new `next` task; `cha
 
 ## Follow a change
 
-In the fictional tracker, the keyboard navigation check passes and the review moves to Done. Swap in the tracker's next fixture and collect Jira again. Like a [good record](sensors.md#good-records), the fixture keeps the issue's event `time` and records the change in `attributes.updated`; its value `now` makes the demo sensor date the change at collection, as a tracker reports a transition that just happened:
+In the fictional tracker, the keyboard navigation check passes and the review moves to Done. Swap in the tracker's next fixture and collect Jira again. Like a [good record](sensors.md#good-records), the fixture keeps the issue's event `time` and records the change in `attributes.updated`. Its value `now` makes the demo sensor date the change at collection, like a transition that just happened:
 
 ```bash
 cp fixtures/jira-done.json fixtures/jira.json
@@ -147,7 +149,7 @@ Collection reports `"updated":1`. The home page now flags the project: the Jira 
 }
 ```
 
-The Jira record's `fields` now hold `"status":"Done"`. The saved conclusion is out of date: update the Launch review and Next actions, and the flag clears with the edit. This is the loop BF supports: gather, connect, act, learn, and notice when evidence moves on.
+The Jira record's `fields` now hold `"status":"Done"`. The saved conclusion is out of date: update the Launch review and Next actions, and the flag clears with the edit.
 
 ## Give a terminal agent the same context
 
@@ -155,7 +157,7 @@ Print the demo path with `echo "$context_demo/brain"`. In a fresh terminal-agent
 
 > Work in `ABSOLUTE_DEMO_PATH` and use the `bf` CLI. Read `project:new-website`, then the Workspace, Jira, GitHub and Gcloud records supporting it. Can the website launch, what remains, and why did we choose one page? Cite each supporting ref and separate recorded facts from inference. Report incomplete or outdated evidence. Do not collect, fetch source URLs or change files.
 
-No skill or MCP setup is needed for this first task. Check the tool history: the agent should read the records and cite the Jira review before answering. A plausible answer without those reads does not verify access. Install [the skills](agents.md#install-the-skills) to make the procedure available in every session. A cloud agent's provider may receive what the agent reads.
+This first task needs no skill or MCP setup. Check the tool history: the agent should read the records and cite the Jira review before answering. A plausible answer without those reads does not verify access. A cloud agent's provider may receive what the agent reads. Install [the skills](agents.md#install-the-skills) to make the procedure available in every session.
 
 Remove the disposable copy when you are done:
 
@@ -175,4 +177,4 @@ Choose one recurring question whose answer spans tools. Keep the decision in its
 | Jira             | [`acli`](https://developer.atlassian.com/cloud/acli/) or the API.                                                                                                                                                                                                                                                                                                                                   | A sensor for selected issues, their status and explicit project identities.                    |
 | Gcloud           | [`gcloud`](https://cloud.google.com/sdk/gcloud) or the API.                                                                                                                                                                                                                                                                                                                                         | A sensor for selected deployment revisions and observed service state.                         |
 
-A sensor is a script printing JSON records; provider tools own authentication. Your script owns scope, complete pagination, output bounds, failures and identity normalization. Test it with fake provider output before collecting, as the [sensor guide](sensors.md) describes. The [team pilot](team.md#evaluate-a-pilot) checks whether the loop helps people in practice.
+A sensor is a script printing JSON records, and provider tools own authentication. Your script owns scope, complete pagination, output bounds, failures and identity normalization. Test it with fake provider output before collecting, as the [sensor guide](sensors.md) describes. The [team pilot](team.md#evaluate-a-pilot) checks whether the loop helps people in practice.
