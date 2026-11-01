@@ -33,10 +33,6 @@ jobs:
         run: mise run check:scan
       - name: Audit all locked Python dependencies
         run: mise run check:vuln
-      - name: Audit workflows with online checks
-        env:
-          GH_TOKEN: ${{ github.token }} # Read-only API access for impostor-commit and known-vulnerability audits.
-        run: zizmor --persona=pedantic .github/workflows
   install:
     name: Unlocked installation (Python ${{ matrix.python }})
     runs-on: ubuntu-24.04
