@@ -71,7 +71,7 @@ A failed assistant run keeps its queue state and any saved answer. Its log holds
 
 To see what the harness receives, preview the expanded prompt:
 
-1. Add a temporary assistant that reuses the prompt file with `command: [cat]` and no `text`, `inputs`, `outputs` or `schedules`, such as `prompt-check: {prompt: prompts/personal.md, command: [cat]}`.
+1. Add a temporary assistant that reuses the prompt file with `command: [cat]` and no `reply`, `inputs`, `post` or `schedules`, such as `prompt-check: {prompt: prompts/personal.md, command: [cat]}`.
 2. Run `bf run prompt-check --dry-run`. To fill `{{input}}`, add `--stdin` and pipe a message.
 3. Read the reply's `text`: it is the expanded prompt. Nothing is recorded, queued or delivered.
 4. Remove that assistant afterwards.
@@ -103,7 +103,7 @@ See [assistant settings](prompts.md) and [queue recovery](channels.md#queue-and-
 - **`PROMPT: cannot read assistant NAME's prompt; …`**: restore the prompt file or correct `prompt` in `bf.yaml`. The assistant's schedules wait meanwhile and start once it reads.
 - **`assistant queue is full; …`, `admitted N of M messages`**: unfinished work fills the [queue](channels.md#queue-and-recovery). Retry or cancel the failed and uncertain work `bf queue` lists. A read input catches up at its next poll, and a stream's provider redelivers.
 - **`assistant queue lacks answer space for this job; …` or `… for this run, so it was cancelled; …`**: running jobs hold the space, and the job starts once they finish. `bf run` cancels its job instead, so run it again then.
-- **`assistant NAME needs N MiB of queue space per answer, …`**: `bf validate` reports it before any run, as `assistants.NAME: an answer with N outputs needs …`. Lower the assistant's `max_bytes` or its outputs ([limits](limits.md#processes-and-logs)), then retry the job.
+- **`assistant NAME needs N MiB of queue space per answer, …`**: lower the assistant's `max_bytes` ([limits](limits.md#processes-and-logs)), then retry the job.
 - **`assistant queue holds unresolved work admitted under this brain's previous path or name; …`**: `bf status` also reports it after a move or rename. Restore the previous path or name, resolve the work with `bf queue`, then move or rename again. A drained queue needs nothing: the next `bf queue` or execution command rebinds it. Collection still works meanwhile.
 - **`assistant queue predates this release; …`**: an earlier release created this queue. `bf status` reports it too, and execution refuses it. Never delete it. Follow that upgrade's manual steps in the [changelog](../changelog.md), which resolve its work and update the queue in place. Resolving needs the previous release: reinstall it, such as `uv tool install --python 3.14 'brain-framework==19.1.0'`, drain the queue, then upgrade again.
 - **`unexpected assistant queue schema; …`**: another build created this queue, such as a pre-release one, and `bf status` reports it too. Resolve its work with that build and back the queue up. Then move its `queue.sqlite3` out of the `runtime/` folder: the next execution command creates an empty queue. A queue updated by hand needs the full upgrade statement in the [changelog](../changelog.md).
@@ -111,7 +111,7 @@ See [assistant settings](prompts.md) and [queue recovery](channels.md#queue-and-
 - **`job is still running; …` or `delivery is still being sent; …`**: another process, such as `bf run`, `bf update` or watch, still runs that attempt. Let it finish or stop that process, then run the command again. An attempt whose process ended is recorded first, so `--retry` or `--cancel` then resolves it.
 - **`stream frame exceeded max_bytes`**: the adapter printed a line longer than `channels.NAME.stream.max_bytes`. Raise a lowered limit, up to the 1 MiB default, or print compact UTF-8. Then restart watch: the provider redelivers the message. No valid envelope exceeds 1 MiB, so beyond it, fix the adapter's framing.
 - **`channel NAME: more than 1000 messages fall within one second; …`**: a read input caught up in parts down to one second, and that second still held more than one batch. An adapter that gives a backlog one timestamp causes this. Give each message its provider time, or read the channel with a `stream` input. The parts admitted before are kept.
-- **`assistants.NAME.inputs: unknown channel X`**: declare `X` under `channels:` or correct the name, here or under `outputs`. `channel X requires MODE` or `requires send` asks for that capability.
+- **`assistants.NAME.inputs: unknown channel X`**: declare `X` under `channels:` or correct the name, here or under `post`. `channel X requires MODE` or `requires send` asks for that capability: an input channel needs `send` to answer its messages.
 
 ## Updates do not run
 

@@ -46,11 +46,14 @@
           "title": "Max Bytes",
           "type": "integer"
         },
-        "outputs": {
-          "items": { "anyOf": [{ "$ref": "#/$defs/ChannelOutput" }, { "$ref": "#/$defs/ReplyOutput" }] },
-          "maxItems": 32,
-          "title": "Outputs",
-          "type": "array"
+        "post": {
+          "anyOf": [
+            { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "The channel where scheduled, wake and manual runs post; an incoming message is answered in its own conversation.",
+          "title": "Post"
         },
         "prompt": {
           "description": "The prompt file: a normalized Markdown path in prompts/, such as prompts/assistant.md.",
@@ -61,18 +64,17 @@
           "title": "Prompt",
           "type": "string"
         },
+        "reply": {
+          "anyOf": [{ "$ref": "#/$defs/AssistantReplyPath" }, { "type": "null" }],
+          "default": null,
+          "description": "Read a structured {say, wake} answer at this JSON Pointer of the harness's JSON stdout; pass {{schema}} to the harness. Omitted, all of stdout is the message."
+        },
         "schedules": {
           "maxProperties": 32,
           "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/AssistantSchedule" } },
           "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
           "title": "Schedules",
           "type": "object"
-        },
-        "text": {
-          "anyOf": [{ "maxLength": 4096, "pattern": "^/(?:[^~\\x00]|~[01])*$", "type": "string" }, { "type": "null" }],
-          "default": null,
-          "description": "JSON Pointer to the reply text in the command's JSON stdout, such as /response; the other members become the record's output attribute. Omitted, all of stdout is the reply.",
-          "title": "Text"
         },
         "timeout": {
           "default": 900,
@@ -81,6 +83,11 @@
           "minimum": 1,
           "title": "Timeout",
           "type": "integer"
+        },
+        "wake": {
+          "anyOf": [{ "$ref": "#/$defs/WakeBounds" }, { "type": "null" }],
+          "default": null,
+          "description": "Let a structured reply schedule one later run, clamped to min and max seconds."
         }
       },
       "required": ["command", "prompt"],
@@ -101,6 +108,22 @@
       },
       "required": ["channel"],
       "title": "AssistantInput",
+      "type": "object"
+    },
+    "AssistantReplyPath": {
+      "additionalProperties": false,
+      "description": "Where the harness's JSON stdout holds its structured answer.",
+      "properties": {
+        "path": {
+          "description": "JSON Pointer to the {say, wake} object in the harness's JSON stdout, such as /structured_output; an empty string means the whole stdout.",
+          "maxLength": 4096,
+          "pattern": "^(?:/(?:[^~\\x00]|~[01])*)*$",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": ["path"],
+      "title": "AssistantReplyPath",
       "type": "object"
     },
     "AssistantSchedule": {
@@ -128,6 +151,11 @@
           "title": "Days"
         },
         "every": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Every", "type": "integer" },
+        "gate": {
+          "anyOf": [{ "$ref": "#/$defs/Gate" }, { "type": "null" }],
+          "default": null,
+          "description": "A command that runs before the harness and prints {\"events\": [...]}; no event skips the model."
+        },
         "lookback": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" },
         "timezone": {
           "anyOf": [{ "maxLength": 128, "minLength": 1, "type": "string" }, { "type": "null" }],
@@ -171,13 +199,6 @@
       "title": "Channel",
       "type": "object"
     },
-    "ChannelOutput": {
-      "additionalProperties": false,
-      "properties": { "channel": { "$ref": "#/$defs/OutputChannel" } },
-      "required": ["channel"],
-      "title": "ChannelOutput",
-      "type": "object"
-    },
     "Command": {
       "additionalProperties": false,
       "description": "An owner's process interface, without scheduling or provider-specific settings.",
@@ -218,6 +239,46 @@
       "title": "Command",
       "type": "object"
     },
+    "Gate": {
+      "additionalProperties": false,
+      "description": "A deterministic check that runs before the harness and lists the events worth a model run.",
+      "properties": {
+        "command": {
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
+          "items": { "type": "string" },
+          "maxItems": 128,
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
+              "pattern": "^(?:[^/{}\\\\]+|(?:sensors|routines|channels)(?:/[^/{}\\\\]+)+)$",
+              "type": "string"
+            }
+          ],
+          "title": "Command",
+          "type": "array"
+        },
+        "max_bytes": {
+          "default": 262144,
+          "description": "Maximum stdout in bytes; exceeding it fails the gate.",
+          "maximum": 1048576,
+          "minimum": 1,
+          "title": "Max Bytes",
+          "type": "integer"
+        },
+        "timeout": {
+          "default": 120,
+          "description": "Maximum runtime in seconds.",
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Timeout",
+          "type": "integer"
+        }
+      },
+      "required": ["command"],
+      "title": "Gate",
+      "type": "object"
+    },
     "JsonValue": {},
     "Mapping": {
       "additionalProperties": false,
@@ -244,35 +305,6 @@
         }
       },
       "title": "Mapping",
-      "type": "object"
-    },
-    "OutputChannel": {
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "not": { "pattern": "[^a-z0-9-]" },
-          "pattern": "^[a-z][a-z0-9-]{0,63}$",
-          "title": "Name",
-          "type": "string"
-        },
-        "when": {
-          "anyOf": [
-            {
-              "items": { "enum": ["input", "schedule", "manual"], "type": "string" },
-              "maxItems": 3,
-              "minItems": 1,
-              "type": "array",
-              "uniqueItems": true
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "description": "Invocation kinds to deliver; omitted means every kind.",
-          "title": "When"
-        }
-      },
-      "required": ["name"],
-      "title": "OutputChannel",
       "type": "object"
     },
     "ReadInput": {
@@ -320,29 +352,14 @@
       "title": "Reconciliation",
       "type": "object"
     },
-    "Reply": {
-      "additionalProperties": false,
-      "description": "Use the admitted incoming message's channel, conversation and message identity.",
-      "properties": {},
-      "title": "Reply",
-      "type": "object"
-    },
-    "ReplyOutput": {
-      "additionalProperties": false,
-      "properties": { "reply": { "$ref": "#/$defs/Reply" } },
-      "required": ["reply"],
-      "title": "ReplyOutput",
-      "type": "object"
-    },
     "Routine": {
       "additionalProperties": false,
       "description": "A deterministic brain program: run when due, by a named hook, or now with `bf run`.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and {{lines:FILE}}. Optional only with enabled: false.",
           "items": { "type": "string" },
           "maxItems": 128,
-          "minItems": 1,
           "prefixItems": [
             {
               "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
@@ -417,7 +434,6 @@
           "type": "integer"
         }
       },
-      "required": ["command"],
       "title": "Routine",
       "type": "object"
     },
@@ -564,10 +580,9 @@
       "if": { "properties": { "reconcile": { "type": "object" } }, "required": ["reconcile"] },
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and {{lines:FILE}}. Optional only with enabled: false.",
           "items": { "type": "string" },
           "maxItems": 128,
-          "minItems": 1,
           "prefixItems": [
             {
               "not": { "pattern": "(?:^|/)\\.\\.?(?:/|$)" },
@@ -583,6 +598,12 @@
           "description": "Allow manual and scheduled execution.",
           "title": "Enabled",
           "type": "boolean"
+        },
+        "expire_after": {
+          "anyOf": [{ "maximum": 3153600000, "minimum": 3600, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Seconds after which a record's event time (or, without one, when it was last observed) makes collection remove it and skip it when printed again; unset keeps records.",
+          "title": "Expire After"
         },
         "fields": {
           "anyOf": [
@@ -675,7 +696,6 @@
           "type": "boolean"
         }
       },
-      "required": ["command"],
       "then": { "properties": { "mode": { "const": "window" } } },
       "title": "Sensor",
       "type": "object"
@@ -781,6 +801,30 @@
         }
       },
       "title": "ValidateSettings",
+      "type": "object"
+    },
+    "WakeBounds": {
+      "additionalProperties": false,
+      "description": "The range BF clamps an assistant's own wake requests to; omitted, the assistant cannot wake itself.",
+      "properties": {
+        "max": {
+          "default": 604800,
+          "description": "Most seconds before a wake.",
+          "maximum": 31536000,
+          "minimum": 60,
+          "title": "Max",
+          "type": "integer"
+        },
+        "min": {
+          "default": 600,
+          "description": "Fewest seconds before a wake.",
+          "maximum": 31536000,
+          "minimum": 60,
+          "title": "Min",
+          "type": "integer"
+        }
+      },
+      "title": "WakeBounds",
       "type": "object"
     },
     "WatchSettings": {

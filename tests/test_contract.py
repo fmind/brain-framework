@@ -183,7 +183,9 @@ def _breaks(old: dict, new: dict, old_root: dict, new_root: dict, path: str, *, 
 def test_schemas_keep_the_release_contract(kind: str) -> None:
     released = json.loads((CONTRACT / f"{_name(kind)}.schema.json").read_text())
     current = document(cast(Kind, kind))
-    assert _breaks(released, current, released, current, _name(kind), reply=kind.endswith("-reply")) == []
+    # BF reads an assistant's reply as it reads a file: it must keep accepting what a saved copy of the schema produces.
+    reply = kind.endswith("-reply") and kind != "assistant-reply"
+    assert _breaks(released, current, released, current, _name(kind), reply=reply) == []
 
 
 def test_the_comparison_catches_breaking_changes() -> None:

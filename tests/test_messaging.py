@@ -44,10 +44,7 @@ assistants:
     command: [harness]
     inputs:
       - channel: {name: chat, mode: stream}
-    outputs:
-      - reply: {}
-      - channel: {name: chat, when: [schedule]}
-      - channel: {name: desktop, when: [schedule]}
+    post: chat
     schedules:
       review: {every: 1800}
 """,
@@ -146,12 +143,12 @@ def test_interrupted_harness_requires_explicit_retry(messaging: Store) -> None:
     assert queue.next(True, {"personal"}) == key
 
 
-def test_named_schedule_fans_out_without_moving_on_direct_input(messaging: Store) -> None:
+def test_named_schedule_posts_without_moving_on_direct_input(messaging: Store) -> None:
     at = datetime.now(UTC)
     queue = Queue(messaging)
     key = assistants.schedule(messaging, {"personal"}, at)[0][0]
     assistants.execute(messaging, key, runner=lambda *_: b"Proactive summary")
-    assert {item["channel"] for item in cast("list[dict]", queue.report()["deliveries"])} == {"chat", "desktop"}
+    assert [item["channel"] for item in cast("list[dict]", queue.report()["deliveries"])] == ["chat"]
     checkpoint = queue.progress("schedule:personal:schedule:review")
     assistants.accept(messaging, "chat", [message()], {"personal"})
     incoming = queue.next(True, {"personal"})
@@ -274,14 +271,17 @@ def test_reactive_capacity_remains_available_during_proactive_run(
     [
         {"refresh": 10},
         {"lookback": 10},
-        {"outputs": [{"channel": "chat"}]},
         {"inputs": [{"channel": {"name": "chat", "mode": "stream", "every": 10}}]},
         {"inputs": [{"channel": {"name": "chat", "mode": "read"}}]},
-        {"outputs": [{"reply": {}, "channel": {"name": "chat"}}]},
-        {"outputs": [{"reply": {}}, {"reply": {}}]},
-        {"outputs": [{"channel": {"name": "chat"}}, {"channel": {"name": "chat"}}]},
-        # Sensor triggers no longer exist, nor does their kind of run.
-        {"outputs": [{"channel": {"name": "chat", "when": ["schedule", "trigger"]}}]},
+        {"post": ["chat"]},
+        {"post": "unknown"},
+        {"wake": {"min": 600}},
+        {"reply": {"path": "/result"}, "wake": {"min": 7200, "max": 3600}},
+        {"reply": {"path": "result"}},
+        {"schedules": {"review": {"every": 60, "gate": ["routines/gate.py"]}}},
+        # v21 replaced outputs with post, and text and status with reply.
+        {"outputs": [{"channel": {"name": "chat"}}]},
+        {"text": "/response"},
     ],
 )
 def test_invalid_configuration_fails_before_execution(messaging: Store, change: dict) -> None:
@@ -957,7 +957,10 @@ def test_identity_tombstones_expire_after_retention(messaging: Store, monkeypatc
 
 def test_cycle_reports_one_assistants_failures_and_runs_the_others(messaging: Store) -> None:
     def assistants_beside(config):
-        config["channels"]["inbox"] = {"read": {"command": ["read-inbox", "{{start}}", "{{end}}"]}}
+        config["channels"]["inbox"] = {
+            "read": {"command": ["read-inbox", "{{start}}", "{{end}}"]},
+            "send": {"command": ["send-inbox"]},
+        }
         config["assistants"]["reader"] = {
             "prompt": "prompts/personal.md",
             "command": ["harness"],
@@ -1097,9 +1100,14 @@ def test_renamed_brain_with_unresolved_work_refuses_execution_but_never_record_w
 def test_interrupted_idempotent_delivery_retries_but_others_wait_for_inspection(messaging: Store) -> None:
     configure(messaging, lambda config: config["channels"]["chat"]["send"].update(idempotent=True))
     queue = Queue(messaging)
-    key = assistants.schedule(messaging, {"personal"}, datetime.now(UTC))[0][0]
-    assistants.execute(messaging, key, runner=answers)
-    deliveries = {str(item["channel"]): str(item["id"]) for item in queue.outcomes(key)}
+    deliveries: dict[str, str] = {}
+    at = datetime.now(UTC)
+    for channel in ("chat", "desktop"):
+        configure(messaging, lambda config, channel=channel: config["assistants"]["personal"].update(post=channel))
+        key = assistants.schedule(messaging, {"personal"}, at)[0][0]
+        assistants.execute(messaging, key, runner=answers)
+        deliveries |= {str(item["channel"]): str(item["id"]) for item in queue.outcomes(key)}
+        at += timedelta(hours=1)
     for delivery in deliveries.values():
         assert queue.sending(delivery)
     queue.recover_attempts()
@@ -1233,9 +1241,7 @@ def test_direct_run_keeps_its_job_and_deliveries_from_background_workers(
 ) -> None:
     configure(
         messaging,
-        lambda config: config["assistants"]["personal"].update(
-            outputs=[{"channel": {"name": "chat", "when": ["manual"]}}], schedules={}
-        ),
+        lambda config: config["assistants"]["personal"].update(inputs=[], post="chat", schedules={}),
     )
     current, background = assistants._current, []  # noqa: SLF001 - the gap between enqueueing and claiming
 
@@ -1587,3 +1593,17 @@ def test_a_drained_v19_queue_upgrades_with_the_documented_statements(messaging: 
     assert later
     assistants.execute(messaging, later, runner=answers)
     assert queue.report()["counts"] == {"complete": 3}
+
+
+def test_a_job_an_earlier_release_queued_stays_cancellable(messaging: Store) -> None:
+    queue = Queue(messaging)
+    key = assistants.schedule(messaging, {"personal"}, datetime.now(UTC))[0][0]
+    end = queue.work(key).end
+    with queue.connect() as db:
+        # v20 snapshots held `outputs`, which v21 rejects.
+        db.execute("UPDATE jobs SET payload=json_set(payload,'$.settings.outputs',json('[]')) WHERE id=?", (key,))
+    with pytest.raises(Error, match="invalid queued assistant job"):
+        assistants.execute(messaging, key, runner=answers)
+    queue.retry(key, cancel=True)
+    assert queue.get(key)["state"] == "cancelled"
+    assert queue.progress("schedule:personal:schedule:review")["end"] == end

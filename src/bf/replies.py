@@ -509,3 +509,29 @@ READ: dict[str, object] = {
         ),
     ],
 }
+
+
+# The structured answer an assistant with `reply:` returns; `{{schema}}` passes it to the harness. Every property is
+# required and nullable, because strict structured-output modes reject optional properties.
+ASSISTANT: dict[str, object] = {
+    "title": "AssistantReply",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["say", "wake"],
+    "properties": {
+        "say": {
+            "type": ["string", "null"],
+            "description": "The message for the owner, or null to stay silent.",
+        },
+        "wake": {
+            "type": ["object", "null"],
+            "description": "Run again later, or null. BF clamps the delay to the assistant's wake bounds.",
+            "additionalProperties": False,
+            "required": ["in", "reason"],
+            "properties": {
+                "in": {"type": "integer", "minimum": 1, "maximum": 31536000, "description": "Seconds from now."},
+                "reason": {"type": "string", "maxLength": 280, "description": "Why, passed back to the next run."},
+            },
+        },
+    },
+}

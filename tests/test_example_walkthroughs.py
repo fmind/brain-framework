@@ -49,8 +49,10 @@ def export() -> str:
                 "Owner message: What changed in the launch?",
                 '"title":"Brain assistant"',
                 '"text":"manual"',
-                "reported status RESOURCE_EXHAUSTED",
+                '"text":"The launch moved to Friday."',
+                "assistant reply at /structured_output is missing",
                 '"state":"uncertain"',
+                '"wakes":[{"assistant":"brief"',
             ],
         ),
         (

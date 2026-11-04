@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "say": { "description": "The message for the owner, or null to stay silent.", "type": ["string", "null"] },
+    "wake": {
+      "additionalProperties": false,
+      "description": "Run again later, or null. BF clamps the delay to the assistant's wake bounds.",
+      "properties": {
+        "in": { "description": "Seconds from now.", "maximum": 31536000, "minimum": 1, "type": "integer" },
+        "reason": { "description": "Why, passed back to the next run.", "maxLength": 280, "type": "string" }
+      },
+      "required": ["in", "reason"],
+      "type": ["object", "null"]
+    }
+  },
+  "required": ["say", "wake"],
+  "title": "AssistantReply",
+  "type": "object"
+}

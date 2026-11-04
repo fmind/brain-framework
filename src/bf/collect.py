@@ -649,8 +649,8 @@ def expand_lines(store: Store, path: str) -> list[str]:
     return items
 
 
-def arguments(store: Store, program: Command, start: str, end: str, prompt: str = "") -> list[str]:
-    values = {"brain": str(store.root), "start": start, "end": end, "prompt": prompt}
+def arguments(store: Store, program: Command, start: str, end: str, prompt: str = "", schema: str = "") -> list[str]:
+    values = {"brain": str(store.root), "start": start, "end": end, "prompt": prompt, "schema": schema}
     # One pass: an expanded prompt that mentions a placeholder keeps it as text.
     expanded: list[str] = []
     for index, arg in enumerate(program.command):
@@ -659,7 +659,7 @@ def arguments(store: Store, program: Command, start: str, end: str, prompt: str 
         else:
             expanded.append(
                 re.sub(
-                    r"\{\{(brain|home|start|end|prompt)\}\}",
+                    r"\{\{(brain|home|start|end|prompt|schema)\}\}",
                     lambda match: home_folder() if match[1] == "home" else values[match[1]],
                     arg,
                 )
@@ -829,32 +829,34 @@ def routine(
         return result
 
 
-def parse_reply(raw: bytes, pointer: str | None) -> tuple[str, dict[str, JsonValue]]:
-    """The reply text, and the other members of a JSON reply; the error never quotes the output."""
+def parse_reply(raw: bytes) -> str:
+    """A plain-text reply; the error never quotes the output."""
     try:
-        output = raw.decode("utf-8")
+        return raw.decode("utf-8").strip()
     except UnicodeError as error:
         raise Error("assistant command must print UTF-8") from error
-    if pointer is None:
-        return output.strip(), {}
+
+
+def structured_reply(raw: bytes, pointer: str) -> tuple[JsonValue, dict[str, JsonValue]]:
+    """The value at `pointer` of a JSON reply, and the reply's other members; the error never quotes the output."""
     try:
         document = decode(raw)
     except Error as error:
-        raise Error("assistant command must print one JSON object when text is set") from error
+        raise Error("assistant command must print one JSON object when reply is set") from error
     if not isinstance(document, dict):
-        raise Error("assistant command must print one JSON object when text is set")
+        raise Error("assistant command must print one JSON object when reply is set")
+    if not pointer:
+        return cast(JsonValue, document), {}
     value = ontology.pointer(cast(JsonValue, document), pointer)
-    if not isinstance(value, str):
-        raise Error(f"assistant reply has no text string at {pointer}")
     parent, _, key = pointer.rpartition("/")
     holder = ontology.pointer(cast(JsonValue, document), parent) if parent else document
     if isinstance(holder, dict):
-        # The reply is the record's text: keep it once.
+        # The answer becomes the record's text: keep it once.
         holder.pop(key.replace("~1", "/").replace("~0", "~"), None)
-    elif isinstance(holder, list):
+    elif isinstance(holder, list) and value is not None:
         # Preserve the other elements' positions without duplicating a potentially large answer.
         holder[int(key)] = None
-    return value.strip(), cast(dict[str, JsonValue], document)
+    return value, cast(dict[str, JsonValue], document)
 
 
 def reply_title(name: str, reply: str) -> str:

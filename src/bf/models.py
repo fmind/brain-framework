@@ -779,7 +779,8 @@ class Command(Model):
                     raise ValueError("lines placeholder requires a normalized brain-relative file path")
                 continue
             stripped = re.sub(r"\{\{(?:" + "|".join(cls.PLACEHOLDERS) + r")\}\}", "", value)
-            if "{{" in stripped or "}}" in stripped:
+            # Only an opening {{ starts a placeholder: a lone }} is literal text, such as the end of inline JSON.
+            if "{{" in stripped:
                 raise ValueError(
                     f"unknown placeholder; use {', '.join(cls.PLACEHOLDERS[:-1])} or {cls.PLACEHOLDERS[-1]}"
                 )
@@ -987,33 +988,64 @@ class AssistantInput(Model):
     channel: Annotated[ReadInput | StreamInput, Field(discriminator="mode")]
 
 
-Invocation = Literal["input", "schedule", "manual"]
+Invocation = Literal["input", "schedule", "manual", "wake"]
 
 
-class OutputChannel(Model):
-    name: Name
-    when: (
-        Annotated[list[Invocation], Field(min_length=1, max_length=3, json_schema_extra={"uniqueItems": True})] | None
-    ) = Field(default=None, description="Invocation kinds to deliver; omitted means every kind.")
+class Gate(Command):
+    """A deterministic check that runs before the harness and lists the events worth a model run."""
 
-    @field_validator("when")
-    @classmethod
-    def distinct(cls, value: list[Invocation] | None) -> list[Invocation] | None:
-        if value is not None and len(value) != len(set(value)):
-            raise ValueError("when must be distinct")
-        return value
+    timeout: Annotated[int, Field(ge=1, le=3600)] = Field(default=120, description="Maximum runtime in seconds.")
+    max_bytes: Annotated[int, Field(ge=1, le=1 << 20)] = Field(
+        default=256 << 10, description="Maximum stdout in bytes; exceeding it fails the gate."
+    )
 
 
-class ChannelOutput(Model):
-    channel: OutputChannel
+class GateEvent(Model):
+    """One event a gate found; the harness receives it in {{context}}."""
+
+    key: Annotated[str, Field(min_length=1, max_length=256)]
+    text: Annotated[str, Field(max_length=4096)] = ""
+    ref: Annotated[str, Field(max_length=4096)] = ""
 
 
-class Reply(Model):
-    """Use the admitted incoming message's channel, conversation and message identity."""
+class GateReply(Model):
+    events: Annotated[list[GateEvent], Field(max_length=64)]
 
 
-class ReplyOutput(Model):
-    reply: Reply
+class Wake(Model):
+    """A run's request to run again, seconds from now, with the reason it passes back to itself."""
+
+    in_: Annotated[int, Field(ge=1, le=31_536_000, alias="in")]
+    reason: Annotated[str, Field(max_length=280)]
+
+
+class AssistantReply(Model):
+    """A structured harness answer: `say` is the message, null to stay silent; `wake` asks for a later run."""
+
+    say: str | None
+    wake: Wake | None
+
+
+class WakeBounds(Model):
+    """The range BF clamps an assistant's own wake requests to; omitted, the assistant cannot wake itself."""
+
+    min: Annotated[int, Field(ge=60, le=31_536_000)] = Field(default=600, description="Fewest seconds before a wake.")
+    max: Annotated[int, Field(ge=60, le=31_536_000)] = Field(default=604_800, description="Most seconds before a wake.")
+
+    @model_validator(mode="after")
+    def ordered(self) -> WakeBounds:
+        if self.min > self.max:
+            raise ValueError("wake.min must not exceed wake.max")
+        return self
+
+
+class AssistantReplyPath(Model):
+    """Where the harness's JSON stdout holds its structured answer."""
+
+    path: Annotated[str, Field(max_length=4096, pattern=r"^(?:/(?:[^~\x00]|~[01])*)*$")] = Field(
+        description="JSON Pointer to the {say, wake} object in the harness's JSON stdout, such as "
+        "/structured_output; an empty string means the whole stdout."
+    )
 
 
 Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -1032,6 +1064,10 @@ class AssistantSchedule(Model):
     days: (
         Annotated[list[Weekday], Field(min_length=1, max_length=7, json_schema_extra={"uniqueItems": True})] | None
     ) = Field(default=None, description="Optional weekdays when the schedule may run; omitted means every day.")
+    gate: Gate | None = Field(
+        default=None,
+        description='A command that runs before the harness and prints {"events": [...]}; no event skips the model.',
+    )
 
     @model_validator(mode="after")
     def valid_schedule(self) -> AssistantSchedule:
@@ -1079,32 +1115,10 @@ class AssistantSchedule(Model):
         return now
 
 
-class AssistantStatus(Model):
-    """Where a harness's JSON stdout reports its own outcome, and which values mean success."""
-
-    path: Annotated[str, Field(max_length=4096, pattern=r"^/(?:[^~\x00]|~[01])*$")] = Field(
-        description="JSON Pointer to the harness's status in its JSON stdout, such as /status."
-    )
-    success: Annotated[
-        list[Annotated[str, Field(min_length=1, max_length=256)] | bool],
-        Field(min_length=1, max_length=16, json_schema_extra={"uniqueItems": True}),
-    ] = Field(
-        description="Values at path that mean the harness succeeded, such as [SUCCESS] or [false]; any other value, "
-        "or none, fails the attempt like a nonzero exit."
-    )
-
-    @field_validator("success")
-    @classmethod
-    def distinct(cls, values: list[str | bool]) -> list[str | bool]:
-        if len({(type(value), value) for value in values}) != len(values):
-            raise ValueError("success values must be distinct")
-        return values
-
-
 class Assistant(Command):
     """One harness with independent acquisition, delivery and schedules."""
 
-    PLACEHOLDERS: ClassVar[tuple[str, ...]] = ("brain", "home", "start", "end", "prompt")
+    PLACEHOLDERS: ClassVar[tuple[str, ...]] = ("brain", "home", "start", "end", "prompt", "schema")
 
     prompt: Annotated[str, Field(min_length=1, max_length=4096)] = Field(
         description="The prompt file: a normalized Markdown path in prompts/, such as prompts/assistant.md.",
@@ -1116,15 +1130,10 @@ class Assistant(Command):
     max_bytes: Annotated[int, Field(ge=1, le=4 << 20)] = Field(
         default=1 << 20, description="Maximum stdout in bytes; exceeding it fails without recording the run."
     )
-    text: Annotated[str, Field(max_length=4096, pattern=r"^/(?:[^~\x00]|~[01])*$")] | None = Field(
+    reply: AssistantReplyPath | None = Field(
         default=None,
-        description="JSON Pointer to the reply text in the command's JSON stdout, such as /response; the other "
-        "members become the record's output attribute. Omitted, all of stdout is the reply.",
-    )
-    status: AssistantStatus | None = Field(
-        default=None,
-        description="Where the harness's JSON stdout reports success, such as {path: /status, success: [SUCCESS]}; "
-        "another value fails the attempt like a nonzero exit. Requires text.",
+        description="Read a structured {say, wake} answer at this JSON Pointer of the harness's JSON stdout; pass "
+        "{{schema}} to the harness. Omitted, all of stdout is the message.",
     )
     keep: Annotated[int, Field(ge=1, le=MAX_FILES // 2)] | None = Field(
         default=None,
@@ -1137,8 +1146,15 @@ class Assistant(Command):
         "leaving the job uncertain.",
     )
     inputs: Annotated[list[AssistantInput], Field(max_length=32)] = Field(default_factory=list)
-    outputs: Annotated[list[ChannelOutput | ReplyOutput], Field(max_length=32)] = Field(default_factory=list)
+    post: Name | None = Field(
+        default=None,
+        description="The channel where scheduled, wake and manual runs post; an incoming message is answered in its "
+        "own conversation.",
+    )
     schedules: dict[Name, AssistantSchedule] = Field(default_factory=dict, max_length=32)
+    wake: WakeBounds | None = Field(
+        default=None, description="Let a structured reply schedule one later run, clamped to min and max seconds."
+    )
 
     @field_validator("prompt")
     @classmethod
@@ -1160,13 +1176,8 @@ class Assistant(Command):
         names = [item.channel.name for item in self.inputs]
         if len(set(names)) != len(names):
             raise ValueError("each input channel may appear once per assistant")
-        if sum(isinstance(item, ReplyOutput) for item in self.outputs) > 1:
-            raise ValueError("reply may appear once in outputs")
-        outputs = [item.channel.name for item in self.outputs if isinstance(item, ChannelOutput)]
-        if len(outputs) != len(set(outputs)):
-            raise ValueError("each output channel may appear once; combine its when values")
-        if self.status is not None and self.text is None:
-            raise ValueError("status requires text: set text to the reply's JSON Pointer so BF reads JSON stdout")
+        if self.wake is not None and self.reply is None:
+            raise ValueError("wake requires reply: only a structured reply can ask for a wake")
         return self
 
 
@@ -1355,7 +1366,6 @@ class Config(Model):
                     "locks and, for sensors, the records in memories/"
                 )
         for name, assistant in self.assistants.items():
-            replies = any(isinstance(item, ReplyOutput) for item in assistant.outputs)
             for item in assistant.inputs:
                 binding = item.channel
                 channel = self.channels.get(binding.name)
@@ -1363,15 +1373,16 @@ class Config(Model):
                     raise ValueError(f"assistants.{name}.inputs: unknown channel {binding.name}")
                 if getattr(channel, binding.mode) is None:
                     raise ValueError(f"assistants.{name}.inputs: channel {binding.name} requires {binding.mode}")
-                if replies and channel.send is None:
-                    raise ValueError(f"assistants.{name}.outputs: reply requires send on input channel {binding.name}")
-            for item in assistant.outputs:
-                if isinstance(item, ChannelOutput):
-                    channel = self.channels.get(item.channel.name)
-                    if channel is None:
-                        raise ValueError(f"assistants.{name}.outputs: unknown channel {item.channel.name}")
-                    if channel.send is None:
-                        raise ValueError(f"assistants.{name}.outputs: channel {item.channel.name} requires send")
+                if channel.send is None:
+                    raise ValueError(
+                        f"assistants.{name}.inputs: channel {binding.name} requires send to answer its messages"
+                    )
+            if assistant.post is not None:
+                channel = self.channels.get(assistant.post)
+                if channel is None:
+                    raise ValueError(f"assistants.{name}.post: unknown channel {assistant.post}")
+                if channel.send is None:
+                    raise ValueError(f"assistants.{name}.post: channel {assistant.post} requires send")
         if TAGGED in self.ontology:
             raise ValueError(f"fields.{TAGGED} is reserved for tag membership")
         if LINKS in self.ontology:

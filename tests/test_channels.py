@@ -423,9 +423,13 @@ def test_only_an_adapter_that_stays_up_counts_as_connected(
     ("assistant", "reason"),
     [
         ({"inputs": [{"channel": {"name": "nope", "mode": "stream"}}]}, "assistants.a.inputs: unknown channel nope"),
-        ({"outputs": [{"channel": {"name": "nope"}}]}, "assistants.a.outputs: unknown channel nope"),
+        ({"post": "nope"}, "assistants.a.post: unknown channel nope"),
         ({"inputs": [{"channel": {"name": "chat", "mode": "read", "every": 60}}]}, "channel chat requires read"),
-        ({"outputs": [{"channel": {"name": "listen"}}]}, "assistants.a.outputs: channel listen requires send"),
+        ({"post": "listen"}, "assistants.a.post: channel listen requires send"),
+        (
+            {"inputs": [{"channel": {"name": "listen", "mode": "stream"}}]},
+            "assistants.a.inputs: channel listen requires send to answer its messages",
+        ),
     ],
 )
 def test_an_undeclared_channel_is_named_apart_from_a_missing_capability(assistant: dict, reason: str) -> None:

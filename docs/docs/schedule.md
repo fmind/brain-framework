@@ -5,7 +5,7 @@ description: Run or observe due sensors, routines and assistants, set watch pref
 
 # Watch and schedule updates
 
-Keep reviewed sensors and routines current with `enabled` and `refresh`. [Assistants](prompts.md) declare their own inputs, outputs and schedules in `bf.yaml`. [Timing and health](#timing-and-health) says when each program is due and how failures retry. Start inside your brain.
+Keep reviewed sensors and routines current with `enabled` and `refresh`. [Assistants](prompts.md) declare their own inputs, `post` channel, schedules, gates and wakes in `bf.yaml`. [Timing and health](#timing-and-health) says when each program is due and how failures retry. Start inside your brain.
 
 | You want to…                              | Use                                                                         |
 | ----------------------------------------- | --------------------------------------------------------------------------- |

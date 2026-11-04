@@ -4,6 +4,45 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+A major release that makes assistants event-driven and lets them choose when to speak. A structured reply replaces answer pointers and status checks, a gate decides whether a scheduled run needs the model, an assistant can schedule its own next run, and one `post` channel replaces output routing. The brain format (`version: 8`), records, notes, the search cache and the queue format are unchanged; `bf.yaml` assistants need manual edits. Follow the upgrade steps below.
+
+### Breaking changes
+
+- **`reply` replaces `text` and `status`.** An assistant with `reply: {path: POINTER}` reads a structured `{say, wake}` object from its harness's JSON stdout, such as `/structured_output`, and `{{schema}}` passes the harness that schema. Output that is not a JSON object, a missing reply or one that does not match the schema fails the attempt like a nonzero exit, which also catches a harness that exits 0 after a model error or its own timeout. `null` or blank `say` stays silent. `bf validate` reports `assistants.NAME.text: Extra inputs are not permitted` and the same for `status` ([structured replies](https://fmind.github.io/brain-framework/docs/prompts/#structured-replies)). Without `reply`, stdout is still the plain message.
+- **`post` replaces `outputs`.** A message is answered in its own conversation, as `reply: {}` did, and every other run, manual ones included, posts to the one channel `post` names. `outputs`, `reply: {}` and `when` are gone: `bf validate` reports `assistants.NAME.outputs: Extra inputs are not permitted`. One answer makes at most one delivery; to notify a second channel, declare a second assistant or let the channel's script fan out.
+- **Input channels need `send`.** Every channel an assistant reads must declare `send`, so its messages can be answered: `assistants.NAME.inputs: channel X requires send to answer its messages`.
+- **Runs of kind `wake`.** `BF_TRIGGER`, `{{context}}`'s `kind`, a record's `attributes.trigger` and `bf update --dry-run` rows may now be `wake`, and records may carry `attributes.wake`. Scripts that match the run kinds need the new value.
+
+### Added
+
+- **Gates.** A schedule's optional `gate: {command: [...]}` runs a deterministic program before the harness. It prints `{"events": [...]}`; no event completes the job without starting the model, and events reach the prompt in `{{context}}`. A failed gate retries by itself, since no harness ran, and a retried job reuses the events its gate saved, so a gate can keep "already reported" state in `BF_STATE_DIR` ([gates](https://fmind.github.io/brain-framework/docs/prompts/#gates)).
+- **Wakes.** With `wake: {min, max}`, a structured reply's `wake: {in, reason}` schedules one later run, clamped to those bounds. A newer request replaces the pending one, a failed run asks for none, and the wake run receives its reason in `{{context}}`. `bf queue` lists pending `wakes` by assistant and due time ([wakes](https://fmind.github.io/brain-framework/docs/prompts/#wakes)).
+- **`bf schema --kind assistant-reply`** prints the reply schema, for a harness that reads it from a file, such as `codex exec --output-schema FILE`; it is published as `assistant-reply.schema.json`.
+
+### Changed
+
+- **Literal `}}` in arguments.** A command argument may hold `}}`, such as the end of inline JSON settings; only an unknown `{{…}}` placeholder fails. Before, `}}` had to be written `} }`.
+- **Assistant safety.** [Keep prompts safe](https://fmind.github.io/brain-framework/docs/prompts/#keep-prompts-safe) now states that an assistant with a shell or write tools can be steered by the mail, chat or web content it reads, whatever BF labels as data.
+- `bf validate` no longer checks an assistant's queue space per answer: with one delivery per answer and the 4 MiB `max_bytes` bound, every answer fits.
+
+### Fixed
+
+- The assistant guide stated that an `idempotent` assistant retries up to 5 attempts after `5 × 2^(n−1)` seconds; it retries after 2, 4, … up to 300 seconds, for up to 20 attempts, as the code always did.
+
+### Upgrade from v20
+
+1. With v20 still installed, stop `bf watch`, its service or timers and any script calling `bf run`, `bf channel` or `bf queue`.
+1. Drain the assistant queue: run `bf update --kind assistant`, then retry or cancel each pending, failed or uncertain job until `bf queue` `counts` show only `complete` and `cancelled`. A job v20 queued snapshots its old settings, which v21 cannot run: after upgrading, cancel any you missed with `bf queue ID --cancel`.
+1. Upgrade with `uv tool upgrade brain-framework`, or update a pinned brain's pin, and check `bf --version`.
+1. In `bf.yaml`, for each assistant:
+   - Replace `outputs` with `post: CHANNEL`, naming the channel its scheduled runs posted to, and delete `reply: {}` and `when`. Manual runs now post there too.
+   - Add `send` to each channel listed in `inputs` that lacks it.
+   - Either switch to a structured reply: pass the schema, such as `--json-schema "{{schema}}"` for Claude Code or Antigravity, set `reply: {path: /structured_output}` and delete `text` and `status`; or keep a plain answer: delete `text` and `status` and make the harness print plain text, since its whole stdout becomes the message.
+   - Replace `} }` workarounds in arguments with `}}` if you like; both work.
+1. With a structured reply, rewrite each prompt's answer section: fill `say`, or `null` when nothing needs the owner. Delete rules such as "answer exactly `-`", answer marker lines and wrapper scripts that strip harness chatter. Move deduplication and threshold rules into a schedule's `gate`, and add `wake: {min, max}` where the assistant should schedule its own follow-up.
+1. Update scripts and prompts that match `BF_TRIGGER`, `attributes.trigger` or `{{context}}`'s `kind` for the new `wake` kind.
+1. Run `bf validate`, `bf skills DIR` for each skills folder, `bf run NAME` once per assistant and `bf status --check`, then restart watch.
+
 ## [v20.1.0](https://github.com/fmind/brain-framework/releases/tag/v20.1.0) - 2026-11-01
 
 A feature release for integrations and evidence hygiene. The brain format (`version: 8`), existing `bf.yaml` files, the `search` and `read` reply schemas and the search cache are unchanged. Upgrade steps: run `bf skills DIR` to update the packaged skills, and check that no sensor relies on the silent cut of record text above 4 MiB fixed below: set `truncate_text: true` on such a sensor. A new brain from `bf init` declares the standard vocabulary; an existing brain keeps its fields.

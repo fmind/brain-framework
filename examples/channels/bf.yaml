@@ -14,10 +14,9 @@ assistants:
     prompt: prompts/personal.md
     # A deterministic stand-in for an agent CLI; no model or network access.
     command: [printf, "Acknowledged."]
+    # A message is answered in its own conversation; scheduled and manual runs post here.
     inputs:
       - channel: { name: local, mode: stream }
-    outputs:
-      - reply: {}
-      - channel: { name: local, when: [manual, schedule] }
+    post: local
     schedules:
       review: { every: 1800 }

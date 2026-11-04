@@ -761,46 +761,6 @@ def test_validate_reports_a_prompt_file_every_run_would_reject(brain: Store) -> 
     } in problems
 
 
-def test_validate_reports_an_assistant_whose_answer_never_fits_the_queue(brain: Store) -> None:
-    channels = "".join(f"  out{n}:\n    send:\n      command: [cat]\n" for n in range(3))
-    outputs = "".join(f"      - channel: {{name: out{n}}}\n" for n in range(3))
-    config = (
-        f"version: 8\nname: fixture\nchannels:\n{channels}assistants:\n"
-        f"  large:\n    prompt: prompts/a.md\n    command: [agent]\n    max_bytes: 4194304\n    outputs:\n{outputs}"
-        "  small:\n    prompt: prompts/a.md\n    command: [agent]\n    outputs:\n      - channel: {name: out0}\n"
-    )
-    brain.write("bf.yaml", config.encode())
-    brain.write("prompts/a.md", b"Review.\n")
-    problems = cast("list[dict[str, str]]", validate(brain)["problems"])
-    # Each job of `large` would fail when it starts: say so before the schedule does.
-    refused = (
-        "assistants.large: an answer with 3 outputs needs 100 MiB of queue space, more than one job may reserve "
-        "(96 MiB); lower its max_bytes or its outputs"
-    )
-    assert [problem["error"] for problem in problems] == [refused]
-
-
-@pytest.mark.parametrize(("outputs", "routes"), [("abc", 3), ("abc+reply", 3), ("ab+reply", 0), ("bc", 0)])
-def test_validate_counts_the_deliveries_an_incoming_message_makes(brain: Store, outputs: str, routes: int) -> None:
-    # Without a reply, a named output to the incoming channel opens its own conversation: one more delivery.
-    named = "".join(f"      - channel: {{name: {name}, when: [input]}}\n" for name in outputs.split("+")[0])
-    reply = "      - reply: {}\n" if "reply" in outputs else ""
-    config = (
-        "version: 8\nname: fixture\nchannels:\n  a:\n    read: {command: [read]}\n    send: {command: [cat]}\n"
-        "  b:\n    send: {command: [cat]}\n  c:\n    send: {command: [cat]}\nassistants:\n"
-        "  x:\n    prompt: prompts/a.md\n    command: [agent]\n    max_bytes: 4194304\n"
-        f"    inputs:\n      - channel: {{name: a, mode: read, every: 60}}\n    outputs:\n{named}{reply}"
-    )
-    brain.write("bf.yaml", config.encode())
-    brain.write("prompts/a.md", b"Review.\n")
-    refused = (
-        f"assistants.x: an answer with {routes} outputs needs 100 MiB of queue space, more than one job may reserve "
-        "(96 MiB); lower its max_bytes or its outputs"
-    )
-    errors = [problem["error"] for problem in cast("list[dict[str, str]]", validate(brain)["problems"])]
-    assert errors == ([refused] if routes else [])
-
-
 def test_declarative_validate_policies_and_line_files(brain: Store) -> None:
     brain.write(
         "bf.yaml",

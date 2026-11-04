@@ -46,10 +46,7 @@ assistants:
     command: [harness]
     inputs:
       - channel: {name: chat, mode: stream}
-    outputs:
-      - reply: {}
-      - channel: {name: chat, when: [schedule]}
-      - channel: {name: desktop, when: [schedule]}
+    post: chat
     schedules:
       review: {every: 1800}
 """
@@ -88,6 +85,17 @@ def fake(calls: list[str] | None = None, answer: bytes = b"Answer") -> Callable[
 
 def failing(*_: object) -> bytes:
     raise Error("program exited with status 3")
+
+
+def posting(store: Store) -> set[str]:
+    """Add a second assistant posting to desktop on the same schedule; returns both names."""
+    store.write(
+        "bf.yaml",
+        CONFIG
+        + b"  notifier:\n    prompt: prompts/personal.md\n    command: [harness]\n    post: desktop\n"
+        + b"    schedules:\n      review: {every: 1800}\n",
+    )
+    return {"personal", "notifier"}
 
 
 def deliveries(store: Store) -> dict[str, dict[str, object]]:
@@ -172,9 +180,9 @@ def test_failed_schedule_blocks_its_window_until_cancelled_and_shows_in_attentio
 
 
 def test_idempotent_delivery_retries_later_while_another_waits_for_review(store: Store) -> None:
-    queue = Queue(store)
-    key = assistants.schedule(store, NAMES, datetime.now(UTC))[0][0]
-    assistants.execute(store, key, runner=fake(answer=b"Proactive summary"))
+    queue, names = Queue(store), posting(store)
+    for key in assistants.schedule(store, names, datetime.now(UTC))[0]:
+        assistants.execute(store, key, runner=fake(answer=b"Proactive summary"))
     before = datetime.now(UTC)
     assert assistants.deliver(store, runner=failing)
     assert assistants.deliver(store, runner=failing)
@@ -186,16 +194,16 @@ def test_idempotent_delivery_retries_later_while_another_waits_for_review(store:
     # A send that is not idempotent might have reached its destination: it waits for explicit review.
     assert sent["desktop"]["state"] not in {"pending", "sending", "delivered"}
     assert "status 3" in str(sent["desktop"]["error"])
-    assert queue.delivery(names=NAMES) is None
+    assert queue.delivery(names=names) is None
     queue.retry(str(sent["desktop"]["id"]))
     assert assistants.deliver(store, runner=fake(), key=str(sent["desktop"]["id"]))
     assert queue.inspect(str(sent["desktop"]["id"]))["state"] == "delivered"
 
 
 def test_channel_edited_after_the_answer_blocks_only_its_delivery(store: Store) -> None:
-    queue = Queue(store)
-    key = assistants.schedule(store, NAMES, datetime.now(UTC))[0][0]
-    assistants.execute(store, key, runner=fake(answer=b"Proactive summary"))
+    queue, names = Queue(store), posting(store)
+    for key in assistants.schedule(store, names, datetime.now(UTC))[0]:
+        assistants.execute(store, key, runner=fake(answer=b"Proactive summary"))
     reviewed = store.read("bf.yaml")
     store.write("bf.yaml", reviewed.replace(b"notify-desktop", b"notify-elsewhere"))
     calls: list[str] = []

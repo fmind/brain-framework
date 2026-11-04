@@ -5,11 +5,11 @@ description: Connect any messaging surface through passive send, read and stream
 
 # Channels
 
-A channel connects your brain to a messaging surface, such as a chat, an inbox or desktop notifications. It is a named endpoint with optional `send`, `read` and `stream` capabilities, each run as a command. Declare it in `bf.yaml`, test it with `bf channel send` or `bf channel read`, then let [assistants](prompts.md) use it for their inputs and outputs.
+A channel connects your brain to a messaging surface, such as a chat, an inbox or desktop notifications. It is a named endpoint with optional `send`, `read` and `stream` capabilities, each run as a command. Declare it in `bf.yaml`, test it with `bf channel send` or `bf channel read`, then let [assistants](prompts.md) read from it and post to it.
 
 BF understands JSON envelopes and argv, not Google Chat, Slack, email or desktop notifications. The script owns provider access, sender admission, destination restrictions and transport details. Put scripts under `channels/`, or use an executable already on PATH. One script can serve several channel names with different arguments.
 
-Channels have no schedule or polling interval. An assistant chooses its inputs, outputs and batch-read cadence. A stream adapter implements push, Pub/Sub, long polling or fast polling itself. Its stdin control frames and stdout messages are bidirectional transport control; application replies go through `send`.
+Channels have no schedule or polling interval. An assistant chooses its inputs, its `post` channel and its batch-read cadence. A stream adapter implements push, Pub/Sub, long polling or fast polling itself. Its stdin control frames and stdout messages are bidirectional transport control; application replies go through `send`.
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/channels/
@@ -264,11 +264,11 @@ Resolve queued work before renaming or moving a brain, or changing its execution
 
 ### Answer space
 
-A job reserves its answer space only when a worker starts it: `max_bytes × (7 + 6 × routes) + (job size + 64 KiB) × (1 + routes)`. Routes are the deliveries the run makes. This is about 13 MiB at the 1 MiB default with one route.
+A job reserves its answer space only when a worker starts it: `max_bytes × (7 + 6 × routes) + (job size + 64 KiB) × (1 + routes)`. Routes are the deliveries the run makes: one when it answers a message or posts, none otherwise. This is about 13 MiB at the 1 MiB default with one route.
 
 - An answered job reserves the same with its saved output in place of `max_bytes`. Failed and uncertain jobs reserve nothing.
 - A job that cannot reserve its space stays pending without starting its harness, reported as `assistant queue lacks answer space for this job; it waits until running work finishes`. It starts once running work frees the space. `bf run` fails instead and cancels its job.
-- A job needing more than 96 MiB fails with `assistant NAME needs N MiB of queue space per answer, more than one job may reserve; lower its max_bytes or its outputs`. `bf validate` reports such an assistant before any run.
+- A job needing more than 96 MiB fails with `assistant NAME needs N MiB of queue space per answer, more than one job may reserve; lower its max_bytes`. With one route and the 4 MiB `max_bytes` limit, no job needs that much.
 - Retrying a saved answer reserves its space again, or fails with `assistant queue lacks space to record this saved answer; resolve other work first`.
 
 ### Retention

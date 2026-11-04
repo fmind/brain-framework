@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -12,15 +13,16 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from bf import assistants, pages, records
+from bf import assistants, collect, pages, records
 from bf.cli import app
-from bf.collect import parse_reply, reply_title
+from bf.collect import parse_reply, reply_title, structured_reply
 from bf.health import report
 from bf.history import ASSISTANTS, log_path, state
 from bf.messages import Message
 from bf.models import Assistant, Config, Error, Program, Record
 from bf.retrieve import read
 from bf.runtime import Queue
+from bf.schemas import document
 from bf.storage import Store, collecting
 from bf.update import run_assistant, update
 from bf.validate import validate
@@ -35,7 +37,7 @@ assistants:
   assistant:
     prompt: prompts/assistant.md
     command: [agent, --print, "{{prompt}}"]
-    text: /response
+    reply: {path: /response}
     schedules:
       review: {every: 1800}
   piped:
@@ -48,7 +50,7 @@ assistants:
 """
 TEMPLATE = b"# Assistant\nWindow {{start}} to {{end}} in {{brain}}.\nOwner: {{input}}\nKeep {{prompt}} and {{other}}.\n"
 ANSWER = "## Two replies owed\n\nAnswer the Monday thread."
-REPLY = json.dumps({"response": ANSWER + "\n", "usage": {"total_tokens": 42}}).encode()
+REPLY = json.dumps({"response": {"say": ANSWER + "\n", "wake": None}, "usage": {"total_tokens": 42}}).encode()
 
 
 @pytest.fixture
@@ -82,12 +84,20 @@ def stored(store: Store, source: str = "assistant") -> list[Record]:
 def test_configuration_validates_assistants() -> None:
     assert Config.model_validate({"version": 8, "name": "x", "assistants": None}).assistants == {}
     default = Assistant.model_validate({"prompt": "prompts/a.md", "command": ["agy", "-p={{prompt}}"]})
-    assert (default.schedules, default.timeout, default.max_bytes, default.text) == ({}, 900, 1 << 20, None)
+    assert (default.schedules, default.timeout, default.max_bytes, default.reply) == ({}, 900, 1 << 20, None)
     for path in ("notes/a.md", "prompts/../a.md", "prompts/a.txt"):
         with pytest.raises(ValidationError):
             Assistant(prompt=path, command=["agy"])
     with pytest.raises(ValidationError, match="pattern"):
-        Assistant(prompt="prompts/a.md", command=["agy"], text="response")
+        Assistant.model_validate({"prompt": "prompts/a.md", "command": ["agy"], "reply": {"path": "response"}})
+    with pytest.raises(ValidationError, match="wake requires reply"):
+        Assistant.model_validate({"prompt": "prompts/a.md", "command": ["agy"], "wake": {}})
+    # Only an opening {{ starts a placeholder: inline JSON may end in }}.
+    assert (
+        Assistant(prompt="prompts/a.md", command=["agy", '{"a":{"b":1}}', "{{schema}}"]).command[1] == '{"a":{"b":1}}'
+    )
+    with pytest.raises(ValidationError, match="unknown placeholder"):
+        Assistant(prompt="prompts/a.md", command=["agy", "{{schema_file}}"])
     with pytest.raises(ValidationError, match="unknown placeholder"):
         Program(command=["echo", "{{prompt}}"])
     for kind in ("sensors", "routines"):
@@ -144,10 +154,9 @@ def test_direct_and_preview_runs_leave_named_schedule_progress_alone(configured:
 @pytest.mark.parametrize(
     ("output", "message"),
     [
-        (b"not json", "must print one JSON object when text is set"),
-        (b"[1]", "must print one JSON object when text is set"),
-        (b'{"result":"x"}', "reply has no text string"),
-        (b"\xff", "must print UTF-8"),
+        (b"not json", "must print one JSON object when reply is set"),
+        (b"[1]", "must print one JSON object when reply is set"),
+        (b"\xff", "must print one JSON object when reply is set"),
     ],
 )
 def test_invalid_reply_keeps_raw_answer_without_publishing(configured: Store, output: bytes, message: str) -> None:
@@ -156,17 +165,23 @@ def test_invalid_reply_keeps_raw_answer_without_publishing(configured: Store, ou
     assert stored(configured) == []
     queue = Queue(configured)
     job = cast("list[dict]", queue.report()["jobs"])[0]
-    assert job["state"] == "failed"
-    assert queue.get(job["id"])["raw"] == output
+    assert job["state"] == "uncertain"
+    assert not queue.get(job["id"])["raw"]
 
 
 def test_json_pointer_and_plain_reply_contracts() -> None:
-    assert parse_reply(b'{"a/b":{"~x":" answer "},"usage":1}', "/a~1b/~0x")[0] == "answer"
-    assert parse_reply(b" Plain text \n", None) == ("Plain text", {})
-    assert parse_reply(b'{"answers":["Answer","context"]}', "/answers/0") == (
-        "Answer",
+    assert structured_reply(b'{"a/b":{"~x":{"say":"hi"}},"usage":1}', "/a~1b/~0x") == (
+        {"say": "hi"},
+        {"a/b": {}, "usage": 1},
+    )
+    assert structured_reply(b'{"answers":[{"say":null},"context"]}', "/answers/0") == (
+        {"say": None},
         {"answers": [None, "context"]},
     )
+    assert structured_reply(b'{"say":"root"}', "") == ({"say": "root"}, {})
+    assert parse_reply(b" Plain text \n") == "Plain text"
+    with pytest.raises(Error, match="must print UTF-8"):
+        parse_reply(b"\xff")
     assert reply_title("personal", "# Summary:\tTwo replies") == "Summary: Two replies"
     assert reply_title("personal", "\n\n") == "personal run without a reply"
     assert len(reply_title("personal", "x" * 500)) == 120
@@ -266,7 +281,9 @@ def test_validation_checks_prompt_files_and_record_refs(configured: Store) -> No
 def test_retention_keeps_foreign_records_and_does_not_fail_saved_runs(
     configured: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    configured.write("bf.yaml", CONFIG.replace(b"    text: /response\n", b"    text: /response\n    keep: 1\n"))
+    configured.write(
+        "bf.yaml", CONFIG.replace(b"    reply: {path: /response}\n", b"    reply: {path: /response}\n    keep: 1\n")
+    )
     configured.write("memories/assistant/stray.json", b"not a record")
     records.upsert(configured, "assistant", [Record(id="legacy", title="Kept")], snapshot=False)
     for index in range(3):
@@ -287,7 +304,9 @@ def test_retention_keeps_foreign_records_and_does_not_fail_saved_runs(
 
 
 def test_keep_never_removes_the_run_it_just_recorded(configured: Store) -> None:
-    configured.write("bf.yaml", CONFIG.replace(b"    text: /response\n", b"    text: /response\n    keep: 2\n", 1))
+    configured.write(
+        "bf.yaml", CONFIG.replace(b"    reply: {path: /response}\n", b"    reply: {path: /response}\n    keep: 2\n", 1)
+    )
     # Two runs recorded while the clock ran a day ahead.
     ahead = [
         Record(id=f"20260926T0{hour}0000Z-0000000{hour}", title="Ahead", time=f"2026-09-26T0{hour}:00:00Z")
@@ -307,7 +326,7 @@ def test_wall_clock_schedules_context_schedule_silent_noop_and_idempotent_retry(
         b"  brief:\n"
         b"    prompt: prompts/brief.md\n"
         b"    command: [agent]\n"
-        b"    text: /response\n"
+        b"    reply: {path: /response}\n"
         b"    idempotent: true\n"
         b"    schedules:\n"
         b"      morning:\n"
@@ -334,8 +353,8 @@ def test_wall_clock_schedules_context_schedule_silent_noop_and_idempotent_retry(
     with pytest.raises(Error, match="network down"):
         assistants.execute(configured, job_id, runner=lambda *_: (_ for _ in ()).throw(Error("network down")))
     assert Queue(configured).get(job_id)["state"] == "pending"
-    # A silent no-op scheduled reply (empty response and no metadata) completes and advances the checkpoint without writing a record.
-    noop = assistants.execute(configured, job_id, runner=lambda *_: b'{"response": ""}')
+    # A silent no-op scheduled reply (no message and no metadata) completes and advances the checkpoint without writing a record.
+    noop = assistants.execute(configured, job_id, runner=lambda *_: b'{"response": {"say": null, "wake": null}}')
     assert "record" not in noop
     assert records.files(configured, "brief") == []
     assert Queue(configured).progress("schedule:brief:schedule:morning")["end"] == "2026-08-31T08:05:00.000000Z"
@@ -345,6 +364,7 @@ TOLD = b"""version: 8
 name: fixture
 channels:
   chat:
+    send: {command: [send-chat]}
     stream: {command: [receive-chat]}
 assistants:
   told:
@@ -397,45 +417,54 @@ name: fixture
 assistants:
   checked:
     prompt: prompts/assistant.md
-    command: [agent]
-    text: /response
-    status: {path: /result/status, success: [SUCCESS]}
+    command: [agent, --json-schema, "{{schema}}"]
+    reply: {path: /structured_output}
+    wake: {min: 600, max: 3600}
   retried:
     prompt: prompts/assistant.md
     command: [agent]
-    text: /response
-    status: {path: /ok, success: [true]}
+    reply: {path: /structured_output}
     idempotent: true
 """
 
 
-def test_harness_status_accepts_success_and_records_it(configured: Store) -> None:
+def test_structured_reply_records_its_message_and_metadata(configured: Store) -> None:
     configured.write("bf.yaml", CHECKED)
-    result = ask(configured, name="checked", output=b'{"result":{"status":"SUCCESS"},"response":"Done"}')
+    calls: list[list[str]] = []
+
+    def runner(argv, *_):
+        calls.append(argv)
+        return b'{"structured_output":{"say":"Done","wake":null},"status":"SUCCESS"}'
+
+    work = assistants.prepare(configured, "checked", "manual", START, END)
+    Queue(configured).enqueue(work)
+    result = cast("dict", assistants.execute(configured, work.id, runner=runner))
     assert result["text"] == "Done"
-    assert stored(configured, "checked")[0].attributes["output"] == {"result": {"status": "SUCCESS"}}
+    # {{schema}} passes the published reply schema, exactly as bf schema prints it.
+    assert json.loads(calls[0][2]) == {
+        key: value for key, value in document("assistant-reply").items() if key != "$schema"
+    }
+    record = stored(configured, "checked")[0]
+    assert record.attributes["output"] == {"status": "SUCCESS"}
+    assert "wake" not in record.attributes
 
 
 @pytest.mark.parametrize(
-    ("output", "message"),
+    "output",
     [
-        (
-            b'{"result":{"status":"RESOURCE_EXHAUSTED"},"response":"secret quota"}',
-            "reported status RESOURCE_EXHAUSTED;",
-        ),
-        (b'{"result":{"status":"quota exceeded for secret"},"response":""}', "reported an unexpected status;"),
-        (b'{"result":{"status":["SUCCESS"]},"response":"secret"}', "reported an unexpected status;"),
-        (b'{"result":{"status":"SUCCESS_BUT_LONGER_THAN_THIRTY_TWO_CHARACTERS"}}', "reported an unexpected status;"),
-        (b'{"result":{"status":true},"response":"secret"}', "reported status true;"),
-        (b'{"result":"secret","response":"secret"}', "reported no status at /result/status;"),
-        (b'{"response":"secret"}', "reported no status at /result/status;"),
-        (b"secret plain text", "reported no status at /result/status;"),
+        b'{"status":"RESOURCE_EXHAUSTED","response":"secret quota"}',
+        b'{"structured_output":"secret"}',
+        b'{"structured_output":{"say":"secret"}}',
+        b'{"structured_output":{"say":"secret","wake":null,"extra":"secret"}}',
+        b'{"structured_output":{"say":1,"wake":null}}',
+        b'{"structured_output":{"say":"secret","wake":{"in":0,"reason":"secret"}}}',
+        b'{"structured_output":{"say":"secret","wake":{"in":"60","reason":"secret"}}}',
+        b'{"structured_output":{"say":"secret","wake":{"in":60,"reason":"' + b"x" * 281 + b'"}}}',
     ],
 )
-def test_harness_reported_failure_fails_the_attempt_without_quoting_it(
-    configured: Store, output: bytes, message: str
-) -> None:
+def test_invalid_structured_reply_fails_the_attempt_without_quoting_it(configured: Store, output: bytes) -> None:
     configured.write("bf.yaml", CHECKED)
+    message = "assistant reply at /structured_output is missing or does not match bf schema --kind assistant-reply"
     with pytest.raises(Error, match=re.escape(message)) as raised:
         ask(configured, name="checked", output=output)
     assert "secret" not in str(raised.value)
@@ -450,9 +479,9 @@ def test_harness_reported_failure_fails_the_attempt_without_quoting_it(
     assert "secret" not in configured.read(log_path("checked")).decode()
 
 
-def test_harness_reported_failure_retries_an_idempotent_assistant_and_fails_dry_runs(configured: Store) -> None:
+def test_invalid_structured_reply_retries_an_idempotent_assistant_and_fails_dry_runs(configured: Store) -> None:
     configured.write("bf.yaml", CHECKED)
-    with pytest.raises(Error, match="reported status false;"):
+    with pytest.raises(Error, match="does not match"):
         ask(configured, name="retried", output=b'{"ok":false,"response":"secret"}')
     job = cast("list[dict]", Queue(configured).report()["jobs"])[0]
     assert job["state"] == "pending"
@@ -461,28 +490,182 @@ def test_harness_reported_failure_retries_an_idempotent_assistant_and_fails_dry_
         {
             "assistant": "checked",
             "status": "failed",
-            "error": f"assistant harness reported no status at /result/status; see {log_path('checked')}",
+            "error": "assistant reply at /structured_output is missing or does not match bf schema --kind "
+            f"assistant-reply; see {log_path('checked')}",
         }
     ]
 
 
-def test_status_requires_a_json_reply_and_distinct_success_values() -> None:
-    base = {"prompt": "prompts/a.md", "command": ["agy"]}
-    status = {"path": "/status", "success": ["SUCCESS", False]}
-    accepted = Assistant.model_validate({**base, "text": "/response", "status": status})
-    assert accepted.status is not None
-    assert accepted.status.success == ["SUCCESS", False]
-    assert Assistant.model_validate(base).status is None
-    with pytest.raises(ValidationError, match="status requires text"):
-        Assistant.model_validate({**base, "status": status})
-    for invalid in (
-        {"path": "status", "success": ["SUCCESS"]},
-        {"path": "/status", "success": []},
-        {"path": "/status", "success": ["SUCCESS", "SUCCESS"]},
-        {"path": "/status", "success": [""]},
-        {"path": "/status", "success": [0]},
-        {"path": "/status"},
-        {"path": "/status", "success": ["SUCCESS"], "failure": ["ERROR"]},
-    ):
-        with pytest.raises(ValidationError):
-            Assistant.model_validate({**base, "text": "/response", "status": invalid})
+def wake_reply(seconds: int, reason: str = "Recheck CI", say: str | None = None) -> bytes:
+    return json.dumps({"structured_output": {"say": say, "wake": {"in": seconds, "reason": reason}}}).encode()
+
+
+def test_a_wake_is_clamped_runs_once_with_its_reason_and_is_replaced_by_a_newer_one(configured: Store) -> None:
+    configured.write("bf.yaml", CHECKED)
+    configured.write("prompts/assistant.md", b"Why: {{context}}\n")
+    queue = Queue(configured)
+    before = datetime.now(UTC)
+    ask(configured, name="checked", output=wake_reply(5, say="Waiting for CI"))
+    wake = queue.progress("wake:checked")
+    # Five seconds is below the 600-second minimum.
+    assert datetime.fromisoformat(str(wake["due"])) >= before + timedelta(seconds=600)
+    assert stored(configured, "checked")[0].attributes["wake"] == {"due": wake["due"], "reason": "Recheck CI"}
+    # The listing names when, never the model's reason.
+    assert queue.report()["wakes"] == [{"assistant": "checked", "due": wake["due"], "job": None}]
+    assert assistants.due_schedules(configured, {"checked"}, before + timedelta(seconds=300)) == []
+    later = before + timedelta(seconds=601)
+    [due] = assistants.due_schedules(configured, {"checked"}, later)
+    assert due[:2] == ("checked", "wake")
+    [key], failures = assistants.schedule(configured, {"checked"}, later)
+    assert failures == []
+    # Taken by its job, the wake never starts twice.
+    assert assistants.due_schedules(configured, {"checked"}, later) == []
+    seen: list[str] = []
+
+    def runner(_argv, _program, _store, _name, stdin):
+        seen.append(stdin.decode())
+        return wake_reply(99_999, reason="Again tomorrow")
+
+    assistants.execute(configured, key, runner=runner)
+    assert '"kind":"wake"' in seen[0]
+    assert '"wake":{"reason":"Recheck CI"}' in seen[0]
+    # Its own new wake replaces the one it consumed, clamped to the 3600-second maximum.
+    renewed = queue.progress("wake:checked")
+    assert renewed["reason"] == "Again tomorrow"
+    assert datetime.fromisoformat(str(renewed["due"])) <= datetime.now(UTC) + timedelta(seconds=3600)
+    assert renewed["job"] == ""
+
+
+def test_a_wake_needs_bounds_and_a_failed_run_asks_for_none(configured: Store) -> None:
+    configured.write("bf.yaml", CHECKED)
+    queue = Queue(configured)
+    ask(configured, name="retried", output=wake_reply(900, say="Noted"))
+    # Without wake bounds, the request stays in the record's output only.
+    assert queue.progress("wake:retried") == {}
+    with pytest.raises(Error):
+        ask(configured, name="checked", output=b'{"structured_output":{"say":"x","wake":{"in":900}}}')
+    assert queue.progress("wake:checked") == {}
+
+
+def test_harness_learns_it_runs_for_a_wake(configured: Store) -> None:
+    configured.write("bf.yaml", CHECKED)
+    queue = Queue(configured)
+    queue.set_progress("wake:checked", {"due": START, "reason": "Recheck", "set": START, "job": ""})
+    [key], _ = assistants.schedule(configured, {"checked"}, NOW)
+    told: list[str] = []
+
+    def runner(*_: object) -> bytes:
+        # What run would pass the harness as BF_TRIGGER.
+        told.append(collect._EXPOSED.get()["BF_TRIGGER"])  # noqa: SLF001
+        return b'{"structured_output":{"say":null,"wake":null}}'
+
+    assistants.execute(configured, key, runner=runner)
+    assert told == ["wake"]
+    # A silent wake run completes, records nothing and clears the wake it took.
+    assert queue.get(key)["state"] == "complete"
+    assert queue.progress("wake:checked") == {}
+    assert stored(configured, "checked") == []
+
+
+GATED = b"""version: 8
+name: fixture
+assistants:
+  dev:
+    prompt: prompts/assistant.md
+    command: [agent]
+    schedules:
+      events:
+        every: 600
+        gate: {command: [routines/gate.py, "{{start}}"]}
+"""
+
+
+def gated(store: Store, gate: Callable[[], bytes], answer: bytes = b"Answer") -> tuple[str, list[str], dict]:
+    """Queue the gated schedule and execute it once; returns its key, the programs started and the result."""
+    store.write("bf.yaml", GATED)
+    store.write("prompts/assistant.md", b"Events: {{context}}\n")
+    [key], _ = assistants.schedule(store, {"dev"}, NOW)
+    return key, *run_gated(store, key, gate, answer)
+
+
+def run_gated(store: Store, key: str, gate: Callable[[], bytes], answer: bytes = b"Answer") -> tuple[list[str], dict]:
+    started: list[str] = []
+    prompts: list[str] = []
+
+    def runner(argv, _program, _store, name, stdin):
+        started.append(name)
+        if name == "assistant.dev.gate.events":
+            assert argv == ["routines/gate.py", Queue(store).work(key).start]
+            return gate()
+        prompts.append(stdin.decode())
+        return answer
+
+    try:
+        result = cast("dict", assistants.execute(store, key, runner=runner))
+    except Error as error:
+        result = {"error": str(error)}
+    return started, {**result, "prompts": prompts}
+
+
+def test_a_gate_without_events_skips_the_harness_and_advances_the_schedule(configured: Store) -> None:
+    key, started, result = gated(configured, lambda: b'{"events":[]}')
+    assert started == ["assistant.dev.gate.events"]
+    assert result["text"] == ""
+    assert Queue(configured).get(key)["state"] == "complete"
+    assert Queue(configured).progress("schedule:dev:schedule:events")["end"] == "2026-09-25T08:00:00.000000Z"
+    assert stored(configured, "dev") == []
+
+
+def test_gate_events_reach_the_prompt_and_are_reused_on_retry(configured: Store) -> None:
+    events = b'{"events":[{"key":"ci:main","text":"CI failed","ref":"memories/ci#1"}]}'
+    key, started, result = gated(configured, lambda: events, answer=b"CI failed on main.")
+    assert started == ["assistant.dev.gate.events", "dev"]
+    assert '"events":[{"key":"ci:main","ref":"memories/ci#1","text":"CI failed"}]' in result["prompts"][0]
+    assert result["text"] == "CI failed on main."
+    queue = Queue(configured)
+    [key], _ = assistants.schedule(configured, {"dev"}, datetime.now(UTC) + timedelta(hours=1))
+
+    def crashed() -> bytes:
+        raise Error("harness crashed")
+
+    started: list[str] = []
+
+    def runner(_argv, _program, _store, name, _stdin):
+        started.append(name)
+        return events if name.startswith("assistant.") else crashed()
+
+    with pytest.raises(Error, match="harness crashed"):
+        assistants.execute(configured, key, runner=runner)
+    assert queue.get(key)["state"] == "uncertain"
+    # The retry reuses the events the gate already reported: a gate that remembers what it sent loses nothing.
+    queue.retry(key)
+    started, result = run_gated(configured, key, crashed, answer=b"Retried")
+    assert started == ["dev"]
+    assert '"key":"ci:main"' in result["prompts"][0]
+    assert queue.progress(f"gate:{key}") == {}
+
+
+@pytest.mark.parametrize(
+    "output",
+    [b"secret", b'{"events":"secret"}', b'{"events":[{"text":"secret"}]}', b'{"events":[], "secret": 1}'],
+)
+def test_a_failed_gate_retries_by_itself_without_quoting_its_output(configured: Store, output: bytes) -> None:
+    key, started, result = gated(configured, lambda: output)
+    assert started == ["assistant.dev.gate.events"]
+    assert result["error"] == (
+        'gate of schedule events must print {"events": [...]} with at most 64 events; '
+        "see logs/assistant.dev.gate.events.log"
+    )
+    # No harness ran, so nothing acted: the job retries with backoff instead of waiting for review.
+    job = Queue(configured).get(key)
+    assert job["state"] == "pending"
+    assert "secret" not in str(job["error"])
+    assert Queue(configured).progress(f"retry:{key}")["attempts"] == 1
+
+
+def test_bf_schema_prints_the_assistant_reply_schema() -> None:
+    result = CliRunner().invoke(app, ["schema", "--kind", "assistant-reply"])
+    assert result.exit_code == 0
+    schema = json.loads(result.stdout)
+    assert schema["required"] == ["say", "wake"]
+    assert schema["additionalProperties"] is False

@@ -1368,14 +1368,14 @@ def test_watch_shows_failing_inputs_and_deliveries_until_they_recover(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: str
 ) -> None:
     channel = {
-        "read": b"  inbox:\n    read: {command: [reader]}\n",
+        "read": b"  inbox:\n    read: {command: [reader]}\n    send: {command: [sender]}\n",
         "stream": b"  chat:\n    send: {command: [send]}\n    stream: {command: [receive]}\n",
         "delivery": b"  chat:\n    send: {command: [send]}\n",
     }[failure]
     settings = {
         "read": b"    inputs:\n      - channel: {name: inbox, mode: read, every: 1}\n",
         "stream": b"    inputs:\n      - channel: {name: chat, mode: stream}\n",
-        "delivery": b"    schedules:\n      review: {every: 3600}\n    outputs:\n      - channel: {name: chat}\n",
+        "delivery": b"    schedules:\n      review: {every: 3600}\n    post: chat\n",
     }[failure]
     brain.write("bf.yaml", CONFIG + b"channels:\n" + channel + HELPER + settings)
     brain.write("prompts/helper.md", b"Review.\n")

@@ -57,7 +57,7 @@ bf schema --kind registry
 bf schema --kind eval
 ```
 
-Their `title` values are `Config`, `UserConfig` and `Suite`. `--kind search-reply` and `--kind read-reply` print the [reply schemas](retrieval.md#reply-schemas). Save the output and associate it with your editor's YAML validation.
+Their `title` values are `Config`, `UserConfig` and `Suite`. `--kind search-reply` and `--kind read-reply` print the [reply schemas](retrieval.md#reply-schemas). Save the output and associate it with your editor's YAML validation. `--kind assistant-reply` prints the [structured reply](prompts.md#structured-replies) an assistant's harness returns.
 
 | File                              | Published schema                    |
 | --------------------------------- | ----------------------------------- |

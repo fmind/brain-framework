@@ -379,8 +379,6 @@ assistants:
     command: [harness]
     inputs:
       - channel: {name: chat, mode: stream}
-    outputs:
-      - reply: {}
   notes:
     prompt: prompts/personal.md
     command: [harness]
