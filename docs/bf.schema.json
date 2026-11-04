@@ -26,10 +26,17 @@
           "type": "boolean"
         },
         "idempotent": {
+          "anyOf": [
+            { "type": "boolean" },
+            {
+              "items": { "enum": ["input", "schedule", "manual", "wake"], "type": "string" },
+              "maxItems": 4,
+              "type": "array"
+            }
+          ],
           "default": false,
-          "description": "Retry failed or interrupted pre-answer harness attempts automatically with backoff instead of leaving the job uncertain.",
-          "title": "Idempotent",
-          "type": "boolean"
+          "description": "Retry failed or interrupted pre-answer harness attempts automatically with backoff instead of leaving the job uncertain: true for every run, or the run kinds to retry, such as [schedule, wake].",
+          "title": "Idempotent"
         },
         "inputs": { "items": { "$ref": "#/$defs/AssistantInput" }, "maxItems": 32, "title": "Inputs", "type": "array" },
         "keep": {

@@ -4,6 +4,12 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+A minor release. The brain format (`version: 8`), the reply schemas, the queue format and the search cache are unchanged; `bf.yaml` accepts one more form, so no upgrade step is needed.
+
+### Added
+
+- **Retries by run kind.** An assistant's `idempotent` accepts a list of run kinds besides `true` and `false`, such as `[schedule, wake]`: a failed or interrupted attempt of a listed kind retries by itself with backoff, while other runs, such as an answer to a message that may have acted, wait for `bf queue ID --retry` or `--cancel` ([what a run records](https://fmind.github.io/brain-framework/docs/prompts/#what-a-run-records)).
+
 ## [v21.0.1](https://github.com/fmind/brain-framework/releases/tag/v21.0.1) - 2026-11-04
 
 A patch release. The brain format (`version: 8`), `bf.yaml`, the reply schemas, the queue format and the search cache are unchanged; no upgrade step is needed, except to recover a queue that a device renumbering already stranded (below).

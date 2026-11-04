@@ -17,7 +17,20 @@ from pydantic import Field, JsonValue, ValidationError, field_validator
 
 from bf.config import load
 from bf.messages import Message, Outgoing, Receipt
-from bf.models import Assistant, Error, Invocation, Model, Name, Record, Send, decode, digest, encode, timestamp
+from bf.models import (
+    Assistant,
+    Error,
+    Invocation,
+    Model,
+    Name,
+    Record,
+    Send,
+    decode,
+    digest,
+    encode,
+    retried,
+    timestamp,
+)
 from bf.storage import QUEUE, BusyError, Store, collecting, lock_file, runtime_store
 
 DATABASE = QUEUE
@@ -740,12 +753,15 @@ class Queue:
         """
         with self.connect() as db:
             # No job or delivery has an empty id: an omitted one matches nothing.
-            job_row = db.execute(
-                "SELECT coalesce(json_extract(payload,'$.settings.idempotent'),0) FROM jobs WHERE id=? AND state='running'",
-                (job,),
-            ).fetchone()
+            job_row = db.execute("SELECT payload,kind FROM jobs WHERE id=? AND state='running'", (job,)).fetchone()
             if job_row is not None:
-                if bool(job_row[0]):
+                # A payload BF cannot read retries nothing: the attempt waits for inspection.
+                try:
+                    payload = decode(job_row[0])
+                except Error:
+                    payload = {}
+                settings = payload.get("settings") if isinstance(payload, dict) else None
+                if isinstance(settings, dict) and retried(settings.get("idempotent"), job_row[1]):
                     outcome, message = self._retry_attempt(db, job, "interrupted harness attempt")
                     db.execute(
                         "UPDATE jobs SET state=?,error=?,updated=? WHERE id=? AND state='running'",

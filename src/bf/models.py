@@ -991,6 +991,11 @@ class AssistantInput(Model):
 Invocation = Literal["input", "schedule", "manual", "wake"]
 
 
+def retried(idempotent: object, kind: str) -> bool:
+    """Whether a failed attempt of a run of this kind retries by itself: `idempotent` is true or lists the kind."""
+    return idempotent is True or (isinstance(idempotent, list) and kind in idempotent)
+
+
 class Gate(Command):
     """A deterministic check that runs before the harness and lists the events worth a model run."""
 
@@ -1140,10 +1145,10 @@ class Assistant(Command):
         description="Keep this many newest run records in memories/NAME/; older ones are removed after a run. Unset "
         "keeps every run.",
     )
-    idempotent: bool = Field(
+    idempotent: bool | Annotated[list[Invocation], Field(max_length=4)] = Field(
         default=False,
         description="Retry failed or interrupted pre-answer harness attempts automatically with backoff instead of "
-        "leaving the job uncertain.",
+        "leaving the job uncertain: true for every run, or the run kinds to retry, such as [schedule, wake].",
     )
     inputs: Annotated[list[AssistantInput], Field(max_length=32)] = Field(default_factory=list)
     post: Name | None = Field(

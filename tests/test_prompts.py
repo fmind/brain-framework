@@ -19,7 +19,7 @@ from bf.collect import parse_reply, reply_title, structured_reply
 from bf.health import report
 from bf.history import ASSISTANTS, log_path, state
 from bf.messages import Message
-from bf.models import Assistant, Config, Error, Program, Record
+from bf.models import Assistant, Config, Error, Invocation, Program, Record
 from bf.retrieve import read
 from bf.runtime import Queue
 from bf.schemas import document
@@ -494,6 +494,31 @@ def test_invalid_structured_reply_retries_an_idempotent_assistant_and_fails_dry_
             f"assistant-reply; see {log_path('checked')}",
         }
     ]
+
+
+def test_idempotent_run_kinds_retry_only_runs_of_those_kinds(configured: Store) -> None:
+    configured.write("bf.yaml", CHECKED.replace(b"idempotent: true", b"idempotent: [schedule, wake]"))
+    queue = Queue(configured)
+
+    def failed(kind: Invocation, *, interrupted: bool = False) -> str:
+        work = assistants.prepare(configured, "retried", kind, START, END, slot=kind)
+        queue.enqueue(work)
+        if interrupted:
+            assert queue.claim(work.id)
+            queue.interrupted(job=work.id)
+        else:
+            with pytest.raises(Error, match="does not match"):
+                assistants.execute(configured, work.id, runner=lambda *_: b'{"response":"secret"}')
+        return str(queue.get(work.id)["state"])
+
+    # A listed kind retries by itself; any other run, such as an answer to a message, may have acted on its request.
+    assert failed("schedule") == "pending"
+    assert failed("manual") == "uncertain"
+    assert failed("wake", interrupted=True) == "pending"
+    assert failed("input", interrupted=True) == "uncertain"
+    assert Assistant.model_validate({"prompt": "prompts/a.md", "command": ["a"], "idempotent": []}).idempotent == []
+    with pytest.raises(ValidationError, match="idempotent"):
+        Assistant.model_validate({"prompt": "prompts/a.md", "command": ["a"], "idempotent": ["scheduled"]})
 
 
 def wake_reply(seconds: int, reason: str = "Recheck CI", say: str | None = None) -> bytes:

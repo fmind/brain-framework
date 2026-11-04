@@ -48,6 +48,7 @@ from bf.models import (
     decode,
     digest,
     encode,
+    retried,
     timestamp,
 )
 from bf.replies import ASSISTANT
@@ -491,7 +492,7 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                     key,
                     message,
                     uncertain=current["state"] == "running" and not isinstance(error, NotStartedError),
-                    idempotent=work.settings.idempotent,
+                    idempotent=retried(work.settings.idempotent, work.kind),
                     retry=isinstance(error, GateError),
                 )
             with suppress(Error, OSError):
