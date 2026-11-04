@@ -6,13 +6,14 @@ import errno
 import fcntl
 import os
 import re
+import sqlite3
 import stat
 import time
 from collections.abc import Callable, Generator
 from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 
-from bf.models import MAX_FILE, MAX_FILES, Error, digest
+from bf.models import MAX_FILE, MAX_FILES, Error, decode, digest
 
 
 class BusyError(Error):
@@ -30,6 +31,8 @@ _TEMPORARY = re.compile(r"\.write-[0-9a-f]{32}")
 UNNAMED = "file name is not valid UTF-8 or contains a backslash; rename it"
 # A link BF never follows, to a file or to a folder such as memories/: its owner puts the real one in its place.
 LINKED = "symlinks are not followed; replace the link with the file or folder itself"
+# The assistant queue's file in its runtime folder (bf.runtime owns its schema).
+QUEUE = "queue.sqlite3"
 
 
 def temporary(path: str) -> bool:
@@ -455,8 +458,8 @@ def xdg(name: str, default: str) -> Path:
         raise Error(f"cannot find the home directory; set HOME or {name}") from error
 
 
-def _private(*parts: str, root: Path) -> Store:
-    """A private directory below XDG_STATE_HOME, or ~/.local/state, outside the evidence brain."""
+def _state(*parts: str, root: Path) -> tuple[Path, Path]:
+    """The state home and a directory below its bf/ root, checked but not created."""
     base = xdg("XDG_STATE_HOME", ".local/state")
     if base.resolve().is_relative_to(root):
         raise Error("state directory must be outside the brain")
@@ -466,6 +469,12 @@ def _private(*parts: str, root: Path) -> Store:
     # Reject redirected state roots before creating any descendant: check each level from home down.
     if any(path.is_symlink() for path in (directory, *directory.parents[: len(parts) + 1])):
         raise Error("state directory may not contain symlinks")
+    return home, directory
+
+
+def _private(*parts: str, root: Path) -> Store:
+    """A private directory below XDG_STATE_HOME, or ~/.local/state, outside the evidence brain."""
+    home, directory = _state(*parts, root=root)
     # mkdir applies its mode to the last directory only: create the shared bf/ root explicitly too.
     top = home / "bf"
     try:
@@ -500,7 +509,68 @@ def runtime_store(store: Store) -> Store:
     A drained queue follows a move or rename; unresolved work refuses execution until the brain is restored. Never
     discard this directory as a search cache.
     """
+    if len(found := _renumbered(store)) > 1:
+        names = ", ".join(sorted(found))
+        raise Error(
+            f"several assistant queues in the state folder runtime/ are bound to this brain ({names}); move all but "
+            f"the one to keep out of runtime/, then rename it {store.identity}"
+        )
     return _private("runtime", store.identity, root=store.root)
+
+
+def _bound(folder: Path) -> str | None:
+    """The brain path a runtime folder's queue was last bound to, read without changing it; None when unreadable."""
+    database = folder / QUEUE
+    try:
+        if not stat.S_ISREG(database.lstat().st_mode):
+            return None
+        connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True, timeout=10)
+    except OSError, sqlite3.Error:
+        return None
+    try:
+        row = connection.execute("SELECT value FROM checkpoints WHERE key='binding'").fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    try:
+        binding = decode(row[0]) if row is not None else None
+    except Error:
+        return None
+    path = binding.get("path") if isinstance(binding, dict) else None
+    return path if isinstance(path, str) else None
+
+
+def _renumbered(store: Store) -> list[str]:
+    """Keep the queue and program state when only the brain's device number changed; return ambiguous old names.
+
+    Some filesystems, such as btrfs, can number a device anew at boot, which renames the identity of the same folder.
+    When the brain has no runtime folder yet, the one folder with the same inode whose queue is bound to this path,
+    and its program state, take the new name. A copy or a move to another filesystem has another path or inode, so
+    its old queue stays where it is. Several matches return their names and move nothing.
+    """
+    # Only the per-brain folders are private: mkdir gave their shared parents the default mode.
+    runtime = _state("runtime", root=store.root)[1]
+    if not runtime.is_dir() or os.path.lexists(runtime / store.identity):
+        return []
+    inode = "-" + store.identity.rsplit("-", 1)[1]
+    with _lock(store, "renumber.lock", 30, busy="another process is checking this brain's state; retry"):
+        if os.path.lexists(runtime / store.identity):
+            return []
+        found = [
+            entry.name
+            for entry in os.scandir(runtime)
+            if entry.name.endswith(inode)
+            and entry.is_dir(follow_symlinks=False)
+            and _bound(Path(entry.path)) == str(store.root)
+        ]
+        if len(found) != 1:
+            return found
+        programs = _state("programs", root=store.root)[1]
+        if (programs / found[0]).is_dir() and not os.path.lexists(programs / store.identity):
+            (programs / found[0]).rename(programs / store.identity)
+        (runtime / found[0]).rename(runtime / store.identity)
+    return []
 
 
 def program_state(store: Store, name: str) -> Store:
@@ -511,6 +581,8 @@ def program_state(store: Store, name: str) -> Store:
     """
     if not name or name.startswith(".") or "/" in name or "\x00" in name:
         raise Error("invalid program name")
+    # Collection never waits for the queue: an ambiguous queue is runtime_store's error, not a program's.
+    _renumbered(store)
     return _private("programs", store.identity, name, root=store.root)
 
 

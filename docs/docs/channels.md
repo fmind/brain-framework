@@ -247,6 +247,7 @@ Resolve queued work before renaming or moving a brain, or changing its execution
 - While work admitted under the old path or name remains, those commands refuse. `bf status` reports it as a problem: `assistant queue holds unresolved work admitted under this brain's previous path or name; …`. Restore the path or name, resolve the work with `bf queue`, then move or rename the brain again.
 - Collection never uses the queue, so it never waits for the binding.
 - A copy, or a move to another filesystem, gives the brain a new physical identity and an empty queue. The old queue stays in its former folder.
+- A new device number for the same folder, such as btrfs numbering a device anew at boot, keeps the queue and the programs' private state. The next BF command that needs them renames the folder with the same inode whose queue is bound to the brain's path. When several such folders exist, assistant commands refuse with `several assistant queues in the state folder runtime/ are bound to this brain (…)`; keep one, rename it as the error says, and move the others out.
 
 ### Capacity
 

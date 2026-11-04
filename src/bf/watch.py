@@ -659,9 +659,8 @@ def _settle(store: Store) -> None:
 
     Never creates the queue; a queue execution refuses keeps its entries for bf status to show.
     """
-    queue = Queue(store)
     with suppress(Error, OSError):
-        if queue.exists():
+        if (queue := Queue(store)).exists():
             with queue.connect() as db:
                 db.execute("DELETE FROM checkpoints WHERE key LIKE 'health:%'")
 

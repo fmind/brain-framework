@@ -4,6 +4,12 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+A patch release. The brain format (`version: 8`), `bf.yaml`, the reply schemas, the queue format and the search cache are unchanged; no upgrade step is needed.
+
+### Fixed
+
+- **A new device number no longer starts an empty assistant queue.** BF names a brain's queue and program-state folders by its device and inode numbers, and btrfs can number a device anew at boot: the queue then looked empty, stranding unresolved work, and window sensors restarted from `lookback`. When the folder for the brain's current identity is missing, BF now renames the folder with the same inode whose queue is bound to the brain's path, together with its program state. Several matching folders make assistant commands fail with `several assistant queues in the state folder runtime/ are bound to this brain (…)` instead of choosing one; collection never waits for it ([move or rename a brain](https://fmind.github.io/brain-framework/docs/channels/#move-or-rename-a-brain)).
+
 ## [v21.0.0](https://github.com/fmind/brain-framework/releases/tag/v21.0.0) - 2026-11-04
 
 A major release that makes assistants event-driven and lets them choose when to speak. A structured reply replaces answer pointers and status checks, a gate decides whether a scheduled run needs the model, an assistant can schedule its own next run, and one `post` channel replaces output routing. The brain format (`version: 8`), records, notes, the search cache and the queue format are unchanged; `bf.yaml` assistants need manual edits. Follow the upgrade steps below.

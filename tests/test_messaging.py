@@ -6,7 +6,9 @@ import json
 import re
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event, Thread
 from typing import cast
 
@@ -14,13 +16,13 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from bf import assistants, channels, records, runtime
+from bf import assistants, channels, records, runtime, watch
 from bf.collect import NotStartedError, collect
 from bf.config import load
 from bf.messages import Message, Outgoing
 from bf.models import Config, Error, ReadInput, Send, encode, timestamp
 from bf.runtime import Queue, QueueFullError
-from bf.storage import BusyError, Store, collecting
+from bf.storage import BusyError, Store, collecting, program_state
 
 
 @pytest.fixture
@@ -1088,6 +1090,54 @@ def test_drained_queue_follows_a_renamed_or_moved_brain(messaging: Store) -> Non
     assert Queue(store).report()["counts"] == {}
     assistants.accept(store, "chat", [message()], {"personal"})
     assert Queue(store).report()["counts"] == {"pending": 1}
+
+
+def renumbered(store: Store, device: str) -> Store:
+    """The same folder after its filesystem numbered the device anew, as btrfs can at boot."""
+    again = Store(store.root)
+    again.identity = f"{device}-{again.identity.rsplit('-', 1)[1]}"
+    return again
+
+
+def test_a_new_device_number_keeps_the_queue_and_program_state(messaging: Store) -> None:
+    assistants.accept(messaging, "chat", [message()], {"personal"})
+    program_state(messaging, "calendar").write("cursor", b"42")
+    old = Queue(messaging).store.root
+    store = renumbered(messaging, "999")
+    assert program_state(store, "calendar").read("cursor") == b"42"
+    assert Queue(store).report()["counts"] == {"pending": 1}
+    assert Queue(store).store.root == old.parent / store.identity
+    assert not old.exists()
+
+
+def test_another_brain_with_the_same_inode_number_keeps_its_queue(messaging: Store, tmp_path: Path) -> None:
+    assistants.accept(messaging, "chat", [message()], {"personal"})
+    old = Queue(messaging).store.root
+    (tmp_path / "other").mkdir()
+    other = Store(tmp_path / "other")
+    other.write("bf.yaml", messaging.read("bf.yaml"))
+    # Another filesystem can reuse the inode number: the old queue is bound to another path, so it stays.
+    other.identity = f"999-{old.name.rsplit('-', 1)[1]}"
+    assert Queue(other).report()["counts"] == {}
+    assert Queue(other).store.root != old
+    assert Queue(messaging).report()["counts"] == {"pending": 1}
+
+
+def test_several_queues_bound_to_one_renumbered_brain_fail_without_blocking_collection(messaging: Store) -> None:
+    assistants.accept(messaging, "chat", [message()], {"personal"})
+    old = Queue(messaging).store.root
+    twin = old.parent / f"777-{old.name.rsplit('-', 1)[1]}"
+    twin.mkdir(mode=0o700)
+    (twin / "queue.sqlite3").write_bytes((old / "queue.sqlite3").read_bytes())
+    store = renumbered(messaging, "999")
+    with pytest.raises(Error, match=r"several assistant queues .* are bound to this brain"):
+        Queue(store).report()
+    program_state(store, "calendar").write("cursor", b"1")
+    # watch starts, and keeps collecting, while assistant commands refuse.
+    with ExitStack() as stack:
+        watch.Assistants(store, ((), (), ()), stack)
+    assert old.exists()
+    assert twin.exists()
 
 
 def test_renamed_brain_with_unresolved_work_refuses_execution_but_never_record_writes(messaging: Store) -> None:

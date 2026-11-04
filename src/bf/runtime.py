@@ -18,9 +18,9 @@ from pydantic import Field, JsonValue, ValidationError, field_validator
 from bf.config import load
 from bf.messages import Message, Outgoing, Receipt
 from bf.models import Assistant, Error, Invocation, Model, Name, Record, Send, decode, digest, encode, timestamp
-from bf.storage import BusyError, Store, collecting, lock_file, runtime_store
+from bf.storage import QUEUE, BusyError, Store, collecting, lock_file, runtime_store
 
-DATABASE = "queue.sqlite3"
+DATABASE = QUEUE
 # The queue format this release reads and writes; any other is preserved, never adapted.
 VERSION = 2
 MAX_PENDING = 10_000

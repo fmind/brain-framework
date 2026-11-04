@@ -198,5 +198,5 @@ Assistant obligations live separately under the private `bf/runtime/` state dire
 - This durable queue is bound to physical brain identity, path and name.
 - Never delete it with disposable caches or run history.
 - Resolve its work with `bf queue` before moving or renaming a brain.
-- A drained queue follows a rename or a move within one filesystem.
+- A drained queue follows a rename or a move within one filesystem. The queue and program state also follow a new device number for the same folder, such as btrfs can assign at boot.
 - Unresolved work refuses execution until the brain is restored. Collection never waits for it.
