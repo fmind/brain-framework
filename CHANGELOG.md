@@ -4,6 +4,8 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v21.1.0](https://github.com/fmind/brain-framework/releases/tag/v21.1.0) - 2026-11-04
+
 A minor release. The brain format (`version: 8`), the reply schemas, the queue format and the search cache are unchanged; `bf.yaml` accepts one more form, so no upgrade step is needed.
 
 ### Added
