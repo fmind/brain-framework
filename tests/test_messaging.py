@@ -1043,12 +1043,19 @@ def test_dispatcher_tick_survives_bad_configuration_missing_prompts_and_a_full_q
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             dispatcher.tick()
-            if cast("dict", queue.report()["counts"]).get("complete") == 1 and not dispatcher.tasks:
+            if replied(queue) and not dispatcher.tasks:
                 break
             time.sleep(0.05)
         assert queue.progress("health:dispatcher")["error"] == ""
-    # A bf.yaml mid-edit delays the waiting reply instead of failing it.
-    assert cast("dict", queue.report()["counts"]) == {"complete": 1}
+    # A bf.yaml mid-edit delays the waiting reply instead of failing it. Once the reply frees its slots, the refused
+    # review may be admitted and complete too, so only the reply's completion and the absence of failures are fixed.
+    assert replied(queue)
+    assert set(cast("dict", queue.report()["counts"])) == {"complete"}
+
+
+def replied(queue: Queue) -> bool:
+    jobs = cast("list[dict]", queue.report()["jobs"])
+    return any(job["kind"] == "input" and job["state"] == "complete" for job in jobs)
 
 
 def test_dispatcher_backs_off_a_job_another_process_holds(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
