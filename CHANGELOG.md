@@ -4,6 +4,8 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v21.0.0](https://github.com/fmind/brain-framework/releases/tag/v21.0.0) - 2026-11-04
+
 A major release that makes assistants event-driven and lets them choose when to speak. A structured reply replaces answer pointers and status checks, a gate decides whether a scheduled run needs the model, an assistant can schedule its own next run, and one `post` channel replaces output routing. The brain format (`version: 8`), records, notes, the search cache and the queue format are unchanged; `bf.yaml` assistants need manual edits. Follow the upgrade steps below.
 
 ### Breaking changes
