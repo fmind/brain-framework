@@ -4,11 +4,12 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
-A patch release. The brain format (`version: 8`), `bf.yaml`, the reply schemas, the queue format and the search cache are unchanged; no upgrade step is needed.
+A patch release. The brain format (`version: 8`), `bf.yaml`, the reply schemas, the queue format and the search cache are unchanged; no upgrade step is needed, except to recover a queue that a device renumbering already stranded (below).
 
 ### Fixed
 
-- **A new device number no longer starts an empty assistant queue.** BF names a brain's queue and program-state folders by its device and inode numbers, and btrfs can number a device anew at boot: the queue then looked empty, stranding unresolved work, and window sensors restarted from `lookback`. When the folder for the brain's current identity is missing, BF now renames the folder with the same inode whose queue is bound to the brain's path, together with its program state. Several matching folders make assistant commands fail with `several assistant queues in the state folder runtime/ are bound to this brain (…)` instead of choosing one; collection never waits for it ([move or rename a brain](https://fmind.github.io/brain-framework/docs/channels/#move-or-rename-a-brain)).
+- **A new device number no longer starts an empty assistant queue.** BF names a brain's queue and program-state folders by its device and inode numbers, and btrfs can number a device anew at boot: the queue then looked empty, stranding unresolved work, and window sensors restarted from `lookback`. When the folder for the brain's current identity is missing, BF now renames the folder with the same inode whose queue is bound to the brain's path, together with its program state; a brain without a queue still restarts its window sensors from `lookback`. Several matching folders, or one that cannot be read, such as after an interrupted write, make assistant commands fail with `several assistant queues in the state folder runtime/ are bound to this brain (…)` or `assistant queue in the state folder runtime/ (NAMES) may belong to this brain but cannot be read` instead of choosing; collection and watch keep running ([move or rename a brain](https://fmind.github.io/brain-framework/docs/channels/#move-or-rename-a-brain)).
+- **Recovering an already stranded queue (manual).** A brain that already ran after a renumbering has a new, possibly empty folder, which this release keeps. To recover the old queue: stop `bf watch`, check that `bf queue` shows no work you need, move `runtime/NEW` (named by `stat -L -c %d-%i BRAIN`, or `stat -L -f %d-%i BRAIN` on macOS) out of the state folder, rename the old `runtime/OLD-INODE` folder to `NEW` (and `programs/OLD-INODE` likewise), then run `bf queue`.
 
 ## [v21.0.0](https://github.com/fmind/brain-framework/releases/tag/v21.0.0) - 2026-11-04
 

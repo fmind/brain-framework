@@ -1133,11 +1133,25 @@ def test_several_queues_bound_to_one_renumbered_brain_fail_without_blocking_coll
     with pytest.raises(Error, match=r"several assistant queues .* are bound to this brain"):
         Queue(store).report()
     program_state(store, "calendar").write("cursor", b"1")
-    # watch starts, and keeps collecting, while assistant commands refuse.
+    # Watch still starts, so its collection runs, while assistant commands refuse.
     with ExitStack() as stack:
         watch.Assistants(store, ((), (), ()), stack)
     assert old.exists()
     assert twin.exists()
+
+
+def test_an_unreadable_queue_with_the_same_inode_refuses_instead_of_starting_empty(messaging: Store) -> None:
+    # SQLite cannot open read-only a queue holding an interrupted write's journal: that queue may be this brain's.
+    assistants.accept(messaging, "chat", [message()], {"personal"})
+    old = Queue(messaging).store.root
+    (old / "queue.sqlite3").write_bytes(b"not a database, as a hot journal makes it look read-only")
+    store = renumbered(messaging, "999")
+    with pytest.raises(Error, match=r"may belong to this brain but cannot be read.*rename it 999-"):
+        Queue(store).report()
+    assert not (old.parent / store.identity).exists()
+    program_state(store, "calendar").write("cursor", b"1")
+    with pytest.raises(Error, match="cannot be read"):
+        Queue(store).report()
 
 
 def test_renamed_brain_with_unresolved_work_refuses_execution_but_never_record_writes(messaging: Store) -> None:

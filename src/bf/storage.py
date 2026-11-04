@@ -509,7 +509,15 @@ def runtime_store(store: Store) -> Store:
     A drained queue follows a move or rename; unresolved work refuses execution until the brain is restored. Never
     discard this directory as a search cache.
     """
-    if len(found := _renumbered(store)) > 1:
+    found, unread = _renumbered(store)
+    if unread:
+        names = ", ".join(sorted(unread))
+        raise Error(
+            f"assistant queue in the state folder runtime/ ({names}) may belong to this brain but cannot be read, "
+            f"such as after an interrupted write; if it is this brain's, rename it {store.identity}, otherwise run "
+            "bf queue in its own brain"
+        )
+    if len(found) > 1:
         names = ", ".join(sorted(found))
         raise Error(
             f"several assistant queues in the state folder runtime/ are bound to this brain ({names}); move all but "
@@ -518,59 +526,73 @@ def runtime_store(store: Store) -> Store:
     return _private("runtime", store.identity, root=store.root)
 
 
+_UNREAD = "\x00"  # _bound's result for a queue that exists but cannot be read, never a brain path
+
+
 def _bound(folder: Path) -> str | None:
-    """The brain path a runtime folder's queue was last bound to, read without changing it; None when unreadable."""
+    """The brain path a runtime folder's queue was last bound to, read without changing it.
+
+    None when the folder holds no bound queue; _UNREAD when its queue cannot be read, such as one holding the journal
+    of an interrupted write, which SQLite refuses to open read-only.
+    """
     database = folder / QUEUE
     try:
-        if not stat.S_ISREG(database.lstat().st_mode):
-            return None
-        connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True, timeout=10)
-    except OSError, sqlite3.Error:
+        info = database.lstat()
+    except FileNotFoundError:
         return None
+    except OSError:
+        return _UNREAD
+    if not stat.S_ISREG(info.st_mode):
+        return _UNREAD
+    if not info.st_size:
+        return None  # created, schema not committed yet: it holds nothing
     try:
-        row = connection.execute("SELECT value FROM checkpoints WHERE key='binding'").fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        connection.close()
-    try:
+        connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True, timeout=1)
+        try:
+            if not connection.execute("SELECT 1 FROM sqlite_master WHERE name='checkpoints'").fetchone():
+                return _UNREAD
+            row = connection.execute("SELECT value FROM checkpoints WHERE key='binding'").fetchone()
+        finally:
+            connection.close()
         binding = decode(row[0]) if row is not None else None
-    except Error:
-        return None
+    except sqlite3.Error, Error:
+        return _UNREAD
     path = binding.get("path") if isinstance(binding, dict) else None
     return path if isinstance(path, str) else None
 
 
-def _renumbered(store: Store) -> list[str]:
-    """Keep the queue and program state when only the brain's device number changed; return ambiguous old names.
+def _renumbered(store: Store) -> tuple[list[str], list[str]]:
+    """Keep the queue and program state when only the brain's device number changed.
+
+    Return the old names that block it: several bound to this path, and queues that cannot be read.
 
     Some filesystems, such as btrfs, can number a device anew at boot, which renames the identity of the same folder.
     When the brain has no runtime folder yet, the one folder with the same inode whose queue is bound to this path,
     and its program state, take the new name. A copy or a move to another filesystem has another path or inode, so
-    its old queue stays where it is. Several matches return their names and move nothing.
+    its old queue stays where it is. Several matches, or a queue that cannot be read, move nothing.
     """
     # Only the per-brain folders are private: mkdir gave their shared parents the default mode.
     runtime = _state("runtime", root=store.root)[1]
     if not runtime.is_dir() or os.path.lexists(runtime / store.identity):
-        return []
+        return [], []
     inode = "-" + store.identity.rsplit("-", 1)[1]
     with _lock(store, "renumber.lock", 30, busy="another process is checking this brain's state; retry"):
         if os.path.lexists(runtime / store.identity):
-            return []
-        found = [
-            entry.name
+            return [], []
+        bound = {
+            entry.name: _bound(Path(entry.path))
             for entry in os.scandir(runtime)
-            if entry.name.endswith(inode)
-            and entry.is_dir(follow_symlinks=False)
-            and _bound(Path(entry.path)) == str(store.root)
-        ]
-        if len(found) != 1:
-            return found
+            if entry.name.endswith(inode) and entry.is_dir(follow_symlinks=False)
+        }
+        found = [name for name, path in bound.items() if path == str(store.root)]
+        unread = [name for name, path in bound.items() if path == _UNREAD]
+        if len(found) != 1 or unread:
+            return found, unread
         programs = _state("programs", root=store.root)[1]
         if (programs / found[0]).is_dir() and not os.path.lexists(programs / store.identity):
             (programs / found[0]).rename(programs / store.identity)
         (runtime / found[0]).rename(runtime / store.identity)
-    return []
+    return [], []
 
 
 def program_state(store: Store, name: str) -> Store:
