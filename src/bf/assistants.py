@@ -281,6 +281,10 @@ def _answer(raw: bytes, work: Work) -> tuple[str, Requested | None, dict[str, Js
     return (answer.say or "").strip(), wake, metadata
 
 
+# Gate events in one prompt, encoded; 64 events of maximal text would otherwise exceed the prompt bound.
+GATE_EVENT_BYTES = 65_536
+
+
 def _exposed(work: Work) -> AbstractContextManager[None]:
     """The run's trigger, schedule and window as BF_* variables for its harness or gate."""
     return exposing(BF_TRIGGER=work.kind, BF_SCHEDULE=_schedule(work), BF_START=work.start, BF_END=work.end)
@@ -315,7 +319,14 @@ def _gate(store: Store, work: Work, runner: Runner) -> list[JsonValue] | None:
     except (Error, OSError, UnicodeError) as error:
         reason = str(error) if isinstance(error, Error) else f"gate of schedule {schedule} failed; see {log_path(name)}"
         raise GateError(reason) from error
-    return [event.model_dump(exclude_defaults=True) for event in reply.events]
+    events: list[JsonValue] = [event.model_dump(exclude_defaults=True) for event in reply.events]
+    if len(encode(events)) > GATE_EVENT_BYTES:
+        # Saved events are reused on every retry: an oversized set would fail each prompt the same way.
+        raise GateError(
+            f"gate of schedule {schedule} printed more than {GATE_EVENT_BYTES} bytes of events; "
+            "shorten their text or send fewer"
+        )
+    return events
 
 
 def _quiet(store: Store, queue: Queue, work: Work, key: str, wake: Requested | None = None) -> dict[str, object]:
@@ -382,8 +393,8 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                     events = gated["events"]
                 else:
                     events = _gate(store, work, runner)
-                    if events is not None:
-                        queue.set_progress(f"gate:{key}", {"events": events})
+                    if events is not None and not queue.save_gate(key, events):
+                        raise Error("assistant job is no longer pending; inspect bf queue")
                 if events is not None and not events:
                     return _quiet(store, queue, work, key)
                 argv, stdin = expanded(store, work, queue)
@@ -676,7 +687,8 @@ def schedule(
                 work = prepare(
                     store, name, "wake", start, end, slot=slot, reason=str(wake.get("reason", "")), config=config
                 )
-                queue.enqueue_wake(work, wake)
+                if not queue.enqueue_wake(work, wake):
+                    continue  # A run that finished meanwhile replaced or took the wake.
             else:
                 work = prepare(store, name, "schedule", start, end, slot=slot, config=config)
                 queue.enqueue(work)

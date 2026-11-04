@@ -393,11 +393,30 @@ class Queue:
         with self.connect() as db:
             self.put(db, work)
 
-    def enqueue_wake(self, work: Work, wake: dict[str, JsonValue]) -> None:
-        """Queue a wake run and mark its wake taken in one transaction, so it starts once."""
+    def enqueue_wake(self, work: Work, wake: dict[str, JsonValue]) -> bool:
+        """Queue a wake run and mark its wake taken in one transaction, so it starts once.
+
+        Returns False, queueing nothing, when the wake changed since it was read: a run that finished meanwhile
+        replaced or took it, and the newer request must keep its own due time.
+        """
+        key = f"wake:{work.assistant}"
         with self.connect() as db:
+            row = db.execute("SELECT value FROM checkpoints WHERE key=?", (key,)).fetchone()
+            if row is None or decode(row[0]) != wake or wake.get("job"):
+                return False
             self.put(db, work)
-            self.checkpoint(db, f"wake:{work.assistant}", {**wake, "job": work.id})
+            self.checkpoint(db, key, {**wake, "job": work.id})
+        return True
+
+    def save_gate(self, key: str, events: list[JsonValue]) -> bool:
+        """Keep a pending job's gate events for its retries; False when the job was cancelled meanwhile."""
+        with self.connect() as db:
+            cursor = db.execute(
+                "INSERT OR REPLACE INTO checkpoints SELECT ?,? WHERE EXISTS "
+                "(SELECT 1 FROM jobs WHERE id=? AND state='pending')",
+                (f"gate:{key}", encode({"events": events}).decode(), key),
+            )
+            return cursor.rowcount > 0
 
     def admit(
         self,
@@ -560,8 +579,14 @@ class Queue:
     def finish(self, work: Work, wake: Requested | None = None) -> None:
         """Complete a job; a wake it asked for replaces the assistant's pending one in the same transaction."""
         with self.connect() as db:
-            db.execute("UPDATE jobs SET state='complete',updated=?,error='' WHERE id=?", (now(), work.id))
+            # A job cancelled while its gate ran stays cancelled: the cancellation already advanced its schedule.
+            completed = db.execute(
+                "UPDATE jobs SET state='complete',updated=?,error='' WHERE id=? AND state<>'cancelled'",
+                (now(), work.id),
+            )
             db.execute("DELETE FROM checkpoints WHERE key IN (?,?)", (f"retry:{work.id}", f"gate:{work.id}"))
+            if not completed.rowcount:
+                return
             if work.kind == "schedule":
                 self.checkpoint(db, f"schedule:{work.assistant}:{work.slot}", {"end": work.end, "success": now()})
             if work.kind == "wake":
@@ -908,6 +933,10 @@ class Queue:
                 db.execute("DELETE FROM checkpoints WHERE key=?", (f"retry:{key}",))
                 if cancel:
                     db.execute("DELETE FROM checkpoints WHERE key=?", (f"gate:{key}",))
+                    # A cancelled wake run drops the wake it took, so `bf queue` lists only live wakes.
+                    db.execute(
+                        "DELETE FROM checkpoints WHERE key=? AND json_extract(value,'$.job')=?", (f"wake:{row[4]}", key)
+                    )
                     db.execute(
                         "UPDATE deliveries SET state='cancelled',error='' WHERE job=? AND state='pending'", (key,)
                     )

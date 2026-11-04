@@ -130,18 +130,20 @@ Search and read keep a local `usage.jsonl`:
 
 Assistants, channels and the queue:
 
-| Resource                      | Limit                                                                                                                                                             |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Assistant inputs, schedules   | 32 entries each                                                                                                                                                   |
-| Assistants per brain          | 32                                                                                                                                                                |
-| Channels per brain            | 64                                                                                                                                                                |
-| Channel read                  | 1,000 messages; a read input catches up on a longer window in parts, at most 16 admitted parts per poll                                                           |
-| Stream frame                  | 1 MiB by default (1 KiB–1 MiB)                                                                                                                                    |
-| Stream lifetime               | No deadline for a healthy idle stream; each stream run ends with one timed entry in `logs/channel.NAME.stream.log`                                                |
-| Queue database                | 256 MiB                                                                                                                                                           |
-| Queue admission               | New work until the queue holds 96 MiB or 10,000 unfinished obligations                                                                                            |
-| Answer space of a started job | `max_bytes × (7 + 6 × routes)` and a little more, within 96 MiB: at most 14 routes per run at the 1 MiB default and 2 at 4 MiB, fewer for a large prompt or input |
-| Completed bodies              | 8 MiB budgets                                                                                                                                                     |
-| Identity tombstones           | 35 days                                                                                                                                                           |
+| Resource                      | Limit                                                                                                                                                      |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Assistant inputs, schedules   | 32 entries each                                                                                                                                            |
+| Assistants per brain          | 32                                                                                                                                                         |
+| Channels per brain            | 64                                                                                                                                                         |
+| Channel read                  | 1,000 messages; a read input catches up on a longer window in parts, at most 16 admitted parts per poll                                                    |
+| Stream frame                  | 1 MiB by default (1 KiB–1 MiB)                                                                                                                             |
+| Stream lifetime               | No deadline for a healthy idle stream; each stream run ends with one timed entry in `logs/channel.NAME.stream.log`                                         |
+| Queue database                | 256 MiB                                                                                                                                                    |
+| Queue admission               | New work until the queue holds 96 MiB or 10,000 unfinished obligations                                                                                     |
+| Answer space of a started job | `max_bytes × (7 + 6 × routes)` and a little more, within 96 MiB; a run has at most one route, its message's conversation or the `post` channel             |
+| Gate                          | 64 events and 64 KiB of encoded events; `timeout` 120 s by default (up to 3,600 s), `max_bytes` 256 KiB by default (up to 1 MiB)                           |
+| Wake                          | One pending per assistant; `in` from 1 s to 1 year, clamped to `min` (at least 60 s, default 600 s) and `max` (default 604,800 s); `reason` 280 characters |
+| Completed bodies              | 8 MiB budgets                                                                                                                                              |
+| Identity tombstones           | 35 days                                                                                                                                                    |
 
 See [channel limits and recovery](channels.md#queue-and-recovery).

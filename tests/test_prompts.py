@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 from typer.testing import CliRunner
 
 from bf import assistants, collect, pages, records
@@ -661,6 +661,64 @@ def test_a_failed_gate_retries_by_itself_without_quoting_its_output(configured: 
     assert job["state"] == "pending"
     assert "secret" not in str(job["error"])
     assert Queue(configured).progress(f"retry:{key}")["attempts"] == 1
+
+
+def test_oversized_gate_events_fail_the_gate_instead_of_every_prompt(configured: Store) -> None:
+    # 20 events of 4,000 characters fit the gate's 256 KiB output but not one prompt: saved for retries, they would
+    # fail each attempt the same way and stall the schedule.
+    events = {"events": [{"key": f"k{index}", "text": "x" * 4000} for index in range(20)]}
+    key, started, result = gated(configured, lambda: json.dumps(events).encode())
+    assert started == ["assistant.dev.gate.events"]
+    assert result["error"] == (
+        "gate of schedule events printed more than 65536 bytes of events; shorten their text or send fewer"
+    )
+    queue = Queue(configured)
+    assert queue.get(key)["state"] == "pending"
+    assert queue.progress(f"retry:{key}")["attempts"] == 1
+    assert queue.progress(f"gate:{key}") == {}
+
+
+@pytest.mark.parametrize("events", [b'{"events":[]}', b'{"events":[{"key":"ci:main"}]}'])
+def test_a_job_cancelled_while_its_gate_runs_stays_cancelled(configured: Store, events: bytes) -> None:
+    configured.write("bf.yaml", GATED)
+    configured.write("prompts/assistant.md", b"Events: {{context}}\n")
+    [key], _ = assistants.schedule(configured, {"dev"}, NOW)
+    queue = Queue(configured)
+
+    def cancelled() -> bytes:
+        queue.retry(key, cancel=True)
+        return events
+
+    started, _ = run_gated(configured, key, cancelled)
+    assert started == ["assistant.dev.gate.events"]
+    assert queue.get(key)["state"] == "cancelled"
+    assert queue.progress(f"gate:{key}") == {}
+
+
+def test_a_wake_replaced_while_it_was_read_is_not_queued(configured: Store) -> None:
+    configured.write("bf.yaml", CHECKED)
+    queue = Queue(configured)
+    queue.set_progress("wake:checked", {"due": START, "reason": "Old", "set": START, "job": ""})
+    stale = queue.progress("wake:checked")
+    # A run that finished between the read and the enqueue asked for a later wake.
+    newer: dict[str, JsonValue] = {"due": END, "reason": "Newer", "set": START, "job": ""}
+    queue.set_progress("wake:checked", newer)
+    work = assistants.prepare(configured, "checked", "wake", START, END, slot="wake", reason="Old")
+    assert not queue.enqueue_wake(work, stale)
+    assert queue.progress("wake:checked") == newer
+    assert queue.report()["jobs"] == []
+    assert queue.enqueue_wake(work, newer)
+    assert queue.progress("wake:checked")["job"] == work.id
+
+
+def test_cancelling_a_wake_run_drops_its_wake(configured: Store) -> None:
+    configured.write("bf.yaml", CHECKED)
+    queue = Queue(configured)
+    queue.set_progress("wake:checked", {"due": START, "reason": "Recheck", "set": START, "job": ""})
+    [key], _ = assistants.schedule(configured, {"checked"}, NOW)
+    queue.retry(key, cancel=True)
+    assert queue.progress("wake:checked") == {}
+    assert queue.report()["wakes"] == []
 
 
 def test_bf_schema_prints_the_assistant_reply_schema() -> None:

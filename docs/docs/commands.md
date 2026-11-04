@@ -311,7 +311,8 @@ A disabled sensor, routine or assistant reports no failure and appears in no `at
 - `deliveries`: the next 50 unresolved, each with its state and error;
 - `counts` and `delivery_counts` by state;
 - `delivery_failures`: the unresolved deliveries holding an error;
-- `transports`: each `health:` entry now reporting an `error`, with its time `at`.
+- `transports`: each `health:` entry now reporting an `error`, with its time `at`;
+- `wakes`: each assistant's requested wake with its `due` time and the `job` running it, or `null`.
 
 A `transports` entry names a stream (`health:channel:NAME`), a read input (`health:read:ASSISTANT:CHANNEL`), an assistant's schedule admission (`health:assistant:NAME`), the dispatcher (`health:dispatcher`) or a worker lane. Watch clears these entries whenever it starts or stops. Each `bf update` replaces its read and admission entries.
 
