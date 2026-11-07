@@ -89,21 +89,21 @@ Preview with `bf run weekly-review --dry-run`: it runs the routine but writes no
 
 ## Routine settings
 
-| Setting     | Default  | Meaning                                                                                               |
-| ----------- | -------- | ----------------------------------------------------------------------------------------------------- |
-| `command`   | required | A program on PATH or in `routines/`, then its arguments; optional only with `enabled: false`.         |
-| `output`    | `log`    | `log` keeps stdout in `logs/NAME.log`; `action` writes nonempty Markdown as an action.                |
-| `hooks`     | `[]`     | Events, such as `pre-commit`, that `bf run --hook EVENT` runs.                                        |
-| `enabled`   | `true`   | A disabled routine never runs: `bf run` names it and runs nothing.                                    |
-| `refresh`   | `0`      | Seconds between due runs; `0` leaves the routine out of updates.                                      |
-| `lookback`  | `86400`  | Seconds covered by the first run.                                                                     |
-| `timeout`   | `300`    | Maximum runtime in seconds.                                                                           |
-| `max_bytes` | 1 MiB    | Maximum stdout of an `action` routine; a `log` routine's stdout only feeds its log.                   |
-| `keep`      | none     | An `action` routine keeps its newest `keep` actions; see [keep recent reports](#keep-recent-reports). |
+| Setting     | Default  | Meaning                                                                                                                  |
+| ----------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `command`   | required | A program on PATH or in `routines/`, `sensors/` or `channels/`, then its arguments; optional only with `enabled: false`. |
+| `output`    | `log`    | `log` keeps stdout in `logs/NAME.log`; `action` writes nonempty Markdown as an action.                                   |
+| `hooks`     | `[]`     | Events, such as `pre-commit`, that `bf run --hook EVENT` runs.                                                           |
+| `enabled`   | `true`   | A disabled routine never runs: `bf run` names it and runs nothing.                                                       |
+| `refresh`   | `0`      | Seconds between due runs; `0` leaves the routine out of updates.                                                         |
+| `lookback`  | `86400`  | Seconds covered by the first run.                                                                                        |
+| `timeout`   | `300`    | Maximum runtime in seconds.                                                                                              |
+| `max_bytes` | 1 MiB    | Maximum stdout of an `action` routine; a `log` routine's stdout only feeds its log.                                      |
+| `keep`      | none     | An `action` routine keeps its newest `keep` actions; see [keep recent reports](#keep-recent-reports).                    |
 
 - [Limits](limits.md#size-bounds) gives each setting's range.
 - [Program names](schema.md#program-names) gives the naming rules. A routine's name also names the action folders it writes.
-- Arguments support `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. `start` is the end of the last reviewed window, or `lookback` before the first run; `end` is now.
+- Arguments support `{{brain}}`, `{{home}}`, `{{start}}`, `{{end}}` and `{{lines:FILE}}`, as [sensor settings](sensors.md#sensor-settings) describe. `start` is the end of the last reviewed window, or `lookback` before the first run; `end` is now.
 - A routine also receives its window and a private state directory as [environment variables](sensors.md#what-a-program-receives), like a sensor.
 
 ## Keep recent reports
@@ -127,7 +127,7 @@ After writing a new action, the routine removes its older actions beyond the new
 - an action written before you set `keep`, or by another clone;
 - whatever BF cannot read or remove, which `logs/NAME.log` names. A link or unreadable folder anywhere in `actions/` keeps every older action.
 
-The new action always counts as the newest, even when another clone, in a time zone ahead, dated one later.
+The new action always counts as the newest, even when another clone in a time zone ahead dated its own action a day later.
 
 ## Run a routine now
 

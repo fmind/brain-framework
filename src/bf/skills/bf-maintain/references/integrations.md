@@ -8,9 +8,6 @@ Start from a reviewed [sensor example](https://github.com/fmind/brain-framework/
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
-fields:
-  # Beside the existing entries, such as depends-on: bf.yaml has one fields: key.
-  kind: { description: Common kind of source item., type: string, cardinality: one }
 sensors:
   docs:
     command: [sensors/local-documents.py, team, "{{home}}/Documents/team"]
@@ -23,6 +20,7 @@ sensors:
 - `command` is direct argv without a shell; arguments accept `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`.
 - `mode: window` (the default) collects a time window each run; `mode: snapshot` returns the whole catalog, and records it no longer returns are removed. Know how the provider reports changes, pagination, partial content and deletions.
 - `priority: low` quiets a high-volume feed on period and home pages.
+- `kind` is a standard field `bf init` declares; add a field it lacks to the existing top-level `fields:` mapping, since a duplicate key or a second `fields:` breaks every command.
 
 A sensor's `fields:` maps each shared field, declared once under the top-level `fields:` of `bf.yaml`, from a JSON pointer into its output (`path`, such as `/attributes/repository_refs`) or a constant (`value`); the sensor prints `attributes`, never `fields`. Emit explicit namespaced identities only (`person:email/address`, `repo:github.com/owner/name`, lowercase as the reviewed examples write them); `links` and `url` take identities or URLs. Keep the upstream modification time in `attributes.updated`, which flags linking notes for review, and mark incomplete text with `attributes.partial`. See [good records](https://fmind.github.io/brain-framework/docs/sensors/#good-records) and the [limits](https://fmind.github.io/brain-framework/docs/limits/).
 

@@ -40,7 +40,7 @@ If a query misses, use the evidence's own words and drop the scope. The sample s
 
 ### Narrow a search
 
-`--scope` takes one scope: a folder or note such as `projects`, a source such as `memories/brief`, a period such as `7d` or `2026-09-21..2026-09-25`, an identity or a tag address. A period, a space, then one other scope narrows it in time, as in `bf search "launch" --scope "7d repo:github.com/example/new-website"`. [Scopes](retrieval.md#scopes) list every form.
+`--scope` takes one scope: a folder or note such as `projects`, a source such as `memories/brief`, a period such as `7d` or `2026-09-21..2026-09-25`, an identity or a tag address such as `bf://brain/tags/website` (not `tags/website`). A period, a space, then one other scope narrows it in time, as in `bf search "launch" --scope "7d repo:github.com/example/new-website"`. [Scopes](retrieval.md#scopes) list every form.
 
 ## Read a ref
 

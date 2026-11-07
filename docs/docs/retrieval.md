@@ -16,18 +16,18 @@ With several selected brains:
 
 Pages are computed views, not files. They combine the selected brains; `bf read bf://brain/projects` selects one brain's page.
 
-| Ref for `bf read`                                                       | Result                                                                                                       |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| none                                                                    | Home: projects, recent actions and notes, activity, upcoming items and failing programs.                     |
-| `projects`, `concepts`, `actions` or a subfolder                        | Notes with their tasks; one `ACTION.md` per action.                                                          |
-| `tasks`                                                                 | Open checkboxes and counts.                                                                                  |
-| `12h`, `7d`, `2w`                                                       | Items placed by date or observation, items modified in the period and source counts.                         |
-| `today`, `yesterday`, `2026-09-27`, `2026-09`, `2026-09-21..2026-09-25` | The same for a local day, month or inclusive range of days; `previous` and `next` name the adjacent periods. |
-| `memories`                                                              | Sources with counts, freshness and collected windows.                                                        |
-| `memories/SOURCE`, `memories/SOURCE/PERIOD`                             | One source's coverage and records; `undated` selects records without a time.                                 |
-| `memories/SOURCE/FILE`                                                  | Maps a SHA-256-named record file to its `SOURCE:ID` ref, beside the source's coverage.                       |
-| `tags`, `tags/LABEL`                                                    | Tag directory and members; see [tag rules](link-reference.md#tag-rules).                                     |
-| `actions/YYYY-MM-DD_topic`                                              | The action's `ACTION.md`, up to 200 files, 20 linked projects and backlinks.                                 |
+| Ref for `bf read`                                                       | Result                                                                                                                      |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| none                                                                    | Home: projects, recent actions and notes, activity, upcoming items, failing programs and `pages`, the browsable page names. |
+| `projects`, `concepts`, `actions` or a subfolder                        | Notes with their tasks; one `ACTION.md` per action.                                                                         |
+| `tasks`                                                                 | Open checkboxes and counts.                                                                                                 |
+| `12h`, `7d`, `2w`                                                       | Items placed by date or observation, records changed upstream in the period (`changed`) and source counts.                  |
+| `today`, `yesterday`, `2026-09-27`, `2026-09`, `2026-09-21..2026-09-25` | The same for a local day, month or inclusive range of days; `previous` and `next` name the adjacent periods.                |
+| `memories`                                                              | Sources with counts, freshness and collected windows.                                                                       |
+| `memories/SOURCE`, `memories/SOURCE/PERIOD`                             | One source's coverage and records; `undated` selects records without a time.                                                |
+| `memories/SOURCE/FILE`                                                  | Maps a SHA-256-named record file to its `SOURCE:ID` ref, beside the source's coverage.                                      |
+| `tags`, `tags/LABEL`                                                    | Tag directory and members; see [tag rules](link-reference.md#tag-rules).                                                    |
+| `actions/YYYY-MM-DD_topic`                                              | The action's `ACTION.md`, up to 200 files, 20 linked projects and backlinks.                                                |
 
 - Listed items show declared single-value `fields`, such as a status, when the note or record sets them.
 - A folder ref may end with `/`, as shell completion adds: `tags/website/` reads like `tags/website`.
@@ -48,7 +48,7 @@ Pages are computed views, not files. They combine the selected brains; `bf read 
 | Home `activity`       | Record counts of the last 24 hours.                                                                                                                 |
 | Home `upcoming`       | Items in the next 7 days.                                                                                                                           |
 | Home size             | `changed` and `upcoming` hold at most 20 items, without excerpts.                                                                                   |
-| Period `changed`      | Up to 20 items modified in the period but placed outside it; not paginated.                                                                         |
+| Period `changed`      | Up to 20 records changed upstream in the period but placed outside it; not paginated.                                                               |
 | Home `attention`      | Scheduled programs that failed or are `overdue` or `never` succeeded on this machine, and sources that fell [`silent`](schedule.md#silent-sources). |
 
 - Records of a [`priority: low`](sensors.md#quiet-a-high-volume-source) source leave period `items`, `changed` and home `upcoming`. Period `sources` and home `activity` keep their counts with `"priority":"low"`.
@@ -185,11 +185,11 @@ A combined scope narrows a folder, note, source, identity or tag to a period, su
 These scopes are invalid (exit 2):
 
 - A period combined with another period, such as `7d memories/brief/7d`, or with `memories/SOURCE/undated`.
-
 - Other segments below `memories/SOURCE`.
 - A fragment on a source, such as `memories/brief#x`.
 - A section, whether its path, such as `projects/new-website.md#decision`, or its `bf://` address: scope the whole note, then read the section.
 - A page's address, such as `bf://brain/projects` or `bf://brain/7d`: use its brain-relative form, `projects` or `7d`.
+- A tag's page path, such as `tags/website`: a tag is the exception and needs its address, `bf://brain/tags/website`.
 
 A source that no selected brain configures or indexes fails like its page, naming close sources such as `did you mean memories/brief?`. A folder or identity that names nothing returns no items.
 
@@ -223,16 +223,16 @@ Identities are case-sensitive and resolve only through explicit aliases, entitie
 
 ## Notes, records and identities
 
-| Exact read               | Reply fields                                                                                                                                                                           |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Note                     | `brain`, `ref`, `text` (the whole file), `sha256`, `modified`, `backlinks`, `claims`; `uri` for a BF address.                                                                          |
-| `ACTION.md`              | Adds `files` and linked `projects`.                                                                                                                                                    |
-| Note that gets reminders | Adds `tasks`, `next` and its [review signals](#ordering-and-review-signals).                                                                                                           |
-| Section                  | `brain`, `ref` with its `#section`, that section's `text`, the whole file's `sha256` and `modified`, and the note's `title` and `type`, with its `status` and `date` when set.         |
-| Record                   | `brain`, `ref`, `path`, `record` (`id`, `title` and any `text`, `time`, `url`, `links`, `aliases`, `attributes`, `fields`), `collection`, `sha256`, `modified`, `backlinks`, `claims`. |
-| Identity                 | The owning note or record; without an owner, a page of the backlinks naming it.                                                                                                        |
-| Ambiguous alias          | Fails: read an exact ref.                                                                                                                                                              |
-| Any                      | `notice`, and `problems` or `stale` when evidence was skipped or the brain was busy.                                                                                                   |
+| Exact read               | Reply fields                                                                                                                                                                                             |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Note                     | `brain`, `ref`, `text` (the whole file), `sha256`, `modified`, `backlinks`, `claims` when it makes any; `uri` for a BF address.                                                                          |
+| `ACTION.md`              | Adds `files` and linked `projects`.                                                                                                                                                                      |
+| Note that gets reminders | Adds `tasks`, `next` and its [review signals](#ordering-and-review-signals).                                                                                                                             |
+| Section                  | `brain`, `ref` with its `#section`, that section's `text`, the whole file's `sha256` and `modified`, and the note's `title` and `type`, with its `status` and `date` when set.                           |
+| Record                   | `brain`, `ref`, `path`, `record` (`id`, `title` and any `text`, `time`, `url`, `links`, `aliases`, `attributes`, `fields`), `collection`, `sha256`, `modified`, `backlinks`, `claims` when it makes any. |
+| Identity                 | The owning note or record; without an owner, a page of the backlinks naming it.                                                                                                                          |
+| Ambiguous alias          | Fails: read an exact ref.                                                                                                                                                                                |
+| Any                      | `notice`, and `problems` or `stale` when evidence was skipped or the brain was busy.                                                                                                                     |
 
 - `sha256` covers the file's bytes, also on a section read: compare it before replacing a file you read.
 - A record's text is `record.text`, never a top-level `text`.

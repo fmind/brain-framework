@@ -165,7 +165,7 @@ With `reply`, the harness returns a JSON object with two members, and BF checks 
 - Both members are required, may be `null` and allow nothing else, because strict structured-output modes reject optional members. `bf schema --kind assistant-reply` prints the schema.
 - `{{schema}}` in an argument passes that schema as compact JSON, such as `--json-schema "{{schema}}"` for Claude Code or Antigravity. For a harness that reads it from a file, such as `codex exec --output-schema FILE`, save `bf schema --kind assistant-reply` in the brain and name that file.
 - `reply.path` is the JSON Pointer to that object in the harness's JSON stdout, such as `/structured_output`; an empty string means the whole stdout.
-- Output that is not a JSON object, a missing value or one that does not match the schema fails the attempt exactly like a nonzero exit: BF saves no answer, writes no record and delivers nothing. The job becomes `uncertain`, or retries automatically when the assistant is `idempotent`. The error, such as `assistant reply at /structured_output is missing or does not match bf schema --kind assistant-reply; see logs/personal.log`, never quotes the output.
+- Output that is not a JSON object, a missing value or one that does not match the schema fails the attempt exactly like a nonzero exit: BF saves no answer, writes no record and delivers nothing. The job becomes `uncertain`, or retries automatically when the assistant is `idempotent` for that run kind. The error, such as `assistant reply at /structured_output is missing or does not match bf schema --kind assistant-reply; see logs/personal.log`, never quotes the output.
 
 That last rule also catches a harness that exits 0 after a failed model call or its own timeout: it returns no structured reply. The other members of the JSON stdout stay in the record's `output` attribute.
 
@@ -307,25 +307,25 @@ How an answer ends the job:
 - A silent scheduled or wake run with no other output metadata completes the job and advances its schedule, without writing an empty record or sending deliveries. With metadata, such as a harness's JSON stdout, it writes a record without a message.
 - A silent answer to a message is a failure requiring inspection.
 - By default, a failed, interrupted or killed harness attempt, including one without a valid [structured reply](#structured-replies), leaves its job `failed` or `uncertain`, because its tools might already have acted. BF requires explicit retry or cancellation.
-- When the assistant declares `idempotent: true` (for a read-only harness), an interrupted or failed harness attempt retries automatically with exponential backoff, after 2, 4, … up to 300 seconds, for up to 20 attempts; then the job waits for review. A list of run kinds, such as `idempotent: [schedule, wake]`, retries only those runs: an assistant whose prompt acts only on the owner's messages can retry its scheduled reviews while an answer to a message, which may have acted, waits for review.
+- When the assistant declares `idempotent: true` (for a read-only harness), an interrupted or failed harness attempt, or a harness that never started, retries automatically with exponential backoff, after 2, 4, … up to 300 seconds, for up to 20 attempts; then the job waits for review. A list of run kinds, such as `idempotent: [schedule, wake]`, retries only those runs: an assistant whose prompt acts only on the owner's messages can retry its scheduled reviews while an answer to a message, which may have acted, waits for review.
 - A killed attempt shows `running` until BF records it, as [recovery](channels.md#queue-and-recovery) describes.
 
 ## Assistant settings
 
-| Field        | Default   | Meaning                                                                                                    |
-| ------------ | --------- | ---------------------------------------------------------------------------------------------------------- |
-| `prompt`     | required  | Markdown file below `prompts/`.                                                                            |
-| `command`    | required  | Harness argv; supports `{{prompt}}` and `{{schema}}`.                                                      |
-| `reply`      | omitted   | `{path}`: JSON Pointer to the [structured reply](#structured-replies); omitted means plain text.           |
-| `enabled`    | `true`    | Admit and execute this assistant.                                                                          |
-| `idempotent` | `false`   | Retry failed harness attempts automatically, up to 20 attempts: `true`, or a list of run kinds.            |
-| `timeout`    | `900`     | Maximum harness runtime in seconds.                                                                        |
-| `max_bytes`  | `1048576` | Maximum stdout bytes, up to 4 MiB.                                                                         |
-| `keep`       | omitted   | Maximum generated records to retain.                                                                       |
-| `inputs`     | `[]`      | Objects with `channel: {name, mode}`; `read` also requires `every`. Each channel needs `send` for answers. |
-| `post`       | omitted   | Channel where scheduled, wake and manual runs post.                                                        |
-| `schedules`  | `{}`      | Named `{every, lookback?, gate?}` or `{at, timezone?, days?, lookback?, gate?}` settings (default 1d).     |
-| `wake`       | omitted   | `{min, max}` seconds: let a structured reply schedule one later run; requires `reply`.                     |
+| Field        | Default   | Meaning                                                                                                                         |
+| ------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt`     | required  | Markdown file below `prompts/`.                                                                                                 |
+| `command`    | required  | Harness argv; supports `{{prompt}}` and `{{schema}}`.                                                                           |
+| `reply`      | omitted   | `{path}`: JSON Pointer to the [structured reply](#structured-replies); omitted means plain text.                                |
+| `enabled`    | `true`    | Admit and execute this assistant.                                                                                               |
+| `idempotent` | `false`   | Retry failed harness attempts automatically, up to 20 attempts: `true`, or a list of run kinds.                                 |
+| `timeout`    | `900`     | Maximum harness runtime in seconds.                                                                                             |
+| `max_bytes`  | `1048576` | Maximum stdout bytes, up to 4 MiB.                                                                                              |
+| `keep`       | omitted   | Maximum generated records to retain.                                                                                            |
+| `inputs`     | `[]`      | Objects with `channel: {name, mode}`; `read` also requires `every`. Each channel needs `send` for answers.                      |
+| `post`       | omitted   | Channel where scheduled, wake and manual runs post.                                                                             |
+| `schedules`  | `{}`      | Named `{every, lookback?, gate?}` or `{at, timezone?, days?, lookback?, gate?}` settings; `lookback` defaults to 86400 (1 day). |
+| `wake`       | omitted   | `{min, max}` seconds: let a structured reply schedule one later run; requires `reply`.                                          |
 
 ## Keep prompts safe
 

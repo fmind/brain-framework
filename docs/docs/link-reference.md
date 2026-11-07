@@ -129,13 +129,13 @@ Relative links:
 
 ## Relation links
 
-Declare a relation under `fields:` in `bf.yaml` before writing a typed link, as `bf init` does for the [starter relations](links.md#choose-the-right-relation), such as `owner`:
+Declare a relation under `fields:` in `bf.yaml` before writing a typed link. `bf init` already declares `owner` and the rest of the [standard vocabulary](schema.md#standard-vocabulary). A relation you add, such as [`verifies`](links.md#declare-your-own-relation), needs these keys:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schema/
 fields:
-  owner:
-    description: Person or organization explicitly responsible for the subject.
+  verifies:
+    description: The subject records a check of the target against stated criteria.
     type: identity
     cardinality: many
     relation: true

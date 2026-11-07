@@ -53,14 +53,15 @@ The dashboard shows each program's state, last success, next due time, returned 
 
 This is the fictional [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch), sorted by state: `unavailable` failed, `calendar` updated its record, `git` added one, and the manual and disabled sensors stay idle.
 
-| Key               | Effect                                                                       |
-| ----------------- | ---------------------------------------------------------------------------- |
-| `j` / `k`, arrows | Select a program and show its details, including its log and latest action.  |
-| Tab               | Show only programs needing attention: failed, never collected or due.        |
-| `f` (or `u`)      | Reload `bf.yaml` and check due work now; queues one check during an update.  |
-| Space             | Pause or resume future checks; an active update finishes.                    |
-| `?`               | Toggle the guide: every key, sort field and count explained.                 |
-| `q`               | Cancel any active update and quit. Ctrl-C or closing the terminal exits 130. |
+| Key                   | Effect                                                                       |
+| --------------------- | ---------------------------------------------------------------------------- |
+| `j` / `k`, arrows     | Select a program and show its details, including its log and latest action.  |
+| `g` / `G`, Home / End | Select the first or last program.                                            |
+| Tab                   | Show only programs needing attention: failed, never collected or due.        |
+| `f` (or `u`)          | Reload `bf.yaml` and check due work now; queues one check during an update.  |
+| Space                 | Pause or resume future checks; an active update finishes.                    |
+| `?`                   | Toggle the guide: every key, sort field and count explained.                 |
+| `q`                   | Cancel any active update and quit. Ctrl-C or closing the terminal exits 130. |
 
 Press `f` after adding a reviewed sensor or routine to `bf.yaml`: its row appears and it runs if due. A new assistant's row appears too, but it runs only after you restart watch. Refresh respects selectors, pause, `refresh` and failure backoff.
 
@@ -233,7 +234,7 @@ A plain timer also works: a systemd timer, a launchd `StartCalendarInterval` job
 <details markdown="1">
 <summary>Service behavior and host lifecycle</summary>
 
-A systemd user service runs while your user manager does, from your first login to your last logout, unless `loginctl enable-linger` keeps it running. A LaunchAgent runs while you are logged in. After a failure, both start watch again a minute later; a stop request leaves watch at least a minute to roll back an interrupted record write and stop its programs. Watch catches up due work after sleep or power-off, up to 30 days. Each program's `timeout` bounds its run.
+A systemd user service runs while your user manager does, from your first login to your last logout, unless `loginctl enable-linger` keeps it running. A LaunchAgent runs while you are logged in. After a failure, both start watch again a minute later; a stop request leaves watch at least a minute to roll back an interrupted record write and stop its programs. Watch catches up due work after sleep or power-off; a window sensor catches up at most 30 days. Each program's `timeout` bounds its run.
 
 ChromeOS stops its Linux environment at logout, and WSL needs a running distribution. See the [ChromeOS lifecycle](https://www.chromium.org/chromium-os/developer-library/guides/containers/containers-and-vms/#lifecycles), [WSL systemd](https://learn.microsoft.com/en-us/windows/wsl/systemd), [systemd lingering](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html) and [Apple launch agent](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) guides.
 
@@ -257,7 +258,7 @@ A program is **due** when it is enabled, has a nonzero `refresh` and has not suc
 - Assistants have no implicit schedule: declare `schedules: {review: {every: 1800}}` for a 30-minute review. Their input and schedule windows are independent.
 - Choose a watch `interval`, or a timer's, shorter than the smallest nonzero `refresh`. When the `interval` reaches it, `bf watch` warns and names that program, in the dashboard header and guide, or as one `bf:` line on stderr with `--json`. With an hourly sensor and a 15-minute timer, a check 59 minutes after the last success skips the sensor; the next check, at 74 minutes, runs it.
 - A success timestamp in the future, after a clock correction, makes the program due at once.
-- Long pauses catch up at most 30 days.
+- After a long pause, a window sensor catches up at most 30 days ([sensors](sensors.md#collect-and-update)); routines and assistant schedules cover the whole gap.
 
 When a sensor or routine fails:
 
@@ -279,13 +280,7 @@ Run history is local, even when records are shared, so check health on the colle
 
 A sensor succeeds only with a collection reaching the moment it runs: one that only [backfilled](sensors.md#backfills-and-coverage) older windows stays `never`.
 
-`bf status --check` exits 1 for:
-
-- an enabled scheduled program that is `overdue`, `never` succeeded, last failed or, for a source, [fell silent](#silent-sources);
-- an assistant with failed or uncertain jobs, or schedules that cannot start;
-- a channel with an unresolved delivery that failed or is uncertain, or a stream or read error.
-
-See [`messaging`](commands.md#status-sources-and-routines) for the assistant and channel fields.
+`bf status --check` exits 1 for every [`attention`](commands.md#attention-entries) entry, such as a scheduled program that is `overdue`, `never` succeeded, last failed or [fell silent](#silent-sources). See [`messaging`](commands.md#messaging) for the assistant and channel fields.
 
 ### Silent sources
 

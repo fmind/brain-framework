@@ -9,7 +9,7 @@ A channel connects your brain to a messaging surface, such as a chat, an inbox o
 
 BF understands JSON envelopes and argv, not Google Chat, Slack, email or desktop notifications. The script owns provider access, sender admission, destination restrictions and transport details. Put scripts under `channels/`, or use an executable already on PATH. One script can serve several channel names with different arguments.
 
-Channels have no schedule or polling interval. An assistant chooses its inputs, its `post` channel and its batch-read cadence. A stream adapter implements push, Pub/Sub, long polling or fast polling itself. Its stdin control frames and stdout messages are bidirectional transport control; application replies go through `send`.
+Channels have no schedule or polling interval. An assistant chooses its inputs, its `post` channel and its batch-read cadence. A stream adapter implements push, Pub/Sub, long polling or fast polling itself. A stream's stdin and stdout carry only transport frames, such as messages and acknowledgements; answers always go through `send`.
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/channels/
@@ -107,9 +107,9 @@ BF persists the delivery ID before calling send and reuses it on retry. For [35 
 What happens when a send fails or is interrupted:
 
 - **Assistant delivery, idempotent channel:** it retries on its own after 2, 4, 8… seconds, at most 300 seconds apart. After 20 attempts it becomes `failed` (`…; stopped retrying after 20 attempts; retry or cancel it with bf queue`).
-- **Assistant delivery, default channel:** it becomes `uncertain` and requires inspection (`interrupted send; inspect before retrying`).
+- **Assistant delivery, default channel:** it becomes `uncertain` and requires inspection. It keeps the send's error, or reads `interrupted send; inspect before retrying` when the send was killed.
 - **Standalone `bf channel send`:** watch and `bf update` never send or retry it. It becomes `failed` on an idempotent channel (`…; retry it with bf queue ID --retry`) and `uncertain` otherwise.
-- **Send command that never started,** such as one not on PATH: it sent nothing, so it fails or retries like an idempotent one. A harness that never started leaves its job `failed`, not `uncertain`.
+- **Send command that never started,** such as one not on PATH: it sent nothing, so it fails or retries like an idempotent one. A harness that never started leaves its job `failed`, not `uncertain`, and retries it when the assistant is `idempotent` for that run kind.
 
 An explicit `bf queue ID --retry` starts the attempts over. Saved answers are never regenerated to retry delivery.
 
@@ -204,11 +204,7 @@ bf queue DELIVERY_ID --retry
 bf queue JOB_ID --cancel
 ```
 
-`bf status --check` fails while any of these remains. `attention` names each, and `messaging` holds the details, as [status](commands.md#status-sources-and-routines) describes:
-
-- an assistant that is not disabled has a failed or uncertain job, or schedules that cannot start;
-- a channel has an unresolved delivery that failed or is uncertain;
-- a channel has a current stream or read error.
+`bf status --check` fails for every [`attention`](commands.md#attention-entries) entry, such as a failed or uncertain job, an overdue schedule or a failing channel; [`messaging`](commands.md#messaging) holds the queue details.
 
 ### Retry, cancel and hold
 
@@ -247,7 +243,7 @@ Resolve queued work before renaming or moving a brain, or changing its execution
 - While work admitted under the old path or name remains, those commands refuse. `bf status` reports it as a problem: `assistant queue holds unresolved work admitted under this brain's previous path or name; …`. Restore the path or name, resolve the work with `bf queue`, then move or rename the brain again.
 - Collection never uses the queue, so it never waits for the binding.
 - A copy, or a move to another filesystem, gives the brain a new physical identity and an empty queue. The old queue stays in its former folder.
-- A new device number for the same folder, such as btrfs numbering a device anew at boot, keeps the queue and, with it, the programs' private state. The next BF command that needs them renames the folder with the same inode whose queue is bound to the brain's path; a brain without a queue keeps no program state, so window sensors restart from `lookback`. The same path and inode on another disk, such as a cloned disk swapped in, takes the queue too.
+- A new device number for the same folder, such as btrfs numbering a device anew at boot, keeps the queue and, with it, the programs' private state. The next BF command that needs them renames the folder with the same inode whose queue is bound to the brain's path. Without a queue, the programs' private `BF_STATE_DIR` folders stay under the old number, so a program that keeps a cursor there starts again from its `lookback`; run history and window resume follow the brain's path and are kept. The same path and inode on another disk, such as a cloned disk swapped in, takes the queue too.
 - When several such folders are bound to the brain, assistant commands refuse with `several assistant queues in the state folder runtime/ are bound to this brain (…)`, and when one cannot be read, such as after an interrupted write, with `assistant queue in the state folder runtime/ (NAMES) may belong to this brain but cannot be read`. Rename the right folder as the error says and move the others out. Collection and watch keep running meanwhile.
 
 ### Capacity

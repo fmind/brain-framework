@@ -48,7 +48,7 @@ if "  new-calendar:" not in text:
 PYTHON
 ```
 
-Press `f` in the watcher (`u` also works). Expect `new-calendar` to appear and collect one record without restarting. To make the shortcut's timing visible, start this demo with `--interval 300`; otherwise its five-second checks may collect the new source before you press the key. The header then shows `interval too slow, press ?`, since the 30-second `calendar` runs late between checks. Refresh during an active update queues one follow-up check; repeated presses coalesce. While paused, the row still appears but collection waits for Space. Existing fresh programs, failures waiting for retry, disabled programs and manual programs keep their normal timing. An observer only rereads configuration and history. This adds a fictional local sensor, not a live provider.
+Press `f` in the watcher (`u` also works). Expect `new-calendar` to appear and collect one record without restarting. To make the shortcut's timing visible, start this demo with `--interval 300`; otherwise its five-second checks may collect the new source before you press the key. The header then shows `interval too slow, press ?`, since 300-second checks leave the 30-second `calendar` `overdue` between them. Refresh during an active update queues one follow-up check; repeated presses coalesce. While paused, the row still appears but collection waits for Space. Existing fresh programs, failures waiting for retry, disabled programs and manual programs keep their normal timing. An observer only rereads configuration and history. This adds a fictional local sensor, not a live provider.
 
 Try the sorting controls after that first cycle:
 

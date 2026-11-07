@@ -181,7 +181,7 @@ Sensors written by different people line up when they print the same attribute n
 | `author`      | identity, many, relation | `/attributes/author_refs`      | Account explicitly credited as author; not ownership.                               |
 | `owner`       | identity, many, relation | `/attributes/owner_refs`       | Account or organization the provider declares responsible.                          |
 | `assignee`    | identity, many, relation | `/attributes/assignee_refs`    | Account assigned responsibility for the item.                                       |
-| `participant` | identity, many, relation | `/attributes/participant_refs` | Any account in a message, event or meeting, including the roles below.              |
+| `participant` | identity, many, relation | `/attributes/participant_refs` | Any account in a message, event or meeting, including the narrower relations below. |
 | `sender`      | identity, many, relation | `/attributes/sender_refs`      | Account that sent the message; narrower than `participant`.                         |
 | `recipient`   | identity, many, relation | `/attributes/recipient_refs`   | Direct recipients, without copies; narrower than `participant`.                     |
 | `cc`          | identity, many, relation | `/attributes/cc_refs`          | Accounts copied on a message; narrower than `participant`.                          |
@@ -212,11 +212,11 @@ Types are strict:
 - A timestamp needs a timezone.
 - An identity is an exact, case-sensitive `scheme:value` without invisible characters, as the [identity rules](link-reference.md#identity-rules) define. Sensors normalize it, such as lowercasing an email address.
 
-| Cardinality | Mapped value                                                                                            |
-| ----------- | ------------------------------------------------------------------------------------------------------- |
-| `one`       | One value; a missing or null value fails the whole collection.                                          |
-| `optional`  | One value when present; missing or null omits the field.                                                |
-| `many`      | A list of up to 1,000 values, duplicates removed; missing or null omits it, an empty list records none. |
+| Cardinality | Mapped value                                                                                                                 |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `one`       | One value; a missing or null value fails the whole collection. A field's default `path` that finds nothing omits it instead. |
+| `optional`  | One value when present; missing or null omits the field.                                                                     |
+| `many`      | A list of up to 1,000 values, duplicates removed; missing or null omits it, an empty list records none.                      |
 
 - A note's `fields` follow the same types and cardinality, which `bf validate` checks. Only collection requires a `one` value, so a note may omit it.
 - Each example is a complete field value checked against the type and cardinality. Examples never supply defaults.

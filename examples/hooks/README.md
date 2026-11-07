@@ -53,7 +53,7 @@ Read refs with `bf read` before relying on them; collected records are counted, 
 
 This verifies the scripts' actual Git-to-brain lookup and prompt search; host installation is a separate step below.
 
-## Preview the context
+## Install and preview the hooks
 
 In the brain's project frontmatter, name the repository it belongs to, with its owner and name in lowercase, such as `repo:github.com/googlecloudplatform/open-knowledge-format`. Identities are case-sensitive, and this hook and the Git and GitHub history sensors lowercase GitHub owners and names:
 
@@ -71,7 +71,7 @@ curl -fsSLo ~/brain/hooks/prompt-context.py "$examples/prompt-context.py"
 chmod +x ~/brain/hooks/session-context.py ~/brain/hooks/prompt-context.py
 ```
 
-Run the copied hook from that repository with Python 3.11 or later as `python3` and, on PATH, the `bf` release whose tag you copied the hooks from:
+Run the copied hook from a clone of the repository the project's `aliases` name, with Python 3.11 or later as `python3` and, on PATH, the `bf` release whose tag you copied the hooks from:
 
 ```bash
 ~/brain/hooks/session-context.py ~/brain

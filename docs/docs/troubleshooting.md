@@ -46,11 +46,7 @@ Read the file, field or program the diagnostic names before retrying. Diagnostic
 
 ### Reinstall BF
 
-If you use MCP, write `'brain-framework[mcp]'` in place of `brain-framework` in the first two commands.
-
-- **SQLite too old**: `uv tool install --reinstall --managed-python --python 3.14 brain-framework`.
-- **PyYAML without libyaml**: `uv tool install --reinstall --python 3.14 brain-framework`.
-- **Missing `mcp` extra**: run `uv tool install --python 3.14 'brain-framework[mcp]'`, then restart the host.
+[Install and update](upgrades.md#install) gives the reinstall command for each of these messages, with and without the `mcp` extra. Restart agent hosts afterwards.
 
 ## A program fails
 
@@ -76,12 +72,12 @@ To see what the harness receives, preview the expanded prompt:
 3. Read the reply's `text`: it is the expanded prompt. Nothing is recorded, queued or delivered.
 4. Remove that assistant afterwards.
 
-Do not swap the `command` or `text` of an assistant that has pending work, even for a moment: each job keeps the settings it was queued with. See [configuration changes](channels.md#configuration-changes) for what still runs and how to recover.
+Do not swap the `command` or `reply` of an assistant that has pending work, even for a moment: each job keeps the settings it was queued with. See [configuration changes](channels.md#configuration-changes) for what still runs and how to recover.
 
 Common errors and replies:
 
-- **`assistant command must print one JSON object when text is set`**: with `text` set, stdout must be one JSON object. Ask the harness for a single JSON result, such as `--output-format json`, not text or a stream of JSON lines. Or remove `text` to keep all of stdout as the reply.
-- **`assistant reply has no text string at /…`**: the pointer names no string. Run the harness once by hand with the same output option and list the members of its JSON. Then point `text` at the reply, such as `/result` for Claude Code or `/response` for Antigravity.
+- **`assistant command must print one JSON object when reply is set`**: with `reply` set, stdout must be one JSON object. Ask the harness for a single JSON result, such as `--output-format json`, not text or a stream of JSON lines. Or remove `reply` to keep all of stdout as the message.
+- **`assistant reply at /… is missing or does not match bf schema --kind assistant-reply`**: run the harness once by hand with the same options and list the members of its JSON. Then point `reply.path` at the `{say, wake}` object, such as `/structured_output` for Claude Code; see [structured replies](prompts.md#structured-replies).
 - **`expanded assistant prompt exceeds 120000 bytes; shorten …`**: the [prompt size limit](limits.md#size-bounds) applies on standard input too, not only to `{{prompt}}` in an argument. Shorten the prompt file or the piped input, and let the harness read evidence with `bf read`. A queued job keeps its template, so only `bf queue ID --cancel` resolves it. A message's job blocks its conversation until then.
 - **`the argument holding the prompt exceeds Linux's 128 KiB limit`**: the rest of that argument pushed it over Linux's bound. Shorten it, or drop `{{prompt}}` so the prompt arrives on standard input, if the harness reads it there.
 - **`… configuration changed; restore it …`**: the job's settings no longer match. The assistant's prompt, harness or output settings, or the `send` command of a channel its job delivers to, changed since queuing, or the assistant was removed or disabled. Restore them, then run `bf queue ID --retry`, or abandon the job with `bf queue ID --cancel`.
@@ -151,7 +147,7 @@ How the rebuild behaves:
 
 - It fills `.bf/index.sqlite.new` beside the live cache and replaces the cache when complete, so searches keep answering meanwhile.
 - A rebuild killed before it finishes leaves that file. The next search, read or status removes it once no build is running.
-- `bf build` exits 1 when its `skipped` count shows unreadable files; `bf validate` names them.
+- `bf build` and `bf forget` exit 1 when the cache's `skipped` count shows unreadable files; `bf validate` names them.
 - A damaged cache is discarded and rebuilt on its own.
 - An exact read that meets an active write returns within about 3 seconds, marked `stale`: retry it for the final content.
 

@@ -21,12 +21,14 @@ If your shell cannot find `bf`, run `uv tool update-shell` and open a new shell.
 <details markdown="1">
 <summary>If a command asks you to reinstall BF</summary>
 
-Two installation problems stop commands with a message naming the fix:
+Three installation problems stop commands with a message naming the fix:
 
 - **PyYAML without libyaml.** BF reads YAML only through libyaml. When PyYAML was built without it, as from source on a newer Python, every command reading `bf.yaml` stops. Fix: `uv tool install --reinstall --python 3.14 brain-framework`.
 - **SQLite too old.** The search cache needs SQLite 3.35.0 or newer with FTS5 and JSON functions, which uv's managed Pythons include. When a system Python lacks them, search, read, status and build stop. Fix: `uv tool install --reinstall --managed-python --python 3.14 brain-framework`.
 
-With MCP, reinstall `'brain-framework[mcp]'` instead: a reinstall without the extra drops it.
+- **Missing `mcp` extra.** `bf mcp needs the mcp extra`. Fix: `uv tool install --python 3.14 'brain-framework[mcp]'`, then restart the agent host.
+
+With MCP, reinstall `'brain-framework[mcp]'` in the first two fixes too: a reinstall without the extra drops it.
 
 </details>
 

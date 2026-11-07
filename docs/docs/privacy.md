@@ -70,7 +70,7 @@ Replies and diagnostics escape control characters and invisible format character
 - Adapters own authentication, admitted senders and fixed destinations. Remote text never selects executable commands.
 - Queued inputs, saved answers and deliveries hold private content in the local BF runtime state. Preserve it for recovery and protect it like the brain.
 - `bf queue ID` intentionally reveals that item's private body.
-- Completed bodies are compacted beyond 8 MiB budgets. Identity tombstones with send receipts are deleted after 35 days.
+- Only the newest 8 MiB of finished work keeps its bodies, and finished jobs and deliveries are deleted 35 days later; see [queue limits](limits.md#processes-and-logs).
 - Search, read and status open the queue read-only and never create it.
 
 See [channel recovery](channels.md#queue-and-recovery).

@@ -53,14 +53,15 @@ The project groups the action under `depends-on`. The action's `claims` show the
 
 ### Choose the right relation
 
-New brains declare four relations under `fields:` in `bf.yaml`:
+New brains declare the [standard vocabulary](schema.md#standard-vocabulary) under `fields:` in `bf.yaml`. Notes mostly use these relations:
 
-| Relation     | Use when the source explicitly says…               | Link from the subject's note                                             |
-| ------------ | -------------------------------------------------- | ------------------------------------------------------------------------ |
-| `author`     | Who created it.                                    | `[Author](bf://brain/people/alice?rel=author)`                           |
-| `owner`      | Who is responsible for it.                         | `[Owner](bf://brain/people/alice?rel=owner)`                             |
-| `depends-on` | What it needs to operate or remain valid.          | `[Decision](bf://brain/projects/new-website.md?rel=depends-on#decision)` |
-| `related-to` | A connection with no more specific known relation. | `[Related project](bf://brain/projects/new-website.md?rel=related-to)`   |
+| Relation     | Use when the source explicitly says…                      | Link from the subject's note                                             |
+| ------------ | --------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `author`     | Who created it.                                           | `[Author](bf://brain/people/alice?rel=author)`                           |
+| `owner`      | Who is responsible for it.                                | `[Owner](bf://brain/people/alice?rel=owner)`                             |
+| `depends-on` | What it needs to operate or remain valid.                 | `[Decision](bf://brain/projects/new-website.md?rel=depends-on#decision)` |
+| `related-to` | A connection with no more specific known relation.        | `[Related project](bf://brain/projects/new-website.md?rel=related-to)`   |
+| `supersedes` | That it replaces an earlier note, which stays as history. | `[Old decision](bf://brain/projects/old-website.md?rel=supersedes)`      |
 
 The Alice examples need the [person note](link-reference.md#bf-links). For a mere mention, use a plain Markdown link; when the note derives from its target, use an OKF `sources` entry.
 

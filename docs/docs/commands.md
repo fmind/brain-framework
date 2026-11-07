@@ -22,8 +22,8 @@ description: Look up Brain Framework commands, previews, graph exports, replies,
 | `collect SENSOR [--since TIME] [--until TIME] [--dry-run] [--allow-removal] [--input FILE]` | Run one sensor now, or [check its saved output](sensors.md#check-saved-output) without running it.                                       |
 | `forget REF... [--dry-run]`                                                                 | Remove collected records and keep their sensors from storing them again; see [forget records](#forget-records).                          |
 | `run [PROGRAM] [ARGS]... [--hook EVENT] [--stdin] [--dry-run]`                              | Run one routine or [assistant](prompts.md), or every routine of a hook, now; see [routines](routines.md).                                |
-| `channel read NAME --since START [--until END]`                                             | Read one complete batch without changing input progress or invoking an assistant.                                                        |
-| `channel send NAME --stdin`                                                                 | Save and send one outgoing JSON message through its configured endpoint.                                                                 |
+| `channel read CHANNEL --since START [--until END]`                                          | Read one complete batch without changing input progress or invoking an assistant.                                                        |
+| `channel send CHANNEL --stdin`                                                              | Save and send one outgoing JSON message through its configured endpoint.                                                                 |
 | `queue [ID] [--retry\|--cancel] [--limit N]`                                                | List durable jobs and deliveries, inspect one in private detail or explicitly retry or cancel it; delivery retry sends immediately.      |
 | `update [--sensor NAME] [--routine NAME] [--assistant NAME] [--kind KIND] [--dry-run]`      | Run due sensors, then due routines, then due assistant work, then refresh the cache.                                                     |
 | `watch [--interval N] [--poll-interval N] [--notify MODE] [--json]`                         | Run due programs until you quit, with a live dashboard; see [watch](schedule.md).                                                        |
@@ -34,7 +34,7 @@ description: Look up Brain Framework commands, previews, graph exports, replies,
 
 Every command taking `--brain NAME|PATH` selects brains as [Configuration](configuration.md#select-a-brain) describes:
 
-- `collect`, `run`, `channel`, `queue`, `update`, `watch`, `forget` and `build` act on exactly one brain.
+- `collect`, `run`, `channel`, `queue`, `update`, `watch`, `forget`, `build`, `validate`, `eval` and `status --watch` act on exactly one brain.
 - `update` and `watch` also accept repeatable `--sensor`, `--routine` and `--assistant` [selectors](schedule.md#select-programs).
 
 ### Preview an update or a collection
@@ -179,7 +179,7 @@ Other invalid inputs:
 - `bf read tasks#next`: pages have no sections.
 - `bf read projects --rel cites`: a page lists no relation.
 - `bf read projects/new-website.md --rel nope`: the error lists the valid relations.
-- An empty value choosing where or on what a command acts, such as `--brain ""`, `bf init ""`, `bf collect ""`, `run --hook ""`, `--sensor ""`, `collect SENSOR --since ""`, `build --reproject ""`.
+- An empty value choosing where or on what a command acts, such as `--brain ""`, `bf init ""`, `bf collect ""`, `run --hook ""`, `--sensor ""`, `collect SENSOR --since ""`, `collect SENSOR --input ""`, `build --reproject ""`.
 - A repeated option that takes one value: `bf search launch --scope projects --scope concepts` is invalid instead of searching only the last scope. Only the program selectors repeat: `--sensor`, `--routine`, `--assistant` and `update --kind`.
 
 A well-formed ref that names nothing exits 1 and suggests what exists:
@@ -191,14 +191,14 @@ A well-formed ref that names nothing exits 1 and suggests what exists:
 
 Commands also exit 1 in these cases:
 
-| Command           | Exits 1 when                                                                                                                            |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `update`, `run`   | A program fails; successful programs keep their results.                                                                                |
-| `update`, `build` | The refreshed cache skipped files.                                                                                                      |
-| `status --check`  | `healthy` is false: on problems, an unavailable cache, brain or reference, and every [`attention`](#status-sources-and-routines) entry. |
-| `validate`        | It finds problems; warnings never fail it.                                                                                              |
-| `skills`          | It keeps a folder holding your edits, foreign files or a newer bf's copy; see [skills](agents.md#install-the-skills).                   |
-| `skills --check`  | Any skill is not current.                                                                                                               |
+| Command                     | Exits 1 when                                                                                                                            |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `update`, `run`             | A program fails; successful programs keep their results.                                                                                |
+| `update`, `build`, `forget` | The refreshed cache skipped files.                                                                                                      |
+| `status --check`            | `healthy` is false: on problems, an unavailable cache, brain or reference, and every [`attention`](#status-sources-and-routines) entry. |
+| `validate`                  | It finds problems; warnings never fail it.                                                                                              |
+| `skills`                    | It keeps a folder holding your edits, foreign files or a newer bf's copy; see [skills](agents.md#install-the-skills).                   |
+| `skills --check`            | Any skill is not current.                                                                                                               |
 
 `attention` entries include scheduled programs that failed, are `overdue` or `never` succeeded, or fell silent, unresolved assistant work and failing channels.
 

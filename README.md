@@ -188,7 +188,7 @@ Use the brain with [Claude Code](https://code.claude.com/docs/en/overview), [Cod
 
 > Use the bf CLI. Find why we chose a single product page. Read the source, cite its ref and tell me the project's next action.
 
-It should cite `projects/new-website.md#decision` and name “Draft the product page.” For ongoing use, install the packaged skills into your host's skills folder, such as `~/.claude/skills` for Claude Code:
+It should cite `projects/new-website.md#decision` and name “Draft the product page.” For ongoing use, install the packaged skills into the folder your host discovers (`~/.agents/skills` below; Claude Code uses `~/.claude/skills`):
 
 ```bash
 bf skills ~/.agents/skills

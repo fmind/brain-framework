@@ -13,14 +13,14 @@ A typed link states a relation: `[Decision](bf://NAME/projects/new-website.md?re
 - The link's section is the claim's `origin`: keep the supporting observation beside it.
 - In a `bf://` link to a record, percent-encode a `#` or `?` of its id as `%23` or `%3F`.
 
-Declare each relation once under `fields:` in `bf.yaml`: `bf init` declares `author`, `owner`, `depends-on` and `related-to`, and `cites`, `links` and `tagged-with` are reserved. `bf validate` names an undeclared relation, whose links stay untyped. Merge a new relation into the existing mapping, since a second `fields:` key is invalid:
+Declare each relation once under `fields:` in `bf.yaml`: `bf init` declares the [standard vocabulary](https://fmind.github.io/brain-framework/docs/schema/#standard-vocabulary), including `owner`, `depends-on`, `related-to` and `supersedes`, and `cites`, `links` and `tagged-with` are reserved. Check `bf.yaml` before adding one: a name it already lists is a duplicate key that breaks every command. `bf validate` names an undeclared relation, whose links stay untyped. Merge a new relation into the existing mapping, since a second `fields:` key is invalid:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schema/
 fields:
-  # Keep the existing relations, such as depends-on.
-  supersedes:
-    description: This authored decision explicitly replaces the target decision.
+  # Keep the existing entries, such as depends-on.
+  verifies:
+    description: This authored check explicitly verifies the target claim.
     type: identity
     cardinality: many
     relation: true

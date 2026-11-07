@@ -11,7 +11,10 @@ cases:
     # A qualified address still resolves once a related brain also holds concepts/welcome.md.
     read: bf://$name/concepts/welcome.md
     expect: [concepts/welcome.md]
-    text: [Write one note per project in projects/, reusable knowledge in concepts/]
+    # Two fragments, each found in the note.
+    text:
+      - Write one note per project in projects/
+      - reusable knowledge in concepts/
   - name: absent-starter-topic
     query: bfabsentevidence9c4f2a7d
     empty: true

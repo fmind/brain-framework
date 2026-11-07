@@ -136,9 +136,7 @@ The [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/
 - The **session hook** prints the current repository's project: its status, review deadline, next task and linked notes. It also lists programs that are overdue, never collected or failed, and sources that [fell silent](schedule.md#silent-sources).
 - The optional **prompt hook** searches at most eight content words of each prompt, waits up to 5 seconds and prints the refs of up to three matching notes. It passes words of every prompt to `bf search` as an argument.
 
-Copy them into a folder only you write, such as your personal brain's `hooks/`, review them and make them executable with `chmod +x hooks/*.py`. Hosts run them as commands at every session or prompt, so never register a hook from a brain others can push to.
-
-The [hooks README](https://github.com/fmind/brain-framework/blob/main/examples/hooks/README.md#connect-the-host) configures Claude Code and Codex, with host timeouts of 30 seconds per session and 10 per prompt. Both hooks print nothing when retrieval is slow, unusable or empty. While collection runs, they can use a nonempty stale cache generation, with an “Index refreshing” note; empty generations and other retrieval problems stay silent.
+Copy them into a folder only you write, such as your personal brain's `hooks/`. Hosts run them at every session or prompt, so never register a hook from a brain others can push to. The [hooks README](https://github.com/fmind/brain-framework/blob/main/examples/hooks/README.md#connect-the-host) installs, previews and connects them for Claude Code and Codex.
 
 ## Refresh brain instructions
 

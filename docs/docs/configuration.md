@@ -29,7 +29,7 @@ Each brain's `bf.yaml` holds its format `version`, its `name` and optional `brai
 
 Commands take the first selection available, in this order. An invalid explicit choice fails instead of falling through:
 
-| Selection                   | `search`, `read`, `export`, `mcp`, `status` | `validate`, `eval`, `build`, `status --watch`            | `collect`, `run`, `channel`, `queue`, `update`, `watch`         |
+| Selection                   | `search`, `read`, `export`, `mcp`, `status` | `validate`, `eval`, `build`, `forget`, `status --watch`  | `collect`, `run`, `channel`, `queue`, `update`, `watch`         |
 | --------------------------- | ------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------- |
 | 1. `--brain NAME` or `PATH` | That brain.                                 | That brain.                                              | That brain; a name must be registered or the enclosing brain's. |
 | 2. `BF_BRAIN`               | That brain.                                 | That brain.                                              | That brain, under the same rule.                                |

@@ -34,7 +34,13 @@ def _merge(config: Path, fragment: str, prose: str) -> None:
     for entry, key in REPLACE.findall(prose):
         del data[key][entry]
     for key, value in yaml.safe_load(fragment).items():
-        data[key] = {**data.get(key, {}), **value} if isinstance(value, dict) else value
+        if isinstance(value, dict):
+            # A reader adds these entries beside the existing ones: one already present would be a duplicate key.
+            duplicates = sorted(set(value) & set(data.get(key) or {}))
+            assert not duplicates, f"the guide adds {key}: entries bf.yaml already has: {duplicates}"
+            data[key] = {**data.get(key, {}), **value}
+        else:
+            data[key] = value
     config.write_text(yaml.safe_dump(data, sort_keys=False))
 
 

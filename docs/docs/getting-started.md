@@ -190,20 +190,8 @@ sensors:
       kind: { value: document }
 ```
 
-`bf.yaml` already has a `fields:` key with the [starter relations](links.md#choose-the-right-relation). Add `kind` beneath them instead of creating a second `fields:` key:
-
-```yaml
-# https://fmind.github.io/brain-framework/docs/schema/
-fields:
-  kind:
-    description: Common kind of source item.
-    type: string
-    cardinality: one
-    examples: [document]
-```
-
 - **`command`** runs the sensor from the brain folder, without a shell.
-- **`fields:` in `bf.yaml`** declares `kind` as one string value, required on every record a sensor maps it to.
+- **`fields:` in `bf.yaml`** already declares `kind`, one of the [standard fields](schema.md#standard-vocabulary) `bf init` writes, as one string value.
 - **The sensor's `fields`** set `kind: document` on each record it prints.
 - **`mode: snapshot`** says the output is the complete list, so a record the sensor stops printing is removed.
 - **`refresh: 0`** keeps the sensor manual: it runs only when you collect it.

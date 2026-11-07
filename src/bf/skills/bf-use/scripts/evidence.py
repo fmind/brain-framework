@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Read one exact bf reply whole, capture it, or compare a retained capture with a new read.
 
-`read` runs the offline `bf read` and assembles text pages; `capture` and `compare` use stdin only.
+`read` runs the offline `bf read` and assembles text pages. `capture` and `compare` read stdin, or, given a ref and
+`--brain`, run that read themselves: `capture REF --brain BRAIN --output NEW` writes an owner-only file that must not
+exist yet, and `compare SAVED REF --brain BRAIN` compares a saved capture with a new read, without shell pipes.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TypeAlias, cast
 
 # Agents run this helper with whatever python3 is on PATH: keep it compatible with Python 3.11.
@@ -250,23 +254,61 @@ def compare(before: dict[str, JSON], after: dict[str, JSON]) -> dict[str, JSON]:
     }
 
 
+def saved(path: str) -> dict[str, JSON]:
+    """A capture file, bounded like standard input."""
+    with Path(path).open("rb") as stream:
+        data = stream.read(MAX_INPUT + 1)
+    if len(data) > MAX_INPUT:
+        raise ValueError("capture exceeds the input limit")
+    return object_value(json.loads(data, object_pairs_hook=unique))
+
+
+def save(path: str, data: bytes) -> None:
+    """Create `path` exclusively, owner-only, never through a symbolic link; remove it if writing fails."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+    except BaseException:
+        Path(path).unlink(missing_ok=True)
+        raise
+
+
 def main() -> int:
     arguments = sys.argv[1:]
-    if arguments[:1] == ["read"] and len(arguments) == 4 and arguments[2] == "--brain":
-        ref, brain = arguments[1], arguments[3]
+    mode, rest = (arguments[0], arguments[1:]) if arguments else ("", [])
+    # A literal command: capture REF --brain BRAIN --output NEW, compare SAVED REF --brain BRAIN or read REF --brain BRAIN.
+    shapes = {"read": (0, 3, ""), "capture": (0, 5, "--output"), "compare": (1, 4, "")}
+    first, size, option = shapes.get(mode, (0, -1, ""))
+    if len(rest) == size and rest[first + 1] == "--brain" and (not option or rest[first + 3] == option):
+        ref, brain = rest[first], rest[first + 2]
         # bf would parse a leading hyphen as an option; the brain is always an option value.
         if not ref or ref.startswith("-") or len(ref) > 8192 or any(ord(c) < 32 for c in ref) or not brain:
             sys.stderr.write("evidence: expected an exact ref and a brain name or path\n")
             return 2
         try:
-            output = terminal(exact(ref, brain))
+            before = saved(rest[0]) if mode == "compare" else {}
+            reply = exact(ref, brain)
+            output = terminal(
+                reply if mode == "read" else capture(reply) if mode == "capture" else compare(before, reply)
+            )
         except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, RecursionError):
-            sys.stderr.write("evidence: bf read failed or changed while reading; inspect the exact read and retry\n")
+            sys.stderr.write("evidence: a read or capture failed, changed or is incomplete; inspect it and retry\n")
             return 1
+        if mode == "capture":
+            try:
+                save(rest[4], output + b"\n")
+            except OSError:
+                sys.stderr.write("evidence: --output must be a new file in an existing folder; nothing was kept\n")
+                return 1
+            output = terminal({"captured": rest[4]})
         sys.stdout.buffer.write(output + b"\n")
         return 0
     if len(arguments) != 1 or arguments[0] not in {"capture", "compare"}:
-        sys.stderr.write("usage: evidence.py read REF --brain BRAIN | evidence.py capture|compare < JSON\n")
+        sys.stderr.write(
+            "usage: evidence.py read REF --brain BRAIN | capture REF --brain BRAIN --output NEW"
+            " | compare SAVED REF --brain BRAIN | capture|compare < JSON\n"
+        )
         return 2
     count = 1 if arguments[0] == "capture" else 2
     limit = count * MAX_INPUT

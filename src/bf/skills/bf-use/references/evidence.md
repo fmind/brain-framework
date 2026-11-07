@@ -13,33 +13,20 @@ Read the exact note section or record with `bf read`. In a dated decision note, 
 - A record of a source Git ignores, as `bf init` ignores `memories/`, goes in the ignored `originals/` folder; cite its path in a code span, since a link fails `bf validate` in clones that lack the file.
 - An authored note, or a record Git versions, goes in the owning action's `inputs/`, otherwise in `assets/`.
 
-The [evidence helper](../scripts/evidence.py) never contacts a network. `read REF --brain PATH` prints the whole exact reply of the offline `bf read`. `capture` keeps one exact read's text or record, source metadata, local capture time and a content digest, and refuses listing pages, lone text pages and incomplete or `stale` reads: a local observation, not proof of truth or live provider state. `capture` and `compare` read at most 19 MiB of standard input per reply or capture; beyond that, capture a note section or a smaller record.
+The [evidence helper](../scripts/evidence.py) never contacts a network. `read REF --brain PATH` prints the whole exact reply of the offline `bf read`. `capture` keeps one exact read's text or record, source metadata, local capture time and a content digest, and refuses listing pages, lone text pages and incomplete or `stale` reads: a local observation, not proof of truth or live provider state. A capture or saved reply may hold at most 19 MiB; beyond that, capture a note section or a smaller record.
 
-Below, `$evidence_ref` is the exact ref (with several brains, its `uri`), `$new_capture` an unused `.json` path and `$saved_capture` an earlier capture. This subshell writes an owner-only capture, never replaces an earlier one and removes only a capture it failed to write:
+Capture the exact ref (with several brains, its `uri`) into `NEW.json`, an unused path in an existing folder chosen as above:
 
 ```bash
-(
-  set -o pipefail -o noclobber
-  umask 077
-  mkdir -p -- "$(dirname -- "$new_capture")" || exit 1
-  exec 3> "$new_capture" || exit 1
-  python3 "$SKILL_DIR/scripts/evidence.py" read "$evidence_ref" --brain "$brain_path" |
-    python3 "$SKILL_DIR/scripts/evidence.py" capture >&3 || { rm -f -- "$new_capture"; exit 1; }
-)
+python3 SKILL_DIR/scripts/evidence.py capture 'REF' --brain PATH --output NEW.json
 ```
 
-Captures may hold private or external text: give them the original's audience, and check the brain's ignore rules before committing action inputs or assets.
+It replies `{"captured":"NEW.json"}` and writes an owner-only file, never replaces an existing one and keeps nothing when the read fails or is incomplete. Captures may hold private or external text: give them the original's audience, and check the brain's ignore rules before committing action inputs or assets.
 
-To compare, supply the saved capture followed by a new exact read:
+To compare, pass the saved capture (`SAVED.json`), then the same ref:
 
 ```bash
-(
-  set -o pipefail
-  {
-    cat "$saved_capture"
-    python3 "$SKILL_DIR/scripts/evidence.py" read "$evidence_ref" --brain "$brain_path"
-  } | python3 "$SKILL_DIR/scripts/evidence.py" compare
-)
+python3 SKILL_DIR/scripts/evidence.py compare SAVED.json 'REF' --brain PATH
 ```
 
 Only this compact comparison reaches the model. `state` is `changed`, `unchanged` or `unknown`; `content_changed` compares stored content even when freshness is unknown.
