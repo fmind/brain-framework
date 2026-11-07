@@ -831,48 +831,31 @@ def memories(
             return None
         return {"sources": [{"source": source, **count, **source_health(store, {source: count}, now=now)[source]}]}
 
+    window = None
     if len(parts) == 2:
         # A record's time is its stored instant: ordering by the column walks items_kind_source_time.
-        reply, found = _listing(
-            stores,
-            "i.kind='record' AND i.source=:source",
-            {"source": source},
-            "i.time DESC,i.ref DESC",
-            _time_key,
-            SECTION,
-            offset,
-            counted=counted,
-            kind="source",
-            summary=coverage,
-        )
-        if not found:
-            # An unknown source is a missing page, never an empty answer.
-            raise absent(reply, _MISSING + suggest(source, known, prefix="memories/"))
-        return {"page": "/".join(parts), "sources": _gather(found, "sources"), **reply}
-    name = parts[2]
-    window = None if name.endswith(".json") else period(name, now)
-    if window:
-        where = f"i.kind='record' AND i.source=:source AND {index.PERIOD_WITHIN}"
-        params = {"source": source, "since": window.since, "until": window.until}
-    elif name == "undated":
-        where, params = "i.kind='record' AND i.source=:source AND i.time=''", {"source": source}
-    elif re.fullmatch(r"[0-9a-f]{64}\.json", name):
-        where, params = "i.kind='record' AND i.path=:path", {"path": f"memories/{source}/{name}"}
+        where, params = "i.kind='record' AND i.source=:source", {"source": source}
+        order, key, budget, kind = "i.time DESC,i.ref DESC", _time_key, SECTION, "source"
     else:
-        raise NotFoundError(_MISSING)
+        name = parts[2]
+        window = None if name.endswith(".json") else period(name, now)
+        if window:
+            where = f"i.kind='record' AND i.source=:source AND {index.PERIOD_WITHIN}"
+            params = {"source": source, "since": window.since, "until": window.until}
+        elif name == "undated":
+            where, params = "i.kind='record' AND i.source=:source AND i.time=''", {"source": source}
+        elif re.fullmatch(r"[0-9a-f]{64}\.json", name):
+            where, params = "i.kind='record' AND i.path=:path", {"path": f"memories/{source}/{name}"}
+        else:
+            raise NotFoundError(_MISSING)
+        order = f"({index.PERIOD_TIME}) DESC,i.ref DESC" if window else "i.time DESC,i.ref DESC"
+        key, budget = (_period_key if window else _time_key), PAGE
+        kind = "source-period" if window or name == "undated" else "record"
     reply, found = _listing(
-        stores,
-        where,
-        params,
-        f"({index.PERIOD_TIME}) DESC,i.ref DESC" if window else "i.time DESC,i.ref DESC",
-        _period_key if window else _time_key,
-        PAGE,
-        offset,
-        counted=counted,
-        kind="source-period" if window or name == "undated" else "record",
-        summary=coverage,
+        stores, where, params, order, key, budget, offset, counted=counted, kind=kind, summary=coverage
     )
     if not found:
+        # An unknown source is a missing page, never an empty answer.
         raise absent(reply, _MISSING + suggest(source, known, prefix="memories/"))
     return {
         "page": "/".join(parts),

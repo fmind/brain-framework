@@ -275,9 +275,10 @@ class _Validation:
 
     def evidence(self) -> None:
         store, config = self.store, self.config
+        listed = store.files("memories", skipped=self.skipped, split=True)
         evidence = [
             name
-            for name in store.files("memories", skipped=self.skipped, split=True)
+            for name in listed
             # Check every file collection and search read as a record, even a hidden AppleDouble `._<sha>.json`,
             # and report other visible files; ignore other hidden files, such as .DS_Store, and the pending
             # transaction.
@@ -286,7 +287,7 @@ class _Validation:
         ]
         self.stored = set(evidence)
         # A forgotten list collection could not parse would fail every run of its source.
-        for name in store.files("memories", skipped=self.skipped, split=True):
+        for name in listed:
             parts = name.split("/")
             if len(parts) == 3 and parts[2] == records.FORGOTTEN:
                 try:
