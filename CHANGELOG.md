@@ -22,6 +22,7 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 ### Changed
 
 - **`bf forget` exits 1 when the refreshed cache skipped files**, like `bf build` and `bf update`: the records are still forgotten and the reply is unchanged, but a skipped file hides evidence. Run `bf validate` to name it.
+- **Development tools.** Python 3.14.10 (still held below 3.15), uv 0.13.7, betterleaks 1.10.0, jactionlint 2.5.0, trivy 0.76.2 and the dprint Markdown plugin 0.28.2; the workflows pin mise 2026.11.3 and `jdx/mise-action` v5.2.7, and `mise.lock` uses lockfile revision 4, which needs mise 2026.11.1 or later. Betterleaks scans pass `--config .betterleaks.toml`, which 1.10 no longer loads by itself. The docs site builds with Zensical 0.1, whose theme ships as the separate Zensical UI distribution, now listed on the site's notices page.
 - **Skills.** bf-use says to report `problems`, which need repair, and retry only `stale` results; its evidence helper gains `capture REF --brain PATH --output FILE` and `compare SAVED REF --brain PATH`, so captures run as one literal command. Run `bf skills DIR` to update installed skills.
 
 ## [v21.1.0](https://github.com/fmind/brain-framework/releases/tag/v21.1.0) - 2026-11-04
