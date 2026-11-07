@@ -74,7 +74,7 @@ dev = [
   "ty>=0.0.70,<0.1",
   # The extra validates classifiers offline instead of downloading them or skipping the check.
   "validate-pyproject[all]>=0.25",
-  "zensical>=0.0.59,<0.1",
+  "zensical>=0.1.0,<0.2",
 ]
 
 [tool.ruff]

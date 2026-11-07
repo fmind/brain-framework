@@ -30,14 +30,18 @@ PERMITTED = {"Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "MIT-0"
 # Reviewed code vendored inside a distribution, keyed by its folder: the component it adapts and that license.
 VENDORED = {"typer/_click": ("Click", "BSD-3-Clause")}
 LEGAL = re.compile(r"(?:LICEN[CS]E|COPYING|NOTICE)[^/]*")
-# Site copies of the licenses bundled by the locked Zensical distribution, keyed by their published name.
+# Site copies of the licenses in the locked Zensical distributions, keyed by their published name: since Zensical 0.1,
+# its theme (templates, icons and the browser bundle) ships as the separate zensical-ui distribution.
 BUNDLED = {
-    "zensical-LICENSE.txt": "zensical-{version}.dist-info/licenses/LICENSE.md",
-    "lucide-LICENSE.txt": "zensical/templates/.icons/lucide/LICENSE",
-    "simple-icons-LICENSE.txt": "zensical/templates/.icons/simple/LICENSE.md",
-    "zensical-javascript-LICENSE.txt": "zensical/templates/assets/javascripts/LICENSE",
+    "zensical-LICENSE.txt": ("zensical", "zensical-{version}.dist-info/licenses/LICENSE.md"),
+    "zensical-ui-LICENSE.txt": ("zensical-ui", "zensical_ui-{version}.dist-info/licenses/LICENSE"),
+    "lucide-LICENSE.txt": ("zensical-ui", "zensical_ui/templates/.icons/lucide/LICENSE"),
+    "simple-icons-LICENSE.txt": ("zensical-ui", "zensical_ui/templates/.icons/simple/LICENSE.md"),
+    "zensical-javascript-LICENSE.txt": ("zensical-ui", "zensical_ui/templates/assets/javascripts/LICENSE"),
 }
-SITE_VERSION = re.compile(r"^(\| Zensical(?: browser bundle)? +\| )(\S+)", re.MULTILINE)
+# The site page's version rows, keyed by their label, with the distribution that supplies each version.
+VERSION_ROWS = {"Zensical": "zensical", "Zensical UI": "zensical-ui", "Zensical browser bundle": "zensical-ui"}
+SITE_VERSION = re.compile(r"^(\| (Zensical(?: UI| browser bundle)?) +\| )(\S+)", re.MULTILINE)
 # Licenses of the npm libraries that Zensical's prebuilt search client bundles but its license file omits, keyed by their
 # published name. No synced distribution holds them, so each is the package's license file copied byte for byte and
 # pinned by SHA-256; after a Zensical update, search its browser bundle for them and for any new library.
@@ -142,13 +146,17 @@ def notices() -> str:
 
 
 def site() -> tuple[str, dict[str, bytes]]:
-    zensical = metadata.distribution("zensical")
-    page, rows = SITE_VERSION.subn(lambda match: match[1] + zensical.version, SITE.read_text(encoding="utf-8"))
-    if rows != 2:
-        raise SystemExit(f"{SITE.name}: expected the Zensical and browser bundle version rows, found {rows}")
+    distributions = {name: metadata.distribution(name) for name in {*VERSION_ROWS.values()}}
+    page, rows = SITE_VERSION.subn(
+        lambda match: match[1] + distributions[VERSION_ROWS[match[2]]].version, SITE.read_text(encoding="utf-8")
+    )
+    if rows != len(VERSION_ROWS):
+        raise SystemExit(
+            f"{SITE.name}: expected the Zensical, Zensical UI and browser bundle version rows, found {rows}"
+        )
     return page, {
-        published: zensical.locate_file(installed.format(version=zensical.version)).read_bytes()
-        for published, installed in BUNDLED.items()
+        published: (found := distributions[name]).locate_file(installed.format(version=found.version)).read_bytes()
+        for published, (name, installed) in BUNDLED.items()
     }
 
 

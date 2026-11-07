@@ -72,15 +72,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## anyio 4.15.1
+## anyio 4.16.0
 
 Source: <https://github.com/agronholm/anyio>
 
 License: `MIT`
 
-Evidence: `anyio-4.15.1.dist-info/licenses/LICENSE`
+Evidence: `anyio-4.16.0.dist-info/licenses/LICENSE`
 
-### anyio-4.15.1.dist-info/licenses/LICENSE
+### anyio-4.16.0.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -173,15 +173,15 @@ documentation is licensed as follows:
     DEALINGS IN THE SOFTWARE.
 ```
 
-## click 8.5.0
+## click 8.5.1
 
 Source: <https://github.com/pallets/click/>
 
 License: `BSD-3-Clause`
 
-Evidence: `click-8.5.0.dist-info/licenses/LICENSE.txt`
+Evidence: `click-8.5.1.dist-info/licenses/LICENSE.txt`
 
-### click-8.5.0.dist-info/licenses/LICENSE.txt
+### click-8.5.1.dist-info/licenses/LICENSE.txt
 
 ```text
 Copyright 2014 Pallets
@@ -872,15 +872,15 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
 ```
 
-## opentelemetry-api 1.45.1
+## opentelemetry-api 1.45.2
 
 Source: <https://github.com/open-telemetry/opentelemetry-python>
 
 License: `Apache-2.0`
 
-Evidence: `opentelemetry_api-1.45.1.dist-info/licenses/LICENSE`
+Evidence: `opentelemetry_api-1.45.2.dist-info/licenses/LICENSE`
 
-### opentelemetry_api-1.45.1.dist-info/licenses/LICENSE
+### opentelemetry_api-1.45.2.dist-info/licenses/LICENSE
 
 ```text
                                  Apache License
@@ -1126,15 +1126,15 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## pydantic 2.14.1
+## pydantic 2.14.3
 
 Source: <https://github.com/pydantic/pydantic>
 
 License: `MIT`
 
-Evidence: `pydantic-2.14.1.dist-info/licenses/LICENSE`
+Evidence: `pydantic-2.14.3.dist-info/licenses/LICENSE`
 
-### pydantic-2.14.1.dist-info/licenses/LICENSE
+### pydantic-2.14.3.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -1160,15 +1160,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## pydantic-core 2.50.1
+## pydantic-core 2.50.4
 
 Source: <https://github.com/pydantic/pydantic/tree/main/pydantic-core>
 
 License: `MIT`
 
-Evidence: `pydantic_core-2.50.1.dist-info/licenses/LICENSE`
+Evidence: `pydantic_core-2.50.4.dist-info/licenses/LICENSE`
 
-### pydantic_core-2.50.1.dist-info/licenses/LICENSE
+### pydantic_core-2.50.4.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -1266,15 +1266,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## python-multipart 0.0.32
+## python-multipart 0.0.33
 
 Source: <https://github.com/Kludex/python-multipart>
 
 License: `Apache-2.0`
 
-Evidence: `python_multipart-0.0.32.dist-info/licenses/LICENSE.txt`
+Evidence: `python_multipart-0.0.33.dist-info/licenses/LICENSE.txt`
 
-### python_multipart-0.0.32.dist-info/licenses/LICENSE.txt
+### python_multipart-0.0.33.dist-info/licenses/LICENSE.txt
 
 ```text
                                  Apache License
@@ -1749,7 +1749,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## typer 0.27.3
+## typer 0.28.0
 
 Source: <https://github.com/fastapi/typer>
 
@@ -1757,9 +1757,9 @@ License: `MIT`
 
 The distribution vendors code adapted from Click in `typer/_click/`; its bundled `BSD-3-Clause` license is included below.
 
-Evidence: `typer-0.27.3.dist-info/licenses/LICENSE`
+Evidence: `typer-0.28.0.dist-info/licenses/LICENSE`
 
-### typer-0.27.3.dist-info/licenses/LICENSE
+### typer-0.28.0.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -2112,15 +2112,15 @@ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## typing-inspection 0.4.4
+## typing-inspection 0.4.5
 
 Source: <https://github.com/pydantic/typing-inspection>
 
 License: `MIT`
 
-Evidence: `typing_inspection-0.4.4.dist-info/licenses/LICENSE`
+Evidence: `typing_inspection-0.4.5.dist-info/licenses/LICENSE`
 
-### typing_inspection-0.4.4.dist-info/licenses/LICENSE
+### typing_inspection-0.4.5.dist-info/licenses/LICENSE
 
 ```text
 MIT License

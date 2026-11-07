@@ -160,7 +160,7 @@ def test_site_notices_fail_when_a_version_row_stops_matching(tmp_path: Path, mon
     text = (ROOT / "docs/third-party-notices.md").read_text(encoding="utf-8")
     page.write_text(text.replace("Zensical browser bundle", "Zensical JavaScript"), encoding="utf-8")
     monkeypatch.setattr(notices, "SITE", page)
-    with pytest.raises(SystemExit, match="expected the Zensical and browser bundle version rows, found 1"):
+    with pytest.raises(SystemExit, match="expected the Zensical, Zensical UI and browser bundle version rows, found 2"):
         notices.site()
 
 
