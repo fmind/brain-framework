@@ -21,6 +21,8 @@ github_attestations = true
 locked_verify_provenance = true
 lockfile = true
 lockfile_platforms = ["linux-x64", "linux-arm64", "macos-x64", "macos-arm64"]
+# No release-age cooldown: mise's 24-hour default hides same-day releases from `mise run upgrade`. Exact pins, the
+# lockfile and provenance checks guard installs. "0d", not "0": self_update.minimum_release_age inherits it and rejects "0".
 minimum_release_age = "0d"
 slsa = true
 

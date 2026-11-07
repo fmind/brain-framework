@@ -381,3 +381,25 @@ def test_read_passes_whole_replies_and_rejects_option_like_refs(provider: Provid
         result = provider.run("evidence.py", *arguments, folder="../src/bf/skills/bf-use/scripts")
         assert result.returncode == 2
     assert provider.calls("bf") == [["read", NOTE["ref"], "--brain", "brain"]]
+
+
+def test_literal_capture_writes_a_new_owner_only_file_and_compares_it(provider: Provider, tmp_path: Path) -> None:
+    # Skills write commands literally: capture and compare run the read themselves instead of a shell pipe.
+    folder, output = "../src/bf/skills/bf-use/scripts", tmp_path / "capture.json"
+    provider.install("bf", [{"match": ["read"], "stdout": NOTE}] * 3)
+    arguments = ("capture", NOTE["ref"], "--brain", "brain", "--output", str(output))
+    result = provider.run("evidence.py", *arguments, folder=folder)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"captured": str(output)}
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert json.loads(output.read_text())["text"] == NOTE["text"]
+    compared = provider.run("evidence.py", "compare", str(output), NOTE["ref"], "--brain", "brain", folder=folder)
+    assert json.loads(compared.stdout)["state"] == "unchanged", compared.stderr
+    # An existing capture is never replaced, and a failed or incomplete read leaves no file behind.
+    before = output.read_bytes()
+    assert provider.run("evidence.py", *arguments, folder=folder).returncode == 1
+    assert output.read_bytes() == before
+    provider.install("bf", [{"match": ["read"], "stdout": {**NOTE, "stale": ["example"]}}])
+    fresh = tmp_path / "stale.json"
+    refused = provider.run("evidence.py", *arguments[:-1], str(fresh), folder=folder)
+    assert (refused.returncode, refused.stdout, fresh.exists()) == (1, "", False)

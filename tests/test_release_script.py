@@ -253,3 +253,23 @@ def test_publish_refuses_a_tag_naming_another_commit(primary: Path) -> None:
     result = release(clone, "publish", "1.3.0")
     assert result.returncode == 1
     assert "tags never move" in result.stderr
+
+
+def test_publish_rerun_fetches_a_tag_only_origin_holds(primary: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write(primary / "src/a.txt", "released\n")
+    clone, _ = prepare(primary, "1.3.0", "src/a.txt")
+    released = publish_locally(clone, "1.3.0")
+    # push-and-tag deletes its local tag when the push reports a failure, though origin may have received it.
+    git(clone, "push", "-q", "origin", "v1.3.0")
+    git(clone, "tag", "-d", "v1.3.0")
+    # A fake gh that lists no CD run, on the PATH `release` gives the clone.
+    fake = clone.parent / "bin/gh"
+    fake.parent.mkdir()
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("RELEASE_ATTEMPTS", "1")
+    monkeypatch.setenv("RELEASE_DELAY", "0")
+    result = release(clone, "publish", "1.3.0")
+    assert (result.returncode, "no CD run was listed" in result.stderr) == (1, True), result.stderr
+    # The rerun restored the tag `sync` needs instead of sending the release back to `publish`.
+    assert git(clone, "rev-parse", "v1.3.0^{commit}") == released

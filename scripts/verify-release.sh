@@ -92,10 +92,11 @@ summary: Launch a product website that helps visitors understand the product.
 
 Start with a single product page because visitors need a clear explanation before signing up.
 EOF
-"${bf}" validate --brain "${brain}" | grep -q '"valid":true' || fail "bf validate rejected the sample brain"
-"${bf}" search "visitors clear explanation" --brain "${brain}" | grep -q '"ref":"projects/new-website.md#decision"' ||
-  fail "bf search did not find the sample decision"
-"${bf}" read "projects/new-website.md#decision" --brain "${brain}" | grep -q 'Start with a single product page' ||
+# grep -F reads the whole reply: grep -q could exit first and fail bf's write under pipefail.
+"${bf}" validate --brain "${brain}" | grep -F '"valid":true' > /dev/null || fail "bf validate rejected the sample brain"
+"${bf}" search "visitors clear explanation" --brain "${brain}" |
+  grep -F '"ref":"projects/new-website.md#decision"' > /dev/null || fail "bf search did not find the sample decision"
+"${bf}" read "projects/new-website.md#decision" --brain "${brain}" | grep -F 'Start with a single product page' > /dev/null ||
   fail "bf read did not return the sample decision"
 
 echo "verify-release: ${tag} at ${commit} is published at ${url}; PyPI digests and build attestations match ${wheel}" \

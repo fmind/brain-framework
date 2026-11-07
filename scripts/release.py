@@ -234,8 +234,15 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
     today = datetime.date.today().isoformat()
     heading = f"## [{tag}]({REPOSITORY}/releases/tag/{tag}) - {today}"
     changelog.write_text(text.replace("\n## Unreleased\n", f"\n## Unreleased\n\n{heading}\n", 1))
-    if run("scripts/release-notes.sh", tag, cwd=clone, check=False) == "":
-        raise ReleaseError("the Unreleased section is empty: write its entries and name CHANGELOG.md in the paths")
+    try:
+        run("scripts/release-notes.sh", tag, cwd=clone)
+    except ReleaseError as error:
+        # Name the usual cause; any other, such as a duplicate section, keeps the script's own message.
+        if "empty section" not in str(error):
+            raise
+        raise ReleaseError(
+            "the Unreleased section is empty: write its entries and name CHANGELOG.md in the paths"
+        ) from error
     if not is_major:
         return []
     for skill in sorted(clone.glob("src/bf/skills/*/SKILL.md")):
@@ -285,7 +292,11 @@ def publish(version: str) -> None:
     tagged = run("git", "ls-remote", "origin", f"refs/tags/{tag}^{{}}", cwd=clone).split("\t")[0]
     if tagged and tagged != run("git", "rev-parse", "HEAD", cwd=clone):
         raise ReleaseError(f"{tag} on origin names {tagged}, not HEAD; tags never move, so investigate first")
-    if not tagged:
+    if tagged:
+        # A rerun after push-and-tag reported a failure may lack the local tag that `sync` needs; a different local
+        # tag fails the fetch instead of moving.
+        run("git", "fetch", "--quiet", "origin", f"refs/tags/{tag}:refs/tags/{tag}", cwd=clone)
+    else:
         # push-and-tag refuses a dirty tree, another branch or an existing tag, and tags only after CI succeeded.
         stream(str(clone / "scripts/push-and-tag.sh"), version, cwd=clone)
     attempts = int(os.environ.get("RELEASE_ATTEMPTS", "60"))
