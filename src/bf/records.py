@@ -348,8 +348,13 @@ def source_of(name: str) -> str:
     return parts[1]
 
 
-def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool) -> dict[str, int]:
+def upsert(
+    store: Store, source: str, incoming: list[Record], *, snapshot: bool, removals: list[str] | None = None
+) -> dict[str, int]:
     """Update independent record files; snapshot removal and all replacements remain transactional.
+
+    `removals`, such as forgotten and expired files, leave in the same transaction without counting as removed, so a
+    failed collection never removes them alone.
 
     Only files a change replaces or removes are parsed, and each must hold its own id: collection never
     overwrites or deletes misnamed evidence, while a file with its own id that breaks the current record
@@ -361,6 +366,11 @@ def upsert(store: Store, source: str, incoming: list[Record], *, snapshot: bool)
     # Only writers holding the brain lock write records: a temporary file there belongs to a killed write.
     store.sweep(f"memories/{source}")
     counts, replacements = plan(store, source, incoming, snapshot=snapshot)
+    for name in removals or ():
+        if name in replacements:
+            # A snapshot already planned to remove this file, unwanted, and counted it.
+            counts["removed"] -= 1
+        replacements[name] = None
     _commit(store, source, replacements)
     return counts
 
@@ -577,7 +587,8 @@ def forget(store: Store, source: str, targets: dict[str, str], *, dry_run: bool 
     if not re.fullmatch(NAME, source):
         raise Error("invalid record source")
     recover(store)
-    hidden = forgotten(store, source)
+    known = forgotten(store, source)
+    hidden = set(known)
     result, present = [], []
     for ref, entry in targets.items():
         name = f"memories/{source}/{entry}.json"
@@ -592,11 +603,19 @@ def forget(store: Store, source: str, targets: dict[str, str], *, dry_run: bool 
         hidden.add(entry)
     if dry_run:
         return result
-    listed = "".join(f"{entry}\n" for entry in sorted(hidden)).encode()
+    # Append, so the owner's comments and order stay as written.
+    listing = f"memories/{source}/{FORGOTTEN}"
+    try:
+        listed = store.read(listing, _FORGOTTEN_LIMIT)
+    except FileNotFoundError:
+        listed = b""
+    if listed and not listed.endswith(b"\n"):
+        listed += b"\n"
+    listed += "".join(f"{entry}\n" for entry in sorted(hidden - known)).encode()
     if len(listed) > _FORGOTTEN_LIMIT:
-        raise Error(f"memories/{source}/{FORGOTTEN} would exceed {_FORGOTTEN_LIMIT:,} bytes; split the source")
+        raise Error(f"{listing} would exceed {_FORGOTTEN_LIMIT:,} bytes; split the source")
     # The list first: a crash before the removal leaves a listed record that the next collection removes.
-    store.write(f"memories/{source}/{FORGOTTEN}", listed)
+    store.write(listing, listed)
     remove(store, source, present)
     return result
 

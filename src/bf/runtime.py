@@ -33,7 +33,6 @@ from bf.models import (
 )
 from bf.storage import QUEUE, BusyError, Store, collecting, lock_file, runtime_store
 
-DATABASE = QUEUE
 # The queue format this release reads and writes; any other is preserved, never adapted.
 VERSION = 2
 MAX_PENDING = 10_000
@@ -205,7 +204,7 @@ class Queue:
 
     def exists(self) -> bool:
         try:
-            self.store.fingerprint(DATABASE)
+            self.store.fingerprint(QUEUE)
         except FileNotFoundError:
             return False
         return True
@@ -216,7 +215,7 @@ class Queue:
         try:
             # Never open/close a live SQLite inode ourselves: POSIX close drops this process's locks,
             # including another thread's transaction. Serialize creation before SQLite can see the file.
-            with _CREATE, self.store.parent(DATABASE) as (parent, name):
+            with _CREATE, self.store.parent(QUEUE) as (parent, name):
                 try:
                     info = os.stat(name, dir_fd=parent, follow_symlinks=False)
                 except FileNotFoundError:
@@ -232,8 +231,8 @@ class Queue:
                     raise Error("assistant queue must be a private regular file owned by you")
             for suffix in ("-wal", "-shm", "-journal"):
                 with suppress(FileNotFoundError):
-                    self.store.fingerprint(DATABASE + suffix)
-            connection = sqlite3.connect(self.store.root / DATABASE, timeout=10, isolation_level=None)
+                    self.store.fingerprint(QUEUE + suffix)
+            connection = sqlite3.connect(self.store.root / QUEUE, timeout=10, isolation_level=None)
             try:
                 connection.row_factory = sqlite3.Row
                 connection.execute("PRAGMA foreign_keys=ON")
@@ -466,7 +465,8 @@ class Queue:
                 accepted.add(message.id)
                 if previous is None:
                     self.reserve(db, 0, 2 * (len(encode(payload)) + len(message.text.encode())))
-                    self.event(db, f"input:{key}", "channel.received", name, payload, message.time)
+                    # Retention counts from admission: an old backlog message keeps its marker like a new one.
+                    self.event(db, f"input:{key}", "channel.received", name, payload, now())
                     db.execute(
                         "INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,?)",
                         (key, name, message.conversation, "user", message.time, message.text),

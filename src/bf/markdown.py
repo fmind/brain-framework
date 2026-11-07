@@ -647,7 +647,8 @@ def validate_okf(path: str, data: bytes | Markdown) -> None:
         return
     if not isinstance(attributes.get("type"), str) or not str(attributes["type"]).strip():
         raise Error(f"{path}: OKF documents require a nonempty type in YAML frontmatter")
-    if attributes.get("status", "stable") not in {"draft", "stable", "deprecated"}:
+    status = attributes.get("status", "stable")
+    if not isinstance(status, str) or status not in {"draft", "stable", "deprecated"}:
         raise Error(f"{path}: OKF status must be draft, stable or deprecated")
     aliases = attributes.get("aliases", [])
     if not isinstance(aliases, list) or not all(isinstance(v, str) and re.fullmatch(IDENTITY, v) for v in aliases):

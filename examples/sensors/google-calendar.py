@@ -276,6 +276,6 @@ if __name__ == "__main__":
     except InvalidError as error:
         print(f"Calendar collection failed: {error}.", file=sys.stderr)
         sys.exit(1)
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, subprocess.SubprocessError, RecursionError):
         print("Calendar collection failed; check gws authentication and the requested window.", file=sys.stderr)
         sys.exit(1)

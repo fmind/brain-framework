@@ -142,6 +142,9 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
         (["build", "--reproject", ""], "--reproject"),
         (["collect", "calendar", "--since", ""], "--since"),
         (["collect", ""], "SENSOR"),
+        # An empty --input, as an unset variable gives, used to run the sensor and save records instead of checking.
+        (["collect", "calendar", "--input", ""], "--input"),
+        (["channel", "listen", "chat"], "ACTION: 'listen' is not one of 'read', 'send'"),
         (["run", ""], "PROGRAM"),
         (["update", "--sensor", "calendar", "--sensor", ""], "--sensor"),
         (["update", "--routine", " "], "--routine"),
@@ -154,6 +157,7 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
         (["read", "caf\udce9"], "REF: expected UTF-8 text"),
         # Run's variadic arguments used to skip that check: the name failed later as an unknown routine, exit 1.
         (["run", "caf\udce9"], "PROGRAM: expected UTF-8 text"),
+        (["forget", "caf\udce9"], "REF: expected UTF-8 text"),
     ],
 )
 def test_invalid_options_name_the_option_without_a_selected_brain(

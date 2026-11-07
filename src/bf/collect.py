@@ -518,8 +518,7 @@ def collect(
                 # Forgotten and expired records leave on purpose: only other removals need --allow-removal.
                 if snapshot and not allow_removal and (refusal := _shrink(store, name, kept)):
                     raise Error(refusal)
-                records.remove(store, name, kept.removals)
-                result.update(records.upsert(store, name, kept.kept, snapshot=snapshot))
+                result.update(records.upsert(store, name, kept.kept, snapshot=snapshot, removals=kept.removals))
                 result.update(records=len(kept.kept), **_retention(kept))
                 committed = True
                 result["elapsed_seconds"] = round(time.monotonic() - measured, 6)

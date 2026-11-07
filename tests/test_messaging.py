@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Callable
-from contextlib import ExitStack
+from collections.abc import Callable, Generator
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
@@ -403,6 +403,48 @@ def test_a_harness_or_send_command_that_never_started_is_failed_not_uncertain(me
     assert "retry it with bf queue ID --retry" in str(sent["error"])
 
 
+def test_an_idempotent_run_retries_a_harness_that_never_started(messaging: Store) -> None:
+    configure(messaging, lambda config: config["assistants"]["personal"].update(idempotent=True))
+    queue = Queue(messaging)
+    assistants.accept(messaging, "chat", [message()], {"personal"})
+    key = queue.next(True, {"personal"})
+    assert key
+    with pytest.raises(Error, match="not on PATH"):
+        assistants.execute(
+            messaging, key, runner=lambda *_: (_ for _ in ()).throw(NotStartedError("harness is not on PATH"))
+        )
+    # Nothing acted, so it retries like a failed attempt of the same run instead of blocking its schedule.
+    assert queue.get(key)["state"] == "pending"
+
+
+def test_a_delivery_rescheduled_while_waiting_for_its_lock_is_not_sent(
+    messaging: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = Queue(messaging)
+    queue.send("chat", Send(command=["send-chat"]), Outgoing(id="standalone", text="Hello"))
+    original = assistants.collecting
+
+    @contextmanager
+    def raced(store: Store, name: str) -> Generator[None]:
+        # Another process failed the send and set its backoff after this one read the delivery.
+        later = timestamp((datetime.now(UTC) + timedelta(minutes=5)).isoformat())
+        queue.delivery_failed("standalone", "send failed", outcome="pending", due=later)
+        with original(store, name):
+            yield
+
+    monkeypatch.setattr(assistants, "collecting", raced)
+    assert not assistants.deliver(messaging, runner=lambda *_: pytest.fail("must wait for its backoff"))
+    assert queue.inspect("standalone")["attempts"] == 0
+
+
+def test_an_old_backlog_message_keeps_its_admission_marker(messaging: Store) -> None:
+    queue = Queue(messaging)
+    old = message().model_copy(update={"time": timestamp((datetime.now(UTC) - timedelta(days=40)).isoformat())})
+    assistants.accept(messaging, "chat", [old], {"personal"})
+    with queue.connect() as db:
+        assert db.execute("SELECT count(*) FROM events WHERE kind='channel.received'").fetchone()[0] == 1
+
+
 def test_an_unresolved_manual_run_never_holds_back_another(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     configure(messaging, lambda config: config["assistants"]["personal"].update(inputs=[], schedules={}))
     queue = Queue(messaging)
@@ -551,7 +593,7 @@ def test_queue_connection_preflight_preserves_another_threads_sqlite_lock(
                         "except sqlite3.OperationalError as error: sys.exit(0 if 'locked' in str(error) else 2)\n"
                         "else: db.rollback(); sys.exit(1)\n"
                     ),
-                    str(queue.store.root / runtime.DATABASE),
+                    str(queue.store.root / runtime.QUEUE),
                 ],
                 check=False,
                 capture_output=True,
@@ -1574,7 +1616,7 @@ def test_another_queue_format_is_refused_and_preserved(messaging: Store, script:
 
     queue = Queue(messaging)
     queue.report()
-    path = queue.store.root / runtime.DATABASE
+    path = queue.store.root / runtime.QUEUE
     path.unlink()
     db = sqlite3.connect(path)
     try:
@@ -1609,7 +1651,7 @@ def test_a_drained_v19_queue_upgrades_with_the_documented_statements(messaging: 
     key = queue.next(True, {"personal"})
     assert key
     assistants.execute(messaging, key, runner=answers)
-    path = queue.store.root / runtime.DATABASE
+    path = queue.store.root / runtime.QUEUE
     built = path.with_name("v19.sqlite3")
     db = sqlite3.connect(built)
     try:

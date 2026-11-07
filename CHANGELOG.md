@@ -4,6 +4,26 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+### Fixed
+
+- **Getting started no longer breaks `bf.yaml`.** The guide, the bf-maintain integration example and the bf-use relation example told readers to add `kind` or `supersedes` under `fields:`, which `bf init` already declares: the duplicate key made every command fail with `YAML mapping keys must be unique strings`. The guide test now rejects a step that adds an existing entry.
+- **`bf update` stops parallel sensors when cancelled.** With two or more due sensors, Ctrl-C or SIGTERM waited for every running sensor to finish, then committed their records; their programs are now killed at once, as with one sensor.
+- **A failed collection keeps its expired and forgotten records.** They were removed in their own transaction before the new records were written, so a run that then failed with `nothing was written` had still removed them; both now commit together.
+- **`bf collect SENSOR --input ""` is invalid input.** An empty value, as an unset variable gives, ran the sensor and saved records instead of checking a file.
+- **An idempotent assistant retries a harness that never started**, such as one not on PATH or cancelled by a stopping `bf watch`, as it retries a failed attempt; the job no longer stays `failed`.
+- **A delivery waits for its backoff.** A process that read a delivery just before another one failed it could send it again at once; the delivery is now read again under its lock.
+- **Old backlog messages keep their duplicate guard.** A pushed message older than 35 days lost the marker that keeps a provider edit from being admitted again.
+- **`bf forget` keeps comments in `.forgotten`.** It rewrote the list from its digests, dropping the owner's `#` lines; it now appends.
+- **A note whose name holds `#` is not a section.** A link to `concepts/a.md#x.md` showed as a backlink of `concepts/a.md`.
+- **A folder replaced by a link during a scan** is reported in `problems` instead of failing the search or read; a non-UTF-8 `bf forget` REF is invalid input (exit 2), like other arguments.
+- **Example programs.** Four sensors print one diagnostic line instead of a traceback on deeply nested provider JSON, and the weekly review fails closed on a malformed projects page.
+- **Documentation.** Troubleshooting quotes the v21 assistant reply errors, the relation and schedule pages match the starter vocabulary and catch-up rules, and reference tables list `forget`, `validate` and `eval` where they apply.
+
+### Changed
+
+- **`bf forget` exits 1 when the refreshed cache skipped files**, like `bf build` and `bf update`: the records are still forgotten and the reply is unchanged, but a skipped file hides evidence. Run `bf validate` to name it.
+- **Skills.** bf-use says to report `problems`, which need repair, and retry only `stale` results; its evidence helper gains `capture REF --brain PATH --output FILE` and `compare SAVED REF --brain PATH`, so captures run as one literal command. Run `bf skills DIR` to update installed skills.
+
 ## [v21.1.0](https://github.com/fmind/brain-framework/releases/tag/v21.1.0) - 2026-11-04
 
 A minor release. The brain format (`version: 8`), the reply schemas, the queue format and the search cache are unchanged; `bf.yaml` accepts one more form, so no upgrade step is needed.

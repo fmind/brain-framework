@@ -48,12 +48,15 @@ def assert_linear_time(operation: Callable[[int], object], size: int) -> None:
     samples: dict[int, list[float]] = {n: [] for n in sizes}
     for _ in range(3):
         for n in sizes:
-            started = time.process_time()
-            operation(n)
-            samples[n].append(time.process_time() - started)
+            # Repeat a fast operation until the CPU clock, coarse on some hosts, measures it reliably.
+            started, repeats = time.process_time(), 0
+            while not repeats or time.process_time() - started < 0.02:
+                operation(n)
+                repeats += 1
+            samples[n].append((time.process_time() - started) / repeats)
     # CPU time excludes runner scheduling delays; minima discard GC and other transient overhead.
     small, large = (min(samples[n]) for n in sizes)
-    assert large < 8 * small, f"4x input took {large / small:.2f}x CPU time ({small:.6f}s -> {large:.6f}s)"
+    assert large < 8 * small, f"4x input took {large / max(small, 1e-9):.2f}x CPU time ({small:.6f}s -> {large:.6f}s)"
 
 
 def pytest_configure() -> None:

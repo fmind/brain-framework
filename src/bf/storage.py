@@ -311,6 +311,14 @@ class Store:
                             raise
                         skipped[f"{prefix}/{shown}" if shown is not None else path] = stamp
                         continue
+                    except OSError as error:
+                        # A folder replaced by a link or a file after listing: report it as the next scan sees it.
+                        if error.errno not in {errno.ELOOP, errno.ENOTDIR}:
+                            raise
+                        if skipped is None:
+                            raise Error(f"{path}: symlinks and special files are forbidden") from error
+                        skipped[path] = stamp
+                        continue
                     if shown is not None:
                         if skipped is None:
                             raise Error(f"{prefix}/{shown}: {UNNAMED}")

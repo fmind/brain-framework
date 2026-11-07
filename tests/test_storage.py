@@ -515,6 +515,25 @@ def test_scan_skips_entries_removed_after_listing(brain: Store, monkeypatch: pyt
     assert brain.files("concepts") == ["concepts/evidence.md", "concepts/kept.md"]
 
 
+def test_scan_reports_a_folder_replaced_by_a_link_after_listing(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    brain.write("concepts/swapped/draft.md", b"# Draft\n")
+    original = os.scandir
+
+    def racing(fd: int) -> AbstractContextManager[Iterator[os.DirEntry[str]]]:
+        entries = list(original(fd))
+        # The listing typed it as a folder; a sync tool then replaces it with a link before it is opened.
+        if any(entry.name == "swapped" for entry in entries):
+            os.unlink("swapped/draft.md", dir_fd=fd)
+            os.rmdir("swapped", dir_fd=fd)
+            os.symlink("/", "swapped", dir_fd=fd)
+        return nullcontext(iter(entries))
+
+    monkeypatch.setattr(os, "scandir", racing)
+    skipped: dict[str, tuple[int, int, int, int]] = {}
+    assert list(brain.scan("concepts", skipped=skipped, fingerprints=False)) == ["concepts/evidence.md"]
+    assert list(skipped) == ["concepts/swapped"]
+
+
 def test_scan_bounds_name_the_directory(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     deep = "concepts/" + "d/" * 65
     brain.write(deep + "x.md", b"# Deep\n")

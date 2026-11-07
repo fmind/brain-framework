@@ -14,8 +14,8 @@ from bf import __version__, index, usage
 from bf.config import Selection, brain_name, load, related
 from bf.history import ASSISTANTS, ROUTINES, log_path, state
 from bf.models import CACHE, Assistant, Config, Error, Program, Sensor, decode, timestamp
-from bf.runtime import DATABASE, Queue, check_schema, check_version
-from bf.storage import Store
+from bf.runtime import Queue, check_schema, check_version
+from bf.storage import QUEUE, Store
 
 # Counters of the last committed collection, reported apart from indexed totals.
 _COUNTERS = (
@@ -163,20 +163,20 @@ class _Reader(Queue):
     def exists(self) -> bool:
         # Execution creates the file, then commits its schema: until then the queue holds nothing.
         try:
-            return self.store.lstat(DATABASE).st_size > 0
+            return self.store.lstat(QUEUE).st_size > 0
         except FileNotFoundError:
             return False
 
     @contextmanager
     def connect(self) -> Generator[sqlite3.Connection]:
-        info = self.store.lstat(DATABASE)
+        info = self.store.lstat(QUEUE)
         if info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise Error("assistant queue must be a private regular file owned by you")
         for suffix in ("-wal", "-shm", "-journal"):
             with suppress(FileNotFoundError):
-                self.store.lstat(DATABASE + suffix)
+                self.store.lstat(QUEUE + suffix)
         try:
-            uri = (self.store.root / DATABASE).as_uri() + "?mode=ro"
+            uri = (self.store.root / QUEUE).as_uri() + "?mode=ro"
             connection = sqlite3.connect(uri, uri=True, timeout=10, isolation_level=None)
             try:
                 connection.row_factory = sqlite3.Row

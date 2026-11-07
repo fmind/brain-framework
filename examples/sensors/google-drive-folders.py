@@ -179,6 +179,6 @@ if __name__ == "__main__":
     except InvalidError as error:
         print(f"Drive folder collection failed: {error}.", file=sys.stderr)
         sys.exit(1)
-    except (OSError, ValueError, TypeError, UnicodeError, subprocess.SubprocessError):
+    except (OSError, ValueError, TypeError, UnicodeError, subprocess.SubprocessError, RecursionError):
         print("Drive folder collection failed; check gws access and folder listing completeness.", file=sys.stderr)
         sys.exit(1)

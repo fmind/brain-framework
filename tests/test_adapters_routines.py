@@ -158,6 +158,11 @@ def test_weekly_review_fails_closed(provider: Provider) -> None:
         assert result.returncode
         assert not result.stdout
         assert "incomplete" in result.stderr
+    # A malformed projects listing fails with one line instead of a traceback.
+    pages(provider, {"page": "", "projects": [PROJECT, "not an item"]}, {"total": 1})
+    malformed = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
+    assert (malformed.returncode, malformed.stdout) == (1, "")
+    assert malformed.stderr == "weekly-review: the projects page is malformed; run bf status\n"
     provider.install("bf", [{"match": ["read"], "code": 1, "stderr": "private detail"}])
     failed = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert failed.returncode
@@ -288,7 +293,7 @@ def test_weekly_review_qualifies_empty_sections_while_a_sensor_needs_attention()
     assert "- Sensor `calendar`: never succeeded on this machine; last attempt failed." in lines
     assert "- Routine `backup`: overdue." in lines
     assert "- Assistant `assistant` in brain `team`: last attempt failed." in lines
-    assert "- 0 items in the period, and a sensor needing attention may have missed some" in lines
+    assert "- 0 items in the period, and a sensor needing attention may have missed some." in lines
     assert "No upcoming item was collected, and a sensor needing attention may have missed some." in lines
     assert lines[-1].startswith("Repair the programs needing attention first.")
     validate_okf("actions/2026-09-25_weekly-review/ACTION.md", text.encode())
@@ -305,7 +310,7 @@ def test_weekly_review_says_why_a_silent_source_needs_attention() -> None:
     lines = text.splitlines()
     assert "- Sensor `mail`: no new or changed record within its `silent_after`." in lines
     assert "- Sensor `feed`: overdue; no new or changed record within its `silent_after`." in lines
-    assert "- 0 items in the period, and a sensor needing attention may have missed some" in lines
+    assert "- 0 items in the period, and a sensor needing attention may have missed some." in lines
     validate_okf("actions/2026-09-25_weekly-review/ACTION.md", text.encode())
 
 
@@ -313,7 +318,7 @@ def test_weekly_review_states_empty_sections_plainly_when_every_sensor_is_curren
     # A late routine collects no evidence: the empty sections need no qualification.
     home = {"projects": [], "tasks": EMPTY_TASKS, "attention": [{"routine": "backup", "freshness": "overdue"}]}
     lines = list(weekly_review().render("2026-09-25", home, {"total": 0}))
-    assert "- 0 items in the period" in lines
+    assert "- 0 items in the period." in lines
     assert "No upcoming item was collected." in lines
 
 
@@ -440,7 +445,7 @@ def test_weekly_review_counts_one_in_the_singular() -> None:
     text = "\n".join(weekly_review().render("2026-09-25", home, {"total": 1}))
     lines = text.splitlines()
     assert "1 open task; 0 completed across 1 note with checkboxes." in lines
-    assert "- 1 item in the period" in lines
+    assert "- 1 item in the period." in lines
     assert "(draft, edited 2026-09-01, 1 newer linked item). Next:" in text
     # The action names every page it was generated from.
     assert "from `bf read`, `bf read projects`, `bf read tasks` and `bf read 7d`." in text

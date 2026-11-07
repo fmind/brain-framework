@@ -185,6 +185,15 @@ def test_link_claims_backlinks_subjects_and_file_evidence(brain: Store) -> None:
     assert read([brain], "bf://fixture/people/bob?rel=friend#about")["ref"] == "projects/bob.md#about"
 
 
+def test_a_note_named_like_a_section_is_not_one(brain: Store) -> None:
+    # A file name may hold `#`: `a.md#x.md` is its own note, and a link to it is no backlink of `a.md`.
+    brain.write("concepts/a.md", b"# A\n")
+    brain.write("concepts/a.md#x.md", b"# X\n")
+    brain.write("concepts/linker.md", b"# Linker\n\nSee [x](a.md%23x.md).\n")
+    assert read([brain], "concepts/a.md")["backlinks"] == []
+    assert group(read([brain], "concepts/a.md#x.md"), "links")["items"][0]["ref"] == "concepts/linker.md"
+
+
 def test_independent_support_of_field_and_link_claims(brain: Store) -> None:
     people(brain)
     brain.write(

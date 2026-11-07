@@ -25,8 +25,8 @@ from bf.history import log_path
 from bf.messages import Message
 from bf.models import Error, Query, encode, timestamp
 from bf.retrieve import read, search
-from bf.runtime import DATABASE, Queue
-from bf.storage import Store, runtime_store, state_store
+from bf.runtime import Queue
+from bf.storage import QUEUE, Store, runtime_store, state_store
 from bf.update import update
 
 
@@ -399,7 +399,7 @@ def incoming(key: str = "message-1") -> Message:
 
 def test_retrieval_and_status_never_create_or_write_lock_the_queue(brain: Store) -> None:
     assisted(brain)
-    database = runtime_store(brain).root / DATABASE
+    database = runtime_store(brain).root / QUEUE
     search([brain], Query(text="offline retrieval"))
     read([brain], "meetings:decision-1")
     read([brain])
@@ -538,7 +538,7 @@ def test_status_says_an_interrupted_queue_write_recovers_with_bf_queue(brain: St
     assisted(brain)
     queue = Queue(brain)
     queue.set_progress("created", {})
-    database = runtime_store(brain).root / DATABASE
+    database = runtime_store(brain).root / QUEUE
     # A writer killed once its journal was synced, as when it spills pages to the file mid-transaction, leaves a
     # journal only the next writer can roll back.
     killed = (

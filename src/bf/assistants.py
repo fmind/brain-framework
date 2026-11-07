@@ -486,14 +486,16 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                 else "assistant execution or saved reply failed; inspect its local log"
             )
             if current["state"] not in {"complete", "cancelled"}:
-                # A harness that never started cannot have acted: its job fails plainly instead of uncertainly. A
-                # failed gate retries by itself: no harness ran.
+                # A harness that never started cannot have acted: its job fails plainly instead of uncertainly, and
+                # retries like a failed attempt when the run is idempotent. A failed gate retries by itself: no
+                # harness ran.
+                idempotent = retried(work.settings.idempotent, work.kind)
                 queue.fail(
                     key,
                     message,
                     uncertain=current["state"] == "running" and not isinstance(error, NotStartedError),
-                    idempotent=retried(work.settings.idempotent, work.kind),
-                    retry=isinstance(error, GateError),
+                    idempotent=idempotent,
+                    retry=isinstance(error, GateError) or (idempotent and isinstance(error, NotStartedError)),
                 )
             with suppress(Error, OSError):
                 append_log(store, work.assistant, message)
@@ -526,6 +528,10 @@ def deliver(
     key, name = str(delivery["id"]), str(delivery["channel"])
     lock = f".delivery-{digest(key.encode())}"
     with collecting(store, lock):
+        # Read it again under the lock: another process may have sent, failed or rescheduled it meanwhile.
+        delivery = queue.delivery(job=job, key=key, names=names)
+        if delivery is None:
+            return False
         try:
             try:
                 command = Send.model_validate_json(str(delivery["command"]))

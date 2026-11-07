@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import ROOT
+from conftest import ROOT, Provider
 
 ADAPTERS = ["google-calendar.py", "google-drive-folders.py", "gmail-headers.py", "git-history.py", "github-history.py"]
 
@@ -56,3 +56,28 @@ def test_providers_start_outside_the_brain(adapter: str, tmp_path: Path, monkeyp
     monkeypatch.chdir(brain)
     run = runpy.run_path(str(ROOT / "examples/sensors" / adapter))["run"]
     assert run(["/bin/pwd"], limit=1024, timeout=30) == b"/\n"
+
+
+# A JSON reply nested deeper than Python's recursion limit makes json.loads raise RecursionError, not ValueError.
+NESTED = "[" * 100_000
+WINDOW = ("2026-10-01T00:00:00+00:00", "2026-10-02T00:00:00+00:00")
+
+
+@pytest.mark.parametrize(
+    ("adapter", "provider_name", "stdout", "arguments"),
+    [
+        ("gmail-headers.py", "gws", NESTED, WINDOW),
+        ("google-calendar.py", "gws", NESTED, ("primary", *WINDOW)),
+        ("google-drive-folders.py", "gws", NESTED, ()),
+        ("github-history.py", "gh", "HTTP/2.0 200 OK\r\n\r\n" + NESTED, ("owner/repo", "commits", *WINDOW)),
+    ],
+)
+def test_deeply_nested_provider_json_fails_with_one_line(
+    provider: Provider, adapter: str, provider_name: str, stdout: str, arguments: tuple[str, ...]
+) -> None:
+    provider.install(provider_name, [{"match": [], "stdout": stdout, "repeat": True}])
+    result = provider.run(adapter, *arguments)
+    assert result.returncode == 1
+    assert not result.stdout
+    assert len(result.stderr.splitlines()) == 1, result.stderr
+    assert "Traceback" not in result.stderr

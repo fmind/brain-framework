@@ -268,7 +268,7 @@ def main() -> None:
     except InvalidError as error:
         print(f"GitHub collection failed: {error}", file=sys.stderr)
         sys.exit(1)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError, RecursionError):
         print(
             "GitHub collection failed: invalid response or provider failure; check gh access and retry", file=sys.stderr
         )

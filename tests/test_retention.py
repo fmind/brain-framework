@@ -71,6 +71,17 @@ def test_forget_removes_records_and_keeps_collection_from_storing_them_again(bra
     assert invoke("validate", "--brain", "fixture")["valid"] is True
 
 
+def test_forget_keeps_the_owner_comments_in_the_forgotten_list(brain: Store) -> None:
+    configure(brain, "    command: [echo]\n")
+    records_file(brain, "mail", [Record(id="m1", title="One"), Record(id="m2", title="Two")])
+    first = digest(b"m1")
+    brain.write("memories/mail/.forgotten", f"# private thread, 2026-09\n{first}".encode())
+    invoke("forget", "mail:m1", "mail:m2", "--brain", str(brain.root))
+    listed = brain.read("memories/mail/.forgotten").decode()
+    assert listed == f"# private thread, 2026-09\n{first}\n{digest(b'm2')}\n"
+    assert stored(brain) == []
+
+
 def test_forget_accepts_record_paths_and_ids_not_collected_yet(brain: Store) -> None:
     configure(brain, "    command: [echo]\n")
     records_file(brain, "mail", [Record(id="m1", title="One")])
@@ -128,6 +139,17 @@ def test_expire_after_removes_and_skips_records_older_than_its_cutoff(brain: Sto
     assert result["expired"] == 3
     assert result["removed"] == 0
     assert stored(brain) == ["new", "recent"]
+
+
+def test_a_failed_collection_keeps_its_expired_records(brain: Store) -> None:
+    configure(brain, f"    command: [echo]\n    expire_after: {YEAR}\n")
+    records_file(brain, "mail", [Record(id="old", title="Old", time="2024-01-01T00:00:00Z")])
+    # A misnamed file the run would replace fails its commit after the expired removal was planned.
+    brain.write(records.path("mail", "misnamed"), records.serialize(Record(id="other", title="Other")))
+    printed = emit({"id": "misnamed", "title": "Misnamed"})
+    with pytest.raises(Error, match="nothing was written"):
+        collect(brain, "mail", start=START, end=END, runner=lambda *_: printed, clock=lambda: NOW)
+    assert sorted(records.files(brain, "mail")) == sorted(records.path("mail", key) for key in ("old", "misnamed"))
 
 
 def test_expire_after_is_bounded(brain: Store) -> None:
@@ -271,3 +293,16 @@ def test_forget_rejects_an_unknown_source_and_validate_checks_the_list(brain: St
     reply = CliRunner().invoke(app, ["validate", "--brain", "fixture"])
     assert reply.exit_code == 1
     assert json.loads(reply.stdout)["problems"][0]["file"] == "memories/mail/.forgotten"
+
+
+def test_forget_exits_1_when_the_refreshed_cache_skips_a_file(brain: Store) -> None:
+    configure(brain, "    command: [echo]\n")
+    records_file(brain, "mail", [Record(id="m1", title="One")])
+    brain.write("projects/broken.md", b"# Broken\n\n\xff\xfe\n")
+    result = CliRunner().invoke(app, ["forget", "mail:m1", "--brain", str(brain.root)])
+    # The records are forgotten, but the skipped note hides evidence, as for build and update.
+    assert result.exit_code == 1, result.output
+    reply = json.loads(result.stdout)
+    assert reply["records"] == [{"ref": "mail:m1", "removed": True, "listed": False}]
+    assert reply["index"]["skipped"] == 1
+    assert stored(brain) == []

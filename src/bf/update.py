@@ -6,6 +6,8 @@ from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import UTC, datetime
+from functools import partial
+from threading import Event
 from typing import Literal
 
 from bf import assistants as assistant_runtime
@@ -140,7 +142,9 @@ def update(
         windows = [item for item in due(store, now) if item[0] in selected_sensors]
         routine_windows = [item for item in due_routines(store, now) if item[0] in selected_routines]
 
-        def _collect_sensor(item: tuple[str, str, str, bool]) -> tuple[dict[str, object], bool]:
+        def _collect_sensor(
+            item: tuple[str, str, str, bool], runner: Runner = runner
+        ) -> tuple[dict[str, object], bool]:
             sensor, start, end, reconcile = item
             result: dict[str, object] = {"sensor": sensor, "start": start, "end": end, "reconcile": reconcile}
             if dry_run:
@@ -160,8 +164,17 @@ def update(
                 return result, True
 
         if len(windows) > 1 and not dry_run:
-            with ThreadPoolExecutor(max_workers=min(WORKERS, len(windows))) as pool:
-                outcomes = list(pool.map(_collect_sensor, windows))
+            # Signals reach only the main thread: on cancellation, stop the workers' programs instead of waiting for them.
+            stop = Event()
+            parallel = partial(run, cancelled=stop.is_set) if runner is run else runner
+            pool = ThreadPoolExecutor(max_workers=min(WORKERS, len(windows)))
+            try:
+                outcomes = list(pool.map(partial(_collect_sensor, runner=parallel), windows))
+            except BaseException:
+                stop.set()
+                raise
+            finally:
+                pool.shutdown(wait=True, cancel_futures=True)
         else:
             outcomes = [_collect_sensor(item) for item in windows]
         for result, item_failed in outcomes:

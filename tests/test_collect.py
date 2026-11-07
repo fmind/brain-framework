@@ -837,6 +837,47 @@ main()
             child.communicate(timeout=5)
 
 
+def test_cancelled_update_stops_sensors_running_in_parallel(configured: Store, tmp_path: Path) -> None:
+    configured.write(
+        "sensors/wait.sh", b'#!/bin/sh\nsleep 60 &\nprintf "%s %s\\n" "$$" "$!" > "$1.tmp"\nmv "$1.tmp" "$1"\nwait\n'
+    )
+    (configured.root / "sensors/wait.sh").chmod(0o700)
+    markers = [tmp_path / "first", tmp_path / "second"]
+    sensors = {
+        marker.name: {"command": ["sensors/wait.sh", str(marker)], "refresh": 60, "timeout": 120} for marker in markers
+    }
+    configured.write("bf.yaml", json.dumps({"version": 8, "name": "fixture", "sensors": sensors}).encode())
+    child = subprocess.Popen(  # noqa: S603 - exercise the CLI boundary with temporary, synthetic collectors
+        [sys.executable, "-m", "bf", "update", "--brain", str(configured.root)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+    pids: list[int] = []
+    try:
+        deadline = time.monotonic() + 20
+        while not all(marker.exists() for marker in markers) and time.monotonic() < deadline and child.poll() is None:
+            time.sleep(0.02)
+        assert all(marker.exists() for marker in markers), "collectors did not start"
+        pids = [int(value) for marker in markers for value in marker.read_text().split()]
+        child.send_signal(signal.SIGTERM)
+        # Workers stop their programs instead of waiting out the 60-second sleep.
+        stdout, stderr = child.communicate(timeout=10)
+        assert child.returncode == 130, stderr.decode()
+        assert stdout == b""
+        for pid in pids:
+            assert ended(pid), f"collector process {pid} survived"
+        assert "success" not in json.dumps(state(configured, SENSORS))
+        assert all(records.files(configured, marker.name) == [] for marker in markers)
+    finally:
+        for leader in pids[::2]:
+            with suppress(ProcessLookupError):
+                os.killpg(leader, signal.SIGKILL)
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)
+
+
 def test_invalid_history_and_cache_errors_do_not_stop_update(configured: Store, tmp_path: Path) -> None:
     state_store(configured.root).write(
         "sensors.json",

@@ -881,7 +881,7 @@ def _replace(store: Store) -> None:
                     live.execute("PRAGMA journal_mode=DELETE")
                     break
                 except sqlite3.OperationalError as error:
-                    if error.sqlite_errorcode not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                    if error.sqlite_errorcode & 0xFF not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
                         raise
                     if time.monotonic() >= deadline:
                         raise BusyError("readers kept the search cache open; retry bf build") from error
@@ -1168,9 +1168,10 @@ _ROW = f"{_FIELDS},'' AS fragment,i.title,i.lead AS excerpt,i.tasks_open,i.tasks
 def within(column: str, note: str) -> str:
     """Fixed SQL: whether `column` names a section of `note`, a note path or BF address, as `note#fragment` does.
 
-    A range over the column's index: `$` follows `#`, so every `note#...` sorts between them.
+    A range over the column's index: `$` follows `#`, so every `note#...` sorts between them. A fragment never ends
+    in `.md`, so a path such as `a.md#x.md` names another note, not a section of `a.md`.
     """
-    return f"{column}>{note}||'#' AND {column}<{note}||'$'"
+    return f"{column}>{note}||'#' AND {column}<{note}||'$' AND substr({column},-3)!='.md'"
 
 
 # Fixed SQL: each name of the JSON array :names that exactly one item holds, with that item. A name that several
@@ -1775,7 +1776,8 @@ def status(store: Store) -> dict[str, object]:
         sizes = dict(
             connection.execute(
                 "SELECT substr(path,10,instr(substr(path,10),'/')-1),sum(size) FROM files "
-                "WHERE path GLOB 'memories/?*/*' GROUP BY 1"
+                # A size of -1 marks a file a transient error left unstated.
+                "WHERE path GLOB 'memories/?*/*' AND size>=0 GROUP BY 1"
             ).fetchall()
         )
     for source, entry in counts.items():

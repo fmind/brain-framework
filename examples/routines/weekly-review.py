@@ -72,7 +72,10 @@ def projects(brain: str) -> list[dict]:
     offset = 0
     for _ in range(MAX_PROJECT_PAGES):
         reply = page(brain, "projects", offset)
-        result.extend(item for item in reply.get("items", []) if item.get("review"))
+        items = reply.get("items", [])
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            raise SystemExit("weekly-review: the projects page is malformed; run bf status")
+        result.extend(item for item in items if item.get("review"))
         if "next_offset" not in reply:
             return result
         following = reply["next_offset"]
@@ -236,7 +239,7 @@ def render(day: str, home: dict, week: dict) -> Iterator[str]:
         period += f"; records by source: {sources}"
     elif not week.get("total"):
         period += qualifier
-    yield period
+    yield period + "."
     # The days around this one that `bf read SINCE..DAY` and `bf read DAY..AHEAD` list in full.
     today = date.fromisoformat(day)
     since, ahead = (today - timedelta(days=7)).isoformat(), (today + timedelta(days=7)).isoformat()

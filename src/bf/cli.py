@@ -190,6 +190,13 @@ def emit(value: object, *, reply: bool = True) -> None:
     _write(terminal(present(value) if reply else value))
 
 
+def _finish(value: object, *, failed: bool) -> None:
+    """Print a reply, then exit 1 when it reports a failed operation: the reply says what failed."""
+    emit(value)
+    if failed:
+        raise typer.Exit(1)
+
+
 def _write(data: bytes, *, flush: bool = True) -> None:
     """Write reply bytes; standard output that cannot take them, such as a full disk, fails the command."""
     try:
@@ -275,7 +282,7 @@ _PEOPLE = {
     "author": "Account explicitly credited as author; authorship is not ownership.",
     "owner": "Account or organization the provider declares responsible for the item.",
     "assignee": "Account assigned responsibility for the item.",
-    "participant": "Any account in a message, event or meeting; the specific roles list here too.",
+    "participant": "Any account in a message, event or meeting; its narrower relations, such as sender, list here too.",
 }
 _ROLES = {
     "sender": "Account that sent the message.",
@@ -459,9 +466,7 @@ def install(
     from bf.install import skills
 
     result = skills(destination, check=check, force=force)
-    emit(result)
-    if not result["ok"]:
-        raise typer.Exit(1)
+    _finish(result, failed=not result["ok"])
 
 
 @app.command("schema", rich_help_panel="Set up")
@@ -645,6 +650,9 @@ def forget_records(
     """Remove collected records and keep their sensors from storing them again; Git history keeps old copies."""
     targets: dict[str, dict[str, str]] = {}
     for ref in refs:
+        # The UTF-8 check of single values skips arguments that take several, as `run` passes Git's arguments as given.
+        if _surrogates(ref):
+            raise typer.BadParameter("expected UTF-8 text", param_hint="REF")
         try:
             source, entry = records.target(ref)
         except Error as error:
@@ -664,7 +672,8 @@ def forget_records(
     result: dict[str, object] = {"ok": True, "dry_run": dry_run, "records": removed}
     if not dry_run:
         result["index"] = index.refresh(store, recover=True)
-    emit(result)
+    # Like build and update: a skipped file hides evidence, and bf validate names it.
+    _finish(result, failed=bool(cast("dict[str, int]", result.get("index", {})).get("skipped")))
 
 
 @app.command("run", rich_help_panel="Collect and automate")
@@ -724,22 +733,20 @@ def perform(
         except UnicodeError as error:
             raise Error("assistant input must be UTF-8 text") from error
         result = run_assistant(store, names[0], text=text, dry_run=dry_run)
-        emit(result)
-        if not result["ok"]:
-            raise typer.Exit(1)
+        _finish(result, failed=not result["ok"])
         return
     # Git closes a hook's input; an agent's shell can hold its own open, so a direct run reads it only on request,
     # and a hook only for the routines it runs: a hook that no routine lists succeeds at once.
     stdin = _input() if forward or (hook and hooked(config, hook)) else b""
     result = run_routines(store, names=names, hook=hook, args=args, stdin=stdin, dry_run=dry_run)
-    emit(result)
-    if not result["ok"]:
-        raise typer.Exit(1)
+    _finish(result, failed=not result["ok"])
 
 
 @app.command("channel", rich_help_panel="Collect and automate")
 def channel_command(
-    action: Annotated[Literal["read", "send"], typer.Argument(help="Read a bounded batch or send one message.")],
+    action: Annotated[
+        Literal["read", "send"], typer.Argument(metavar="ACTION", help="Read a bounded batch or send one message.")
+    ],
     name: Annotated[str, typer.Argument(metavar="CHANNEL", help="A configured channel name.")],
     brain: RunOption = "",
     since: Annotated[str, typer.Option(help="Required start of a read window.")] = "",
@@ -791,9 +798,7 @@ def channel_command(
         )
     if saved["receipt"]:
         saved["receipt"] = decode(saved["receipt"])
-    emit(saved)
-    if saved["state"] != "delivered":
-        raise typer.Exit(1)
+    _finish(saved, failed=saved["state"] != "delivered")
 
 
 @app.command("queue", rich_help_panel="Collect and automate")
@@ -818,9 +823,9 @@ def queue_command(
         if retry and "channel" in saved:
             assistants.deliver(queue.brain, key=key)
             saved = queue.inspect(key)
-        emit({"id": key, "status": saved["state"]})
-        if retry and "channel" in saved and saved["state"] != "delivered":
-            raise typer.Exit(1)
+        _finish(
+            {"id": key, "status": saved["state"]}, failed=retry and "channel" in saved and saved["state"] != "delivered"
+        )
     elif key:
         row = queue.inspect(key)
         for name in ("payload", "prepared", "command", "receipt"):
@@ -857,9 +862,7 @@ def refresh(
         assistants=tuple(assistant or ()),
         kinds=kinds,
     )
-    emit(result)
-    if not result["ok"]:
-        raise typer.Exit(1)
+    _finish(result, failed=not result["ok"])
 
 
 def _kinds(values: list[str]) -> frozenset[ProgramKind]:
@@ -941,18 +944,14 @@ def report(
         observe(one(brain), observe=True)
         return
     result = health.report(select(brain))
-    emit(result)
-    if check and not result["healthy"]:
-        raise typer.Exit(1)
+    _finish(result, failed=check and not result["healthy"])
 
 
 @app.command("validate", rich_help_panel="Check and repair")
 def check(brain: OneBrainOption = "") -> None:
     """Check OKF projects, concepts and ACTION.md notes, links, record files and program files; exit 1 on problems."""
     result = validate(one(brain))
-    emit(result)
-    if not result["valid"]:
-        raise typer.Exit(1)
+    _finish(result, failed=not result["valid"])
 
 
 @app.command("eval", rich_help_panel="Check and repair")
@@ -972,9 +971,7 @@ def acceptance(
     _option("--path", relative, path)
     previous = _option("--baseline", load_baseline, str(baseline)) if baseline else None
     result = evaluate(one(brain), path, previous)
-    emit(result)
-    if not result["passed"]:
-        raise typer.Exit(1)
+    _finish(result, failed=not result["passed"])
 
 
 @app.command("build", rich_help_panel="Check and repair")
@@ -1002,9 +999,7 @@ def rebuild(
         result = remap(store, reproject, dry_run=dry_run)
         if not dry_run:
             result["index"] = index.refresh(store, recover=True)
-        emit(result)
-        if result["failed"] or cast("dict[str, int]", result.get("index", {})).get("skipped"):
-            raise typer.Exit(1)
+        _finish(result, failed=bool(result["failed"] or cast("dict[str, int]", result.get("index", {})).get("skipped")))
         return
     result = index.refresh(store, full=True)
     emit(result)
@@ -1064,6 +1059,7 @@ def _input() -> bytes:
 _GIVEN = {
     "--brain": "give a brain name or path; an empty value would select another brain",
     "--hook": "give an event name; an empty value would run the first argument as a routine",
+    "--input": "give a file, or - for stdin; an empty value would run the sensor",
     "--assistant": "give an assistant name; an empty value names none",
     "--reproject": "give a sensor name; an empty value would rebuild the cache instead",
     "--routine": "give a routine name; an empty value names none",
