@@ -6,9 +6,8 @@ license: MIT
 
 # bf-contribute
 
-1. **Inspect before editing**: Follow the direction, invariants and safety boundaries in [AGENTS.md](../../../AGENTS.md). Inspect Git status and the relevant implementation before changing it; preserve staged and unrelated work.
-1. **Verify through the shared gate**: Follow [CONTRIBUTING.md](../../../CONTRIBUTING.md#set-up-and-check-a-change) for development commands and verification. Its [test guidance](../../../CONTRIBUTING.md#test-outcomes-and-failures) owns fixtures, workflow checks and documentation updates; example READMEs own runnable steps and expected results.
-1. **Keep private brains separate**: Keep changes within the requested scope. Provider projection, service installation and agent-host installation belong to brain maintenance. Do not run live providers or use private-brain data for contribution tests.
+[AGENTS.md](../../../AGENTS.md) holds the direction, invariants and safety boundaries, and [CONTRIBUTING.md](../../../CONTRIBUTING.md) the checks. This skill adds three rules.
+
 1. **Use consistent user vocabulary**: Write everyday user commands from inside the brain directory. Reserve `--brain` for selection examples, host configuration and unattended scripts. Prefer short tables and runnable examples; link to the owning contract instead of repeating it. Use one word per concept: relation (never role or relationship), `fields:`, record, `overdue` for late programs and `stale` only for results from a busy cache.
-1. **Preserve the release contract**: Within a major release, schemas only gain optional fields, widen what configuration files accept or narrow what replies return; `tests/test_contract.py` rejects anything else. A breaking change ships in a major release, whenever needed, with manual upgrade steps in the changelog ([keep the contract](../../../CONTRIBUTING.md#keep-the-contract)).
-1. **Report verified evidence boundaries**: Report the verified snapshot and evidence boundaries described in [Contributing](../../../CONTRIBUTING.md#release). Commit, push and publish only when authorized; an authorized publication follows the [release checklist](references/release.md).
+1. **Test with fake providers only**: Never run live providers or use private-brain data in contribution tests; use the fake providers in `tests/conftest.py`. Provider projection, service installation and agent-host installation belong to brain maintenance, not this repository.
+1. **Release only with authorization**: Commit, push and publish only when authorized. An authorized release follows the [release checklist](references/release.md).

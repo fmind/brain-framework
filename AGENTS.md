@@ -2,7 +2,7 @@
 
 Brain Framework is one Python package (`brain-framework`) and command (`bf`) for a brain kept in plain files its owner can inspect, edit and share. It provides collection, validation, a knowledge graph and offline retrieval; humans and agents supply interpretation, judgment and action.
 
-[CONTRIBUTING.md](CONTRIBUTING.md) owns setup, checks and documentation rules, [docs/docs/](docs/docs/) owns user-facing contracts and [bf-contribute](.agents/skills/bf-contribute/SKILL.md) owns vocabulary and the release checklist. This file holds direction, invariants and traps no check reports clearly.
+[CONTRIBUTING.md](CONTRIBUTING.md) owns setup, checks and documentation rules, [docs/docs/](docs/docs/) owns user-facing contracts, [GOVERNANCE.md](GOVERNANCE.md) owns scope decisions and the breaks held for the next major, and [bf-contribute](.agents/skills/bf-contribute/SKILL.md) owns vocabulary and the release checklist. This file holds direction, invariants and traps no check reports clearly.
 
 ## Direction
 
@@ -10,7 +10,7 @@ BF supports one loop: **gather → normalize → organize and connect → act �
 
 - **Judge a change by its use**: Does it help someone gather relevant evidence, understand its connections or act with better context? Prefer a complete, inspectable path from source to decision over more data or another abstraction, and keep the brain useful in an ordinary editor.
 - **Show, don't tell**: A new feature ships with user-facing documentation, a runnable example and its expected result, and an update to the owning skill when a workflow changes. Distinguish fictional outcomes from measured results.
-- **Respect the current scope**: The core stays one package and command, with no model inference, provider SDKs, plugin framework, importable sensor SDK or record sync; each computer runs its own brain. Integration helpers ship as the copy-in, standard-library `examples/sensors/_sensor.py` kit, the standard vocabulary `bf init` declares and `bf collect --input`. Embeddings stay outside the core: `bf export --kind items` feeds external retrievers. Assistants, channels, `watch` and multi-brain retrieval are kept and may be improved when evidence from real use justifies it. These are owner decisions: propose crossing one rather than working around it.
+- **Respect the current scope**: The core stays one package and command, with no model inference, provider SDKs, plugin framework, importable sensor SDK or record sync; each computer runs its own brain. Integration helpers ship as the copy-in, standard-library `examples/sensors/_sensor.py` kit, the standard vocabulary `bf init` declares and `bf collect --input`. Embeddings stay outside the core: `bf export --kind items` feeds external retrievers. Assistants, channels, `watch` and multi-brain retrieval are kept and may be improved when evidence from real use justifies it. These are owner decisions, with their reasons and reopen evidence in [GOVERNANCE.md](GOVERNANCE.md#scope-decisions): propose crossing one rather than working around it.
 - **Break cleanly when the design needs it**: Add no compatibility or migration machinery. Removing or changing a command, flag, configuration key, environment variable, persisted format or reply contract, or rejecting input that loads today, ships in a major release with manual upgrade steps; the owner can cut one whenever needed, and related breaks batch into one release where practical. Within a major, schemas only gain optional fields, widen what configuration accepts and narrow what replies return (`tests/test_contract.py`). Input BF misread is a bug for a patch release ([keep the contract](CONTRIBUTING.md#keep-the-contract)).
 
 ## Design invariants
@@ -32,7 +32,7 @@ BF supports one loop: **gather → normalize → organize and connect → act �
 
 ## Where to work
 
-- **`src/bf/`**: Modules are named by concern. `replies.py` declares the `search` and `read` replies, and `tests/conftest.py` validates every reply the suite produces, so describe a new field there first. Only `mcp.py` imports the optional MCP SDK, lazily; `scripts/test_package.py` checks the base install without it.
+- **`src/bf/`**: Modules are named by concern; [CONTRIBUTING](CONTRIBUTING.md#set-up-and-check-a-change) maps each area to its modules and focused tests. `replies.py` declares the `search` and `read` replies, and `tests/conftest.py` validates every reply the suite produces, so describe a new field there first. Only `mcp.py` imports the optional MCP SDK, lazily; `scripts/test_package.py` checks the base install without it.
 - **`src/bf/skills/`**: The packaged skills (`bf-use`, `bf-action`, `bf-setup`, `bf-maintain`); `tests/test_skills.py` checks their text and `mise run eval:skills` their behavior (it spends tokens). Put decision, action and learning conventions in these skills, not the core format.
 - **`src/bf/starter/` and `examples/brain/`**: Their `AGENTS.md` files are sample content for users, not rules for this repository.
 - **`examples/`**: Scripts users copy into their brains, run as processes with fake providers in `tests/test_adapters_*.py`. They and the skills' `scripts/` use only the standard library of Python 3.11.

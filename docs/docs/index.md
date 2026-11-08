@@ -9,7 +9,7 @@ description: Keep evidence, decisions and next steps in plain files that you and
 
 **🧠 Brain Framework: from information to informed actions.**
 
-Keep selected evidence, decisions and next steps in a folder you can inspect and edit. Brain Framework (BF) makes those files searchable and connects them through explicit links. You and your agents use the same evidence; no BF account or model is required.
+Brain Framework (BF) is a local-first brain for you and your AI agents. It gathers evidence from your tools into plain files you own, connects it through an ontology you declare, lets any agent harness search it offline and can wake that harness when a gate you review finds an event. No BF account or model is required.
 
 **Start with [Getting started](getting-started.md): save a decision, find its reason and check the result.** You need Linux or macOS, a terminal and a text editor.
 
@@ -24,6 +24,24 @@ Keep selected evidence, decisions and next steps in a folder you can inspect and
 | Learn                | When the brief changes, BF flags the project; you update it and keep a useful lesson as a concept. |
 
 Start with notes; add sources, routines and assistants as the work needs them. The [four-tool walkthrough](context-hub.md) runs the whole loop on fictional Workspace, Jira, GitHub and Gcloud evidence.
+
+## Let your agent come to you
+
+An [assistant](prompts.md) can watch what your sensors collect and speak first:
+
+```yaml
+assistants:
+  triage:
+    prompt: prompts/triage.md
+    command: [claude, --print, --output-format, json, --json-schema, "{{schema}}"] # your harness and its permissions
+    reply: { path: /structured_output } # {say, wake}
+    post: desktop # a channel you declare
+    wake: { min: 600, max: 86400 }
+    schedules:
+      mail: { every: 600, gate: { command: [python3, routines/records-gate.py, mail] } }
+```
+
+While `bf watch` runs, a [gate](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py) you review checks the collected records every 10 minutes. Each check starts your harness only when the gate finds events. The harness speaks or stays silent and may ask for one follow-up wake. BF posts its answer to your channel and records each run. Mail text reaches your harness, so [limit its tools](prompts.md#keep-prompts-safe), or let a read-only assistant [propose and another act](prompts.md#propose-then-act).
 
 ## Choose a guide
 

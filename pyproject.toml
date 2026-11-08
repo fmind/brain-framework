@@ -2,7 +2,7 @@
 [project]
 name = "brain-framework"
 version = "21.3.0"
-description = "🧠 Brain Framework: from information to informed actions."
+description = "Brain Framework is a local-first brain for you and your AI agents. It gathers evidence from your tools into plain files you own, connects it through an ontology you declare, lets any agent harness search it offline and can wake that harness when a gate you review finds an event."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
@@ -12,21 +12,29 @@ keywords = [
   "ai",
   "ai-agents",
   "agent-memory",
+  "agent-skills",
+  "agents-md",
   "context-engineering",
+  "knowledge-graph",
   "knowledge-management",
   "local-first",
   "mcp",
   "model-context-protocol",
+  "ontology",
+  "personal-knowledge-management",
   "python",
   "second-brain",
 ]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
+  "Intended Audience :: Developers",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Text Processing :: Indexing",
   "Typing :: Typed",
 ]
 dependencies = [
@@ -46,6 +54,7 @@ Changelog = "https://fmind.github.io/brain-framework/changelog/"
 Documentation = "https://fmind.github.io/brain-framework/"
 Issues = "https://github.com/fmind/brain-framework/issues"
 Repository = "https://github.com/fmind/brain-framework"
+Security = "https://github.com/fmind/brain-framework/security/policy"
 
 [project.scripts]
 bf = "bf:main"

@@ -11,11 +11,15 @@
 
 **🧠 Brain Framework: from information to informed actions.**
 
-A second brain for you, your team and your AI agents, on your own computer. Gather what matters from every tool you work with, connect it into one knowledge graph and open your agent there, so it acts with everything you know instead of starting from scratch.
+Brain Framework is a local-first brain for you and your AI agents. It gathers evidence from your tools into plain files you own, connects it through an ontology you declare, lets any agent harness search it offline and can wake that harness when a gate you review finds an event.
+
+- **Files you own, open to any agent.** A brain is a folder of Markdown and JSON. Agents reach it through the `bf` CLI, [MCP](https://fmind.github.io/brain-framework/docs/mcp/), [Agent Skills](https://agentskills.io/specification) and `AGENTS.md`.
+- **Connections you declare.** Fields and links are explicit, and each claim keeps its source record. When that record changes, `newer_evidence` flags the conclusion. Nothing is inferred.
+- **You decide when your agent runs.** [Gate programs](https://github.com/fmind/brain-framework#let-your-agent-come-to-you) you review can decide when your harness starts, and the harness's own permissions decide what it may do.
 
 [![CI](https://github.com/fmind/brain-framework/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fmind/brain-framework/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/brain-framework?color=174EA6)](https://pypi.org/project/brain-framework/) [![Python](https://img.shields.io/pypi/pyversions/brain-framework)](https://pypi.org/project/brain-framework/) [![License: MIT](https://img.shields.io/badge/license-MIT-174EA6)](https://github.com/fmind/brain-framework/blob/main/LICENSE)
 
-[Try it](https://github.com/fmind/brain-framework#try-it) · [How it works](https://github.com/fmind/brain-framework#how-it-works) · [Agents](https://github.com/fmind/brain-framework#open-your-agent-in-your-brain) · [Your tools](https://github.com/fmind/brain-framework#bring-your-tools) · [Good to know](https://github.com/fmind/brain-framework#good-to-know) · [Documentation](https://fmind.github.io/brain-framework/)
+[Try it](https://github.com/fmind/brain-framework#try-it) · [How it works](https://github.com/fmind/brain-framework#how-it-works) · [Agents](https://github.com/fmind/brain-framework#open-your-agent-in-your-brain) · [Your tools](https://github.com/fmind/brain-framework#bring-your-tools) · [Proactive agents](https://github.com/fmind/brain-framework#let-your-agent-come-to-you) · [Good to know](https://github.com/fmind/brain-framework#good-to-know) · [Documentation](https://fmind.github.io/brain-framework/)
 
 <a href="https://raw.githubusercontent.com/fmind/brain-framework/main/docs/assets/brain-loop.svg">
   <img
@@ -228,6 +232,24 @@ After reviewing your sensors, run `bf watch` to keep them refreshed and see fail
 
 The dashboard shows the [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch), which needs no provider account.
 
+## Let your agent come to you
+
+An [assistant](https://fmind.github.io/brain-framework/docs/prompts/) can watch what your sensors collect and speak first:
+
+```yaml
+assistants:
+  triage:
+    prompt: prompts/triage.md
+    command: [claude, --print, --output-format, json, --json-schema, "{{schema}}"] # your harness and its permissions
+    reply: { path: /structured_output } # {say, wake}
+    post: desktop # a channel you declare
+    wake: { min: 600, max: 86400 }
+    schedules:
+      mail: { every: 600, gate: { command: [python3, routines/records-gate.py, mail] } }
+```
+
+While `bf watch` runs, a [gate](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py) you review checks the collected records every 10 minutes. Each check starts your harness only when the gate finds events. The harness speaks or stays silent and may ask for one follow-up wake. BF posts its answer to your channel and records each run. Mail text reaches your harness, so [limit its tools](https://fmind.github.io/brain-framework/docs/prompts/#keep-prompts-safe), or let a read-only assistant [propose and another act](https://fmind.github.io/brain-framework/docs/prompts/#propose-then-act).
+
 ## Good to know
 
 1. **Your data stays on your computer.** A brain is a folder on your disk. BF has no account, server or telemetry, and search and read work offline. Sensors collect while your machine is on.
@@ -236,4 +258,4 @@ The dashboard shows the [offline watch demo](https://github.com/fmind/brain-fram
 1. **It takes some setup.** Each source needs its access, such as `gh auth login` or `gcloud` authentication, then a sensor you review. Sensors, routines and the ontology are files you can read, edit or ask your agent to adapt.
 1. **It finds what was said and linked, not what was meant.** Search matches words and explicit identities, without embeddings, and incomplete results say so. Collect again when you need newer evidence. See [what BF does not do](https://fmind.github.io/brain-framework/docs/concepts/#what-bf-does-not-do).
 
-[Browse the commands](https://fmind.github.io/brain-framework/docs/commands/) · [Report an issue](https://github.com/fmind/brain-framework/issues) · [Contribute](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md) · [MIT licensed](https://github.com/fmind/brain-framework/blob/main/LICENSE) · [Third-party notices](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md)
+[Browse the commands](https://fmind.github.io/brain-framework/docs/commands/) · [Report an issue](https://github.com/fmind/brain-framework/issues) · [Contribute](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md) · [Governance](https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md) · [MIT licensed](https://github.com/fmind/brain-framework/blob/main/LICENSE) · [Third-party notices](https://github.com/fmind/brain-framework/blob/main/THIRD_PARTY_NOTICES.md)

@@ -1,6 +1,6 @@
 # Contributing
 
-Start with [AGENTS.md](AGENTS.md) and [bf-contribute](.agents/skills/bf-contribute/SKILL.md). Keep changes small, preserve offline retrieval and file-based knowledge, and use synthetic evidence. Discuss changes that enlarge the product before implementing them.
+Start with [AGENTS.md](AGENTS.md) and [bf-contribute](.agents/skills/bf-contribute/SKILL.md). Keep changes small, preserve offline retrieval and file-based knowledge, and use synthetic evidence. Discuss changes that enlarge the product before implementing them, as [GOVERNANCE.md](GOVERNANCE.md#propose-a-change) describes.
 
 ## Start from a useful outcome
 
@@ -11,7 +11,7 @@ You can contribute without extending the core:
 - **A source adapter:** name the recurring question it answers, selected scope, shared-field mappings and fake-provider tests for complete success and failure. Keep provider access in the existing sensor pattern.
 - **An experience report:** share a useful outcome or why you stopped using BF through the [usage form](https://github.com/fmind/brain-framework/issues/new?template=usage.yml). Include repeated use and maintenance effort when observed; label estimates.
 
-The [team pilot](docs/docs/team.md#evaluate-a-pilot) compares the current workflow, the same curated files accessed directly and BF retrieval. Present task counts, failures, versions and measurement limits with any claimed improvement. A passing fixture, installation, download or star is not adoption evidence. Keep support in repository issues until actual needs justify another channel.
+The [team pilot](docs/docs/team.md#evaluate-a-pilot) compares the current workflow, the same curated files accessed directly and BF retrieval. Present task counts, failures, versions and measurement limits with any claimed improvement. A passing fixture, installation, download or star is not adoption evidence. Support stays in [repository issues](https://github.com/fmind/brain-framework/issues): open one to ask for help, to run a pilot with this protocol or to start contributing.
 
 For a public demonstration, follow the [four-tool walkthrough](docs/docs/context-hub.md): collect the four fixtures, show their shared project relation, record the launch conclusion, then change the Jira fixture and show the project flagged with `newer_evidence`. It is a reproducible fictional demonstration, not a customer case study. Publish real pilot results only with the relevant permission and privacy review.
 
@@ -32,22 +32,29 @@ mise run all
 
 Exercise checkout code on a disposable brain with `uv run --locked bf COMMAND --brain BRAIN` from the checkout, such as `uv run --locked bf validate --brain /tmp/demo`, or `uv run --locked --project CHECKOUT bf COMMAND` inside the brain. `mise run test:watch` reruns tests after edits; `mise run docs:watch` serves the documentation.
 
-Use a focused check while editing, then run the full gate:
+Use a focused check while editing, then run the full gate. Modules live in `src/bf/`, and each module's first docstring line states its concern:
 
-| Changed area                   | Focused check                                                                            | What to verify                                                                                          |
-| ------------------------------ | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Search                         | `uv run --locked pytest -q tests/test_search.py`                                         | Results and realistic failure cases.                                                                    |
-| Markdown parsing               | `uv run --locked pytest -q tests/test_markdown.py`                                       | Heading slugs and anchors, claim footnotes, note leads and located link errors.                         |
-| Search cache                   | `uv run --locked pytest -q tests/test_cache.py tests/test_cache_version.py`              | Refreshes match a full build; new cache output bumps [`index.SCHEMA`](#version-the-search-cache).       |
-| Limits and usage               | `uv run --locked pytest -q tests/test_bounds.py tests/test_usage.py`                     | Documented limits hold at their edges; usage rotation stays within 1 MiB.                               |
-| Retrieval quality              | `uv run --locked pytest -q tests/test_retrieval_example.py`                              | Questions still find the expected source, rank and answer fragment; see [cases](#add-a-retrieval-case). |
-| Documentation                  | `mise run check:docs` and `mise run check:links`                                         | Strict build, rendered anchors and local repository links with their anchors.                           |
-| Getting started, first sensor  | `uv run --locked pytest -q tests/test_guides.py`                                         | Commands return the documented replies; the test applies each other block as its prose says.            |
-| Walkthroughs and examples      | `uv run --locked pytest -q tests/test_example_walkthroughs.py tests/test_context_hub.py` | README walkthroughs and the four-tool page run on disposable copies and print their stated results.     |
-| Configuration model or reply   | `mise run generate:schema`                                                               | Generated `docs/*.schema.json` match their loaders and replies; test valid and invalid inputs.          |
-| Watch dashboard                | `mise run generate:screenshot`                                                           | `docs/assets/watch.svg` shows the current dashboard; regenerate after dashboard or Rich changes.        |
-| Dependencies                   | `mise run generate:notices`                                                              | `THIRD_PARTY_NOTICES.md` and the site's license copies match the synced environment.                    |
-| Indexing, retrieval or storage | `mise run benchmark` before and after                                                    | Comparable timings with valid, complete results.                                                        |
+| Changed area                   | Files                                                       | Focused check                                                                                                                                      | What to verify                                                                                          |
+| ------------------------------ | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Search                         | `retrieve.py`                                               | `uv run --locked pytest -q tests/test_search.py`                                                                                                   | Results and realistic failure cases.                                                                    |
+| Markdown parsing               | `markdown.py`                                               | `uv run --locked pytest -q tests/test_markdown.py`                                                                                                 | Heading slugs and anchors, claim footnotes, note leads and located link errors.                         |
+| Search cache                   | `index.py`                                                  | `uv run --locked pytest -q tests/test_cache.py tests/test_cache_version.py`                                                                        | Refreshes match a full build; new cache output bumps [`index.SCHEMA`](#version-the-search-cache).       |
+| Limits and usage               | `usage.py` and each bounded module                          | `uv run --locked pytest -q tests/test_bounds.py tests/test_usage.py`                                                                               | Documented limits hold at their edges; usage rotation stays within 1 MiB.                               |
+| Retrieval quality              | `retrieve.py`, `index.py`                                   | `uv run --locked pytest -q tests/test_retrieval_example.py`                                                                                        | Questions still find the expected source, rank and answer fragment; see [cases](#add-a-retrieval-case). |
+| Collection and routines        | `collect.py`, `update.py`, `history.py`, `records.py`       | `uv run --locked pytest -q tests/test_collect.py tests/test_update.py tests/test_routines.py tests/test_reconciliation.py tests/test_retention.py` | Failed runs write nothing; windows advance only on success; forgetting and expiry keep their rules.     |
+| Assistants, queue and channels | `assistants.py`, `runtime.py`, `channels.py`, `messages.py` | `uv run --locked pytest -q tests/test_messaging.py tests/test_prompts.py tests/test_channels.py tests/test_assistant_paths.py`                     | Prompt and reply boundaries, durable recovery, ACK after admission and bounded channel batches.         |
+| Status                         | `health.py`                                                 | `uv run --locked pytest -q tests/test_health.py`                                                                                                   | Coverage separates maintained sources from retained history.                                            |
+| Watch                          | `watch.py`, `watch_settings.py`                             | `uv run --locked pytest -q tests/test_watch.py tests/test_watch_settings.py`                                                                       | Rendering, keys, cancellation and notification transitions.                                             |
+| Validation                     | `validate.py`                                               | `uv run --locked pytest -q tests/test_validate.py`                                                                                                 | Every broken note, link and record is reported at once, located in its file.                            |
+| Pages and graph                | `pages.py`, `graph.py`, `ontology.py`, `links.py`           | `uv run --locked pytest -q tests/test_pages.py tests/test_edges.py tests/test_ontology.py tests/test_links.py`                                     | Bounded pages with readable refs, explicit relations and identities, and edge cases.                    |
+| CLI and MCP                    | `cli.py`, `mcp.py`                                          | `uv run --locked pytest -q tests/test_cli.py tests/test_mcp.py`                                                                                    | Usage errors and streams; MCP offers only `search` and `read` with the CLI's payloads.                  |
+| Documentation                  | `docs/docs/`                                                | `mise run check:docs` and `mise run check:links`                                                                                                   | Strict build, rendered anchors and local repository links with their anchors.                           |
+| Getting started, first sensor  | `docs/docs/`                                                | `uv run --locked pytest -q tests/test_guides.py`                                                                                                   | Commands return the documented replies; the test applies each other block as its prose says.            |
+| Walkthroughs and examples      | `examples/`                                                 | `uv run --locked pytest -q tests/test_example_walkthroughs.py tests/test_context_hub.py`                                                           | README walkthroughs and the four-tool page run on disposable copies and print their stated results.     |
+| Configuration model or reply   | `models.py`, `replies.py`, `schemas.py`                     | `mise run generate:schema`                                                                                                                         | Generated `docs/*.schema.json` match their loaders and replies; test valid and invalid inputs.          |
+| Watch dashboard                | `watch.py`                                                  | `mise run generate:screenshot`                                                                                                                     | `docs/assets/watch.svg` shows the current dashboard; regenerate after dashboard or Rich changes.        |
+| Dependencies                   | `pyproject.toml`, `uv.lock`                                 | `mise run generate:notices`                                                                                                                        | `THIRD_PARTY_NOTICES.md` and the site's license copies match the synced environment.                    |
+| Indexing, retrieval or storage | `index.py`, `retrieve.py`, `storage.py`                     | `mise run benchmark` before and after                                                                                                              | Comparable timings with valid, complete results.                                                        |
 
 ### Add a retrieval case
 
@@ -85,14 +92,14 @@ It needs a logged-in `claude` and spends tokens (about $0.30 per trial of every 
 
 ### Keep the contract
 
-`tests/contract/` holds the configuration and reply schemas of the current major release, and `tests/test_contract.py` compares every generated `docs/*.schema.json` with them. A minor release may only add optional fields, widen what files accept and narrow what replies return:
+`tests/contract/` holds the configuration and reply schemas of the current major release, and `tests/test_contract.py` compares every generated `docs/*.schema.json` with them. The contract is the CLI, the MCP tools, the environment programs receive, file formats and published schemas; `bf.*` Python modules are internal and may change in any release. A minor release may only add optional fields, widen what files accept and narrow what replies return:
 
 - **Configuration** (`bf.yaml`, the registry and eval suites) is compared from the writer's side: every file that loads must keep loading. Removing a field, changing its type, narrowing accepted values or a bound, requiring a new key, or adding or widening a `oneOf` alternative fails the gate.
 - **Replies** (`search` and `read`) are compared from the reader's side, because clients validate replies with the schema they saved. Removing a field or making it optional, dropping or changing a type, adding an enum or const value or an alternative that fits no released one, or loosening a bound, pattern, format, `items` or `additionalProperties` fails the gate.
 
 Any other change to a bound, pattern, format or condition, such as `not` or `allOf`, fails closed and waits for the next major release. That release refreshes `tests/contract/` from `docs/*.schema.json` and lists the manual upgrade steps in the changelog.
 
-A breaking change ships in a major release whenever the design needs it, with no compatibility layer. Record it under `### Breaking changes` in `Unreleased` with its manual upgrade step; the next release is then a major. Each major costs every installation a manual upgrade, so batch related breaks into one release where practical, and let a stricter rule warn through `bf validate` or a `bf:` diagnostic first when that costs little. Input that BF previously misread is a bug: fix it in a patch release.
+A breaking change ships in a major release whenever the design needs it, with no compatibility layer. Record it under `### Breaking changes` in `Unreleased` with its manual upgrade step; the next release is then a major. Each major costs every installation a manual upgrade, so batch related breaks into one release where practical. Add yours to those [planned for the next major](GOVERNANCE.md#next-major). Let a stricter rule warn through `bf validate` or a `bf:` diagnostic first when that costs little. Input that BF previously misread is a bug: fix it in a patch release.
 
 ### Version the search cache
 
@@ -109,6 +116,14 @@ Layer each page for its reader:
 - **Each rule has one home**: state it on its owning page and link to it elsewhere. Before removing a guide's copy, check that the owner states it completely.
 
 Use descriptive links, one page title, logical heading levels and text alternatives for images ([W3C guidance](https://www.w3.org/WAI/tutorials/page-structure/)). Preserve published documentation-site paths and heading anchors when reorganizing: redirect a merged page to its new section in `zensical.toml`. `tests/test_readme.py` checks the README's deep links and `tests/test_skills.py` the skills' links. Keep all guides in `zensical.toml`, with each guide's `llms.txt` summary matching its front matter `description` (`tests/test_docs.py`); after layout changes or a Zensical upgrade, check narrow screens, light and dark schemes, keyboard navigation, code copying and the search dialog. `docs/javascripts/accessibility.js` patches Zensical's search by structure because its class names are minified: rerun an accessibility audit, such as axe-core, with search open and closed after an upgrade.
+
+## Submit a pull request
+
+- **One topic**: each pull request covers one topic under a [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) title, such as `fix(search): keep quoted terms literal`.
+- **A linear history**: `main` keeps no merge commits, so a pull request is rebased or squashed onto it.
+- **The template is the checklist**: complete the test plan in the [pull request template](.github/PULL_REQUEST_TEMPLATE.md).
+- **Best-effort review**: one maintainer reviews every pull request; [GOVERNANCE.md](GOVERNANCE.md) says who decides and how.
+- **Same license in and out**: you contribute under the project's [MIT license](LICENSE), with no contributor license agreement.
 
 ## Read check output
 
