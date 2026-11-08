@@ -4,6 +4,8 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v21.2.0](https://github.com/fmind/brain-framework/releases/tag/v21.2.0) - 2026-11-08
+
 A minor release. The brain format (`version: 8`), `bf.yaml`, the reply schemas, the queue format and the search cache are unchanged; run `bf skills DIR` to update installed skills.
 
 ### Fixed
@@ -18,6 +20,7 @@ A minor release. The brain format (`version: 8`), `bf.yaml`, the reply schemas, 
 - **`bf forget` keeps comments in `.forgotten`.** It rewrote the list from its digests, dropping the owner's `#` lines; it now appends.
 - **A note whose name holds `#` is not a section.** A link to `concepts/a.md#x.md` showed as a backlink of `concepts/a.md`.
 - **A folder replaced by a link during a scan** is reported in `problems` instead of failing the search or read; a non-UTF-8 `bf forget` REF is invalid input (exit 2), like other arguments.
+- **Smaller cache and validation fixes.** An OKF `status` that is a list or mapping is a `bf validate` problem instead of a traceback; rebuilding the search cache retries on SQLite's extended busy and locked codes, as it did on the plain ones; and `bf status` no longer undercounts a source's size after a transient read error.
 - **Example programs.** Four sensors print one diagnostic line instead of a traceback on deeply nested provider JSON, and the weekly review fails closed on a malformed projects page.
 - **Documentation.** Troubleshooting quotes the v21 assistant reply errors, the relation and schedule pages match the starter vocabulary and catch-up rules, and reference tables list `forget`, `validate` and `eval` where they apply.
 
