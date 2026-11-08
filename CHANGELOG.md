@@ -4,6 +4,8 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+A minor release. The brain format (`version: 8`), `bf.yaml`, the reply schemas, the queue format and the search cache are unchanged; run `bf skills DIR` to update installed skills.
+
 ### Fixed
 
 - **Getting started no longer breaks `bf.yaml`.** The guide, the bf-maintain integration example and the bf-use relation example told readers to add `kind` or `supersedes` under `fields:`, which `bf init` already declares: the duplicate key made every command fail with `YAML mapping keys must be unique strings`. The guide test now rejects a step that adds an existing entry.
