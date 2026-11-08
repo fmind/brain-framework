@@ -276,6 +276,9 @@ def _vacant(directory: Path) -> None:
         raise Error("initialization requires a new, empty or freshly cloned directory")
 
 
+# This release's published schemas, for editor modelines: the strict schema on main may already belong to the next
+# major, which can reject keys this release accepts. Editors fetch them; BF itself stays offline.
+SCHEMAS = f"https://raw.githubusercontent.com/fmind/brain-framework/v{__version__}/docs/"
 # The standard vocabulary (docs/docs/schema.md#standard-vocabulary): sensors that print these attributes plug into a
 # new brain without mappings, and notes link with the relations at the end.
 _PEOPLE = {
@@ -326,6 +329,20 @@ STANDARD_FIELDS = {
         cardinality="many",
         relation=True,
         path="/attributes/project_refs",
+    ),
+    "part-of": SchemaField(
+        description="Containing thread, folder, list, epic, project or other parent item.",
+        type="identity",
+        cardinality="many",
+        relation=True,
+        path="/attributes/parent_refs",
+    ),
+    "label": SchemaField(
+        description="Label the provider attaches to the item.",
+        type="identity",
+        cardinality="many",
+        relation=True,
+        path="/attributes/label_refs",
     ),
     "kind": SchemaField(
         description="Provider-declared kind of item within a source that mixes several kinds.",
@@ -379,7 +396,7 @@ def initialize(
         store.write(
             "bf.yaml",
             (
-                "# https://fmind.github.io/brain-framework/\n"
+                f"# https://fmind.github.io/brain-framework/\n# yaml-language-server: $schema={SCHEMAS}bf.schema.json\n"
                 + yaml.safe_dump(config.model_dump(by_alias=True, exclude_defaults=True), sort_keys=False, width=1000)
             ).encode(),
         )
@@ -387,7 +404,7 @@ def initialize(
             text = (files("bf") / "starter" / source).read_text(encoding="utf-8")
             if target.endswith(".yaml"):
                 # The checks read the welcome note by the brain's own address, in the current format.
-                text = Template(text).substitute(name=name, version=FORMAT)
+                text = Template(text).substitute(name=name, version=FORMAT, schemas=SCHEMAS)
             store.write(target, text.encode())
         for directory in FOLDERS + (OPTIONAL if full else ()):
             store.write(directory + "/.gitkeep", b"")

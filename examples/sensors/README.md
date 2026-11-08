@@ -69,6 +69,29 @@ Inspect the returned samples and counts. A preview runs the sensor and may conta
 
 For scheduled window sensors, `refresh` controls the regular cadence and `overlap` protects the resume boundary. Add `reconcile: {refresh: 86400, lookback: 604800}` to revisit seven days once daily on the same source. Preview requested windows with `bf update --dry-run`; compare output bytes, elapsed seconds and changed records with `bf status`. Snapshot catalogs already replace their complete selection and cannot use `reconcile`.
 
+## Older brains
+
+`bf init` declares the [standard vocabulary](../../docs/docs/schema.md#standard-vocabulary) with a default `path` for each field, so a new brain turns these identity lists into typed relations without mappings. A brain created before a field joined that vocabulary keeps its untyped links and gains no relation from it. Merge the rows it lacks into its `fields:` mapping, such as the `part-of` and `label` relations that Drive folders, Gmail and GitHub issues print:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/schema/#standard-vocabulary
+fields:
+  part-of:
+    description: Containing thread, folder, list, epic, project or other parent item.
+    type: identity
+    cardinality: many
+    relation: true
+    path: /attributes/parent_refs
+  label:
+    description: Label the provider attaches to the item.
+    type: identity
+    cardinality: many
+    relation: true
+    path: /attributes/label_refs
+```
+
+A default path applies to every sensor of the brain: first check that no other sensor prints `parent_refs` or `label_refs` as anything but identities. Records an updated sensor saved before you declared the fields gain them with `bf build --reproject SOURCE`.
+
 ## Scope and limits
 
 GitHub history documents its scope and limits in [its guide](github-history.md#evidence-and-limits).
@@ -132,6 +155,7 @@ Preview it with `bf collect google-calendar-agenda --dry-run`. Expected result: 
 - Lists every My Drive and shared-with-me folder (`corpora: user`); shared drives are excluded. It ignores the time-window arguments.
 - As a `mode: snapshot` source, it removes missing folders after a successful nonempty replacement.
 - A folder's `time` is its creation and `attributes.updated` its last modification.
+- Links each parent folder as `drive:ID` and lists the same identities in `attributes.parent_refs`, which the standard `part-of` relation maps.
 - Limits: 10,000 folders and 20 pages; 120 seconds per `gws` call.
 
 ### Gmail headers
@@ -140,6 +164,8 @@ Preview it with `bf collect google-calendar-agenda --dry-run`. Expected result: 
 - Selects messages received in `[START, END)`; `--query=SEARCH` adds a [Gmail search](https://support.google.com/mail/answer/7190), such as `--query=-category:promotions` or `--query=label:work`. Write it with `=` so a leading `-` stays its value.
 - Authorize gws with `gmail.readonly` and without `gmail.metadata`: the window is a Gmail search (`q`), which Gmail rejects for any token that holds the `gmail.metadata` scope, so every run would fail. The sensor still requests only the `metadata` format.
 - Links each address as a lowercase `person:email/` identity and every message of a conversation to `gmail-thread:THREAD`, so `bf read gmail-thread:THREAD` lists the thread. Its alias `mid:MESSAGE-ID` ([RFC 2392](https://www.rfc-editor.org/rfc/rfc2392)) lets another tool's record name the same message.
+- Lists the thread in `attributes.parent_refs` and each label id as `gmail-label:ID` in `attributes.label_refs`, which the standard `part-of` and `label` relations map: `bf read gmail-label:INBOX --rel label` lists the inbox.
+- Label ids are per account, like thread ids: two Gmail accounts collected into one brain share `gmail-label:INBOX`, and their own `Label_N` ids can collide. Give each account's copy its own scheme, such as `gmail-work-label:`, when that matters.
 - `url` opens the thread in the browser's default Gmail account.
 - Limits: 1,000 messages and 10 pages per window, one `gws` call per message and 60 seconds per call: keep `refresh` short so windows stay small. A message's text names every address; its `links` and each of `sender_refs`, `recipient_refs` and `cc_refs` keep at most 1,000, in address order.
 
@@ -169,6 +195,7 @@ sensors:
 - Calls `gh issue list --search updated:...` with the owner's gh login, from `/`. GitHub's search index can lag a few minutes behind an edit: keep the default 300-second `overlap`, or add `reconcile`, so a late issue is collected in a later window.
 - Saves the title, status (`open` or `closed`, with `attributes.reason` such as `completed`), labels and body. It masks common credential shapes in the body with the kit's `redact`, which is best effort: keep the brain private.
 - Links the repository as lowercase `repo:github.com/OWNER/REPO` and accounts as lowercase `person:github.com/LOGIN` in `author_refs`, `assignee_refs` and `repository_refs`. Declare `person:github.com/LOGIN` as an alias on a person's note to join it with their `person:email/` identity.
+- Lists each label as lowercase `label:github.com/OWNER/REPO/NAME` in `label_refs`, with the name percent-encoded, such as `label:github.com/acme/widgets/good%20first%20issue`. The standard `label` relation maps them, and `attributes.labels` keeps the names as GitHub shows them.
 - Claims the alias `github:OWNER/REPO/issues/N`, lowercased like the id, as `github-history.py issues` does: collect a repository's issues with one of the two sensors, or the alias becomes ambiguous.
 - Limits: 500 updated issues per window and 16 MiB from `gh`, 60 seconds per call. A busier window fails and keeps saved records: shorten `refresh`.
 
@@ -218,10 +245,10 @@ Preview it with `bf collect github-issues --since 7d --dry-run`. Expected result
 - `redact(text)`: a best-effort mask for common credential shapes, such as bearer tokens, GitHub and AWS keys, private key blocks and `password=` pairs.
 - `main(collect, failure)` and `fail(message)`: exit 1 with nothing on stdout and one content-free stderr line, so BF keeps the saved records.
 
-Name identity lists after [the standard vocabulary](../../docs/docs/schema.md#standard-vocabulary), such as `author_refs` or `recipient_refs`, so sensors written by different people map to the same fields. [`github-issues.py`](github-issues.py) shows the whole pattern in about 100 lines.
+Name identity lists after [the standard vocabulary](../../docs/docs/schema.md#standard-vocabulary), such as `author_refs` or `recipient_refs`, so sensors written by different people map to the same fields. [`github-issues.py`](github-issues.py) shows the whole pattern in about 130 lines.
 
 ## Adapt a sensor
 
 Each script needs only Python 3.11 or later and calls its provider CLI, which owns the credentials, without a shell and from `/`: `gws` loads a `.env` file from its working directory or any parent folder, so one in the brain or above it could change the account a sensor collects from. It prints one JSON array in the [record format](../../docs/docs/schema.md#mapping-rules), keeping each record within BF's limits, or, when anything fails or a page is missing, exits nonzero with nothing on stdout and one content-free line on stderr, so BF keeps the saved records. Keep these behaviors when you adapt a script, and test them with fake provider output. `{{start}}` and `{{end}}` are timezone-aware bounds of a half-open window. A sensor never prints `fields`: BF computes them from your mappings, and `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/schema.md#record-revisions-and-provenance), such as Drive's `modifiedTime` mapped to `updated`.
 
-For typed relations, map the identity lists the sensors name after [the standard vocabulary](../../docs/docs/schema.md#standard-vocabulary): Git's `/attributes/author_refs` and `/attributes/repository_refs`, GitHub issues' `/attributes/author_refs`, `/attributes/assignee_refs` and `/attributes/repository_refs`, Calendar's `/attributes/organizer_refs`, `/attributes/attendee_refs` and `/attributes/participant_refs`, or Gmail's `/attributes/sender_refs`, `/attributes/recipient_refs` and `/attributes/cc_refs`. Declare each target field with `type: identity`, `cardinality: many` and `relation: true`; see the [field mappings](../../docs/docs/schema.md#shared-fields-and-sensor-mappings).
+For typed relations, map the identity lists the sensors name after [the standard vocabulary](../../docs/docs/schema.md#standard-vocabulary): Git's `/attributes/author_refs` and `/attributes/repository_refs`, GitHub issues' `/attributes/author_refs`, `/attributes/assignee_refs`, `/attributes/repository_refs` and `/attributes/label_refs`, Calendar's `/attributes/organizer_refs`, `/attributes/attendee_refs` and `/attributes/participant_refs`, Drive folders' `/attributes/parent_refs`, or Gmail's `/attributes/sender_refs`, `/attributes/recipient_refs`, `/attributes/cc_refs`, `/attributes/parent_refs` and `/attributes/label_refs`. Declare each target field with `type: identity`, `cardinality: many` and `relation: true`; see the [field mappings](../../docs/docs/schema.md#shared-fields-and-sensor-mappings).

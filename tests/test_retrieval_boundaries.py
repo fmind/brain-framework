@@ -547,7 +547,7 @@ def test_a_brain_whose_bf_yaml_fails_is_named_with_its_cause(brain: Store, tmp_p
     (tmp_path / "other").mkdir()
     other = Store(tmp_path / "other")
     other.write("bf.yaml", b"version: 8\nname: other\nbogus: true\n")
-    problem = {"brain": "other", "error": "invalid bf.yaml: bogus: Extra inputs are not permitted"}
+    problem = {"brain": "other", "error": "invalid bf.yaml: bogus: unknown key"}
     # Like search and status, a read names the key to fix, where it said only "bf.yaml is invalid" before 18.
     assert problem in cast("list[dict]", retrieve.read([brain, other], "projects/offline.md")["problems"])
     assert problem in cast("list[dict]", retrieve.search([brain, other], Query(text="offline"))["problems"])

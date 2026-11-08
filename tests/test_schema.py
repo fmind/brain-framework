@@ -298,6 +298,8 @@ def test_starter_keeps_relations_without_serializing_redundant_defaults(tmp_path
         "attendee",
         "repository",
         "project",
+        "part-of",
+        "label",
         "kind",
         "status",
         "depends-on",

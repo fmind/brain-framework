@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 
 from bf.cli import app
 from bf.storage import Store
-from conftest import Provider
+from conftest import ROOT, Provider
 
 START, END = "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z"
 FOLDER = "application/vnd.google-apps.folder"
@@ -43,6 +43,8 @@ def test_drive_folders_page_completely_and_keep_parent_identity(provider: Provid
     assert [r.id for r in records] == ["root", "child"]
     assert records[1].links == ["drive:root"]
     assert records[0].aliases == ["drive:root"]
+    # The standard part-of relation maps the same identities; the links stay for brains without it.
+    assert [r.attributes["parent_refs"] for r in records] == [[], ["drive:root"]]
     params = json.loads(provider.calls("gws")[0][-1])
     assert "incompleteSearch" in params["fields"]
     assert params["corpora"] == "user"
@@ -131,6 +133,7 @@ def test_drive_maps_selected_fields_within_record_bounds(provider: Provider) -> 
     assert record.attributes == {
         "name": "Plans\u0007 2026",
         "parents": ["root"],
+        "parent_refs": ["drive:root"],
         "created": "2026-08-01T00:00:00Z",
         "updated": "2026-09-01T12:00:00.000000Z",
     }
@@ -261,3 +264,98 @@ def test_incomplete_provider_snapshot_preserves_saved_records(
     failure = runner.invoke(app, args)
     assert failure.exit_code == 1
     assert saved == {p.name: p.read_bytes() for p in (brain.root / "memories/demo").glob("*.json")}
+
+
+# Each updated example with one fake provider reply: the program, its reply, its arguments and its typed claims.
+VOCABULARY: dict[str, tuple[str, list[dict[str, object]], list[str], set[tuple[str, str]]]] = {
+    "google-drive-folders.py": (
+        "gws",
+        [
+            {
+                "match": ["drive"],
+                "stdout": {
+                    "kind": "drive#fileList",
+                    "files": [{"id": "child", "name": "Research", "mimeType": FOLDER, "parents": ["root"]}],
+                },
+            }
+        ],
+        [],
+        {("part-of", "drive:root")},
+    ),
+    "gmail-headers.py": (
+        "gws",
+        [
+            {"match": ["list"], "stdout": {"messages": [{"id": "a1"}]}},
+            {
+                "match": ["get"],
+                "stdout": {
+                    "id": "a1",
+                    "threadId": "f1",
+                    "labelIds": ["INBOX", "Label_12"],
+                    "internalDate": "1788256800000",
+                    "payload": {"headers": [{"name": "From", "value": "alice@example.test"}]},
+                },
+            },
+        ],
+        ["{{start}}", "{{end}}"],
+        {("part-of", "gmail-thread:f1"), ("label", "gmail-label:INBOX"), ("label", "gmail-label:Label_12")},
+    ),
+    "github-issues.py": (
+        "gh",
+        [
+            {
+                "match": ["issue", "list"],
+                "stdout": [
+                    {
+                        "number": 7,
+                        "title": "Plan the launch",
+                        "state": "OPEN",
+                        "labels": [{"name": "Good First Issue"}, {"name": "bug"}],
+                        "createdAt": "2026-09-01T09:00:00Z",
+                        "updatedAt": "2026-09-01T10:00:00Z",
+                    }
+                ],
+            }
+        ],
+        ["Acme/Widgets"],
+        {
+            ("label", "label:github.com/acme/widgets/good%20first%20issue"),
+            ("label", "label:github.com/acme/widgets/bug"),
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("adapter", list(VOCABULARY))
+def test_new_brains_type_parents_and_labels_and_older_brains_keep_their_links(
+    provider: Provider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: str
+) -> None:
+    program, responses, arguments, typed = VOCABULARY[adapter]
+    monkeypatch.setenv("PATH", f"{provider.bin}{os.pathsep}{Path(sys.executable).parent}{os.pathsep}/usr/bin:/bin")
+    runner, claims = CliRunner(), {}
+    for kind in ("new", "older"):
+        brain = tmp_path / kind
+        assert runner.invoke(app, ["init", str(brain), "--name", kind]).exit_code == 0
+        config = yaml.safe_load((brain / "bf.yaml").read_text())
+        if kind == "older":
+            # A brain created before the standard vocabulary declares no fields.
+            del config["fields"]
+        config["sensors"] = {"source": {"command": ["python3", f"sensors/{adapter}", *arguments]}}
+        (brain / "bf.yaml").write_text(yaml.safe_dump(config))
+        (brain / "sensors").mkdir()
+        for name in (adapter, "_sensor.py"):
+            (brain / "sensors" / name).write_bytes((ROOT / "examples/sensors" / name).read_bytes())
+        provider.install(program, responses)
+        collected = runner.invoke(app, ["collect", "source", "--brain", str(brain), "--since", START, "--until", END])
+        assert collected.exit_code == 0, collected.output
+        assert runner.invoke(app, ["validate", "--brain", str(brain)]).exit_code == 0
+        exported = runner.invoke(app, ["export", "--brain", str(brain)])
+        assert exported.exit_code == 0, exported.output
+        lines = [json.loads(line) for line in exported.stdout.splitlines()]
+        claims[kind] = {
+            (line["relation"], line["target"]) for line in lines if line["subject"].startswith(f"bf://{kind}/source:")
+        }
+    assert {claim for claim in claims["new"] if claim[0] in {"part-of", "label"}} == typed
+    # Without the fields, the same records keep exactly their untyped links, as before the vocabulary grew.
+    assert claims["older"] == {claim for claim in claims["new"] if claim[0] == "links"}
+    assert claims["older"]

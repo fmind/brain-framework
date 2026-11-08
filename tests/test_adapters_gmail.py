@@ -75,6 +75,9 @@ def test_gmail_headers_collect_participants_threads_and_message_ids(provider: Pr
     assert launch.attributes == {
         "thread": "f1",
         "labels": ["IMPORTANT", "INBOX"],
+        # The standard part-of and label relations; the thread link stays for brains without them.
+        "parent_refs": ["gmail-thread:f1"],
+        "label_refs": ["gmail-label:IMPORTANT", "gmail-label:INBOX"],
         "sender_refs": ["person:email/alice@example.test"],
         "recipient_refs": ["person:email/bob@example.test", "person:email/carol@example.test"],
         "cc_refs": [],

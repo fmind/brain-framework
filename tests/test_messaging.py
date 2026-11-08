@@ -296,7 +296,7 @@ def test_invalid_configuration_fails_before_execution(messaging: Store, change: 
 def test_a_v19_trigger_fails_with_the_unknown_field_diagnostic(messaging: Store) -> None:
     trigger = {"calendar": {"event": "sensor.changed", "sensor": {"name": "calendar"}}}
     configure(messaging, lambda config: config["assistants"]["personal"].update(triggers=trigger))
-    with pytest.raises(Error, match=re.escape("assistants.personal.triggers: Extra inputs are not permitted")):
+    with pytest.raises(Error, match=re.escape("assistants.personal.triggers: unknown key")):
         load(messaging)
 
 

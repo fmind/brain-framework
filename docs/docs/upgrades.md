@@ -34,7 +34,19 @@ With MCP, reinstall `'brain-framework[mcp]'` in the first two fixes too: a reins
 
 ## Match the docs to your version
 
-This site follows the repository's current code, which can be newer than your installation. `bf --version` names your runtime; `bf COMMAND --help` lists its options. Copy example sensors, routines and demos from the release tag matching `bf --version`, as the guides' commands do. The brain format, declared as `version:` in `bf.yaml` and each `evals/*.yaml`, is separate from the package version.
+This site follows the repository's current code, which can be newer than your installation. `bf --version` names your runtime; `bf COMMAND --help` lists its options. Copy example sensors, routines and demos from the release tag matching `bf --version`, as the guides' commands do. The brain format, declared as `version:` in `bf.yaml` and each `evals/*.yaml`, is separate from the package version; [versioning and stability](#versioning-and-stability) says what it covers.
+
+## Versioning and stability
+
+A release number reads MAJOR.MINOR.PATCH. Within one major release:
+
+- `search` and `read` [replies](retrieval.md#reply-schemas) only gain optional fields.
+- `bf.yaml`, evaluation suites and the machine registry only widen: a file that loads keeps loading.
+- The brain format `version` stays the same.
+
+Minor releases add features; patch releases fix bugs, including input BF misread. A major release ships whenever the design needs it and batches related breaks where practical. It adds no compatibility layer; its manual upgrade steps are in the [changelog](../changelog.md).
+
+A new brain format `version` means stored files need converting: record files, the `memories/` layout, notes, evaluation suites or the fields `bf.yaml` declares. Other breaks keep `version`, with manual upgrade steps: changed program settings, such as sensors, routines, assistants, channels and watch, or a stricter rule that rejects input which loaded before. [Contributing](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md#keep-the-contract) holds the full rule.
 
 ## Update
 
@@ -76,7 +88,13 @@ Expect `"valid":true` from validation, `"passed":true` from your retrieval cases
 
 See [skill installation](agents.md#install-the-skills) before passing `--force`.
 
-`bf init` writes a brain's `AGENTS.md` once: merge new guidance by hand, as [Refresh brain instructions](agents.md#refresh-brain-instructions) shows. Edit a [watch service](schedule.md#run-watch-as-a-service) or timer when the changelog asks or the `bf` executable moved.
+`bf init` writes a brain's files once, so a release's new defaults never reach an existing brain by themselves:
+
+- Merge new `AGENTS.md` guidance by hand, as [Refresh brain instructions](agents.md#refresh-brain-instructions) shows.
+- Add new [standard vocabulary](schema.md#standard-vocabulary) fields, such as `part-of` and `label`, to use the sensors that print them.
+- Add or update the [editor schema](schema.md#editor-schemas) line of `bf.yaml` and `evals/*.yaml`, so its version matches `bf --version`.
+
+Edit a [watch service](schedule.md#run-watch-as-a-service) or timer when the changelog asks or the `bf` executable moved.
 
 Use the same release on every clone and collecting machine of a team brain. Restart agent hosts and watchers after updating, then check collection health with `bf status --check` on the collecting machine.
 

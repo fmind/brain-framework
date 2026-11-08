@@ -5,7 +5,7 @@ description: Create a brain, save your first project decision, search its reason
 
 # Getting started
 
-Save a decision, find its reason and check that it stays findable. You need Linux or macOS, a terminal and a text editor. No provider account or model is needed; an agent can help with the same steps.
+Save a decision, find its reason and check that it stays findable. You need Linux or macOS, a terminal and a text editor. Native Windows is not supported, because BF relies on POSIX file locks and process groups: on Windows, use a Linux distribution in WSL2. No provider account or model is needed; an agent can help with the same steps.
 
 The example is a fictional New website project. BF prints compact JSON on one line; the examples below show selected fields.
 
@@ -48,7 +48,7 @@ cd ~/brain
 
 The new folder holds:
 
-- `bf.yaml`: the brain's configuration.
+- `bf.yaml`: the brain's configuration, linked to its [schema](schema.md#editor-schemas) so editors check it as you type.
 - `AGENTS.md`: instructions for agents.
 - `projects/`, `concepts/` (with a welcome note) and `actions/`: your notes.
 - `evals/retrieval.yaml`: saved questions that `bf eval` checks.

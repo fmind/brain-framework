@@ -68,7 +68,7 @@ def test_unknown_settings_keys_are_named_like_bf_yaml_keys(brain: Store) -> None
     write_watch(brain, b"intervall: private-value\n")
     with pytest.raises(Error) as caught:
         settings(brain)
-    assert str(caught.value) == "invalid bf.yaml: watch.intervall: Extra inputs are not permitted"
+    assert str(caught.value) == "invalid bf.yaml: watch.intervall: unknown key; did you mean interval or poll_interval?"
 
 
 def test_settings_reject_redirected_files(brain: Store, tmp_path) -> None:

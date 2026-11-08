@@ -21,9 +21,9 @@ from typer.core import TyperGroup
 from typer.main import get_command
 from typer.testing import CliRunner
 
-from bf import assistants, index, links, pages, records, retrieve
+from bf import __version__, assistants, index, links, pages, records, retrieve
 from bf.cli import app, main
-from bf.config import user_config
+from bf.config import load, user_config
 from bf.mcp import server
 from bf.messages import Message, Outgoing
 from bf.models import Error, NotFoundError, Record, Send, timestamp
@@ -381,6 +381,8 @@ def test_encoding_failures_name_the_note_and_replies_stay_utf8(brain: Store) -> 
         ("    read: projects/x#y/..\n    empty: true\n", "cases.1.read", "expected a normalized"),
         # A query needs a word or an identity, as bf search does.
         ("    query: '!!!'\n    empty: true\n", "cases.1", "case malformed: give words or an identity"),
+        # A suite is the owner's file too: a misspelled key names the closest key a case allows.
+        ("    qury: offline\n    empty: true\n", "cases.1.qury", "unknown key; did you mean query?"),
     ],
     ids=[
         "scope",
@@ -395,6 +397,7 @@ def test_encoding_failures_name_the_note_and_replies_stay_utf8(brain: Store) -> 
         "read-period",
         "read-path",
         "wordless",
+        "misspelled",
     ],
 )
 def test_eval_rejects_malformed_cases_before_any_retrieval(brain: Store, case: str, location: str, reason: str) -> None:
@@ -516,6 +519,66 @@ def test_generated_agent_instructions_name_real_commands_and_boundaries(tmp_path
     # The documented refresh compares any scratch brain's copy: only template changes differ.
     invoke("init", str(tmp_path / "scratch"), "--name", "other")
     assert (tmp_path / "scratch/AGENTS.md").read_text() == text
+
+
+def test_new_brains_point_editors_at_the_schemas_of_their_release(tmp_path: Path) -> None:
+    # A versionless URL would follow main, whose strict schema may already reject keys of this major.
+    target = tmp_path / "new"
+    invoke("init", str(target))
+    for path, schema in (("bf.yaml", "bf.schema.json"), ("evals/retrieval.yaml", "eval.schema.json")):
+        header = (target / path).read_text().splitlines()[:2]
+        assert header[0].startswith("# https://fmind.github.io/brain-framework/")
+        url = f"https://raw.githubusercontent.com/fmind/brain-framework/v{__version__}/docs/{schema}"
+        assert header[1] == f"# yaml-language-server: $schema={url}"
+        assert (Path(__file__).parents[1] / "docs" / schema).is_file()
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            "sensors:\n  brief:\n    command: [python3]\n    refesh: 60\n",
+            "sensors.brief.refesh: unknown key; did you mean refresh?",
+        ),
+        ("sensor:\n  brief:\n    command: [python3]\n", "sensor: unknown key; did you mean sensors?"),
+        # A map entry name and a discriminated union's tag lead to the settings allowed there.
+        (
+            (
+                "channels:\n  chat: {send: {command: [python3]}, read: {command: [python3]}}\nassistants:\n  helper:\n"
+                "    command: [python3]\n    prompt: prompts/helper.md\n"
+                "    inputs: [{channel: {name: chat, mode: read, every: 60, evry: 60}}]\n"
+            ),
+            "assistants.helper.inputs.0.channel.read.evry: unknown key; did you mean every?",
+        ),
+        (
+            (
+                "assistants:\n  helper:\n    command: [python3]\n    prompt: prompts/helper.md\n"
+                "    schedules: {morning: {at: '25:61'}}\n"
+            ),
+            "assistants.helper.schedules.morning.at: expected HH:MM such as 08:00",
+        ),
+        (
+            "sensors:\n  brief:\n    command: [python3]\n    fields: {kind: {path: attributes~2kind}}\n",
+            "sensors.brief.fields.kind.path: expected a JSON pointer starting with /",
+        ),
+        (
+            "sensors:\n  brief:\n    command: python3 sensors/brief.py\n",
+            "sensors.brief.command: expected an argv list, one string per argument, such as [python3, script.py]",
+        ),
+        # Other reasons keep their wording.
+        ("watch: {interval: 1}\n", "watch.interval: Input should be greater than or equal to 5"),
+    ],
+    ids=["setting", "section", "union-tag", "at", "path", "command", "other"],
+)
+def test_bf_yaml_mistakes_get_plain_reasons_and_the_closest_allowed_key(
+    brain: Store, config: str, expected: str
+) -> None:
+    brain.write("bf.yaml", b"version: 8\nname: fixture\n" + config.encode())
+    with pytest.raises(Error) as caught:
+        load(brain)
+    assert str(caught.value) == f"invalid bf.yaml: {expected}"
+    # Values are never quoted.
+    assert not {"25:61", "attributes~2kind", "sensors/brief.py"} & set(str(caught.value).split())
 
 
 @pytest.mark.parametrize("full", [False, True], ids=["minimal", "full"])
@@ -1037,7 +1100,7 @@ def test_diagnostics_escape_terminal_controls_in_brain_file_names(
     monkeypatch.setattr(sys, "argv", ["bf", "read", "--brain", str(brain.root)])
     with pytest.raises(SystemExit):
         main()
-    invalid = "invalid bf.yaml: \\u001b]0;K\\u0007: Extra inputs are not permitted"
+    invalid = "invalid bf.yaml: \\u001b]0;K\\u0007: unknown key"
     assert capsys.readouterr().err == f"bf: {invalid}\n"
     unloaded = asyncio.run(server([brain]).call_tool("read", {}))
     assert isinstance(unloaded, CallToolResult)

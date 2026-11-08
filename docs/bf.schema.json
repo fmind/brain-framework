@@ -38,7 +38,13 @@
           "description": "Retry failed or interrupted pre-answer harness attempts automatically with backoff instead of leaving the job uncertain: true for every run, or the run kinds to retry, such as [schedule, wake].",
           "title": "Idempotent"
         },
-        "inputs": { "items": { "$ref": "#/$defs/AssistantInput" }, "maxItems": 32, "title": "Inputs", "type": "array" },
+        "inputs": {
+          "description": "Channels whose admitted messages start a run, each answered in its own conversation; each channel appears once.",
+          "items": { "$ref": "#/$defs/AssistantInput" },
+          "maxItems": 32,
+          "title": "Inputs",
+          "type": "array"
+        },
         "keep": {
           "anyOf": [{ "maximum": 50000, "minimum": 1, "type": "integer" }, { "type": "null" }],
           "default": null,
@@ -86,6 +92,7 @@
             },
             { "type": "null" }
           ],
+          "description": "Named schedules, each an every interval or a daily at time, with optional days, timezone, lookback and gate; none by default.",
           "title": "Schedules"
         },
         "timeout": {
@@ -110,6 +117,7 @@
       "additionalProperties": false,
       "properties": {
         "channel": {
+          "description": "The channel whose admitted messages start a run, by name and mode: read with every, or stream.",
           "discriminator": {
             "mapping": { "read": "#/$defs/ReadInput", "stream": "#/$defs/StreamInput" },
             "propertyName": "mode"
@@ -175,7 +183,14 @@
           "default": null,
           "description": "A command that runs before the harness and prints {\"events\": [...]}; no event skips the model."
         },
-        "lookback": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Lookback", "type": "integer" },
+        "lookback": {
+          "default": 86400,
+          "description": "Seconds of evidence the first run covers; later runs start where the last successful or cancelled run ended.",
+          "maximum": 31536000,
+          "minimum": 1,
+          "title": "Lookback",
+          "type": "integer"
+        },
         "timezone": {
           "anyOf": [{ "maxLength": 128, "minLength": 1, "type": "string" }, { "type": "null" }],
           "default": null,
@@ -211,9 +226,21 @@
       ],
       "description": "Passive transport capabilities; assistants decide when to use them.",
       "properties": {
-        "read": { "anyOf": [{ "$ref": "#/$defs/Command" }, { "type": "null" }], "default": null },
-        "send": { "anyOf": [{ "$ref": "#/$defs/Send" }, { "type": "null" }], "default": null },
-        "stream": { "anyOf": [{ "$ref": "#/$defs/Stream" }, { "type": "null" }], "default": null }
+        "read": {
+          "anyOf": [{ "$ref": "#/$defs/Command" }, { "type": "null" }],
+          "default": null,
+          "description": "Finite command that prints the admitted messages of a window, for read inputs."
+        },
+        "send": {
+          "anyOf": [{ "$ref": "#/$defs/Send" }, { "type": "null" }],
+          "default": null,
+          "description": "Command that delivers one answer or post; required to answer a channel's inputs."
+        },
+        "stream": {
+          "anyOf": [{ "$ref": "#/$defs/Stream" }, { "type": "null" }],
+          "default": null,
+          "description": "Long-lived JSON Lines command that prints admitted messages as they arrive, for stream inputs; only bf watch runs it."
+        }
       },
       "title": "Channel",
       "type": "object"
@@ -336,8 +363,14 @@
           "title": "Every",
           "type": "integer"
         },
-        "mode": { "const": "read", "title": "Mode", "type": "string" },
+        "mode": {
+          "const": "read",
+          "description": "Batch reads with the channel's read command, at the every interval.",
+          "title": "Mode",
+          "type": "string"
+        },
         "name": {
+          "description": "A declared channel with read and send.",
           "not": { "pattern": "[^a-z0-9-]" },
           "pattern": "^[a-z][a-z0-9-]{0,63}$",
           "title": "Name",
@@ -762,8 +795,14 @@
     "StreamInput": {
       "additionalProperties": false,
       "properties": {
-        "mode": { "const": "stream", "title": "Mode", "type": "string" },
+        "mode": {
+          "const": "stream",
+          "description": "Receive messages from the channel's stream while bf watch runs.",
+          "title": "Mode",
+          "type": "string"
+        },
         "name": {
+          "description": "A declared channel with stream and send.",
           "not": { "pattern": "[^a-z0-9-]" },
           "pattern": "^[a-z][a-z0-9-]{0,63}$",
           "title": "Name",
@@ -929,6 +968,7 @@
         },
         { "type": "null" }
       ],
+      "description": "Passive message transports with send, read or stream commands; assistants read from and post to them.",
       "title": "Channels"
     },
     "fields": {

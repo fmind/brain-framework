@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """Capture the Drive folders of My Drive and shared-with-me items, linking each to its parents, through gws.
 
-Shared drives are outside this catalog (`corpora: user`).
+Shared drives are outside this catalog (`corpora: user`). Each folder links its parents and lists them in
+`attributes.parent_refs`, which the standard `part-of` relation of a new brain maps. A brain whose bf.yaml lacks that
+field declares it under `fields:` first:
+
+  part-of:
+    description: Containing thread, folder, list, epic, project or other parent item.
+    type: identity
+    cardinality: many
+    relation: true
+    path: /attributes/parent_refs
 """
 
 import json
@@ -140,6 +149,7 @@ def collect() -> list[dict[str, object]]:
                 raise InvalidError(f"the catalog has more than {MAX_FOLDERS} folders")
             created = optional_instant(folder.get("createdTime"))
             modified = optional_instant(folder.get("modifiedTime"))
+            parent_refs = list(filter(None, (reference("drive:" + quote(parent, safe="")) for parent in parents)))
             records.append(
                 {
                     "id": identifier,
@@ -149,11 +159,12 @@ def collect() -> list[dict[str, object]]:
                     "time": created or modified,
                     "url": reference(folder.get("webViewLink", "")),
                     "aliases": list(filter(None, [reference("drive:" + quote(identifier, safe=""))])),
-                    "links": list(filter(None, (reference("drive:" + quote(parent, safe="")) for parent in parents))),
+                    "links": parent_refs,
                     # Selected fields only: `updated` is BF's reserved provider-modification time.
                     "attributes": {
                         "name": name,
                         "parents": parents,
+                        "parent_refs": parent_refs,
                         **({"created": created} if created else {}),
                         **({"updated": modified} if modified else {}),
                     },

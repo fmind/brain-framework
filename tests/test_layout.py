@@ -49,6 +49,8 @@ def test_initialization_creates_the_layout_and_private_namespaces(tmp_path: Path
         "attendee",
         "repository",
         "project",
+        "part-of",
+        "label",
         "kind",
         "status",
         "depends-on",

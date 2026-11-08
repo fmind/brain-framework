@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-"""Collect Gmail message headers (sender, recipients, subject and date) through the owner's gws CLI; never bodies."""
+"""Collect Gmail message headers (sender, recipients, subject and date) through the owner's gws CLI; never bodies.
+
+Each message lists its thread in `attributes.parent_refs` and its label ids in `attributes.label_refs`, which the
+standard `part-of` and `label` relations of a new brain map. A brain whose bf.yaml lacks those fields declares them
+under `fields:` first:
+
+  part-of:
+    description: Containing thread, folder, list, epic, project or other parent item.
+    type: identity
+    cardinality: many
+    relation: true
+    path: /attributes/parent_refs
+  label:
+    description: Label the provider attaches to the item.
+    type: identity
+    cardinality: many
+    relation: true
+    path: /attributes/label_refs
+"""
 
 import argparse
 import json
@@ -195,6 +213,10 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
     message_header = values.get("message-id", "").strip().removeprefix("<").removesuffix(">")
     alias = reference("mid:" + quote(message_header, safe="@!$&'*+.^_`{|}~-")) if message_header else ""
     linked = [ref for ref in [*map(person, everyone), reference(f"gmail-thread:{thread}")] if ref]
+    # Label ids, such as INBOX or Label_12, are opaque and case-sensitive: keep their case, encode anything else.
+    label_refs = [
+        ref for ref in (reference("gmail-label:" + quote(label, safe="")) for label in labels if label) if ref
+    ]
     return {
         "id": message_id,
         "title": subject or "(no subject)",
@@ -206,6 +228,8 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
         "attributes": {
             "thread": thread,
             "labels": sorted(labels),
+            "parent_refs": [f"gmail-thread:{thread}"],
+            "label_refs": sorted(set(label_refs))[:MAX_LINKS],
             "sender_refs": [ref for ref in map(person, people["from"]) if ref][:MAX_LINKS],
             "recipient_refs": [ref for ref in map(person, people["to"]) if ref][:MAX_LINKS],
             "cc_refs": [ref for ref in map(person, people["cc"]) if ref][:MAX_LINKS],
@@ -224,7 +248,7 @@ def collect(start: str, end: str, query: str = "") -> list[dict[str, object]]:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("start")
     parser.add_argument("end")
     parser.add_argument("--query", default="", help="A Gmail search, such as '-category:promotions'.")

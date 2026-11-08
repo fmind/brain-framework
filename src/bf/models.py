@@ -1,4 +1,4 @@
-"""Small public contracts shared by collection, storage, search, CLI and MCP."""
+"""Validated models of bf.yaml, records and notes, with the bounds, errors and text helpers every module shares."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ import unicodedata
 from collections.abc import Collection, Iterable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, ClassVar, Literal, Self
+from types import UnionType
+from typing import Annotated, ClassVar, Literal, Self, get_args, get_origin
 from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -115,7 +116,8 @@ class FormatError(Error):
     """A file declares a format version this release does not read."""
 
 
-# The one brain format: bf.yaml, evaluation suites, record files and the memories/ layout share this number.
+# The one brain format, declared by bf.yaml and each evaluation suite: it changes only when stored files need
+# converting (docs/docs/upgrades.md#versioning-and-stability).
 FORMAT = 8
 
 
@@ -309,15 +311,73 @@ def decode(data: bytes | str) -> object:
 # Distinct reasons an explanation names before counting the rest: errors grow with each invalid item, while
 # run history, logs, the cache and replies keep the message.
 _EXPLAINED = 5
+# Plain reasons for an owner's common mistakes, by error type and the key that holds the value, instead of pydantic's
+# jargon or a raw regular expression.
+_PLAIN = {
+    ("string_pattern_mismatch", "at"): "expected HH:MM such as 08:00",
+    # The examples fit every place: a field path and an assistant's reply path, a sensor and a harness command.
+    ("string_pattern_mismatch", "path"): "expected a JSON pointer starting with /",
+    ("list_type", "command"): "expected an argv list, one string per argument, such as [python3, script.py]",
+}
+
+
+def _options(kinds: Iterable[object]) -> list[object]:
+    """Each type's alternatives, without None or Annotated metadata."""
+    options: list[object] = []
+    for kind in kinds:
+        if get_origin(kind) in (Annotated, UnionType):
+            # Annotated keeps its type first; a union lists its members.
+            options += _options(get_args(kind)[:1] if get_origin(kind) is Annotated else get_args(kind))
+        elif kind is not type(None):
+            options.append(kind)
+    return options
+
+
+def _keys(title: str, location: Iterable[str | int]) -> list[str]:
+    """The keys allowed at `location` in the BF model named `title`, or none when no single model has that name.
+
+    A map entry name, a list position or a discriminated union's tag leads inside, so a misspelled sensor setting
+    is compared with that sensor's settings, never with a flat set of every key.
+    """
+    found: set[type[Model]] = set()
+    pending: list[type[Model]] = [Model]
+    while pending:
+        model = pending.pop()
+        pending += model.__subclasses__()
+        found |= {model} if model.__name__ == title else set()
+    kinds: list[object] = list(found) if len(found) == 1 else []
+    for key in location:
+        inner: list[object] = []
+        for kind in _options(kinds):
+            if isinstance(kind, type) and issubclass(kind, BaseModel):
+                fields = {field.alias or name: field.annotation for name, field in kind.model_fields.items()}
+                if key in fields:
+                    inner.append(fields[key])
+                elif any(get_origin(value) is Literal and get_args(value) == (key,) for value in fields.values()):
+                    # A tag, such as `read` in `inputs.0.channel.read.every`, keeps the model it selects.
+                    inner.append(kind)
+            elif (get_origin(kind), type(key)) in ((dict, str), (list, int)):
+                inner.append(get_args(kind)[-1])
+        kinds = inner
+    return sorted(
+        {
+            field.alias or name
+            for kind in _options(kinds)
+            if isinstance(kind, type) and issubclass(kind, BaseModel)
+            for name, field in kind.model_fields.items()
+        }
+    )
 
 
 def explain(error: ValidationError, known: Collection[str] | None = None) -> str:
-    """Name the first invalid fields in validation order, then count the rest; give pydantic's reason, never the value.
+    """Name the first invalid fields in validation order, then count the rest; give the reason, never the value.
 
     Validation order follows each model's declared fields, then its unknown keys; entries and list items keep their
     input order.
 
-    With `known`, other location keys are redacted: a provider's output controls its own keys.
+    With `known`, other location keys are redacted: a provider's output controls its own keys. Without it, the input
+    is the owner's, such as bf.yaml: an unknown key suggests the closest keys allowed there, and a few common mistakes
+    get a plain reason.
     """
 
     def part(key: str | int) -> str:
@@ -327,9 +387,16 @@ def explain(error: ValidationError, known: Collection[str] | None = None) -> str
         # A custom validator's reason is already a sentence: drop pydantic's "Value error, " label. A reason about
         # the whole document, such as a sensor mapping an undeclared field, names its own location.
         location, reason = ".".join(map(part, item["loc"])), item["msg"].removeprefix("Value error, ")
+        last = item["loc"][-1] if item["loc"] else ""
         if item["type"] == "union_tag_invalid" and "ctx" in item:
             # Pydantic's message quotes the input tag: name the expected tags from the schema instead.
             reason = f"{item['ctx']['discriminator']} must be one of {item['ctx']['expected_tags']}"
+        elif known is None and item["type"] == "extra_forbidden":
+            # Only known names reach the hint: the misspelled key itself appears once, in the location.
+            hint = suggest(last, _keys(error.title, item["loc"][:-1])) if isinstance(last, str) else ""
+            reason = "unknown key" + hint
+        elif known is None and (plain := _PLAIN.get((item["type"], str(last)))):
+            reason = plain
         return f"{location}: {reason}" if location else reason
 
     errors = error.errors(include_url=False, include_input=False)
@@ -966,9 +1033,17 @@ class Stream(Command):
 class Channel(Model):
     """Passive transport capabilities; assistants decide when to use them."""
 
-    send: Send | None = None
-    read: Command | None = None
-    stream: Stream | None = None
+    send: Send | None = Field(
+        default=None, description="Command that delivers one answer or post; required to answer a channel's inputs."
+    )
+    read: Command | None = Field(
+        default=None, description="Finite command that prints the admitted messages of a window, for read inputs."
+    )
+    stream: Stream | None = Field(
+        default=None,
+        description="Long-lived JSON Lines command that prints admitted messages as they arrive, for stream inputs; "
+        "only bf watch runs it.",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -986,18 +1061,20 @@ class Channel(Model):
 
 
 class ReadInput(Model):
-    name: Name
-    mode: Literal["read"]
+    name: Name = Field(description="A declared channel with read and send.")
+    mode: Literal["read"] = Field(description="Batch reads with the channel's read command, at the every interval.")
     every: Annotated[int, Field(ge=1, le=86_400)] = Field(description="Seconds between complete batch reads.")
 
 
 class StreamInput(Model):
-    name: Name
-    mode: Literal["stream"]
+    name: Name = Field(description="A declared channel with stream and send.")
+    mode: Literal["stream"] = Field(description="Receive messages from the channel's stream while bf watch runs.")
 
 
 class AssistantInput(Model):
-    channel: Annotated[ReadInput | StreamInput, Field(discriminator="mode")]
+    channel: Annotated[ReadInput | StreamInput, Field(discriminator="mode")] = Field(
+        description="The channel whose admitted messages start a run, by name and mode: read with every, or stream."
+    )
 
 
 Invocation = Literal["input", "schedule", "manual", "wake"]
@@ -1075,7 +1152,11 @@ class AssistantSchedule(Model):
         description="Interval in seconds between runs, filtered by days. With at, it does not repeat runs: it is only "
         "the grace after a missed slot before bf status reports the schedule overdue.",
     )
-    lookback: Annotated[int, Field(ge=1, le=31_536_000)] = 86_400
+    lookback: Annotated[int, Field(ge=1, le=31_536_000)] = Field(
+        default=86_400,
+        description="Seconds of evidence the first run covers; later runs start where the last successful or "
+        "cancelled run ended.",
+    )
     at: Annotated[str, Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")] | None = Field(
         default=None, description="Optional 24-hour wall-clock time (HH:MM) for daily or weekday-filtered runs."
     )
@@ -1163,7 +1244,11 @@ class Assistant(Command):
         description="Retry failed or interrupted pre-answer harness attempts automatically with backoff instead of "
         "leaving the job uncertain: true for every run, or the run kinds to retry, such as [schedule, wake].",
     )
-    inputs: Annotated[list[AssistantInput], Field(max_length=32)] = Field(default_factory=list)
+    inputs: Annotated[list[AssistantInput], Field(max_length=32)] = Field(
+        default_factory=list,
+        description="Channels whose admitted messages start a run, each answered in its own conversation; each "
+        "channel appears once.",
+    )
     post: Name | None = Field(
         default=None,
         description="The channel where scheduled, wake and manual runs post; an incoming message is answered in its "
@@ -1171,7 +1256,11 @@ class Assistant(Command):
     )
     # Its released schema left names outside the pattern open: closing them in a minor release would narrow it.
     schedules: dict[Name, AssistantSchedule] = Field(
-        default_factory=dict, max_length=32, json_schema_extra=lambda schema: _nullable(schema, closed=False)
+        default_factory=dict,
+        max_length=32,
+        json_schema_extra=lambda schema: _nullable(schema, closed=False),
+        description="Named schedules, each an every interval or a daily at time, with optional days, timezone, "
+        "lookback and gate; none by default.",
     )
     wake: WakeBounds | None = Field(
         default=None, description="Let a structured reply schedule one later run, clamped to min and max seconds."
@@ -1346,7 +1435,13 @@ class Config(Model):
         description="Reviewed deterministic brain programs, run when due, by a hook or with bf run; names must differ "
         "from sensors and assistants.",
     )
-    channels: dict[Name, Channel] = Field(default_factory=dict, max_length=64, json_schema_extra=_nullable)
+    channels: dict[Name, Channel] = Field(
+        default_factory=dict,
+        max_length=64,
+        json_schema_extra=_nullable,
+        description="Passive message transports with send, read or stream commands; assistants read from and post to "
+        "them.",
+    )
     # An assistant name is the source of the records its runs write.
     assistants: dict[Name, Assistant] = Field(
         default_factory=dict,

@@ -62,6 +62,7 @@ New brains declare the [standard vocabulary](schema.md#standard-vocabulary) unde
 | `depends-on` | What it needs to operate or remain valid.                 | `[Decision](bf://brain/projects/new-website.md?rel=depends-on#decision)` |
 | `related-to` | A connection with no more specific known relation.        | `[Related project](bf://brain/projects/new-website.md?rel=related-to)`   |
 | `supersedes` | That it replaces an earlier note, which stays as history. | `[Old decision](bf://brain/projects/old-website.md?rel=supersedes)`      |
+| `part-of`    | What contains it, such as a larger project.               | `[Parent project](bf://brain/projects/platform.md?rel=part-of)`          |
 
 The Alice examples need the [person note](link-reference.md#bf-links). For a mere mention, use a plain Markdown link; when the note derives from its target, use an OKF `sources` entry.
 
@@ -128,6 +129,35 @@ bf read repo:github.com/example/new-website
 | `resource` | OKF: the URI of the asset the note describes. Links to that URI count as backlinks of the note.                               |
 
 Declare only identities you have verified. They are case-sensitive: write them as your sensors emit them, such as lowercase GitHub owners. `bf validate` checks the [identity rules](link-reference.md#identity-rules), such as naming a whole subject rather than a `#section`. It also [warns](checks.md#warnings) about identities that differ only by letter case.
+
+### People, organizations and you
+
+Give a person or an organization a concept note with `type: person` or `type: organization`. List the accounts you have verified as `aliases`. Add an `entity` when other notes should link to it by name, as the [person note](link-reference.md#bf-links) for Alice shows.
+
+Make yourself the hub of your evidence the same way. Save `concepts/me.md` with your own accounts:
+
+```markdown
+---
+type: person
+status: draft
+entity: bf://brain/people/me
+aliases: [person:email/me@example.test, person:github.com/me]
+---
+
+# Me
+```
+
+Then list the messages and events that name you, or export them for a script:
+
+```bash
+bf read bf://brain/people/me --rel participant
+bf export --kind items --scope bf://brain/people/me
+```
+
+- The relation page lists, newest first, each record or note naming you as `participant` or a narrower relation, such as `sender` or `cc`.
+- The export prints your note and every item linking to it, one JSON object per line. A period narrows it, such as `--scope "7d bf://brain/people/me"`.
+
+A fact involving more than two subjects, such as a person's assignment to a project between two dates, is its own note, with a typed link to each subject.
 
 ## Connect records and other brains
 

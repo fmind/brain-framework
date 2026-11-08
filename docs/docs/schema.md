@@ -15,7 +15,7 @@ version: 8
 name: brain
 ```
 
-`version` is the brain format of `bf.yaml`, `evals/*.yaml`, record files and the `memories/` layout. It is independent of the package version. A missing or different version fails before any other field, naming the supported one: `bf.yaml declares version 6; this release reads version: 8`. The changelog lists the upgrade steps of each format.
+`version` is the brain format, independent of the package version; [versioning](upgrades.md#versioning-and-stability) says what it covers. A missing or different version fails before any other field, naming the supported one: `bf.yaml declares version 6; this release reads version: 8`. The changelog lists the upgrade steps of each format.
 
 Add `fields`, [sensors](sensors.md#sensor-settings), [routines](routines.md#routine-settings), [assistants](prompts.md#assistant-settings), [channels](channels.md), related `brains`, [watch preferences](schedule.md#watch-preferences) and a [`validate`](checks.md#validate) policy only as needed. `bf init` writes the version, the name and the [starter relations](links.md#choose-the-right-relation).
 
@@ -59,6 +59,13 @@ bf schema --kind eval
 
 Their `title` values are `Config`, `UserConfig` and `Suite`. `--kind search-reply` and `--kind read-reply` print the [reply schemas](retrieval.md#reply-schemas). Save the output and associate it with your editor's YAML validation. `--kind assistant-reply` prints the [structured reply](prompts.md#structured-replies) an assistant's harness returns.
 
+`bf init` links `bf.yaml` and `evals/retrieval.yaml` to the published schemas of the installed release. Their second line is a modeline that editors using the YAML language server read:
+
+- `bf.yaml`: `# yaml-language-server: $schema=https://raw.githubusercontent.com/fmind/brain-framework/vVERSION/docs/bf.schema.json`, where `VERSION` is `bf --version`.
+- `evals/retrieval.yaml`: the same line ending in `eval.schema.json`.
+
+The editor then flags a misspelled key, such as `refesh`, as you type. The editor downloads the schema; BF itself stays offline. The version keeps the schema of the release you run, because the next major's schema may reject keys this one accepts. After upgrading BF, change the version in each modeline to check the keys the new release added.
+
 | File                              | Published schema                    |
 | --------------------------------- | ----------------------------------- |
 | `bf.yaml`                         | [Brain](../bf.schema.json)          |
@@ -66,6 +73,11 @@ Their `title` values are `Config`, `UserConfig` and `Suite`. `--kind search-repl
 | `evals/*.yaml`                    | [Evaluation](../eval.schema.json)   |
 
 The schemas check names, types, limits and structure. BF also checks meanings that depend on the brain, such as declared fields, distinct program names and valid identities: run `bf validate` and `bf update --dry-run`.
+
+Without an editor, any command that loads `bf.yaml` names such mistakes, never quoting the value:
+
+- An unknown key names the closest keys allowed at its place: `sensors.brief.refesh: unknown key; did you mean refresh?`.
+- An `at` time, a `path` pointer or a `command` list in the wrong form says what it expects, such as `expected HH:MM such as 08:00`.
 
 YAML parsing rejects duplicate keys, anchors, aliases, unsafe tags and oversized documents. Configuration and frontmatter follow the YAML 1.2 core schema:
 
@@ -134,7 +146,7 @@ Only `<sha256-id>.json` files under `memories/SOURCE/` are records. A file whose
 
 `bf validate` also reports other visible files under `memories/`.
 
-## Shared fields and sensor mappings
+## Ontology: shared fields and relations {#shared-fields-and-sensor-mappings}
 
 Fields give provider-specific values a shared meaning:
 
@@ -189,10 +201,20 @@ Sensors written by different people line up when they print the same attribute n
 | `attendee`    | identity, many, relation | `/attributes/attendee_refs`    | Accounts listed as attendees, not proof of attendance; narrower than `participant`. |
 | `repository`  | identity, many, relation | `/attributes/repository_refs`  | Repository the item belongs to.                                                     |
 | `project`     | identity, many, relation | `/attributes/project_refs`     | Project the source names for the item.                                              |
+| `part-of`     | identity, many, relation | `/attributes/parent_refs`      | Containing thread, folder, list, epic, project or other parent item.                |
+| `label`       | identity, many, relation | `/attributes/label_refs`       | Label the provider attaches to the item.                                            |
 | `kind`        | string, one              | `/attributes/kind`             | Provider-declared kind within a source mixing several kinds.                        |
 | `status`      | string, one              | `/attributes/status`           | The item's state in its own tool.                                                   |
 
-`bf init` also declares the note relations `depends-on`, `related-to` and `supersedes`, without a path. Identity values follow the formats the reviewed sensors use: `person:email/` with a lowercase address, `person:HOST/LOGIN` for a provider account such as `person:github.com/octocat`, and lowercase `repo:HOST/OWNER/NAME`. A sensor's own `fields:` mapping still overrides a default path, as the [four-tool example](context-hub.md#how-the-four-tools-share-one-project) shows for differently named project fields. A default path applies to every sensor of the brain: a sensor printing `attributes.status` as an object, or `author_refs` as a single string, fails its whole collection until it prints the declared type or the field's path changes. A brain created before this vocabulary keeps its own fields: add the rows it lacks to use sensors that print them.
+`bf init` also declares the note relations `depends-on`, `related-to` and `supersedes`, without a path. Identity values follow the formats the reviewed sensors use:
+
+- `person:email/` with a lowercase address.
+- `person:HOST/LOGIN` for a provider account, such as `person:github.com/octocat`.
+- Lowercase `repo:HOST/OWNER/NAME`.
+- Lowercase `label:github.com/OWNER/REPO/NAME` for a GitHub label, with the name percent-encoded, such as `label:github.com/acme/widgets/good%20first%20issue`.
+- `gmail-label:ID` for a Gmail label id as Gmail writes it, such as `gmail-label:INBOX` or `gmail-label:Label_12`, like `gmail-thread:THREAD` for a conversation.
+
+Each follows the [identity rules](link-reference.md#identity-rules). A sensor's own `fields:` mapping still overrides a default path, as the [four-tool example](context-hub.md#how-the-four-tools-share-one-project) shows for differently named project fields. A default path applies to every sensor of the brain: a sensor printing `attributes.status` as an object, `author_refs` as a single string or `label_refs` as plain names such as `bug` fails its whole collection until it prints the declared type or the field's path changes. A brain created before a field joined this vocabulary, such as `part-of` or `label`, keeps its own fields: add the rows it lacks to use sensors that print them, as the [example sensors](https://github.com/fmind/brain-framework/blob/main/examples/sensors/README.md#older-brains) show.
 
 ### Types and cardinality
 
@@ -285,6 +307,23 @@ Every record a sensor prints follows the fixed format below. A sensor cannot sup
 - One invalid record fails the whole collection before anything is saved. The error names the first one, such as `1.id: Field required`.
 - Only mapped fields apply to a sensor.
 - `bf validate` checks stored fields against the current declarations, including sources no longer configured.
+
+### Ontology terms in BF
+
+Readers who know ontology languages can map their terms onto BF, as an analogy:
+
+| Ontology term          | In BF                                                                                                          |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Class                  | A note's `type` or a record's `kind` field, as a flat string with no subclasses.                               |
+| Property               | A field declared under `fields:`.                                                                              |
+| Object property        | A relation: an `identity` field with `relation: true`.                                                         |
+| Range                  | A relation's [`targets`](#narrower-relations-and-allowed-targets) prefixes.                                    |
+| Subproperty            | A relation's `broader` relation, one level deep and applied to relation pages at read time.                    |
+| Individual             | A subject with its own identity: a note's [entity](links.md#give-a-subject-a-stable-identity) or a record.     |
+| Identifier equivalence | An alias: another namespaced `scheme:value` identity of the same subject, never a display name.                |
+| Provenance             | Each claim's origin, the section, note or record asserting it, plus a record's `updated` and `observed` times. |
+
+The graph holds only what files state explicitly. BF runs no reasoner: it infers no class, domain, equivalence, reverse relation or chained relation. It exports no RDF; [`bf export`](commands.md#export-the-graph) prints the claims as JSON lines for other tools.
 
 ## Graph and evidence
 
