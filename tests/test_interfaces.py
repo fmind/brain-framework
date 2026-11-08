@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import sys
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from importlib.metadata import version as distribution_version
 from pathlib import Path
@@ -21,7 +21,7 @@ from typer.core import TyperGroup
 from typer.main import get_command
 from typer.testing import CliRunner
 
-from bf import assistants, links, pages, records
+from bf import assistants, index, links, pages, records, retrieve
 from bf.cli import app, main
 from bf.config import user_config
 from bf.mcp import server
@@ -895,6 +895,67 @@ def test_items_export_omits_text_its_stale_metadata_no_longer_describes(
         f"bf: fixture: {records.path('meetings', 'lunch')}: {omitted}",
         f"bf: fixture: projects/offline.md: {omitted}",
     ]
+
+
+def test_a_scoped_export_checks_each_cache_once(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Expanding an identity scope and streaming its rows share one freshness check, as a search does.
+    checked: list[Path] = []
+    fresh = index.fresh
+
+    def counted(store: Store, counts: dict[str, int] | None = None) -> str:
+        checked.append(store.root)
+        return fresh(store, counts)
+
+    monkeypatch.setattr(index, "fresh", counted)
+    with ExitStack() as stack:
+        rows, _extra = retrieve.items([brain], stack, pages.bounds("repo:example/none"))
+        list(rows)
+    assert checked == [brain.root]
+
+
+def test_export_scope_selects_the_items_search_would_search_without_pages(brain: Store) -> None:
+    # More records than one search page holds: a scoped export still lists them all, with no offset to follow.
+    mail = [
+        Record(id=f"m{n:02d}", title=f"Mail {n}", text=f"Body {n}", time=f"2026-09-{n % 2 + 1:02d}T12:00:00Z")
+        for n in range(60)
+    ]
+    records_file(brain, "mail", mail)
+
+    def export(*args: str, code: int = 0) -> list[dict]:
+        result = CliRunner().invoke(app, ["export", "--brain", "fixture", *args])
+        assert result.exit_code == code, result.output
+        return [json.loads(line) for line in result.stdout.splitlines()]
+
+    source = export("--kind", "items", "--scope", "memories/mail")
+    assert [row["ref"] for row in source] == sorted(f"mail:m{n:02d}" for n in range(60))
+    assert all(row["text"] == f"Body {int(str(row['ref'])[6:])}" for row in source)
+    # A source period, a folder, a period with a source and an identity scope as search reads them.
+    day = export("--kind", "items", "--scope", "memories/mail/2026-09-01")
+    assert {row["ref"] for row in day} == {f"mail:m{n:02d}" for n in range(0, 60, 2)}
+    assert [row["ref"] for row in export("--kind", "items", "--scope", "projects/")] == ["projects/offline.md"]
+    assert export("--kind", "items", "--scope", "2026-08 memories/meetings") == export(
+        "--kind", "items", "--scope", "memories/meetings"
+    )
+    owner = export("--kind", "items", "--scope", "repo:example/project")
+    assert [row["ref"] for row in owner] == ["meetings:decision-1", "projects/offline.md"]
+    # Edges keep the claims the scoped items assert, and identities the names of the scoped items.
+    claims = export("--scope", "memories/meetings")
+    assert {(e["subject"], e["target"]) for e in claims} == {
+        ("bf://fixture/meetings:decision-1", "repo:example/project")
+    }
+    names = export("--kind", "identities", "--scope", "projects")
+    assert [row["ref"] for row in names] == ["projects/offline.md"]
+    # Invalid input fails before any brain is read, with search's diagnostic; an unknown source names the close ones.
+    for scope in ("nowhere", "memories/mail/later", "7d 2026-09", "bf://fixture/projects"):
+        exported = CliRunner().invoke(app, ["export", "--kind", "items", "--scope", scope])
+        searched = CliRunner().invoke(app, ["search", "mail", "--scope", scope])
+        assert (exported.exit_code, exported.stdout) == (2, "")
+        assert plain(exported.stderr).replace(" export -h)", " search -h)") == plain(searched.stderr)
+    unknown = CliRunner().invoke(app, ["export", "--kind", "items", "--brain", "fixture", "--scope", "memories/mial"])
+    searched = CliRunner().invoke(app, ["search", "mail", "--brain", "fixture", "--scope", "memories/mial"])
+    assert (unknown.exit_code, unknown.stdout) == (1, "")
+    assert str(unknown.exception) == str(searched.exception)
+    assert "did you mean memories/mail" in str(unknown.exception)
 
 
 def test_errors_name_what_exists(brain: Store) -> None:

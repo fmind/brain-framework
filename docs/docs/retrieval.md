@@ -168,7 +168,7 @@ Queries hold up to 4,096 characters. `--limit` is 1–50 (default 10).
 
 ### Scopes
 
-A search takes one scope:
+A search takes one scope, and [`bf export --scope`](commands.md#export-the-graph) exports the items it would search:
 
 | Scope                                                           | Searches                                                                   |
 | --------------------------------------------------------------- | -------------------------------------------------------------------------- |

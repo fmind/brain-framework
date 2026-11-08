@@ -11,7 +11,7 @@ import unicodedata
 from collections.abc import Collection, Iterable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, ClassVar, Literal
+from typing import Annotated, ClassVar, Literal, Self
 from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -1476,12 +1476,10 @@ def fold(text: str) -> str:
     return text if unicodedata.is_normalized("NFKC", text) else unicodedata.normalize("NFKC", text)
 
 
-class Query(Model):
-    """Words or an exact identity, optionally bounded by one scope: a folder, a time window or an identity."""
+class Bounds(Model):
+    """One scope's bounds, as search and export take it: a folder or file, a time window or undated items, and an
+    identity or tag."""
 
-    text: Annotated[str, Field(max_length=4096)]
-    limit: Annotated[int, Field(ge=1, le=50)] = 10
-    offset: Annotated[int, Field(ge=0, le=MAX_OFFSET)] = 0
     since: str = ""
     until: str = ""
     # Only items without an event time, such as a snapshot source's undated records.
@@ -1499,14 +1497,26 @@ class Query(Model):
             raise ValueError(str(error)) from None
 
     @model_validator(mode="after")
-    def bounded(self) -> Query:
-        # The index keeps only words, and every identity holds one: punctuation alone could match nothing.
-        if not re.search(r"[^\W_]", fold(self.text)):
-            raise ValueError("give words or an identity to search; read a page such as today to list items")
+    def bounded(self) -> Self:
         if self.target and not re.fullmatch(IDENTITY, self.target):
             raise ValueError("target requires an explicit namespaced identity")
         if self.since and self.until and self.since >= self.until:
             raise ValueError("since must be earlier than until")
         if self.undated and (self.since or self.until):
             raise ValueError("undated items have no time to bound")
+        return self
+
+
+class Query(Bounds):
+    """Words or an exact identity, optionally bounded by one scope: a folder, a time window or an identity."""
+
+    text: Annotated[str, Field(max_length=4096)]
+    limit: Annotated[int, Field(ge=1, le=50)] = 10
+    offset: Annotated[int, Field(ge=0, le=MAX_OFFSET)] = 0
+
+    @model_validator(mode="after")
+    def worded(self) -> Self:
+        # The index keeps only words, and every identity holds one: punctuation alone could match nothing.
+        if not re.search(r"[^\W_]", fold(self.text)):
+            raise ValueError("give words or an identity to search; read a page such as today to list items")
         return self

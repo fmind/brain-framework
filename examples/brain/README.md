@@ -76,7 +76,15 @@ The first three lines are:
 {"brain":"example","date":"2026-09-25","origin":"bf://example/actions/2026-09-25_retention-review/ACTION.md#context","relation":"links","subject":"bf://example/actions/2026-09-25_retention-review/ACTION.md","target":"bf://example/actions/2026-09-25_retention-review/outputs/decision.md"}
 ```
 
-Lines are sorted by subject, relation, target and origin. The second line is the answer you wrote above: its record link entered the graph, with the answer's section as its origin. The first action and that answer have no `updated` date, so their claims have no `date`; a note states its date as written, a record its `time` with the local offset. `head` closing the pipe early is expected. `bf export --kind identities` lists each note or record with every identity it answers to. See [export the graph](../../docs/docs/commands.md#export-the-graph).
+Lines are sorted by subject, relation, target and origin. The second line is the answer you wrote above: its record link entered the graph, with the answer's section as its origin. The first action and that answer have no `updated` date, so their claims have no `date`; a note states its date as written, a record its `time` with the local offset. `head` closing the pipe early is expected. `bf export --kind identities` lists each note or record with every identity it answers to.
+
+A script that needs every record of one source exports it whole, without reading `memories/` files or following pages. `--scope` takes what `bf search --scope` takes:
+
+```bash
+bf export --kind items --scope memories/demo
+```
+
+It prints one line: the demo record with its mapped `fields`, its `time` and `observed` times, and `"ref":"demo:retention","source":"demo","text":"Keep original evidence because upstream content can disappear."`. See [export the graph](../../docs/docs/commands.md#export-the-graph).
 
 ## Review a decision
 

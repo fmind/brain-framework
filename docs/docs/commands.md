@@ -18,7 +18,7 @@ description: Look up Brain Framework commands, previews, graph exports, replies,
 | `schema [--kind KIND]`                                                                      | Print a configuration or [reply schema](retrieval.md#reply-schemas); defaults to `bf.yaml`.                                              |
 | `search QUERY [--scope SCOPE] [--limit N] [--offset N]`                                     | Find words or an identity, optionally within one scope, which a period can [narrow](retrieval.md#scopes).                                |
 | `read [REF] [--rel RELATION] [--offset N]`                                                  | Open home, a page, note, section, record or identity; `--rel` lists one relation's links.                                                |
-| `export [--kind edges\|identities\|items]`                                                  | Print the graph, or every note and record with its text, of the selected brains as JSON Lines, from their caches.                        |
+| `export [--kind edges\|identities\|items] [--scope SCOPE]`                                  | Print the graph, or every note and record with its text, as JSON Lines from the caches, within an optional [scope](retrieval.md#scopes). |
 | `collect SENSOR [--since TIME] [--until TIME] [--dry-run] [--allow-removal] [--input FILE]` | Run one sensor now, or [check its saved output](sensors.md#check-saved-output) without running it.                                       |
 | `forget REF... [--dry-run]`                                                                 | Remove collected records and keep their sensors from storing them again; see [forget records](#forget-records).                          |
 | `run [PROGRAM] [ARGS]... [--hook EVENT] [--stdin] [--dry-run]`                              | Run one routine or [assistant](prompts.md), or every routine of a hook, now; see [routines](routines.md).                                |
@@ -113,6 +113,14 @@ Each line has:
   "text": "The launch moves to Monday."
 }
 ```
+
+`--scope SCOPE` keeps only the items `bf search --scope SCOPE` would search, with the same [scopes](retrieval.md#scopes) and errors: an invalid scope exits 2 and an unknown source exits 1. Scripts and routines that need every record of one source, period or folder export them all at once, with no page to follow, instead of reading `memories/` files. The [example brain](https://github.com/fmind/brain-framework/blob/main/examples/brain/README.md#export-the-graph) prints its one demo record:
+
+```bash
+bf export --kind items --scope memories/demo
+```
+
+With `--kind edges`, a scope keeps the claims its items assert; with `--kind identities`, the names its items answer to.
 
 A record its sensor kept only part of adds `"partial":true`, as in [search](retrieval.md#search). A file that changed or became unreadable since the cache refreshed keeps its line without `text` and prints `bf: BRAIN: FILE: text omitted: …` on stderr; run `bf build` first for a complete export. The text is your evidence: send it only to services your [privacy](privacy.md) choices allow.
 

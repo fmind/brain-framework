@@ -26,7 +26,14 @@ def export() -> str:
         (
             "brain",
             None,
-            ['"score":"16/16"', export(), '"state":"unchanged"', '"state":"changed"', '"brain":"example-team"'],
+            [
+                '"score":"16/16"',
+                export(),
+                '"ref":"demo:retention","source":"demo","text":"Keep original evidence because upstream content can disappear."',
+                '"state":"unchanged"',
+                '"state":"changed"',
+                '"brain":"example-team"',
+            ],
         ),
         ("retrieval", 0, ['"score":"26/26"', '"mrr":1.0', '{"notes":15,"problems":[],"records":9,"valid":true}']),
         (

@@ -25,6 +25,7 @@ from bf.models import (
     CACHE,
     LINKS,
     NAME,
+    Bounds,
     Error,
     InputError,
     NotFoundError,
@@ -246,13 +247,18 @@ def query(text: str, bounds: str = "", *, limit: int = 10, offset: int = 0) -> Q
         except Error as error:
             raise InputError(str(error), "query") from None
     # The words alone first: a query without words names the query, and any other reason the scope's bounds.
-    _request("query", text=text)
-    return _request("scope", text=text, limit=limit, offset=offset, **window)
+    _request(Query, "query", text=text)
+    return _request(Query, "scope", text=text, limit=limit, offset=offset, **window)
 
 
-def _request(argument: str, **values: object) -> Query:
+def bounds(value: str) -> Bounds:
+    """A scope checked without a brain, as search checks it, for commands that take a scope without words."""
+    return _request(Bounds, "scope", **scope(value))
+
+
+def _request[T: Bounds](model: type[T], argument: str, **values: object) -> T:
     try:
-        return Query.model_validate(values)
+        return model.model_validate(values)
     except ValidationError as error:
         # pydantic's reasons without its field names, which are not the arguments a caller wrote.
         reasons = sorted({item["msg"].removeprefix("Value error, ") for item in error.errors(include_input=False)})

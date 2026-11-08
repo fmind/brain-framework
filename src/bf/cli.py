@@ -540,10 +540,19 @@ def export(
         ),
     ] = "edges",
     brain: BrainOption = "",
+    scope: Annotated[
+        str,
+        typer.Option(
+            help="Export only the items bf search --scope would search, such as memories/gmail, memories/gmail/7d, "
+            "projects or 2026-09; edges keep the claims those items assert."
+        ),
+    ] = "",
 ) -> None:
     """Print the graph of the selected brains as JSON Lines from their caches; exit 1 when evidence was skipped."""
+    # Invalid input fails before any brain is read, as for search.
+    bounds = pages.bounds(scope)
     with ExitStack() as stack:
-        stream, extra = {"edges": edges, "identities": identities, "items": items}[kind](select(brain), stack)
+        stream, extra = {"edges": edges, "identities": identities, "items": items}[kind](select(brain), stack, bounds)
         for row in stream:
             _write(terminal(present(row)), flush=False)
         _write(b"")

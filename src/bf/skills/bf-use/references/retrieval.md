@@ -30,7 +30,7 @@ Inspect `problems`, `stale` and `sources` before interpreting a result, and retr
 - A whole note, record or identity read groups `backlinks` by `relation`: `links` for untyped links, `cites` for OKF sources. `--rel RELATION` takes a whole note, record or identity, never a page or section, and `--rel PARENT` includes relations declared `broader: PARENT`.
 - `claims` lists the item's typed claims with their `target` and `origin`, the section or record making each; `claims_truncated` marks a capped list. `bf search 'IDENTITY'` gives every linking item's `relations` at once.
 - Section reads omit graph context: read the parent note for a dependency review.
-- For analysis outside BF, `bf export` streams one JSON line per edge and `bf export --kind identities` every item with several names; both exit 1 when evidence was skipped.
+- For analysis outside BF, `bf export` streams one JSON line per edge, `--kind identities` every item with several names and `--kind items` every note and record with its text; `--scope` takes a search scope, such as `memories/SOURCE`, and returns every match without pages. Each exits 1 when evidence was skipped.
 
 ## Pages worth knowing
 

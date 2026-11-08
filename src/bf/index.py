@@ -30,6 +30,7 @@ from bf.models import (
     LINKS,
     MAX_FILES,
     MAX_NOTE,
+    Bounds,
     Config,
     Error,
     Query,
@@ -1189,7 +1190,8 @@ OWNED = (
 # and CROSS JOIN keeps the few section prefixes as the outer loop of each range search.
 _LINKING = f"""SELECT l.item FROM links l WHERE l.target IN (SELECT value FROM json_each(:targets))
   UNION SELECT l.item FROM json_each(:sections) s CROSS JOIN links l ON {within("l.target", "s.value")}"""  # noqa: S608 - fixed SQL
-_FILTERS = f"""((:since='' AND :until='') OR ({PERIOD_TIME})!='')
+# Fixed SQL: whether item `i` lies within a scope's bounds, with the parameters `scoped` gives.
+FILTERS = f"""((:since='' AND :until='') OR ({PERIOD_TIME})!='')
   AND (:since='' OR ({PERIOD_TIME})>=:since) AND (:until='' OR ({PERIOD_TIME})<:until)
   AND (NOT :undated OR i.time='') AND (:prefix='' OR i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')
   AND (:target='' OR (:tag_scope AND i.id IN (SELECT item FROM tags WHERE target=:target))
@@ -1213,6 +1215,15 @@ def sections(targets: set[str]) -> list[str]:
 
 def _parameters(targets: set[str]) -> dict[str, object]:
     return {"targets": json.dumps(sorted(targets)), "sections": json.dumps(sections(targets))}
+
+
+def scoped(bounds: Bounds, targets: set[str]) -> dict[str, object]:
+    """FILTERS' parameters: the scope's bounds, and `targets`, the identities its target expands to in this brain."""
+    return {
+        **bounds.model_dump(include=set(Bounds.model_fields)),
+        **_parameters(targets),
+        "tag_scope": bf_links.tag(bounds.target) is not None,
+    }
 
 
 def _string(term: str) -> str:
@@ -1331,7 +1342,7 @@ def _lexical(connection: sqlite3.Connection, params: dict[str, object]) -> Itera
                     *(1+{COVERAGE}*(coalesce(h.n,1)-1)/max(json_array_length(:terms)-1,1)) AS score
              FROM search JOIN passages p ON p.id=search.rowid JOIN items i ON i.id=p.item
              LEFT JOIN hits h ON h.passage=p.id
-             WHERE search MATCH :match AND {_FILTERS} AND (p.fragment='' OR bm25(search,10.0,1.0,0.0,0.0)<0)),
+             WHERE search MATCH :match AND {FILTERS} AND (p.fragment='' OR bm25(search,10.0,1.0,0.0,0.0)<0)),
            ranked AS MATERIALIZED (
              SELECT *,row_number() OVER copy AS position,first_value(source) OVER copy AS lead FROM matches
              WINDOW copy AS (PARTITION BY CASE WHEN url='' THEN item ELSE url END
@@ -1415,7 +1426,7 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> Iter
             dict(row)
             for row in connection.execute(
                 f"SELECT {_FIELDS},'' AS fragment,i.title,1e3 AS score,i.lead AS excerpt FROM items i "  # noqa: S608 - fixed SQL
-                f"WHERE i.id IN (SELECT item FROM tags WHERE target=:text) AND {_FILTERS} "
+                f"WHERE i.id IN (SELECT item FROM tags WHERE target=:text) AND {FILTERS} "
                 "ORDER BY time DESC,i.ref DESC LIMIT :limit",
                 params,
             )
@@ -1424,7 +1435,7 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> Iter
         f"""WITH candidates AS ({_CANDIDATES}),
               owners AS (SELECT item,max(score) AS score FROM candidates GROUP BY item)
            SELECT {_FIELDS},'' AS fragment,i.title,c.score,i.lead AS excerpt FROM owners c
-           JOIN items i ON i.id=c.item WHERE {_FILTERS}
+           JOIN items i ON i.id=c.item WHERE {FILTERS}
            ORDER BY c.score DESC,time DESC,i.ref DESC LIMIT :limit""",  # noqa: S608 - fixed SQL
         params,
     )
@@ -1478,8 +1489,7 @@ def search(
         text = bf_links.identity(text)
     params: dict[str, object] = {
         **query.model_dump(),
-        **_parameters(targets),
-        "tag_scope": bf_links.tag(query.target) is not None,
+        **scoped(query, targets),
         "limit": limit,
         **_identities(text, identities),
     }

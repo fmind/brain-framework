@@ -144,7 +144,7 @@ The reply lists each routine with its `status`: `ran`, `skipped`, or `failed` wi
 
 ## Write a routine
 
-Read the brain with `bf read` and `bf search`, using literal arguments. Programs receive `BF_BRAIN` set to the brain running them, so a nested `bf` call reads that brain whatever your shell selected. Keep routines offline and deterministic: do not edit notes or call a model, since an [assistant](prompts.md) runs your agent.
+Read the brain with `bf read` and `bf search`, using literal arguments. For every record of one source or period, run `bf export --kind items --scope memories/SOURCE` ([export](commands.md#export-the-graph)) rather than reading `memories/` files: it reads the validated cache and each file through BF's checks, and exits 1 when it skipped evidence. Programs receive `BF_BRAIN` set to the brain running them, so a nested `bf` call reads that brain whatever your shell selected. Keep routines offline and deterministic: do not edit notes or call a model, since an [assistant](prompts.md) runs your agent.
 
 Name each item by the `uri` it returns, or by its `ref` when it has none, so a reviewer chooses what to open. Do not link it: a link from a dated action would count as [newer evidence](brain.md#review-reminders) for its target.
 

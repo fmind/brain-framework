@@ -40,7 +40,7 @@ After changing a sensor's `fields:` mappings, `bf build --reproject SENSOR --dry
 
 ## Routines
 
-A routine is a deterministic brain program under `routines:`, such as a review generator, a backup or a Git hook check: it uses no model and makes no decision, and may read the brain through `bf`, since every program receives `BF_BRAIN`. Start from the reviewed [routine example](https://github.com/fmind/brain-framework/tree/main/examples/routines) and the [routine contract](https://fmind.github.io/brain-framework/docs/routines/).
+A routine is a deterministic brain program under `routines:`, such as a review generator, a backup or a Git hook check: it uses no model and makes no decision, and may read the brain through `bf`, since every program receives `BF_BRAIN`. For every record of one source, it runs `bf export --kind items --scope memories/SOURCE`, never reads `memories/` files. Start from the reviewed [routine example](https://github.com/fmind/brain-framework/tree/main/examples/routines) and the [routine contract](https://fmind.github.io/brain-framework/docs/routines/).
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/routines/

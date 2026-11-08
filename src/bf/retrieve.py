@@ -25,6 +25,7 @@ from bf.models import (
     MAX_OFFSET,
     MAX_REPLY,
     NOTICE,
+    Bounds,
     Error,
     InputError,
     NotFoundError,
@@ -253,39 +254,55 @@ def _brain(stores: list[Store], name: str, problems: list[dict[str, object]]) ->
 
 # Every claim in a stable order of its exported fields; `time` is the event time of the item asserting it.
 _EDGES = f"""SELECT e.subject,coalesce(nullif(e.relation,''),:links) AS relation,e.target,e.origin,{index.TIME} AS time,{index.DATE} AS date,
-  i.observed FROM edges e JOIN items i ON i.id=e.item ORDER BY 1,2,3,4"""  # noqa: S608 - fixed SQL
+  i.observed FROM edges e JOIN items i ON i.id=e.item WHERE {index.FILTERS} ORDER BY 1,2,3,4"""  # noqa: S608 - fixed SQL
 
 
 # Every note or record declaring names beyond its own address: an entity, aliases, or a record's provider aliases.
-_IDENTITIES = """SELECT i.ref,i.kind,i.type,i.source,i.status,json_group_array(n.name) AS names FROM names n
-  JOIN items i ON i.id=n.item GROUP BY i.id HAVING count(*)>1 ORDER BY i.ref"""
+_IDENTITIES = f"""SELECT i.ref,i.kind,i.type,i.source,i.status,json_group_array(n.name) AS names FROM names n
+  JOIN items i ON i.id=n.item WHERE {index.FILTERS} GROUP BY i.id HAVING count(*)>1 ORDER BY i.ref"""  # noqa: S608 - fixed SQL
 
 
 # Every indexed note and record, for retrievers outside BF such as embedding or multilingual search.
 # Each carries its file's cached fingerprint, so a file changed since the cache refreshed is not paired with it.
-_ITEMS = """SELECT i.ref,i.path,i.kind,i.source,i.title,i.time,i.type,i.status,i.url,i.updated,i.observed,i.partial,
-  i.fields,f.size,f.mtime,f.ctime,f.inode FROM items i LEFT JOIN files f ON f.path=i.path ORDER BY i.ref"""
+_ITEMS = f"""SELECT i.ref,i.path,i.kind,i.source,i.title,i.time,i.type,i.status,i.url,i.updated,i.observed,i.partial,
+  i.fields,f.size,f.mtime,f.ctime,f.inode FROM items i LEFT JOIN files f ON f.path=i.path WHERE {index.FILTERS}
+  ORDER BY i.ref"""  # noqa: S608 - fixed SQL
+
+# One brain's export rows, given index.FILTERS' parameters for the scope in that brain.
+type Rows = Callable[[Store, str, sqlite3.Connection, dict[str, object]], Iterator[dict[str, object]]]
 
 
-def edges(stores: list[Store], stack: ExitStack) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
+def edges(
+    stores: list[Store], stack: ExitStack, bounds: Bounds | None = None
+) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
     """Stream the claims of the selected brains and their direct references from their caches, like search."""
     return _export(
         stores,
         stack,
-        lambda _store, name, connection: (_edge(name, row) for row in connection.execute(_EDGES, {"links": LINKS})),
+        bounds,
+        lambda _store, name, connection, scope: (
+            _edge(name, row) for row in connection.execute(_EDGES, {**scope, "links": LINKS})
+        ),
     )
 
 
-def identities(stores: list[Store], stack: ExitStack) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
+def identities(
+    stores: list[Store], stack: ExitStack, bounds: Bounds | None = None
+) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
     """Stream each note or record with every identity it answers to, so duplicates of one subject stand out."""
     return _export(
         stores,
         stack,
-        lambda _store, name, connection: (_identity(name, row) for row in connection.execute(_IDENTITIES)),
+        bounds,
+        lambda _store, name, connection, scope: (
+            _identity(name, row) for row in connection.execute(_IDENTITIES, scope)
+        ),
     )
 
 
-def items(stores: list[Store], stack: ExitStack) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
+def items(
+    stores: list[Store], stack: ExitStack, bounds: Bounds | None = None
+) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
     """Stream every note and record with its text, read from its file, so other tools can index the brain.
 
     The returned `omitted` list fills, while the stream runs, with each item whose text was left out.
@@ -294,7 +311,10 @@ def items(stores: list[Store], stack: ExitStack) -> tuple[Iterator[dict[str, obj
     stream, extra = _export(
         stores,
         stack,
-        lambda store, name, connection: (_item(store, name, row, omitted) for row in connection.execute(_ITEMS)),
+        bounds,
+        lambda store, name, connection, scope: (
+            _item(store, name, row, omitted) for row in connection.execute(_ITEMS, scope)
+        ),
     )
     return stream, {**extra, "omitted": omitted}
 
@@ -326,22 +346,36 @@ def _item(store: Store, brain: str, row: sqlite3.Row, omitted: list[dict[str, ob
 
 
 def _export(
-    stores: list[Store],
-    stack: ExitStack,
-    rows: Callable[[Store, str, sqlite3.Connection], Iterator[dict[str, object]]],
+    stores: list[Store], stack: ExitStack, bounds: Bounds | None, rows: Rows
 ) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
     """Stream rows of the selected brains and their direct references from their caches, like search.
 
     Returns the stream, open while `stack` is, and the selection's `problems` and `stale` brains. The problems
     of a brain are known before its first row: skipped files and unavailable brains make an export incomplete.
+    `bounds` keeps the rows of the items a search within the same scope selects: an edge belongs to the item asserting
+    it, a set of names to the item answering to them. As for search, a source no brain knows fails before any row.
     """
+    bounds = bounds or Bounds()
     stores, problems = related(stores)
+    source = bounds.prefix.split("/")[1] if bounds.prefix.startswith("memories/") else ""
 
     def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
-        return {"rows": rows(store, name, connection)}
+        scope = index.scoped(bounds, graph.local_refs(connection, targets, name))
+        # Only a source scope counts sources, which scans every record's index entry.
+        known = set(pages.sources(store, connection)) if source else set()
+        return {"rows": rows(store, name, connection, scope), "known": known}
 
-    parts, extra = pages.brains(stores, build, counted=False, stack=stack)
+    # One freshness check per brain covers the identity expansion and the rows, as for search.
+    with index.session():
+        targets, target_problems = graph.expand(stores, bounds.target)
+        problems.extend(target_problems)
+        parts, extra = pages.brains(stores, build, counted=False, stack=stack)
     problems.extend(cast("list[dict[str, object]]", extra.get("problems", [])))
+    known = {name for _, part in parts for name in cast("set[str]", part["known"])}
+    if source and parts and source not in known:
+        # Like search: a source no brain indexes or configures is unknown, never an empty export.
+        hint = suggest(source, known, prefix="memories/")
+        raise pages.absent({**extra, "problems": problems}, f"unknown source; read memories to list sources{hint}")
 
     def stream() -> Iterator[dict[str, object]]:
         try:
