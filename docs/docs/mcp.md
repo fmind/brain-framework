@@ -61,6 +61,24 @@ args = ["mcp", "--brain", "/home/me/brain"]
 
 Restart Codex and run `/mcp`. See [Codex MCP setup](https://developers.openai.com/codex/mcp). Remove it with `codex mcp remove brain`.
 
+## goose
+
+goose runs a local MCP server as a stdio extension. Add this entry under `extensions:` in `~/.config/goose/config.yaml`, with your absolute paths, or enter the same values as a command-line extension in `goose configure`:
+
+```yaml
+# https://goose-docs.ai/docs/getting-started/using-extensions#config-entry
+extensions:
+  brain:
+    name: brain
+    type: stdio
+    cmd: /home/me/.local/bin/bf
+    args: [mcp, --brain, /home/me/brain]
+    enabled: true
+    timeout: 300
+```
+
+Start a new goose session, since extension changes apply to future sessions. See [Using extensions](https://goose-docs.ai/docs/getting-started/using-extensions). Remove it by deleting the entry.
+
 ## Other agent hosts
 
 Use the host's **local stdio** configuration with these values, replacing the paths:
@@ -78,7 +96,7 @@ Use the host's **local stdio** configuration with these values, replacing the pa
 | Cursor             | [MCP configuration](https://cursor.com/docs/mcp).                                                                    |
 | OpenCode           | [Local MCP servers](https://opencode.ai/docs/mcp-servers/): the executable and arguments form its command array.     |
 
-A host that accepts only remote MCP URLs cannot start `bf mcp`: BF serves stdio only.
+Any host that loads `AGENTS.md`, [Agent Skills](https://agentskills.io/specification) and local stdio MCP servers can use BF. A host that accepts only remote MCP URLs cannot start `bf mcp`: see [why BF serves local stdio only](#why-local-stdio-and-two-tools).
 
 ## Verify the connection
 
@@ -118,3 +136,16 @@ Arguments match the CLI:
 Hosts show the tools as **Search the brain** and **Read a brain page, note or record**, both annotated read-only.
 
 At connection, the server sends instructions with the loop the generated `AGENTS.md` teaches: orient, search a few words, read each ref relied on, follow `next_offset` and inspect `problems` and `stale`. Whether the model sees them depends on the host. The [MCP tool contract](retrieval.md#mcp-tool-contract) lists parameters, reply schemas and errors.
+
+## Why local stdio and two tools
+
+BF serves MCP over local stdio only, with `search` and `read`, by design:
+
+- **No remote endpoint:** it would expose a private brain beyond the computer that holds it. BF has no hosted service or account, and each computer runs its own brain.
+- **No resources or prompts:** they would duplicate `read`, whose pages already browse the brain, and the [skills](agents.md#install-the-skills), which carry the workflows.
+- **No other tools:** collection, programs and writes run only from commands you start, so a model connected over MCP cannot start them.
+
+Without local MCP, use these instead:
+
+- **The CLI:** run the agent in a clone of the brain, as [Agent workflows](agents.md) shows.
+- **A channel [`stream` adapter](channels.md#stream):** it brings events from a remote service to the brain's assistants. It runs its own listener, so review it like any program.

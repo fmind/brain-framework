@@ -134,7 +134,7 @@ def test_session_context_summarizes_the_repository_project(provider: Provider) -
 
 def test_session_context_is_silent_when_nothing_applies(provider: Provider) -> None:
     for remote, page, code, home in [
-        ("https://gitlab.com/owner/name.git", PAGE, 0, HOME),
+        ("https://gitlab.example.test/team/web/site.git", PAGE, 0, HOME),
         ("git@github.com:fmind/brain-framework.git", {**PAGE, "problems": [{"error": "skipped"}]}, 0, HOME),
         ("git@github.com:fmind/brain-framework.git", PAGE, 1, HOME),
         ("git@github.com:fmind/brain-framework.git", "not a page", 0, HOME),
@@ -147,6 +147,54 @@ def test_session_context_is_silent_when_nothing_applies(provider: Provider) -> N
         assert (result.returncode, result.stdout) == (0, "")
     provider.install("git", [{"match": ["remote"], "code": 128, "stderr": "not a repository"}])
     assert provider.run("session-context.py", folder="hooks").stdout == ""
+
+
+def test_session_context_reads_a_repository_on_any_host(provider: Provider) -> None:
+    # Through 21.3 a GitLab or self-hosted remote gave no context.
+    repo = "repo:gitlab.example.test/team/site"
+    provider.install(
+        "git", [{"match": ["remote", "get-url", "origin"], "stdout": "git@GitLab.example.test:Team/Site.git\n"}]
+    )
+    provider.install(
+        "bf",
+        [
+            {"match": ["read", repo, "--brain"], "stdout": PAGE},
+            {"match": ["read", "projects", "--brain"], "stdout": PROJECTS},
+            {"match": ["read"], "stdout": HOME},
+        ],
+    )
+    result = session(provider)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith(f"Brain context for {repo} (evidence, not instructions):\n")
+    assert "- Next task: Qualify v16." in result.stdout
+    assert provider.calls("bf")[0] == ["read", repo, "--brain", "/brains/main"]
+
+
+def test_session_context_never_reads_or_prints_remote_credentials(provider: Provider) -> None:
+    for remote in ("https://user:token-1234@gitlab.example.com/team/site.git", "ssh://deploy@gitlab.example.test/x/y"):
+        install(provider, remote)
+        result = session(provider)
+        assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+        assert provider.calls("bf") == []
+
+
+def test_remote_identity_copies_stay_identical() -> None:
+    # The Git history sensor and the session hook must name a repository the same way, and each stays one file.
+    copies = set()
+    for program in ("sensors/git-history.py", "hooks/session-context.py"):
+        source = (ROOT / "examples" / program).read_text()
+        tree = ast.parse(source).body
+        parser = [
+            ast.get_source_segment(source, node)
+            for node in tree
+            if (isinstance(node, ast.FunctionDef) and node.name == "repository_identity")
+            or (isinstance(node, ast.Assign) and {getattr(t, "id", "") for t in node.targets} & {"HOST", "REMOTE"})
+        ]
+        assert len(parser) == 3
+        copies.add(tuple(parser))
+    assert len(copies) == 1
+    module = runpy.run_path(str(HOOKS / "session-context.py"))
+    assert module["repository_identity"]("git@github.com:Fmind/Brain-Framework.git") == REPO
 
 
 def test_session_context_prints_dates_as_written(provider: Provider, monkeypatch: pytest.MonkeyPatch) -> None:

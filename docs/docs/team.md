@@ -55,13 +55,37 @@ bf validate
 bf eval
 ```
 
-Use `git pull` to receive changes; BF refreshes its search cache on its own. Review reminders follow each file's modification time on your machine, so a pull that rewrites a note restarts them. Set `stale_after` for a deadline the team shares.
+BF refreshes its search cache on its own after you receive changes. Review reminders follow each file's modification time on your machine, so a pull that rewrites a note restarts them. Set `stale_after` for a deadline the team shares.
 
 To search the team brain from anywhere, register it with `bf register ~/team-brain`, then pass `--brain team-brain`. Registration and reading never run the brain's programs.
 
 Running programs inside the clone runs pulled code with your permissions. For example, `bf update --brain ~/team-brain` runs the harness command of every enabled assistant with a due schedule or read input, and the channel commands it uses. Review the clone first, as [Running code](privacy.md#running-code) lists: its programs, any [runtime pin](upgrades.md#pin-a-brains-runtime) and the agent configuration the harness loads, such as `.claude/`, `.mcp.json` and changes to `AGENTS.md` or `CLAUDE.md`.
 
-Register agent host hooks, such as `hooks/`, only from a reviewed copy outside the clone. The host runs them at every session, so a pulled change would run unreviewed.
+Register agent host hooks, such as `hooks/`, and install a shared brain's `skills/` only from a reviewed copy outside the clone. The host runs hooks at every session and follows skills as instructions, so a pulled change would apply unreviewed.
+
+### Review before you merge
+
+`git pull` merges before you can look. In a clone that runs programs, or where you start an agent, fetch first, note the commit you review and list its changes:
+
+```bash
+git fetch
+reviewed=$(git rev-parse '@{u}')
+git diff --name-status "HEAD...$reviewed" -- . ':!projects/*.md' ':!concepts/*.md' ':!actions/*.md' ':!memories/*.json'
+git diff --name-status "HEAD...$reviewed" -- '*AGENTS.md' '*CLAUDE.md' '*SKILL.md' '*.claude/*' '*.agents/*'
+```
+
+`@{u}` is the branch your clone tracks, such as `origin/main`. Each line gives a file's full path and whether it was added, modified, deleted or renamed:
+
+- **The first list** shows every change except Markdown under `projects/`, `concepts/` and `actions/` and JSON under `memories/`. It covers programs, `bf.yaml`, prompts, hooks, `.env` files and the runtime pin.
+- **The second list** shows the `AGENTS.md`, `CLAUDE.md`, `SKILL.md`, `.claude/` and `.agents/` files of every folder. Agents load them as instructions or configuration, even from a folder of notes the first list hides.
+
+Read each listed file's change with `git diff "HEAD...$reviewed" -- FILE`. A script that a `bf.yaml` command names is a program, even outside `sensors/`. Then, in the same shell, merge exactly the commit you reviewed:
+
+```bash
+git merge --ff-only "$reviewed"
+```
+
+Nothing changes in the clone until the merge, so a running `bf watch` never runs unreviewed code. Commits a later fetch brings, such as an editor's automatic fetch, stay out of the merge. When your clone has unpushed commits of its own, such as collected records, `git rebase "$reviewed"` replaces the merge.
 
 ## Collect on a laptop
 
@@ -70,6 +94,7 @@ Keep provider credentials and scheduled collection on the designated owner's lap
 1. Add a reviewed [sensor](sensors.md) for information the whole team may retain.
 1. Test it locally, then set its `refresh` if regular updates help.
 1. Run `bf watch` on that laptop, or [run it as a service](schedule.md#run-watch-as-a-service) whose file stays outside the brain's Git history.
+1. Receive teammates' changes only as [Review before you merge](#review-before-you-merge) shows: watch runs what a merge brings at its next tick.
 1. Inspect the collected files before sharing them.
 
 New brains ignore `memories/` in Git. To share only a reviewed `github-issues` source, replace the `/memories/` line in `.gitignore` with:
@@ -112,6 +137,23 @@ To include team notes in your personal searches, add a [direct reference](config
 Every clone keeps `name: team-brain`, so a link such as `[Product-page decision](bf://team-brain/projects/new-website.md#decision)` works wherever the clone lives. The target brain must be selected or referenced; a link never grants access.
 
 To move knowledge from a personal brain, the `bf-use` skill's [sharing guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/references/share.md) prepares a copy holding only what the team may read. Validation checks structure, not privacy.
+
+## Agents on cloud computers
+
+A cloud agent works in its vendor's virtual machine, on a fresh clone of a repository. Give it only a team brain whose every file the vendor may process:
+
+- **Never clone a personal brain into a vendor's machine.** Do not start a cloud session from one either: `claude --cloud` [uploads a local repository](https://code.claude.com/docs/en/claude-code-on-the-web#send-local-repositories-without-github) that has no GitHub remote it can clone.
+- **Collect nothing there.** Provider credentials stay on the collecting laptop. Records reach the clone only through the reviewed sources the team commits, as [Collect on a laptop](#collect-on-a-laptop) shows.
+- **Review the branch it clones.** The session runs the clone's [agent configuration](https://code.claude.com/docs/en/cloud-environments#what-carries-over-from-your-setup), such as `.claude/settings.json` hooks and `.mcp.json` servers, so review changes as [Review before you merge](#review-before-you-merge) lists.
+
+Anthropic-hosted Claude Code sessions [clone repositories only from GitHub](https://code.claude.com/docs/en/claude-code-on-the-web#limitations). Install BF and its skills in the environment's [setup script](https://code.claude.com/docs/en/cloud-environments#setup-scripts), replacing `X.Y.Z` with the release your clones use:
+
+```bash
+UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python 3.14 brain-framework==X.Y.Z
+bf skills ~/.claude/skills
+```
+
+The script runs as root before the agent starts. `UV_TOOL_BIN_DIR` puts `bf` in a folder already on `PATH`, where the agent and the skills find it.
 
 ## Evaluate a pilot
 

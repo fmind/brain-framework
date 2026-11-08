@@ -37,14 +37,29 @@ def run(argv: list[str], limit: int, timeout: float) -> bytes | None:
     return result.stdout
 
 
+# A remote's identity, the same in each example that reads one: only `https://HOST/OWNER/NAME`,
+# `ssh://git@HOST/OWNER/NAME` and `git@HOST:OWNER/NAME`, with or without `.git`, on a host whose name ends in a
+# letters-only label. Any other user, a password or token, a port, a nested group or an ssh alias without a dot,
+# such as `git@work:team/site.git`, gives no identity. A dotted alias, such as `gh.work`, passes as its host.
+HOST = r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}"
+REMOTE = re.compile(
+    rf"(?:https://({HOST})/|ssh://git@({HOST})/|git@({HOST}):)([A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)(?:\.git)?"
+)
+
+
+def repository_identity(url: str) -> str:
+    """`repo:HOST/OWNER/NAME`, lowercase as the sensor kit's repo() writes it; "" for any other remote."""
+    match = REMOTE.fullmatch(url.strip())
+    if not match:
+        return ""
+    host = next(group for group in match.groups()[:3] if group)
+    return f"repo:{host}/{match[4]}".lower()
+
+
 def identity() -> str:
-    """The GitHub repository of the working directory, as sensors record it; never raw remote credentials."""
+    """The working directory's repository, as the Git history sensor records it; never raw remote credentials."""
     raw = run(["git", "remote", "get-url", "origin"], REMOTE_BYTES, 5)
-    match = re.fullmatch(
-        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)(?:\.git)?",
-        (raw or b"").decode(errors="replace").strip(),
-    )
-    return "repo:github.com/" + match[1].lower() if match else ""
+    return repository_identity((raw or b"").decode(errors="replace"))
 
 
 def read(ref: str, brain: str, offset: int = 0, timeout: float = LOOKUP_SECONDS) -> dict | None:

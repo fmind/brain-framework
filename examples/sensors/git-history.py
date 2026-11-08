@@ -81,17 +81,34 @@ def run(argv: list[str], limit: int, timeout: int) -> bytes:
             child.stdout.close()
 
 
-def github(repository: Path) -> str:
-    """Project only a recognized GitHub identity, never raw remote credentials."""
+# A remote's identity, the same in each example that reads one: only `https://HOST/OWNER/NAME`,
+# `ssh://git@HOST/OWNER/NAME` and `git@HOST:OWNER/NAME`, with or without `.git`, on a host whose name ends in a
+# letters-only label. Any other user, a password or token, a port, a nested group or an ssh alias without a dot,
+# such as `git@work:team/site.git`, gives no identity. A dotted alias, such as `gh.work`, passes as its host.
+HOST = r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}"
+REMOTE = re.compile(
+    rf"(?:https://({HOST})/|ssh://git@({HOST})/|git@({HOST}):)([A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)(?:\.git)?"
+)
+
+
+def repository_identity(url: str) -> str:
+    """`repo:HOST/OWNER/NAME`, lowercase as the sensor kit's repo() writes it; "" for any other remote."""
+    match = REMOTE.fullmatch(url.strip())
+    if not match:
+        return ""
+    host = next(group for group in match.groups()[:3] if group)
+    return f"repo:{host}/{match[4]}".lower()
+
+
+def remote(repository: Path) -> str:
+    """The origin remote's repository identity, never its raw URL or credentials; "" when there is none."""
     try:
         raw = run(["git", "-C", str(repository), "remote", "get-url", "origin"], 8192, 10)
     except (subprocess.CalledProcessError, ValueError):
         return ""
-    match = re.fullmatch(
-        r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)(?:\.git)?",
-        raw.decode(errors="replace").strip(),
-    )
-    return "repo:github.com/" + match[1].lower() if match else ""
+    identity = repository_identity(raw.decode(errors="replace"))
+    # An over-long link would fail the whole collection, like an over-long author email.
+    return identity if len(identity) <= MAX_REF else ""
 
 
 def nameable(relative: str) -> bool:
@@ -264,7 +281,7 @@ def collect(
     records: list[dict[str, object]] = []
     for relative, repository in selected:
         try:
-            remote = github(repository)
+            origin = remote(repository)
             fields = history(repository, start, end)
         except InvalidError as error:
             raise InvalidError(f"{relative}: {error}") from None
@@ -286,7 +303,7 @@ def collect(
             if AUTOMATED.search(author):
                 continue
             repository_ref = "repo:local/" + quote(relative, safe="/")
-            links = [repository_ref, *([remote] if remote else [])]
+            links = [repository_ref, *([origin] if origin else [])]
             person = "person:email/" + quote(author, safe="/:@+").replace("~", "%7E")
             if "@" in author and len(person) <= MAX_REF:
                 # An over-long author email is dropped: one invalid link would fail the whole collection.

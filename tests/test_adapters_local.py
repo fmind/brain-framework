@@ -286,6 +286,68 @@ def test_people_and_repository_identities_join_across_providers(
     assert {item["source"] for item in items} == {"git", "calendar"}
 
 
+# Through 21.3 only github.com remotes had an identity. The session hook keeps its own copy of the parser.
+REMOTES = {
+    "git@github.com:Owner/Project.git": "repo:github.com/owner/project",
+    "https://github.com/owner/project": "repo:github.com/owner/project",
+    "ssh://git@github.com/owner/project.git\n": "repo:github.com/owner/project",
+    "https://gitlab.example.test/Team/Site.git": "repo:gitlab.example.test/team/site",
+    "git@GitLab.Example.Test:team/site.git": "repo:gitlab.example.test/team/site",
+    "ssh://git@bitbucket.example.test/team/site": "repo:bitbucket.example.test/team/site",
+    # Credentials and users other than ssh's `git` never reach an identity. Secret scanners skip example.com hosts,
+    # so fixtures with a password use one.
+    "https://user:token-1234@gitlab.example.com/team/site.git": "",
+    "https://token-1234@gitlab.example.test/team/site.git": "",
+    "ssh://deploy@gitlab.example.test/team/site.git": "",
+    "ssh://git:token-1234@gitlab.example.com/team/site.git": "",
+    "deploy@gitlab.example.test:team/site.git": "",
+    # Nested groups, ssh aliases, ports, addresses and other transports would need a guess.
+    "https://gitlab.example.test/team/web/site.git": "",
+    "git@gitlab.example.test:team/web/site.git": "",
+    "git@gitlab-work:team/site.git": "",
+    "git@github.com-work:team/site.git": "",
+    "ssh://git@gitlab.example.test:2222/team/site.git": "",
+    "https://gitlab.example.test:8443/team/site.git": "",
+    "git@192.0.2.10:team/site.git": "",
+    "http://gitlab.example.test/team/site.git": "",
+    "file:///srv/git/site.git": "",
+    "/srv/git/site.git": "",
+    "": "",
+    # A dotted ssh alias cannot be told from a host name, so it passes as its host.
+    "git@gh.work:team/site.git": "repo:gh.work/team/site",
+}
+
+
+@pytest.mark.parametrize(("url", "expected"), REMOTES.items())
+def test_git_history_names_repositories_on_any_host_without_credentials(url: str, expected: str) -> None:
+    identity = runpy.run_path(str(ROOT / "examples/sensors/git-history.py"))["repository_identity"]
+    assert identity(url) == expected
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://gitlab.example.test/Team/Site.git", "repo:gitlab.example.test/team/site"),
+        ("git@gitlab.example.test:team/site.git", "repo:gitlab.example.test/team/site"),
+        ("https://user:token-1234@gitlab.example.com/team/site.git", None),
+        ("git@gitlab.example.test:team/web/site.git", None),
+    ],
+)
+def test_git_history_links_the_origin_remote_it_recognizes(
+    provider: Provider, tmp_path: Path, url: str, expected: str | None
+) -> None:
+    root = tmp_path / "code"
+    (root / "site/.git").mkdir(parents=True)
+    log = "abc\u00002026-09-01T10:00:00Z\u0000owner@fmind.dev\u0000Keep evidence\u0000"
+    provider.install("git", [GIT_VERSION, {"match": ["log"], "stdout": log}, {"match": ["remote"], "stdout": url}])
+    result = provider.run("git-history.py", str(root), "2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z")
+    assert result.returncode == 0, result.stderr
+    [commit] = json.loads(result.stdout)
+    assert commit["attributes"]["repository_refs"] == ["repo:local/site", *([expected] if expected else [])]
+    assert "token-1234" not in result.stdout + result.stderr
+    assert "team/web" not in result.stdout
+
+
 def test_calendar_keeps_organizer_separate_from_invited_attendees(provider: Provider) -> None:
     event = {
         **cast(list[dict], PAGE_ONE["items"])[0],
