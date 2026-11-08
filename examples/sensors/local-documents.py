@@ -10,6 +10,7 @@ import lzma
 import os
 import re
 import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -404,6 +405,8 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
 
 
 if __name__ == "__main__":
+    # BF sends SIGTERM before it kills a stopped run: exiting runs the cleanup that removes the private PDF copy.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("label", help="stable personal/team scope name")
     parser.add_argument("root", type=Path, help="explicit allowlisted directory; use snapshot mode")

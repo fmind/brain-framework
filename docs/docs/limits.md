@@ -107,7 +107,7 @@ How a run ends:
 - Cancellation during startup waits until BF owns the new process, then stops its group too.
 - A run BF stops fails with its cause, such as `program timed out after 300s`, even when the program exits on SIGTERM.
 - A program that another process kills, such as the out-of-memory killer, or that ends itself with a signal fails naming the signal: `program was killed by SIGKILL` or `program was killed by SIGTERM`.
-- A background helper that keeps standard output open more than a second after the exit fails the run. Redirecting its output, for example to `/dev/null`, avoids that failure, not the kill.
+- A background helper that keeps standard output open more than a second after the exit fails the run. Redirecting its output, for example to `/dev/null`, avoids that failure, not the stop.
 - A helper holding only stderr never delays or fails the run.
 - Watch, and the service files in [Run watch as a service](schedule.md#run-watch-as-a-service), allow at least 60 seconds after a stop request, so an interrupted record write can roll back.
 

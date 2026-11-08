@@ -57,6 +57,7 @@ Fix the cause, then rerun the program with `bf collect SENSOR` or `bf run ROUTIN
 - **`not an executable regular file`** from `bf validate`: run `chmod +x` on the program, or put an interpreter in its `command`.
 - **`is not a regular file or folder`**: a missing file or a typo. Behind an interpreter, as in `[uv, run, --no-project, sensors/brief.py]`, validation checks only that the first `sensors/`, `routines/` or `channels/` path among the arguments exists.
 - **`program was killed by SIGKILL`**: another process, such as the out-of-memory killer, ended the program.
+- **`program was killed by SIGTERM`**: the program ended itself with that signal, or another process sent it; BF's own stops fail with their cause instead.
 - **Testing a fix**: `bf collect SENSOR --dry-run` **executes the sensor** and may contact its provider. `bf update --dry-run` only lists due work.
 
 A snapshot fails with `snapshot would remove N of M records` when it would empty its source, or remove more than half of it and more than 10 records. Check the account, folder and provider response. Do not delete stored records to make collection pass. When the removal is intended, accept it once with `bf collect SENSOR --allow-removal`.
