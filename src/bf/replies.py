@@ -376,7 +376,11 @@ READ: dict[str, object] = {
                 "until": _INSTANT,
                 "items": _ITEMS,
                 **_PAGED,
-                "changed": _ITEMS,
+                "changed": {
+                    **_ITEMS,
+                    "description": "Up to 20 records changed upstream in the period but placed outside it, on every "
+                    "page, with only `ref`, `kind`, `title`, `time` and `updated`: read a ref for the rest.",
+                },
                 "sources": {"type": "array", "items": {"$ref": "#/$defs/Activity"}},
                 "previous": _STRING,
                 "next": _STRING,

@@ -48,7 +48,7 @@ Pages are computed views, not files. They combine the selected brains; `bf read 
 | Home `activity`       | Record counts of the last 24 hours.                                                                                                                 |
 | Home `upcoming`       | Items in the next 7 days.                                                                                                                           |
 | Home size             | `changed` and `upcoming` hold at most 20 items, without excerpts.                                                                                   |
-| Period `changed`      | Up to 20 records changed upstream in the period but placed outside it; not paginated.                                                               |
+| Period `changed`      | Up to 20 records changed upstream in the period but placed outside it, on every page; only `ref`, `kind`, `title`, `time` and `updated`.            |
 | Home `attention`      | Scheduled programs that failed or are `overdue` or `never` succeeded on this machine, and sources that fell [`silent`](schedule.md#silent-sources). |
 
 - Records of a [`priority: low`](sensors.md#quiet-a-high-volume-source) source leave period `items`, `changed` and home `upcoming`. Period `sources` and home `activity` keep their counts with `"priority":"low"`.

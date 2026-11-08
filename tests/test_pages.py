@@ -883,6 +883,41 @@ def test_page_summaries_share_the_reply_budget(brain: Store, monkeypatch: pytest
     assert len(encode(reply)) <= pages.BUDGET + max(len(encode(item)) for item in items)
 
 
+def test_period_changed_items_are_brief_and_leave_the_page_to_its_items(brain: Store) -> None:
+    # Twenty records edited this week with long text and URLs: every continuation page repeats them.
+    long = "a" * 1000
+    edited = [
+        Record(
+            id=f"edited-{n:02}",
+            title="Edited",
+            text=long,
+            time="2026-08-01T00:00:00Z",
+            url=f"https://example.test/{n:02}?{long}",
+            attributes={"updated": "2026-09-25T08:00:00Z"},
+        )
+        for n in range(pages.SECTION)
+    ]
+    records_file(brain, "mail", edited)
+    dated = [Record(id=f"r{n:02}", title="Page", time="2026-09-25T06:00:00Z") for n in range(pages.PAGE + 10)]
+    records_file(brain, "chat", dated)
+    for offset in (0, pages.PAGE):
+        reply = read([brain], "2026-09-25", offset=offset)
+        changed = cast("list[dict[str, object]]", reply["changed"])
+        # Which record, when it happened and when it changed; its read holds the excerpt and URL.
+        assert changed[0] == {
+            "ref": "mail:edited-19",
+            "kind": "record",
+            "title": "Edited",
+            "time": timestamp("2026-08-01T00:00:00Z"),
+            "updated": timestamp("2026-09-25T08:00:00Z"),
+        }
+        assert len(changed) == pages.SECTION
+        assert {key for item in changed for key in item} == {"ref", "kind", "title", "time", "updated"}
+    # The brief list leaves room for a full page of items, where excerpts used to leave fewer than half.
+    first = read([brain], "2026-09-25")
+    assert (len(cast("list", first["items"])), first["next_offset"]) == (pages.PAGE, pages.PAGE)
+
+
 def test_missing_pages_are_not_mistaken_for_unreadable_brains(brain: Store) -> None:
     brain.write("projects/bad.md", b"---\nstale_after: soon\n---\n# Bad\n")
     for ref in ("memories/gmial", "memories/gmial/2026-09"):

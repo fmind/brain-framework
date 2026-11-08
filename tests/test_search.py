@@ -597,8 +597,12 @@ def test_changed_since_uses_modification_time_without_changing_event_time(brain:
     item = cast("list[dict[str, object]]", read([brain], "2026-09-23")["changed"])[0]
     assert item["time"] == timestamp("2026-01-01T00:00:00Z")
     assert item["updated"] == timestamp("2026-09-23T00:00:00Z")
-    assert item["observed"] == timestamp("2026-09-23T01:00:00Z")
-    assert item["partial"] is True
+    # The brief entry leaves collection details to the record's read.
+    assert set(item) == {"ref", "kind", "title", "time", "updated"}
+    attributes = cast(
+        "dict[str, object]", cast("dict[str, object]", read([brain], "updates:old")["record"])["attributes"]
+    )
+    assert (attributes["observed"], attributes["partial"]) == (timestamp("2026-09-23T01:00:00Z"), True)
 
 
 def test_searches_report_collection_coverage_of_their_sources(brain: Store) -> None:

@@ -626,6 +626,13 @@ def _brief(item: dict[str, object]) -> dict[str, object]:
 
 # A recently changed note on the home page: which note, when, and whether it needs review; its read holds the rest.
 _CHANGED = ("brain", "ref", "uri", "kind", "title", "time", "date", "modified", "review")
+# A record changed upstream on a period page: which record, when it happened and when it changed. Each continuation
+# page repeats the list, so its read holds the rest and the page budget goes to the items.
+_UPDATED = ("ref", "kind", "title", "time", "updated")
+
+
+def _only(item: dict[str, object], keys: tuple[str, ...]) -> dict[str, object]:
+    return {key: item[key] for key in keys if key in item}
 
 
 def home(
@@ -692,9 +699,7 @@ def home(
         "projects_total": len(projects),
         "actions": sorted(_gather(parts, "actions"), key=lambda i: str(i["ref"]), reverse=True)[:10],
         # Orientation previews: titles and times; read an item for its text.
-        "changed": [
-            {key: item[key] for key in _CHANGED if key in item} for item in _newest(_gather(parts, "changed"), SECTION)
-        ],
+        "changed": [_only(item, _CHANGED) for item in _newest(_gather(parts, "changed"), SECTION)],
         "activity": _gather(parts, "activity"),
         "upcoming": [_brief(item) for item in _newest(_gather(parts, "upcoming"), SECTION, oldest=True)],
         "attention": _gather(parts, "attention"),
@@ -726,13 +731,17 @@ def timeline(
 
     def build(store: Store, brain: str, connection: sqlite3.Connection, skip: int, count: int) -> dict[str, object]:
         params = {"since": found.since, "until": found.until, "low": json.dumps(low(store))}
-        changed = _rows(
-            connection,
-            f"{index.MODIFIED} AND NOT ({index.PERIOD_WITHIN}) AND {_LOUD}",
-            params,
-            f"({index.UPDATED}) DESC,i.ref DESC",
-            SECTION,
-        )
+        # Brief before the page measures what its summaries leave the items.
+        changed = [
+            _only(item, _UPDATED)
+            for item in _rows(
+                connection,
+                f"{index.MODIFIED} AND NOT ({index.PERIOD_WITHIN}) AND {_LOUD}",
+                params,
+                f"({index.UPDATED}) DESC,i.ref DESC",
+                SECTION,
+            )
+        ]
         sources = _counts(store, index.activity(connection, found.since, found.until), name)
         rows, total = index.listing(
             connection,

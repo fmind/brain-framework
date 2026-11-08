@@ -293,7 +293,11 @@
     },
     {
       "properties": {
-        "changed": { "items": { "$ref": "#/$defs/Item" }, "type": "array" },
+        "changed": {
+          "description": "Up to 20 records changed upstream in the period but placed outside it, on every page, with only `ref`, `kind`, `title`, `time` and `updated`: read a ref for the rest.",
+          "items": { "$ref": "#/$defs/Item" },
+          "type": "array"
+        },
         "items": { "items": { "$ref": "#/$defs/Item" }, "type": "array" },
         "next": { "type": "string" },
         "next_offset": { "minimum": 0, "type": "integer" },
