@@ -1,0 +1,13 @@
+# Findings betterleaks skips, read from the working directory: synthetic credential URLs in pre-v20 test fixtures.
+# Each fingerprint names one commit, file, rule and line, so the full-history scan still catches any new finding.
+123972d6e78b5d3bc9985cc92e6dad6eab01bef4:services/preset_failfast_test.go:generic-credential-uri:178
+d288bf26bbbf9836b1dc9b6c93e1cf780fb435e5:services/git_log_json_test.go:generic-credential-uri:107
+d288bf26bbbf9836b1dc9b6c93e1cf780fb435e5:services/git_log_json_test.go:generic-credential-uri:109
+d288bf26bbbf9836b1dc9b6c93e1cf780fb435e5:services/preset_failfast_test.go:generic-credential-uri:167
+d288bf26bbbf9836b1dc9b6c93e1cf780fb435e5:services/preset_failfast_test.go:generic-credential-uri:172
+d288bf26bbbf9836b1dc9b6c93e1cf780fb435e5:services/preset_failfast_test.go:generic-credential-uri:241
+d288bf26bbbf9836b1dc9b6c93e1cf780fb435e5:services/preset_failfast_test.go:generic-credential-uri:243
+d288bf26bbbf9836b1dc9b6c93e1cf780fb435e5:services/preset_script_test.go:generic-credential-uri:40
+f198b70d9965d4fdf2eb7ae672346ad60eec4aed:tests/assets/test_helper_local.py:generic-credential-uri:241
+f198b70d9965d4fdf2eb7ae672346ad60eec4aed:tests/assets/test_helper_local.py:generic-credential-uri:244
+f198b70d9965d4fdf2eb7ae672346ad60eec4aed:tests/assets/test_helper_local.py:generic-credential-uri:521

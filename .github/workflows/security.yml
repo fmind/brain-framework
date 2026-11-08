@@ -30,10 +30,13 @@ jobs:
       - name: Scan complete Git history
         run: betterleaks git --config .betterleaks.toml --redact=100 --verbose --no-banner
       - name: Scan full checkout
+        if: ${{ !cancelled() }} # Each audit reports even when an earlier one failed; the job still fails.
         run: mise run check:scan
       - name: Audit all locked Python dependencies
+        if: ${{ !cancelled() }}
         run: mise run check:vuln
       - name: Audit workflows with online checks
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }} # Read-only API access for impostor-commit and known-vulnerability audits.
         # Strict: a skipped lookup fails instead of passing unchecked.
