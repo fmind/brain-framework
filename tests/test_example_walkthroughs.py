@@ -58,6 +58,7 @@ def export() -> str:
                 '"text":"manual"',
                 '"text":"The launch moved to Friday."',
                 "assistant reply at /structured_output is missing",
+                '"text":"narrow"',
                 '"state":"uncertain"',
                 '"wakes":[{"assistant":"brief"',
             ],
@@ -75,6 +76,8 @@ def export() -> str:
                 "The send failed; its delivery waits in the queue.",
                 '"text":"Sent after the outage."',
                 '{"id":"demo-retry","status":"delivered"}',
+                '"assistant":"scout"',
+                '"assistant":"actor"',
             ],
         ),
         ("routines", 0, ['"status":"ran"', "weekly-review-", '"valid":true']),
@@ -130,11 +133,20 @@ def test_readme_walkthrough(example: str, block: int | None, expected: list[str]
     if example == "channels":
         # The manual run and the scheduled review each send one proactive message with its own stable id.
         sent = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{"conversation"')]
-        assert len(sent) == 2, result.stdout
+        assert len(sent) == 4, result.stdout
         assert sent[0]["id"] != sent[1]["id"]
-        assert all(item["reply_to"] == "" and item["text"] == "Acknowledged." for item in sent)
+        assert all(item["reply_to"] == "" and item["text"] == "Acknowledged." for item in sent[:2])
         # The failed attempt recorded nothing: two assistant answers, then the direct send and the retried one.
         assert re.search(r"^\s*4$", result.stdout, re.MULTILINE), result.stdout
+        # The scout posts its proposal; the owner's reply reaches the actor with that proposal in its history.
+        proposal, answer = sent[2:]
+        assert proposal["reply_to"] == ""
+        assert proposal["text"].startswith("The review is ready. Proposed: 1.")
+        assert (answer["conversation"], answer["reply_to"]) == ("proactive-thread", "reply-1")
+        assert "Owner message: do 2" in answer["text"]
+        context = json.loads(answer["text"].split("Invocation: ", 1)[1])
+        assert (context["kind"], context["channel"]) == ("input", "owner-chat")
+        assert [(item["role"], item["text"]) for item in context["history"]] == [("assistant", proposal["text"])]
     assert not (tmp_path / "unrelated-brain").exists()
     assert not list(tmp_path.glob("tmp.*")), "walkthrough did not remove its disposable brain"
 

@@ -1,15 +1,16 @@
 # Four-tool walkthrough
 
-A fictional Google Workspace brief, Jira review, GitHub pull request and Gcloud deployment describe the same New website project with different field names. Collect them into one brain, record whether the site can launch, then watch BF flag that conclusion when the Jira review moves to Done.
+A fictional Google Workspace brief, Jira review, GitHub pull request and Gcloud deployment describe the same New website project with different field names. Collect them into one brain, record whether the site can launch, then watch BF flag that conclusion when the Jira review moves to Done. A gated assistant hears of that change once.
 
 Follow the [four-tool walkthrough](../../docs/docs/context-hub.md) page. `tests/test_context_hub.py` runs its commands on a disposable copy of this folder.
 
-| File                               | Purpose                                                                                          |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------ |
-| [bf.yaml](bf.yaml)                 | Maps each tool's project and status fields to the shared `project` relation and `status`.        |
-| [sensors/demo.py](sensors/demo.py) | Prints `fixtures/TOOL.json` as that tool's record; contacts nothing.                             |
-| `fixtures/*.json`                  | Fictional tool output; `jira-done.json` is the review once Done, changed upstream at collection. |
-| `projects/new-website.md`          | The minimal project note that the records link to through its `project:new-website` alias.       |
-| `evals/retrieval.yaml`             | Ten retrieval cases: `bf eval` reports `"score":"10/10"`.                                        |
+| File                               | Purpose                                                                                                                                              |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [bf.yaml](bf.yaml)                 | Maps each tool's project and status fields to the shared `project` relation and `status`.                                                            |
+| [sensors/demo.py](sensors/demo.py) | Prints `fixtures/TOOL.json` as that tool's record; contacts nothing.                                                                                 |
+| `fixtures/*.json`                  | Fictional tool output; `jira-done.json` is the review once Done, changed upstream at collection.                                                     |
+| `projects/new-website.md`          | The minimal project note that the records link to through its `project:new-website` alias.                                                           |
+| `evals/retrieval.yaml`             | Ten retrieval cases: `bf eval` reports `"score":"10/10"`.                                                                                            |
+| `prompts/watcher.md`               | The watcher assistant's prompt; the walkthrough copies the [records gate](../routines/records-gate.py) from the release instead of keeping one here. |
 
 The fixtures are adapter output, not provider API payloads, and the demo makes no claim about time saved or answer quality. A real sensor replaces `demo.py` with selected output from `gws`, `acli`, `gh` or `gcloud`; see the [sensor contract](../sensors/README.md).

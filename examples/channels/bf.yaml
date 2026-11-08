@@ -9,6 +9,19 @@ channels:
       command: [python3, channels/local.py, read, "{{start}}", "{{end}}"]
     stream:
       command: [python3, channels/local.py, stream]
+  # The walkthrough's scout posts its proposals here, and its actor reads the owner's reply.
+  owner-chat:
+    send:
+      command: [python3, channels/local.py, send]
+    # A stand-in for the owner's chat: printf answers every read with the owner's fictional reply, "do 2", in the
+    # thread where the fixture puts proactive posts, dated at the start of the read window.
+    read:
+      command:
+        [
+          printf,
+          '{"messages":[{"id":"reply-1","sender":"fictional-owner","conversation":"proactive-thread","time":"%s","text":"do 2"}]}',
+          "{{start}}",
+        ]
 assistants:
   personal:
     prompt: prompts/personal.md

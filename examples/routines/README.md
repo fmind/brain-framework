@@ -1,13 +1,14 @@
 # Example routines
 
-Standalone, deterministic brain programs. Copy the ones you need into a brain, declare them under `routines:` in `bf.yaml`, and adapt and test them there; they then belong to the brain. The Python package neither bundles nor installs them.
+Standalone, deterministic brain programs. Copy the ones you need into a brain, declare them under `routines:` in `bf.yaml` or as an assistant schedule's `gate`, and adapt and test them there; they then belong to the brain. The Python package neither bundles nor installs them.
 
 | Routine            | Configuration                            | Result                                                                                                                                                      |
 | ------------------ | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `weekly-review.py` | `output: action`, weekly `refresh`       | A draft action listing programs needing attention, projects due for review, a counted open-task preview, the last seven days by source and the coming week. |
 | `bf validate`      | `hooks: [pre-commit]`, no script to copy | A Git commit stops while the brain has validation problems; the reply stays in `logs/validate.log`.                                                         |
+| `records-gate.py`  | An assistant schedule's `gate`           | One event for each record a source gained or changed since the last check, reported once; without events, the harness does not start.                       |
 
-Both walkthroughs run from the framework checkout after `uv sync --locked`, in a subshell that isolates configuration and state and removes its temporary files on exit.
+The weekly review and pre-commit walkthroughs run from the framework checkout after `uv sync --locked`, in a subshell that isolates configuration and state and removes its temporary files on exit.
 
 ## Prepare a weekly review
 
@@ -88,3 +89,47 @@ Git shows the hook's reply. The first commit passes with `{"dry_run":false,"hook
 [Prepare a weekly review](../../docs/docs/routines.md#prepare-a-weekly-review) copies the routine into your brain, configures it and previews its action. The routine only reads pages: it never edits notes and links nothing, naming items by their `uri` or ref, because a link from a dated action would count as newer evidence for its target. An incomplete page makes it write nothing, and BF retries after the [failure backoff](../../docs/docs/schedule.md#timing-and-health).
 
 Name the routine `weekly-review` in `bf.yaml`, after its file: [Prepare a weekly review](../../docs/docs/routines.md#prepare-a-weekly-review) explains why. Its changed notes, recent actions and coming week come from the home page: recent actions are those whose folder date falls within the last seven days, up to today. When the 20-item preview of changed notes or upcoming items is full, or the 10 newest actions all began within the period or later, the action names the `bf read` page that lists them all.
+
+## React to new records
+
+`records-gate.py` turns a frequent assistant schedule into an event-driven one: your harness runs only when a source gained or changed records. The [four-tool walkthrough](../../docs/docs/context-hub.md#hear-of-each-change-once) runs it on a fictional Jira record. [Gates](../../docs/docs/prompts.md#gates) describes what BF does with its events.
+
+Copy it to `routines/records-gate.py` in your brain and name it as a schedule's gate. This schedule checks the mail source every 10 minutes and reports messages only:
+
+```yaml
+schedules:
+  mail: { every: 600, gate: { command: [python3, routines/records-gate.py, mail, --where, kind=message] } }
+```
+
+Usage: `records-gate.py SOURCE [SOURCE...] [--where FIELD=VALUE]... [--period PERIOD]`.
+
+- For each source, it runs `bf export --kind items --scope memories/SOURCE` and reads the lines as they arrive.
+- It keeps the records BF [observed](../../docs/docs/schema.md#record-revisions-and-provenance), meaning first collected or seen changed, from 10 minutes before the window's start until its end. The 10 minutes reach a collection that started before the previous check but finished after it.
+- `--where kind=message` keeps the records whose `kind` field reads `message`. Repeated conditions must all hold. Numbers and booleans read as JSON writes them, such as `1` or `true`.
+- It prints one event per record, newest first, and remembers each one in `BF_STATE_DIR/records-gate.json`, so the harness hears of a record again only when it changes:
+
+```json
+{
+  "events": [
+    { "key": "bf://brain/mail:m1@2026-09-29T10:30:00.000000Z", "text": "Launch moved", "ref": "bf://brain/mail:m1" }
+  ]
+}
+```
+
+The `key` names the record's version, `text` its title on one line of up to 280 characters, and `ref` the record's `bf://` address, which the harness reads with `bf read`. The title is collected evidence: the gate makes hidden characters visible, but the harness must still treat it as data.
+
+Limits:
+
+- **Installed bf:** the gate calls the first `bf` on PATH, which may differ from a pinned brain's runtime. It needs bf 21.3.0 or later for `bf export --scope`, and names an older version.
+- **Cost:** each check exports the whole source. On 2026-11-08, on a 12-core aarch64 Linux machine, a synthetic source of 10,000 records with 1 KiB of text each exported 12.6 MB in 1.0–1.1 seconds, and each gate check took 1.0–1.2 seconds. Keep `every` at 300 seconds or more for such a source. A check fails after 100 seconds, even when the gate's `timeout` is longer; a shorter `timeout` stops the gate and its export sooner.
+- **Referenced brains:** the export also lists the source's records in the brains this brain [references](../../docs/docs/configuration.md#related-brains), and the gate reports them too. A plain ref such as `mail:m1` can exist in several of them, so each event names its record by address.
+- **Periods:** `--period 7d` exports less, but a period places records by their event `time`, not by when BF observed them ([time meanings](../../docs/docs/retrieval.md#time-meanings)). A record collected late with an older date then never reaches the gate.
+- **Fields:** `--where` reads the export's `fields`, which list declared single-value fields of up to 200 characters ([types and cardinality](../../docs/docs/schema.md#types-and-cardinality)), up to 2 KiB in all, in field-name order ([limits](../../docs/docs/limits.md)). A `cardinality: many` field, or one beyond that size, never matches.
+- **Records written by hand** have no `observed` time, so the gate ignores them.
+- **Collection lag:** a collection that runs longer than 10 minutes, beyond the default 300-second sensor timeout, can finish after the checks that could still reach its records.
+- **Many changes:** a check reports at most 63 records, within the 64 KiB BF accepts. One more event, such as `mail:more`, counts the older ones and points to the source page.
+- **Failures:** when bf is missing, the export fails, prints an invalid line or warns on stderr, such as about a busy cache, the gate prints one `records-gate:` line that quotes no record, remembers nothing and exits 1. BF then retries it. A missing `BF_START`, `BF_END` or `BF_STATE_DIR` exits 2.
+- **Brain problems:** an invalid file anywhere in the brain or a referenced brain, or an unavailable referenced brain, fails even a scoped export, and so every check. BF retries the gate up to 20 times, for about an hour. The job then waits in `bf queue` and blocks the schedule ([schedule and overlap](../../docs/docs/prompts.md#schedule-and-overlap)): fix the file, then run `bf queue ID --retry`.
+- **Memory:** remembered records are forgotten 35 days after BF observed them. Deleting `records-gate.json` reports the current window's records again. The file holds up to 64 MiB: beyond that, the gate forgets the oldest records first and says so on stderr.
+
+The gate uses only Python 3.11's standard library and runs no shell. Its tests, in `tests/test_adapters_gates.py`, run it against a fake `bf` and inside a real `bf update`.

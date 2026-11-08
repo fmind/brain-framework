@@ -99,7 +99,7 @@ Each line has:
 }
 ```
 
-`bf export --kind items` prints one line for each note and record, sorted by ref, with its metadata, its mapped `fields` and its `text`: a note's whole Markdown file or a record's text. It feeds retrievers BF leaves out, such as embedding or multilingual search, which then return refs for `bf read`:
+`bf export --kind items` prints one line for each note and record, sorted by ref, with its metadata, its [single-value `fields`](schema.md#types-and-cardinality) and its `text`: a note's whole Markdown file or a record's text. A record's metadata includes its upstream `updated` time, when its sensor records one in `attributes.updated`, and the time BF [observed](schema.md#record-revisions-and-provenance) it. It feeds retrievers BF leaves out, such as embedding or multilingual search, which then return refs for `bf read`:
 
 ```json
 {
@@ -109,6 +109,8 @@ Each line has:
   "source": "mail",
   "title": "Launch moved",
   "time": "2026-09-29T14:20:00+02:00",
+  "updated": "2026-09-29T15:05:00+02:00",
+  "observed": "2026-09-29T15:10:00+02:00",
   "fields": { "status": "open" },
   "text": "The launch moves to Monday."
 }

@@ -33,10 +33,19 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
     # The first block clones the release and the last removes the copy: run everything between on a local copy.
     assert "git clone" in blocks[0]
     assert "rm -rf" in blocks[-1]
+    # The walkthrough copies the records gate from the cloned release: the checkout's copy stands in for it.
+    demo = tmp_path / "demo"
+    (demo / "source/examples/routines").mkdir(parents=True)
+    shutil.copy2(ROOT / "examples/routines/records-gate.py", demo / "source/examples/routines")
     result = subprocess.run(  # noqa: S603 - the reviewed walkthrough on its disposable fixture copy
         ["bash", "--noprofile", "--norc", "-euc", "\n".join(blocks[1:-1])],  # noqa: S607
         cwd=brain,
-        env={**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"},
+        # The checkout's bf comes first, for the walkthrough and for the gate's own bf calls.
+        env={
+            **os.environ,
+            "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
+            "context_demo": str(demo),
+        },
         text=True,
         capture_output=True,
         timeout=120,
@@ -88,6 +97,22 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
         datetime(2026, 9, 24, 14, tzinfo=UTC),
         "Done",
     )
+    # The gated watcher answers once per change: three scheduled runs, of which the second found nothing new.
+    runs = [reply["assistants"] for reply in replies if "assistants" in reply]
+    assert [[(row["assistant"], row["status"], "record" in row) for row in rows] for rows in runs] == [
+        [("watcher", "ran", True)],
+        [("watcher", "ran", False)],
+        [("watcher", "ran", True)],
+    ]
+    assert len({rows[0]["job"] for rows in runs}) == 3
+    # The quiet run did run its gate, which printed no event, and started no harness: not a schedule left undue.
+    assert (brain / "logs/assistant.watcher.gate.changes.log").read_text().count("exited with status 0") == 3
+    assert (brain / "logs/watcher.log").read_text().count("exited with status 0") == 2
+    answers = next(reply for reply in replies if reply.get("page") == "memories/watcher/7d")
+    assert [item["ref"] for item in answers["items"]] == [runs[2][0]["record"], runs[0][0]["record"]]
+    assert all(reply["valid"] for reply in replies if "valid" in reply)
+    # The walkthrough copies the release's gate: no copy beside the example can drift from it.
+    assert not (EXAMPLE / "routines").exists()
     # Updating the conclusion clears the flag.
     note = brain / "projects/new-website.md"
     note.write_text(note.read_text().replace("still blocks launch", "is Done: nothing blocks launch"))

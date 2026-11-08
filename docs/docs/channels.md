@@ -86,7 +86,12 @@ Envelope limits:
 
 An omitted or empty conversation requests the endpoint's default destination, such as a new thread in one fixed chat. A reply carries its original conversation and message ID. The receipt must preserve the requested conversation.
 
-A desktop adapter can return its own stable notification ID and a fixed conversation identifier. Notification is a send-only channel, not a special BF transport.
+Notification is a send-only channel, not a special BF transport. The [desktop adapter](https://github.com/fmind/brain-framework/blob/main/examples/channels/channels/desktop.py) in the `desktop` example above is one to copy:
+
+- It shows each message with `notify-send` on Linux or `osascript` on macOS, passing the text only as arguments.
+- Its receipt names the requested conversation, or `desktop` by default.
+- It shows the first 1,000 characters, ending with `…`: a notification points to the answer, which the assistant's record keeps whole.
+- A missing notifier exits 1 without echoing the text, so the delivery fails visibly.
 
 Use a configured endpoint directly from the brain directory:
 

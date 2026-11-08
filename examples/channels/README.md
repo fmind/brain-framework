@@ -1,6 +1,6 @@
 # A complete assistant messaging loop
 
-This fictional brain connects a passive local channel to an assistant. `printf` stands in for the agent CLI and answers `Acknowledged.`; the channel records outgoing messages under `logs/deliveries.jsonl`. No model, account or network is needed. Replace the commands with your own provider adapter and harness after testing the contracts.
+This fictional brain connects a passive local channel to an assistant. `printf` stands in for the agent CLI and answers `Acknowledged.`; the channel records outgoing messages under `logs/deliveries.jsonl`. The walkthrough ends with a read-only scout that proposes steps and an actor that carries out the one the owner approves. No model, account or network is needed. Replace the commands with your own provider adapter and harness after testing the contracts.
 
 From the framework checkout, run this isolated walkthrough:
 
@@ -30,6 +30,26 @@ From the framework checkout, run this isolated walkthrough:
   bf queue demo-retry
   bf queue demo-retry --retry
   wc -l <logs/deliveries.jsonl
+  cat >>bf.yaml <<'YAML'
+  scout:
+    prompt: prompts/scout.md
+    command: [printf, '{"say":"The review is ready. Proposed: 1. Rerun the checks. 2. Publish the notes.","wake":null}']
+    reply: { path: "" }
+    idempotent: true
+    post: owner-chat
+    schedules:
+      proposals: { every: 86400 }
+  actor:
+    prompt: prompts/actor.md
+    command: [cat]
+    inputs:
+      - channel: { name: owner-chat, mode: read, every: 1 }
+YAML
+  bf update --assistant scout
+  bf update --assistant actor
+  sleep 1
+  bf update --assistant actor
+  tail -n 2 logs/deliveries.jsonl
 )
 ```
 
@@ -42,6 +62,9 @@ Expected observations:
 1. `bf channel send` uses the endpoint directly, without an assistant: it saves the delivery, sends it and prints `"state":"delivered"` with the fixture's receipt, `"id":"sent-demo-send"`.
 1. With `CHANNEL_DEMO_OFFLINE` set, the fixture refuses to send, standing in for a provider outage: `bf channel send` exits 1, its reply shows `"state":"uncertain"`, since the fixture's `send` does not declare `idempotent: true`, with the `error`, and the fixture's message goes to `logs/channel.local.send.log`. `bf queue demo-retry` opens the saved delivery, text included, and `--retry` sends that same delivery once the outage is over: `{"id":"demo-retry","status":"delivered"}`. Watch and `bf update` never retry such a standalone send on their own.
 1. `logs/deliveries.jsonl` ends with four lines: the failed attempt recorded nothing.
+1. The walkthrough then adds two assistants that [propose, then act](../../docs/docs/prompts.md#propose-then-act). The `scout` stands in for a read-only harness: its structured reply ends with numbered steps after `Proposed:`. It has no inputs and posts to `owner-chat`, whose `send` is the same fixture. `bf update --assistant scout` runs its schedule and posts the proposal, which the fixture puts in `proactive-thread`.
+1. The `actor` reads `owner-chat`, where `printf` stands in for the owner's chat: every read returns the owner's reply, `do 2`, in `proactive-thread`, dated at the start of the read window. Its first update only marks where reading starts, so it runs nothing. One second later, the next update reads the reply and runs `cat`, which prints the expanded prompt it receives. History holds the messages dated up to the reply, so the scout posts before the actor's first read.
+1. The last two lines of `logs/deliveries.jsonl` are the proposal, with an empty `reply_to`, and the actor's answer, with `"reply_to": "reply-1"` in `proactive-thread`. That answer is the actor's prompt. Its invocation context, escaped inside `text`, holds the proposal under `history` with the role `assistant`: history follows the channel and conversation, whichever assistant posted.
 
 To try incoming messages, copy this brain to a directory you keep, select it explicitly and run:
 
