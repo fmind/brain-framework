@@ -154,17 +154,27 @@ Queries hold up to 4,096 characters. `--limit` is 1–50 (default 10).
 | Several brains         | Results alternate by each brain's own rank; positions are not comparable across brains.                                                                                                              |
 | Invalid input          | A query without any word or identity, such as `!!!`, exits 2.                                                                                                                                        |
 
-| Item fields                       | Carried by                                                       |
-| --------------------------------- | ---------------------------------------------------------------- |
-| `ref`, `kind`, `title`, `excerpt` | Every item.                                                      |
-| `date`, `type`, `status`          | Notes.                                                           |
-| `time`, `source`, `url`           | Records.                                                         |
-| `updated`, `observed`             | Records: the provider's `updated` time and BF's `observed` time. |
-| `"partial":true`                  | Records whose sensor or text bound kept only part of the text.   |
+| Item fields                       | Carried by                                                                                            |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `ref`, `kind`, `title`, `excerpt` | Every item.                                                                                           |
+| `date`, `type`, `status`          | Notes.                                                                                                |
+| `time`, `source`, `url`           | Records.                                                                                              |
+| `updated`, `observed`             | Records: the provider's `updated` time and BF's `observed` time.                                      |
+| `"partial":true`                  | Records whose sensor or text bound kept only part of the text.                                        |
+| `"generated":true`                | Model output of one of the brain's own [assistants](prompts.md#what-a-run-records); listings omit it. |
 
 - Titles are previews of at most 200 characters ending in `…`; exact reads keep the whole title.
 - A section's title reads `Note — Parent — Child`.
+- Never cite a `generated` record as the source of a fact; read what it cites.
 - An `excerpt` shows the query's words in context. Otherwise, like listings and relation pages, it shows up to 320 characters of the note's summary or opening text or of the record's text. `…` marks a cut.
+
+### Prefixes and other languages
+
+A `word*` prefix matches the words it begins, even when English stemming shortens or respells them: `organi*` finds `organization`, stored as `organ`, and `pay*` finds `payment`. A prefix of three or more letters adds up to 64 such stems, in alphabetical order.
+
+- Accents fold and elisions split, so `evaluat*` finds `évaluation` and `organisation` finds `l'organisation`.
+- English stemming also matches regular `-s` plurals in other languages, such as `organisations`.
+- For irregular forms, such as `cheval` and `chevaux`, search `cheva*` or put both words in one query. An unmatched word's `suggestions` name close words the brain holds.
 
 ### Scopes
 
@@ -236,6 +246,7 @@ Identities are case-sensitive and resolve only through explicit aliases, entitie
 
 - `sha256` covers the file's bytes, also on a section read: compare it before replacing a file you read.
 - A record's text is `record.text`, never a top-level `text`.
+- An assistant's record also carries `"generated":true`, as in search results.
 - Record refs are `SOURCE:ID`. Read a returned ref exactly as written, even when its id holds `#` or `?`. Percent-encode those as `%23` and `%3F` only inside a `bf://` address.
 - A ref ending in a bare `#`, such as `projects/new-website.md#` or `bf://brain/projects/new-website.md#`, names no section and is invalid input (exit 2): read the whole note or name a section.
 
@@ -298,7 +309,7 @@ An exact read whose reply would exceed 32 KiB returns its text in pages.
 - The outline lists the headings inside the read: never the H1 title spanning the whole note, nor the section being read.
 - When such headings divide the text, the first page holds only its first 4 KiB. Otherwise, as for a note with only a title or a section without subsections, it holds as much as fits.
 - A record's first page carries every other field.
-- Later pages carry `brain`, `ref`, any `uri`, their slice, the paging fields, `sha256`, `modified`, `notice` and any `problems` or `stale` of the read itself. Problems with backlinks and claims stay on the first page.
+- Later pages carry `brain`, `ref`, any `uri`, their slice, the paging fields, `sha256`, `modified`, `notice`, any `generated` and any `problems` or `stale` of the read itself. Problems with backlinks and claims stay on the first page.
 
 | Field                                       | Meaning                                                                                     |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------- |

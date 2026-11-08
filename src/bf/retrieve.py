@@ -6,7 +6,7 @@ import heapq
 import json
 import sqlite3
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import ExitStack, suppress
 from datetime import UTC, datetime
 from itertools import accumulate, islice, zip_longest
@@ -39,8 +39,9 @@ from bf.models import (
 )
 from bf.storage import BusyError, FileAncestorError, Store, relative
 
-# What a later page of an exact read repeats beside its text: identity, digest, notice and completeness.
-_TEXT = ("brain", "ref", "uri", "sha256", "modified", "notice", "problems", "stale")
+# What a later page of an exact read repeats beside its text: identity, digest, notice, completeness and whether a
+# model generated the text.
+_TEXT = ("brain", "ref", "uri", "sha256", "modified", "notice", "problems", "stale", "generated")
 # Freshness that keeps a searched source in a search's coverage even when none of its records returned.
 _ATTENTION = {"overdue", "never"}
 
@@ -84,9 +85,12 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
     collected = query.prefix.split("/")[0] == "memories" or (not query.prefix and not tagged)
 
     def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+        assistants = load(store).assistants
         local_targets = graph.local_refs(connection, targets, name)
         local_identities = graph.local_refs(connection, identities, name)
         exact = shaped and (links.tag(text) is not None or index.known(connection, text, local_identities))
+        # One expansion per brain serves its ranking, unmatched terms and excerpts: prefixes read that brain's words.
+        expanded = {} if exact else index.expand(connection, text)
         rows = index.search(
             connection,
             query,
@@ -94,6 +98,7 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
             targets=local_targets,
             exact=exact,
             limit=bound,
+            expanded=expanded,
             low=pages.low(store),
         )
         # Counting sources scans every record's index entry: only a search that can return records needs them. Their
@@ -103,8 +108,10 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
             "store": store,
             "connection": connection,
             "exact": exact,
+            "expanded": expanded,
+            "match": " OR ".join(expanded.values()),
             "explain": (local_targets if query.target else local_identities) if exact or query.target else None,
-            "rows": (pages.label(name, row) for row in rows),
+            "rows": (pages.label(name, _generated(row, assistants)) for row in rows),
             "sources": {source: count for source, count in counts.items() if not scoped or source == scoped},
             "known": set(counts),
         }
@@ -134,7 +141,7 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
     window = list(islice(islice(merged, query.offset, None), query.limit + 1))
     context = dict(parts)
     for item in window[: query.limit]:
-        _finish(item, text, context[str(item["brain"])])
+        _finish(item, context[str(item["brain"])])
     selected = pages.fitting(window[: query.limit])
     reply: dict[str, object] = {"items": selected, "notice": NOTICE}
     if len(selected) < len(window):
@@ -144,7 +151,10 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
         reply["identity"] = "unknown"
     if not identity:
         # A misspelled word would otherwise match nothing silently; a term any selected brain holds is known.
-        missing = [index.unmatched(cast("sqlite3.Connection", part["connection"]), text) for _, part in parts]
+        missing = [
+            index.unmatched(cast("sqlite3.Connection", part["connection"]), cast("dict[str, str]", part["expanded"]))
+            for _, part in parts
+        ]
         if unmatched := [term for term in missing[0] if all(term in other for other in missing[1:])]:
             reply["unmatched"] = unmatched
             connections = [cast("sqlite3.Connection", part["connection"]) for _, part in parts]
@@ -184,6 +194,11 @@ def _search(stores: list[Store], query: Query, stack: ExitStack, *, counted: boo
     return bounded(pages.local(reply) if single else pages.addressed(reply))
 
 
+def _generated(item: dict[str, object], assistants: Collection[str]) -> dict[str, object]:
+    """Mark a record of one of its brain's assistants: model output, never evidence on its own."""
+    return {**item, "generated": True} if item.get("kind") == "record" and item.get("source") in assistants else item
+
+
 def _tied(row: tuple[dict[str, object] | None, ...]) -> list[dict[str, object]]:
     """One rank of several brains, newest first, then by ref, like equal scores within one brain."""
     items = sorted((item for item in row if item is not None), key=lambda item: str(item["ref"]))
@@ -209,12 +224,12 @@ def _coverage(coverage: list[dict[str, object]], items: list[dict[str, object]],
     return {**({"sources": kept} if kept else {}), **({"sources_omitted": omitted} if omitted else {})}
 
 
-def _finish(item: dict[str, object], text: str, part: dict[str, object]) -> None:
+def _finish(item: dict[str, object], part: dict[str, object]) -> None:
     """Excerpts and relations cost far more than ranking: compute them only for the returned items."""
     connection = cast("sqlite3.Connection", part["connection"])
     item.pop("_rank", None)
     passage = item.pop("_passage", None)
-    if passage is not None and (excerpt := index.excerpt(connection, text, cast("int", passage))):
+    if passage is not None and (excerpt := index.excerpt(connection, str(part["match"]), cast("int", passage))):
         item["excerpt"] = excerpt
     if (targets := cast("set[str] | None", part["explain"])) is not None:
         claims, truncated = graph.explanations(connection, str(item["ref"]), targets)
@@ -723,18 +738,22 @@ def _stamp(data: bytes, nanoseconds: int) -> dict[str, object]:
 def _record(
     store: Store, name: str, ref: str, source: str, record_id: str, *, complete: bool = False, started: float
 ) -> dict[str, object] | None:
+    """An exact record read; a record of one of the brain's assistants is marked `generated`, as model output."""
     # The cache's freshness check already waited for a busy writer: share one records.WAIT across both waits.
     wait = max(0.0, records.WAIT - (time.monotonic() - started))
     found = records.find(store, source, record_id, complete=complete, wait=wait)
     if not found:
         return None
     path, record, data, nanoseconds, busy = found
+    # One bf.yaml describes the read, even mid-save.
+    config = load(store)
     return {
         "brain": name,
         "ref": ref,
         "path": path,
         "record": record.model_dump(exclude_defaults=True),
-        "collection": source_health(store, [source])[source],
+        "collection": source_health(store, [source], config=config)[source],
+        **({"generated": True} if source in config.assistants else {}),
         **_stamp(data, nanoseconds),
         # Read whole while a writer held the brain: the record may be changing, like a busy brain's cache.
         **({"stale": [name]} if busy else {}),

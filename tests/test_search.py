@@ -919,6 +919,98 @@ def test_quoted_phrases_and_word_prefixes_match_while_other_syntax_stays_literal
     assert refs(brain, "repo:example/project") == ["projects/offline.md", "meetings:decision-1"]
 
 
+def blank(tmp_path: Path, name: str = "words") -> Store:
+    """An empty brain."""
+    root = tmp_path / name
+    root.mkdir()
+    store = Store(root)
+    store.write("bf.yaml", f"version: 8\nname: {name}\n".encode())
+    return store
+
+
+def test_a_prefix_matches_the_words_it_begins_that_stemming_shortens_or_respells(tmp_path: Path) -> None:
+    store = blank(tmp_path)
+    words = [
+        "payment",
+        "payer",
+        "keyboard",
+        "keycard7",
+        "organization",
+        "running",
+        "évaluation",
+        "organisation",
+        "chevaux",
+    ]
+    for number, word in enumerate(words):
+        store.write(f"concepts/{number}.md", f"# Note\n\nThe {word} here.\n".encode())
+    # Through 21.3, FTS5 matched only the stemmed prefix, so `pay*` (as `pai*`) missed payment, and `organi*` missed
+    # organization, indexed as `organ`; unmatched then called the words absent.
+    expected = {
+        "pay*": ["payment", "payer"],
+        # A word ending in a digit indexes as itself, as identifiers do.
+        "key*": ["keyboard", "keycard7"],
+        "organi*": ["organization", "organisation"],
+        "runn*": ["running"],
+        "evaluat*": ["évaluation"],
+        "Évaluat*": ["évaluation"],
+        "organisa*": ["organisation"],
+        "cheva*": ["chevaux"],
+        # Shorter prefixes keep their letters: the stemmer leaves short words alone.
+        "pa*": ["payment", "payer"],
+    }
+    for query, found in expected.items():
+        reply = search([store], Query(text=query))
+        items = cast("list[dict[str, str]]", reply["items"])
+        assert sorted(item["excerpt"] for item in items) == sorted(f"The {word} here." for word in found), query
+        assert "unmatched" not in reply, query
+    # An incremental refresh adds the words of a new note; a removed note's words match nothing.
+    store.write("concepts/new.md", b"# New\n\nThe payroll here.\n")
+    (store.root / "concepts/0.md").unlink()
+    assert sorted(refs(store, "pay*")) == ["concepts/1.md", "concepts/new.md"]
+    assert search([store], Query(text="keyb* zzab*"))["unmatched"] == ["zzab*"]
+
+
+def test_a_prefix_names_at_most_64_stems_in_bound_parameters(tmp_path: Path) -> None:
+    store = blank(tmp_path)
+    # Each word is its own stem, which the stemmed prefix `pai*` does not begin.
+    words = sorted(f"pay{a}{b}x" for a in "abc" for b in "abcdefghijklmnopqrstuvwxyz")[:70]
+    store.write("concepts/pay.md", ("# Pay\n\n" + " ".join(words[:64]) + "\n").encode())
+    for word in words[64:]:
+        store.write(f"concepts/{word}.md", f"# Other\n\n{word}\n".encode())
+    # The stems after the first 64 are left out: only their own words find them.
+    assert refs(store, "pay*") == ["concepts/pay.md"]
+    assert refs(store, words[64]) == [f"concepts/{words[64]}.md"]
+    with index.session(), index.database(store) as (connection, _):
+        assert index.EXPANSIONS == 64
+        expected = " OR ".join(['"pay"*', *(f'"{word}"' for word in words[:64])])
+        assert index.expand(connection, "pay*") == {"pay*": f"({expected})"}
+        # Two letters keep the FTS5 prefix alone; an unknown prefix or a plain word adds nothing.
+        assert index.expand(connection, "pa* zzab* payaax") == {
+            "pa*": '"pa"*',
+            "zzab*": '"zzab"*',
+            "payaax": '"payaax"',
+        }
+        # Only words their stems change are stored: the others are vocabulary terms already.
+        assert connection.execute("SELECT count(*) FROM words WHERE word LIKE 'pay%'").fetchone()[0] == 0
+
+
+def test_removed_words_leave_the_64_stems_to_words_the_brain_still_holds(tmp_path: Path) -> None:
+    store = blank(tmp_path)
+    # 70 words whose stems drop `ing`, such as `payaaxing` as `payaax`, which the stemmed prefix `pai*` does not begin.
+    removed = sorted(f"pay{a}{b}xing" for a in "abc" for b in "abcdefghijklmnopqrstuvwxyz")[:70]
+    store.write("concepts/old.md", ("# Old\n\n" + " ".join(removed) + "\n").encode())
+    assert refs(store, "pay*") == ["concepts/old.md"]
+    store.write("concepts/old.md", b"# Old\n\nNothing left.\n")
+    store.write("concepts/new.md", b"# New\n\nThe payzzxing and payzzzx here.\n")
+    # The removed words stay in `words` until the next full build; their stems sort first but match nothing.
+    reply = search([store], Query(text="pay*"))
+    assert [item["ref"] for item in cast("list[dict[str, str]]", reply["items"])] == ["concepts/new.md"]
+    assert "unmatched" not in reply
+    with index.session(), index.database(store) as (connection, _):
+        assert connection.execute("SELECT count(*) FROM words WHERE word LIKE 'pay%'").fetchone()[0] == 71
+        assert index.expand(connection, "pay*") == {"pay*": '("pay"* OR "payzzxing" OR "payzzzx")'}
+
+
 def test_search_names_query_words_that_match_nothing(brain: Store, tmp_path: Path) -> None:
     reply = search([brain], Query(text="offline budjet"))
     # Before 16 a misspelled word left no trace: the reply looked like an answer about both words.
@@ -1205,6 +1297,35 @@ def test_low_priority_sources_rank_at_half_weight_without_a_rebuild(brain: Store
     assert refs(brain, "harbor", **scope("memories/news")) == ["news:bridge"]
 
 
+def test_assistant_records_are_marked_generated_in_search_and_exact_reads(brain: Store, tmp_path: Path) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nassistants:\n  digest:\n    prompt: prompts/digest.md\n    command: [harness]\n",
+    )
+    records_file(brain, "digest", [Record(id="d1", title="Harbor digest", text="The harbor bridge closed.")])
+    records_file(brain, "minutes", [Record(id="m1", title="Harbor minutes", text="The harbor bridge needs repairs.")])
+    found = {
+        item["ref"]: item for item in cast("list[dict[str, object]]", search([brain], Query(text="harbor"))["items"])
+    }
+    assert found["digest:d1"]["generated"] is True
+    assert "generated" not in found["minutes:m1"]
+    assert read([brain], "digest:d1")["generated"] is True
+    assert "generated" not in read([brain], "minutes:m1")
+    # Each brain marks its own assistants: another brain's source of that name is a sensor's evidence.
+    team = blank(tmp_path, "team")
+    records_file(team, "digest", [Record(id="d2", title="Harbor digest", text="The harbor ferry runs.")])
+    reply = search([brain, team], Query(text="harbor"))
+    marks = {(item["brain"], item["ref"]): item.get("generated") for item in cast("list[dict]", reply["items"])}
+    assert marks == {("fixture", "digest:d1"): True, ("fixture", "minutes:m1"): None, ("team", "digest:d2"): None}
+    assert "generated" not in read([brain, team], "bf://team/digest:d2")
+    # Every text page of a large generated record repeats the mark.
+    records_file(brain, "digest", [Record(id="long", title="Long digest", text="A summarized line.\n" * 3000)])
+    first = read([brain], "digest:long")
+    later = read([brain], "digest:long", offset=cast("int", first["next_offset"]))
+    assert first["generated"] is True
+    assert later["generated"] is True
+
+
 def test_only_entry_notes_rank_above_evidence(brain: Store) -> None:
     assert entry_note("projects/archive.md")
     assert entry_note("concepts/retention.md")
@@ -1288,9 +1409,9 @@ def test_only_returned_results_compute_excerpts(brain: Store, monkeypatch: pytes
     computed: list[int] = []
     original = index.excerpt
 
-    def counted(connection: sqlite3.Connection, text: str, passage: int) -> str:
+    def counted(connection: sqlite3.Connection, expression: str, passage: int) -> str:
         computed.append(passage)
-        return original(connection, text, passage)
+        return original(connection, expression, passage)
 
     monkeypatch.setattr(index, "excerpt", counted)
     reply = search([brain], Query(text="needle", limit=5, offset=50))

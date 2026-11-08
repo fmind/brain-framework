@@ -2,6 +2,8 @@
 
 Use when a consequential decision must stay explainable after its sources change, or when reviewing an explicit dependency. Capture only the selected evidence that decision needs, never the whole brain.
 
+A search result or record read marked `"generated":true` is an assistant's model output: never cite it as the source of a fact; read and cite what it cites.
+
 ## Triage a selected passage
 
 Read the exact highlight record and its source URL before promoting it: `text` is the selected passage, `attributes.annotation` a separate interpretation, `time` the capture time and `attributes.source_date` the source's stated date. Neither establishes truth: check enough surrounding context, or keep that limitation. Link the passage from an existing decision or lesson, keep it as unreviewed evidence with its open question, or exclude it during an authorized cleanup after retaining any revision a decision relies on, separating quotation from interpretation.

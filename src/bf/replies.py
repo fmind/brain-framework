@@ -20,6 +20,10 @@ _FACTS = {
     "additionalProperties": {"type": ["string", "number", "boolean"]},
 }
 _REFS = {"type": "array", "items": _STRING}
+_GENERATED = {
+    "const": True,
+    "description": "Model output an assistant recorded; read what it cites before relying on it.",
+}
 
 # A source's local collection state, shared by search coverage, the sources overview and exact record reads.
 _HEALTH: dict[str, object] = {
@@ -71,6 +75,7 @@ _ITEM: dict[str, object] = {
         "description": "The record's text is deliberately incomplete, such as an excerpt the sensor kept; never quote "
         "it as the whole source.",
     },
+    "generated": _GENERATED,
     "tasks": {"$ref": "#/$defs/Tasks"},
     "next": {"type": "string", "description": "The note's first open task."},
     "modified": _INSTANT,
@@ -509,6 +514,7 @@ READ: dict[str, object] = {
                     "properties": _HEALTH,
                     "additionalProperties": False,
                 },
+                "generated": _GENERATED,
             },
         ),
     ],

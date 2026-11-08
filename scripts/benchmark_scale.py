@@ -1,4 +1,5 @@
-"""Time record writes, cache builds, refreshes and searches over synthetic notes and records; never contact providers.
+"""Time record writes, cache builds, refreshes and searches over synthetic notes and records, and report the size of a
+full build; never contact providers.
 
 The synthetic brain lives in a temporary folder under --dir, on disk by default: record writes fsync, and a RAM-backed
 /tmp would hide that cost while holding the whole corpus in memory.
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import cast
 
 from bf import records
-from bf.index import refresh
+from bf.index import CACHE, refresh
 from bf.models import MAX_FILES, Query, Record
 from bf.retrieve import read, search
 from bf.storage import Store, writer, xdg
@@ -73,6 +74,7 @@ def main() -> None:
                 f"---\ntype: concept\n---\n# Project {n}\n\n{background}\n\nKeep durable evidence.\n".encode(),
             )
         measurements = {}
+        size = 0
         revision = 0
         note_revision = 0
         # Each write sample uses its own source: add creates it, update rewrites it and remove empties it again.
@@ -109,7 +111,7 @@ def main() -> None:
                 valid = refs == {"concepts/0.md"} and found[0]["title"] == f"Edited revision{note_revision}"
             elif name == "selective":
                 valid = refs == ({"benchmark:0", "concepts/0.md"} if args.notes else {"benchmark:0"})
-            elif name in {"common", "question"}:
+            elif name in {"common", "question", "prefix"}:
                 valid = len(found) == min(10, args.records + max(0, args.notes - 1))
             elif name == "typo":
                 valid = not found and result.get("suggestions") == {"evidnce": ["evidence"]}
@@ -165,6 +167,8 @@ def main() -> None:
             ("question", lambda: search([store], Query(text="Why retain the decision evidence?"))),
             # A misspelled word: the stem it suggests is in every passage, which must not all be sorted.
             ("typo", lambda: search([store], Query(text="evidnce"))),
+            # A prefix longer than the stem of the words it begins, `evid`: it matches through the indexed spellings.
+            ("prefix", lambda: search([store], Query(text="evidenc*"))),
             ("timeline", lambda: read([store], "2026-06")),
             ("home", lambda: read([store])),
             ("exact_read", lambda: read([store], "decision:0")),
@@ -188,12 +192,15 @@ def main() -> None:
                 "median": round(statistics.median(timings), 3),
                 "max": round(max(timings), 3),
             }
+            if name == "build":
+                # The size of a fresh full build, before the samples below change it in place.
+                size = (store.root / CACHE).stat().st_size
         # Fixture validation is outside the timers and must pass before timings are published.
         if not validate(store)["valid"]:
             raise RuntimeError("benchmark fixture failed brain validation")
         # The report omits the local directory so timings can be shared.
         corpus = {key: value for key, value in vars(args).items() if key != "dir"}
-        sys.stdout.write(json.dumps({"corpus": corpus, "seconds": measurements}) + "\n")
+        sys.stdout.write(json.dumps({"corpus": corpus, "seconds": measurements, "cache_bytes": size}) + "\n")
 
 
 if __name__ == "__main__":

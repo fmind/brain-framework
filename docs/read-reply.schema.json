@@ -145,6 +145,10 @@
           "description": "Declared single-value fields, such as a status or an assignee, each at most 200 characters.",
           "type": "object"
         },
+        "generated": {
+          "const": true,
+          "description": "Model output an assistant recorded; read what it cites before relying on it."
+        },
         "kind": { "enum": ["note", "record"] },
         "modified": {
           "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
@@ -589,6 +593,10 @@
           },
           "required": ["state", "freshness"],
           "type": "object"
+        },
+        "generated": {
+          "const": true,
+          "description": "Model output an assistant recorded; read what it cites before relying on it."
         },
         "modified": {
           "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
