@@ -42,10 +42,11 @@ from bf.models import (
     digest,
     explain,
     local,
+    reason,
     suggest,
     timestamp,
 )
-from bf.storage import BusyError, Store, collecting, program_state, relative, writer
+from bf.storage import BusyError, Store, collecting, program_state, recording, relative, writer
 from bf.validate import broken_links
 
 _LOG = 256 << 10
@@ -97,6 +98,26 @@ def _now() -> str:
     return local(timestamp(datetime.now(UTC).isoformat()))
 
 
+def ended(code: int) -> str:
+    """How a finished program ended, from its exit code."""
+    if code >= 0:
+        return f"exited with status {code}"
+    try:
+        return f"was killed by {signal.Signals(-code).name}"
+    except ValueError:
+        # Real-time signals between SIGRTMIN and SIGRTMAX have no name.
+        return f"was killed by signal {-code}"
+
+
+def program_env(store: Store) -> dict[str, str]:
+    """The environment of a program BF starts, before it exposes any BF_ variable to that program."""
+    # Inherited values of the variables BF sets never leak into a program; a nested bf call without --brain reads
+    # the executing brain, never an inherited selection.
+    env = {key: value for key, value in environment().items() if key not in PROGRAM_ENV}
+    env["BF_BRAIN"] = str(store.root)
+    return env
+
+
 def enabled[P: Program | Assistant](programs: Mapping[str, P], kind: str, name: str) -> P:
     """The enabled program called `name`; an unknown or disabled name fails, suggesting only programs that can run."""
     program = programs.get(name)
@@ -142,6 +163,14 @@ class NotStartedError(Error):
     """The program never started, so it cannot have acted: retrying it is safe."""
 
 
+class CancelledError(Error):
+    """A cancelled update stopped the program: not a program failure, so run history keeps no error."""
+
+
+class NotStartedCancelledError(NotStartedError, CancelledError):
+    """A cancelled update stopped the program before it started."""
+
+
 def executable(store: Store, command: str, env: Mapping[str, str]) -> str:
     """Resolve an owner's argv executable without following brain-owned symlinks."""
     if command.startswith(("sensors/", "routines/", "channels/")):
@@ -151,7 +180,7 @@ def executable(store: Store, command: str, env: Mapping[str, str]) -> str:
         except FileNotFoundError as error:
             raise NotStartedError(f"{command} does not exist; restore it or correct bf.yaml") from error
         except (Error, OSError) as error:
-            raise NotStartedError(str(error) if isinstance(error, Error) else f"cannot read {command}") from error
+            raise NotStartedError(reason(error, f"cannot read {command}")) from error
         return str(store.root / command)
     if "/" in command:
         raise NotStartedError("executable must be a bare command name or a sensors/, routines/ or channels/ path")
@@ -176,11 +205,9 @@ def run(
 
     Its stderr, and a `log` routine's stdout, go to the program's bounded log in logs/, never to errors.
     """
-    # A nested bf call without --brain reads the executing brain, never an inherited selection.
-    env = {key: value for key, value in environment().items() if key not in PROGRAM_ENV}
-    env["BF_BRAIN"] = str(store.root)
+    env = program_env(store)
     if cancelled is not None and cancelled():
-        raise NotStartedError("program cancelled")
+        raise NotStartedCancelledError("program cancelled")
     try:
         # Machine-local and private: cursors and tokens a program keeps between runs, never evidence.
         env.update(BF_PROGRAM=name, BF_STATE_DIR=str(program_state(store, name).root), **_EXPOSED.get())
@@ -198,7 +225,7 @@ def run(
     try:
         with starting():
             if cancelled is not None and cancelled():
-                raise NotStartedError("program cancelled")
+                raise NotStartedCancelledError("program cancelled")
             try:
                 child = subprocess.Popen(  # noqa: S603
                     # Direct argv from the owner's bf.yaml, plus a `bf run` caller's arguments; no shell interprets them.
@@ -232,7 +259,7 @@ def run(
             # so a background descendant holding it cannot delay or fail a finished program.
             while stdout in selector.get_map() or child.poll() is None:
                 if cancelled is not None and cancelled():
-                    raise Error("program cancelled")
+                    raise CancelledError("program cancelled")
                 now = time.monotonic()
                 if exited is None and child.poll() is not None:
                     exited = now
@@ -275,18 +302,11 @@ def run(
                     break
                 errors.extend(chunk)
         code = child.wait()
-        if code < 0:
-            # BF's own kills fail above: the program crashed, or another process, such as the out-of-memory killer,
-            # ended it.
-            try:
-                killer = signal.Signals(-code).name
-            except ValueError:
-                # Real-time signals between SIGRTMIN and SIGRTMAX have no name.
-                killer = f"signal {-code}"
-            raise Error(f"program was killed by {killer}")
-        outcome = f"exited with status {code}"
         if code:
-            raise Error(f"program exited with status {code}")
+            # BF's own kills fail above: a signal means the program crashed, or another process, such as the
+            # out-of-memory killer, ended it.
+            raise Error(f"program {ended(code)}")
+        outcome = ended(code)
         return bytes(output)
     except Error as error:
         outcome = str(error)
@@ -322,13 +342,18 @@ def _failed(
     store: Store, name: str, file: str, started: datetime, message: str, cause: BaseException, *, dry_run: bool
 ) -> NoReturn:
     """Remember a failed run, then name its log; provider output never enters the message."""
+    if isinstance(cause, CancelledError):
+        # Stopping an update is not a program failure, as when a serial run is interrupted: keep its history.
+        raise cause
     with suppress(Error, OSError):
         append_log(store, name, f"{_now()} failed: {message}")
     if not dry_run:
         busy = isinstance(cause, BusyError)
+        # Routine history lives outside the brain: saving it never waits for the brain's readers and writers.
+        lock = recording if file == ROUTINES else writer
         try:
-            # A run that already waited for a busy writer records its failure only if the writer is free now.
-            with writer(store, wait=0 if busy else 120):
+            # A run that already waited for a busy lock records its failure only if the lock is free now.
+            with lock(store, wait=0 if busy else 120):
                 failures = int(str(state(store, file).get(name, {}).get("failures", 0))) + 1
                 remember(store, name, file, run=timestamp(started.isoformat()), error=message, failures=failures)
         except (Error, OSError) as history_error:
@@ -440,7 +465,9 @@ def collect(
         try:
             # A {{home}} that cannot resolve fails the run in its history, as for routines.
             with exposing(BF_START=start, BF_END=end):
-                raw = runner(arguments(store, sensor, start, end), sensor, store, name, b"")
+                # A fixture runs nothing, so its placeholders never need this machine's line files or HOME.
+                argv = [] if fixture is not None else arguments(store, sensor, start, end)
+                raw = runner(argv, sensor, store, name, b"")
             printed = decode(raw)
             text_limit = sensor.max_text_bytes or (4 << 20)
             truncated_count = 0
@@ -453,12 +480,19 @@ def collect(
                     # Without opting in, oversized text reaches validation and fails the run, as documented.
                     opted_in = sensor.truncate_text or sensor.max_text_bytes is not None
                     if opted_in and isinstance(item, dict) and isinstance(item.get("text"), str):
-                        text = item["text"]
-                        if len(encoded_text := text.encode("utf-8")) > text_limit:
+                        try:
+                            encoded_text = item["text"].encode("utf-8")
+                        except UnicodeEncodeError:
+                            continue  # A lone surrogate: record validation names the invalid field.
+                        if len(encoded_text) > text_limit:
                             cut = encoded_text[:text_limit].decode("utf-8", errors="ignore")
                             attrs = item.get("attributes")
+                            # Cut text is incomplete evidence, which retrieval reports from `partial`. Validation
+                            # still rejects attributes that are not an object.
                             updated_attrs = (
-                                {**attrs, "truncated": True} if isinstance(attrs, dict) or attrs is None else attrs
+                                {**(attrs or {}), "truncated": True, "partial": True}
+                                if attrs is None or isinstance(attrs, dict)
+                                else attrs
                             )
                             printed[position] = {**item, "text": cut, "attributes": updated_attrs}
                             truncated_count += 1
@@ -533,7 +567,12 @@ def collect(
                     failures=0,
                     **({"success": observed} if latest else {}),
                     **({"reconciled": observed} if reconcile and latest else {}),
-                    **{key: value for key, value in result.items() if key != "sensor"},
+                    # Retention counters reset each run: one without forgotten or expired records stores 0.
+                    **{
+                        "forgotten": 0,
+                        "expired": 0,
+                        **{key: value for key, value in result.items() if key != "sensor"},
+                    },
                 )
         except (Error, OSError, UnicodeError) as error:
             message = (
@@ -632,7 +671,7 @@ def expand_lines(store: Store, path: str) -> list[str]:
     except FileNotFoundError as error:
         raise NotStartedError(f"{path} does not exist; restore it or correct bf.yaml") from error
     except (Error, OSError) as error:
-        raise NotStartedError(str(error) if isinstance(error, Error) else f"cannot read {path}") from error
+        raise NotStartedError(reason(error, f"cannot read {path}")) from error
     try:
         text = raw.decode("utf-8")
     except UnicodeError as error:
@@ -787,7 +826,12 @@ def routine(
                 if text.strip() and _written(store, f"{day}_{name}-"):
                     result["skipped"] = _EXISTS
                 return {**result, **({"text": text} if text.strip() else {})}
-            with writer(store, wait=120):
+            with ExitStack() as locks:
+                if text.strip():
+                    # Only an action changes the brain; run history alone stays outside it, so a log routine never
+                    # waits for the brain's readers, such as a long bf validate. Locks order: writer, then history.
+                    locks.enter_context(writer(store, wait=120))
+                locks.enter_context(recording(store))
                 if text.strip() and _written(store, f"{day}_{name}-"):
                     result["skipped"] = _EXISTS
                 elif text.strip():
@@ -846,7 +890,11 @@ def structured_reply(raw: bytes, pointer: str) -> tuple[JsonValue, dict[str, Jso
         raise Error("assistant command must print one JSON object when reply is set")
     if not pointer:
         return cast(JsonValue, document), {}
-    value = ontology.pointer(cast(JsonValue, document), pointer)
+    try:
+        value = ontology.pointer(cast(JsonValue, document), pointer)
+    except Error:
+        # A pointer into a string, a number or a non-decimal array index finds no reply: report it as missing.
+        return None, cast(dict[str, JsonValue], document)
     parent, _, key = pointer.rpartition("/")
     holder = ontology.pointer(cast(JsonValue, document), parent) if parent else document
     if isinstance(holder, dict):

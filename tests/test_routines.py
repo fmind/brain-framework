@@ -26,7 +26,7 @@ from bf.health import attention, routine_health
 from bf.history import ROUTINES, log_path, state
 from bf.models import Command, Config, Error, Routine
 from bf.retrieve import read
-from bf.storage import Store, collecting
+from bf.storage import Store, collecting, reader, writer
 from bf.update import update
 from bf.validate import validate
 from conftest import plain
@@ -207,6 +207,27 @@ def test_a_retry_finds_todays_action_when_its_run_history_was_not_saved(
     skipped = {"routine": "digest", "skipped": SKIPPED}
     assert routine(configured, "digest", start=START, end=END, runner=printing(ACTION), clock=lambda: NOW) == skipped
     assert not (configured.root / f"{FOLDER[:-1]}2").exists()
+
+
+def test_only_writing_an_action_waits_for_the_brains_readers(
+    configured: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Fail at once instead of after the 120-second wait for a busy brain.
+    monkeypatch.setattr(collector, "writer", lambda store, **_: writer(store, 0))
+    with reader(configured):
+        # Run history lives outside the brain: a log routine, or an action routine printing nothing, still succeeds.
+        assert routine(configured, "manual", start=START, end=END, runner=printing(b"scanned\n")) == {
+            "routine": "manual"
+        }
+        assert routine(configured, "digest", start=START, end=END, runner=printing(b"")) == {"routine": "digest"}
+        busy = "another process is reading or changing this brain's records"
+        with pytest.raises(Error, match=f"^digest: {busy}; retry after it finishes; no action was written; see "):
+            routine(configured, "digest", start=START, end=END, runner=printing(ACTION))
+    history = state(configured, ROUTINES)
+    assert (history["manual"]["failures"], history["manual"]["error"]) == (0, "")
+    # The busy brain no longer hides the failure from run history.
+    assert history["digest"]["failures"] == 1
+    assert not (configured.root / "actions").exists()
 
 
 def refs(reply: dict[str, object]) -> list[str]:

@@ -102,6 +102,18 @@ def test_editor_and_runtime_reject_invalid_structure(value: dict) -> None:
             b"version: 8\nname: brain\nsensors:\n  demo:\n    command: [echo]\n    fields:\n      # kind: {path: /a}\n",
             {"version": 8, "name": "brain", "sensors": {"demo": {"command": ["echo"]}}},
         ),
+        (
+            "brain",
+            (
+                b"version: 8\nname: brain\nassistants:\n  helper:\n    prompt: prompts/helper.md\n    command: [echo]\n"
+                b"    schedules:\n      # daily: {at: '09:00'}\n"
+            ),
+            {
+                "version": 8,
+                "name": "brain",
+                "assistants": {"helper": {"prompt": "prompts/helper.md", "command": ["echo"]}},
+            },
+        ),
         ("registry", b"brains:\n  # brain:\n  #   path: ~/brain\n", {}),
     ],
 )

@@ -27,7 +27,7 @@ bf eval
 - `bf status` runs nothing and reports each brain's cache, problems, runtime and program health; `--check` exits 1 when one needs attention ([reading status](references/operations.md#read-bf-status)). Each program logs its runs to `logs/NAME.log`: read it locally and keep provider text out of reports.
 - `bf update --dry-run` lists due programs and their windows without running anything.
 - `bf validate` lists `problems` as `{file, error}`, such as invalid OKF metadata, broken links, merge markers, `assistants.NAME.prompt: PATH is not a regular file` or an enabled program that is not an executable regular file (check a disabled one with `test -x sensors/NAME`).
-- Its non-failing [warnings](https://fmind.github.io/brain-framework/docs/checks/#warnings) name sensors emitting `links` or `url` that are neither identities nor URLs, `.write-HEX` temporaries to delete and identities differing only by case.
+- Its non-failing [warnings](https://fmind.github.io/brain-framework/docs/checks/#warnings) name sensors emitting `links` or `url` that are neither identities nor URLs, `.write-HEX` temporaries to delete, `stale_after` deadlines within `warn_stale_days` and identities differing only by case.
 - `bf eval` runs the retrieval cases under `evals/`; `--baseline FILE` with a saved reply lists `regressions`.
 
 `bf collect --dry-run` and `bf run --dry-run` **do run the program**: they skip saving, not execution. Discovery or a dry run grants no authority for live collection.

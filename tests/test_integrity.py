@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 from typing import cast
@@ -29,7 +30,8 @@ def _cross_device(*_: object, **__: object) -> None:
     raise OSError(errno.EXDEV, "cross-device link")
 
 
-def test_health_check_passes_while_a_live_writer_holds_the_brain(brain: Store) -> None:
+def test_health_check_passes_while_a_live_writer_holds_the_brain(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(index, "_CONTENDED", 0.1)
     index.refresh(brain)
     brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
     with writer(brain):
@@ -109,6 +111,7 @@ def test_commit_backups_link_the_replaced_file_unless_the_filesystem_cannot(
 
 def test_exact_reads_do_not_wait_out_a_writer(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(records, "WAIT", 0)
+    monkeypatch.setattr(index, "_CONTENDED", 0.1)
     index.refresh(brain)
     with writer(brain):
         # One file reads whole without the lock, marked like a busy brain's cache.
@@ -121,6 +124,19 @@ def test_exact_reads_do_not_wait_out_a_writer(brain: Store, monkeypatch: pytest.
     assert "stale" not in read([brain], "meetings:decision-1", counted=False)
     with pytest.raises(Error, match="not found"):
         read([brain], "meetings:absent", counted=False)
+
+
+def test_an_exact_record_read_shares_one_wait_with_the_cache(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The cache's wait for a busy writer counts toward the record's: the read answers within records.WAIT.
+    monkeypatch.setattr(records, "WAIT", 1.0)
+    monkeypatch.setattr(index, "_CONTENDED", 0.8)
+    index.refresh(brain)
+    with writer(brain):
+        started = time.monotonic()
+        reply = read([brain], "meetings:decision-1", counted=False)
+        elapsed = time.monotonic() - started
+    assert reply["stale"] == ["fixture"]
+    assert elapsed < 1.5  # the two waits in a row took 1.8 s
 
 
 def _intact(brain: Store) -> bool:

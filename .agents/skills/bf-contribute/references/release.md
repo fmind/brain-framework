@@ -24,7 +24,7 @@ Use only for an explicitly authorized release. [CD](../../../../.github/workflow
 ## Recover a failed release
 
 - Before the tag exists, fix the cause in the clone, commit and rerun `publish`: it repeats every check.
-- If pushing the tag failed, `push-and-tag.sh` deleted the local tag: rerun `publish`. It tags the same commit, or stops if origin received the tag after all.
+- If pushing the tag failed, `push-and-tag.sh` deleted the local tag: rerun `publish`. It tags the same commit, or, if origin received the tag after all, fetches it and continues to CD, verification and sync; a remote tag on another commit stops it.
 - Retry failed CD jobs with `gh run rerun ID --failed`, which reuses the tested distributions retained for 30 days. The gate's vulnerability scans download advisory data: rerun a job that failed on a download, and fix a newly published advisory before publishing.
 - If a GitHub release already exists, creation deliberately fails. Inspect its assets and state, then finish a verified draft manually under release authorization.
 - If `verify-release.sh` reports a digest or attestation mismatch, stop and investigate before announcing the release.

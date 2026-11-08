@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import stat
 from collections.abc import Callable
@@ -13,6 +12,7 @@ from functools import cache
 from bf import links, ontology, pages, records
 from bf.config import load
 from bf.markdown import Note, authored, broken, editor_lock, entry_note, note, okf, parse, resolve, scheme, validate_okf
+from bf.markdown import lines as markdown_lines
 from bf.models import (
     AUTHORED,
     IDENTITY,
@@ -39,13 +39,7 @@ def _kinds(store: Store) -> Callable[[str], int]:
         """Exact names: on a case-insensitive volume, stat would also accept a differently cased link."""
         if not directory:
             return frozenset(path.name for path in store.root.iterdir())
-        with store.parent(directory) as (parent, leaf):
-            descriptor = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
-        try:
-            with os.scandir(descriptor) as found:
-                return frozenset(entry.name for entry in found)
-        finally:
-            os.close(descriptor)
+        return frozenset(store.entries(directory))
 
     def kind(name: str) -> int:
         try:
@@ -175,10 +169,18 @@ def _programs(store: Store, config: Config) -> list[dict[str, str]]:
         for kind in ("send", "read", "stream")
         if (command := getattr(channel, kind)) is not None
     }
+    gate_commands = {
+        f"{name}.schedules.{key}.gate": schedule.gate
+        for name, assistant in config.assistants.items()
+        if assistant.enabled
+        for key, schedule in assistant.schedules.items()
+        if schedule.gate is not None
+    }
     for kind, programs in (
         ("sensors", config.sensors),
         ("routines", config.routines),
         ("assistants", config.assistants),
+        ("assistants", gate_commands),
         ("channels", channel_commands),
     ):
         for name, program in sorted(programs.items()):
@@ -422,7 +424,8 @@ class _Validation:
                     )
         for pattern in rules.forbid_patterns:
             compiled = re.compile(pattern)
-            for line_number, line in enumerate(text.splitlines(), 1):
+            # Numbered by CR/LF like every other note diagnostic: Markdown ignores Unicode line separators.
+            for line_number, line in enumerate((item.rstrip("\r\n") for item in markdown_lines(text)), 1):
                 if compiled.search(line):
                     self.problems.append(_problem(name, f"line {line_number}: matches forbidden pattern {pattern}"))
                     break

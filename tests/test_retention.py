@@ -102,6 +102,11 @@ def test_forget_accepts_record_paths_and_ids_not_collected_yet(brain: Store) -> 
     assert stored(brain) == []
     # Forgetting again reports the record as listed already.
     assert invoke("forget", "mail:later", "--brain", "fixture")["records"][0]["listed"] is True
+    # Two spellings of one record in one call: neither was listed before it, and the list gains one line.
+    records_file(brain, "mail", [Record(id="m2", title="Two")])
+    both = invoke("forget", "mail:m2", records.path("mail", "m2"), "--brain", "fixture")["records"]
+    assert [item["listed"] for item in both] == [False, False]
+    assert brain.read("memories/mail/.forgotten").decode().count(digest(b"m2")) == 1
 
 
 @pytest.mark.usefixtures("brain")
@@ -199,6 +204,36 @@ def test_collect_input_checks_saved_output_without_running_or_saving(brain: Stor
     assert unknown.exit_code == 1
 
 
+def test_collect_input_ignores_the_command_placeholders(
+    brain: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A fixture check runs nothing, so it needs neither this machine's line files nor HOME.
+    configure(brain, '    command: [echo, "{{lines:settings/missing.txt}}", "{{home}}"]\n')
+    monkeypatch.delenv("HOME", raising=False)
+    fixture = tmp_path / "mail.json"
+    fixture.write_text(json.dumps([{"id": "m1", "title": "Hi"}]))
+    assert invoke("collect", "mail", "--input", str(fixture), "--brain", "fixture")["added"] == 1
+    assert not (brain.root / "logs/mail.log").exists()
+
+
+def test_collect_input_and_window_keep_their_bounds(brain: Store, tmp_path: Path) -> None:
+    output = emit({"id": "m1", "title": "Hi"})
+    configure(brain, f"    enabled: false\n    max_bytes: {len(output)}\n")
+    fixture = tmp_path / "mail.json"
+    fixture.write_bytes(output)
+    assert invoke("collect", "mail", "--input", str(fixture), "--brain", "fixture")["added"] == 1
+    # One more byte of valid JSON exceeds the sensor's bound, as its own run would.
+    fixture.write_bytes(output + b" ")
+    over = CliRunner().invoke(app, ["collect", "mail", "--input", str(fixture), "--brain", "fixture"])
+    assert over.exit_code == 2
+    assert "invalid input: --input: exceeds the sensor's max_bytes" in over.stderr
+    assert stored(brain) == []
+    # Without --since, the window starts one lookback before now: an older end names no window.
+    early = CliRunner().invoke(app, ["collect", "mail", "--until", "2020-01-01", "--brain", "fixture"])
+    assert early.exit_code == 2
+    assert "invalid input: --until: must be later than the start; set --since for a historical window" in early.stderr
+
+
 def test_programs_receive_their_name_window_and_private_state_directory(brain: Store) -> None:
     script = (
         "import json, os, stat, sys\n"
@@ -281,6 +316,10 @@ def test_status_reports_the_last_run_retention_counts(brain: Store) -> None:
     collect(brain, "mail", start=START, end=END, runner=lambda *_: printed, clock=lambda: NOW)
     status = invoke("status", "--brain", "fixture")
     assert status["brains"][0]["sources"]["mail"]["last_run"]["forgotten"] == 1
+    # A later run without forgotten records resets the count, which status then leaves out.
+    shown = emit({"id": "shown", "title": "Shown"})
+    collect(brain, "mail", start=START, end=END, runner=lambda *_: shown, clock=lambda: NOW)
+    assert "forgotten" not in invoke("status", "--brain", "fixture")["brains"][0]["sources"]["mail"]["last_run"]
 
 
 def test_forget_rejects_an_unknown_source_and_validate_checks_the_list(brain: Store) -> None:

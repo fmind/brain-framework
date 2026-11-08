@@ -79,6 +79,11 @@ CACHE = "the search cache is unavailable; run bf build"
 FAILURES = (Error, OSError, UnicodeError, sqlite3.DatabaseError)
 
 
+def reason(error: BaseException, fallback: str) -> str:
+    """An Error's own message, otherwise `fallback`: other exceptions may name paths or provider text."""
+    return str(error) if isinstance(error, Error) else fallback
+
+
 def failure(error: Error | OSError | UnicodeError | sqlite3.DatabaseError) -> str:
     """Why an operation failed, without a path: an Error's own message, or a file, encoding or cache cause."""
     if isinstance(error, Error):
@@ -145,11 +150,14 @@ def empty(value: object) -> object:
     return {} if value is None else value
 
 
-def _nullable(schema: JsonDict) -> None:
+def _nullable(schema: JsonDict, *, closed: bool = True) -> None:
     """An optional section's editor schema, or the null `empty` accepts: a mapping closed to its declared names, or
     a `$ref` to settings that close their own."""
     value = {key: schema.pop(key) for key in [*schema] if key not in {"title", "description"}}
-    schema["anyOf"] = [value if "$ref" in value else {**value, "additionalProperties": False}, {"type": "null"}]
+    schema["anyOf"] = [
+        value if "$ref" in value or not closed else {**value, "additionalProperties": False},
+        {"type": "null"},
+    ]
 
 
 def encode(value: object) -> bytes:
@@ -319,9 +327,12 @@ def explain(error: ValidationError, known: Collection[str] | None = None) -> str
         # A custom validator's reason is already a sentence: drop pydantic's "Value error, " label. A reason about
         # the whole document, such as a sensor mapping an undeclared field, names its own location.
         location, reason = ".".join(map(part, item["loc"])), item["msg"].removeprefix("Value error, ")
+        if item["type"] == "union_tag_invalid" and "ctx" in item:
+            # Pydantic's message quotes the input tag: name the expected tags from the schema instead.
+            reason = f"{item['ctx']['discriminator']} must be one of {item['ctx']['expected_tags']}"
         return f"{location}: {reason}" if location else reason
 
-    errors = error.errors(include_url=False, include_context=False, include_input=False)
+    errors = error.errors(include_url=False, include_input=False)
     # Each distinct clause once, so the count of the rest never includes one already shown.
     clauses = list(dict.fromkeys(map(clause, errors)))
     rest = [f"and {len(clauses) - _EXPLAINED} more"] if len(clauses) > _EXPLAINED else []
@@ -746,7 +757,8 @@ class Command(Model):
     command: Annotated[list[str], Field(min_length=1, max_length=128)] = Field(
         description=(
             "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then "
-            "arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}."
+            "arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and a whole-argument {{lines:FILE}}; an "
+            "assistant's also {{prompt}} and {{schema}}."
         ),
         json_schema_extra={
             "prefixItems": [
@@ -782,7 +794,7 @@ class Command(Model):
             # Only an opening {{ starts a placeholder: a lone }} is literal text, such as the end of inline JSON.
             if "{{" in stripped:
                 raise ValueError(
-                    f"unknown placeholder; use {', '.join(cls.PLACEHOLDERS[:-1])} or {cls.PLACEHOLDERS[-1]}"
+                    f"unknown placeholder; use {', '.join(cls.PLACEHOLDERS)} or a whole-argument lines:FILE"
                 )
         executable = values[0]
         parts = executable.split("/")
@@ -1058,7 +1070,11 @@ WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun"
 
 
 class AssistantSchedule(Model):
-    every: Annotated[int, Field(ge=1, le=31_536_000)] = 86_400
+    every: Annotated[int, Field(ge=1, le=31_536_000)] = Field(
+        default=86_400,
+        description="Interval in seconds between runs, filtered by days. With at, it does not repeat runs: it is only "
+        "the grace after a missed slot before bf status reports the schedule overdue.",
+    )
     lookback: Annotated[int, Field(ge=1, le=31_536_000)] = 86_400
     at: Annotated[str, Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")] | None = Field(
         default=None, description="Optional 24-hour wall-clock time (HH:MM) for daily or weekday-filtered runs."
@@ -1111,13 +1127,10 @@ class AssistantSchedule(Model):
                 return today_slot.astimezone(UTC)
             if local_now < today_slot:
                 return today_slot.astimezone(UTC)
-        for offset in range(1, 8):
-            candidate = today + timedelta(days=offset)
-            if WEEKDAYS[candidate.weekday()] in allowed:
-                return datetime(candidate.year, candidate.month, candidate.day, hour, minute, tzinfo=zone).astimezone(
-                    UTC
-                )
-        return now
+        # days holds at least one weekday, so one of the next seven days is allowed.
+        offset = next(o for o in range(1, 8) if WEEKDAYS[(today + timedelta(days=o)).weekday()] in allowed)
+        candidate = today + timedelta(days=offset)
+        return datetime(candidate.year, candidate.month, candidate.day, hour, minute, tzinfo=zone).astimezone(UTC)
 
 
 class Assistant(Command):
@@ -1156,10 +1169,15 @@ class Assistant(Command):
         description="The channel where scheduled, wake and manual runs post; an incoming message is answered in its "
         "own conversation.",
     )
-    schedules: dict[Name, AssistantSchedule] = Field(default_factory=dict, max_length=32)
+    # Its released schema left names outside the pattern open: closing them in a minor release would narrow it.
+    schedules: dict[Name, AssistantSchedule] = Field(
+        default_factory=dict, max_length=32, json_schema_extra=lambda schema: _nullable(schema, closed=False)
+    )
     wake: WakeBounds | None = Field(
         default=None, description="Let a structured reply schedule one later run, clamped to min and max seconds."
     )
+
+    _empty = field_validator("schedules", mode="before")(empty)
 
     @field_validator("prompt")
     @classmethod

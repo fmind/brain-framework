@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import threading
+import time
 from typing import cast
 
 import pytest
@@ -18,7 +19,7 @@ from bf.evaluate import evaluate
 from bf.history import log_path
 from bf.models import Error, Query
 from bf.retrieve import search
-from bf.storage import Store
+from bf.storage import Store, writer
 from bf.validate import validate
 
 MIB = 1 << 20
@@ -57,6 +58,17 @@ def test_run_passes_at_most_one_mebibyte_of_input(routines: Store) -> None:
     assert refused.exit_code == 1
     assert "piped input exceeds 1 MiB" in str(refused.exception)
     assert not (routines.root / log_path("skip")).exists()
+
+
+def test_run_names_an_unknown_or_disabled_routine_before_reading_input(routines: Store) -> None:
+    # bf used to read the input first: an oversized or unending pipe hid the mistyped name and its suggestion.
+    unknown = run(routines, "cuont", MIB + 1)
+    assert unknown.exit_code == 1
+    assert "unknown routine or assistant cuont; check names in bf.yaml; did you mean count?" in str(unknown.exception)
+    routines.write("bf.yaml", ROUTINES.replace(b"  skip:\n", b"  skip:\n    enabled: false\n"))
+    disabled = run(routines, "skip", MIB + 1)
+    assert disabled.exit_code == 1
+    assert "routine skip is disabled in bf.yaml" in str(disabled.exception)
 
 
 def test_a_routine_may_exit_without_reading_its_input(routines: Store) -> None:
@@ -109,6 +121,18 @@ def test_replies_list_200_skipped_files_then_a_count(brain: Store) -> None:
     # It once read "1 more files were skipped".
     problems = cast("list[dict[str, str]]", search([brain], Query(text="offline"))["problems"])
     assert problems[200]["error"] == "1 more file was skipped; run bf validate"
+
+
+def test_a_search_waits_two_seconds_for_a_busy_brain_then_answers_stale(brain: Store) -> None:
+    search([brain], Query(text="offline"))
+    brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
+    with writer(brain):
+        started = time.monotonic()
+        reply = search([brain], Query(text="latecomer"))
+        waited = time.monotonic() - started
+    assert reply["stale"] == ["fixture"]
+    # It waits out the bound once, then serves the cache it has: far below the 120 s wait when there is none.
+    assert 2 <= waited < 30
 
 
 def test_evaluation_runs_at_most_100_suites(brain: Store) -> None:

@@ -450,13 +450,13 @@ def plan(
 
 
 def find(
-    store: Store, source: str, record_id: str, *, complete: bool = False
+    store: Store, source: str, record_id: str, *, complete: bool = False, wait: float = WAIT
 ) -> tuple[str, Record, bytes, int, bool] | None:
     """Exact identities resolve directly by their SHA-256 filename, with the file's bytes and modification time.
 
     Malformed or misnamed evidence never proves absence: a missing file is confirmed by parsing the source,
     unless `complete` states that a ready search cache has already parsed all of it without a problem.
-    The last value is true when a writer kept the brain lock past WAIT seconds: the file was then read whole
+    The last value is true when a writer kept the brain lock past `wait` seconds: the file was then read whole
     without it, since writes rename complete files into place, but it may be changing, and absence fails instead.
     """
     if not re.fullmatch(NAME, source):
@@ -471,7 +471,7 @@ def find(
     name = path(source, record_id)
     with ExitStack() as locked:
         try:
-            locked.enter_context(reader(store, wait=WAIT))
+            locked.enter_context(reader(store, wait=wait))
         except BusyError:
             try:
                 data, modified = store.stamped(name, MAX_RECORD)
@@ -597,7 +597,7 @@ def forget(store: Store, source: str, targets: dict[str, str], *, dry_run: bool 
             stored_now = True
         except FileNotFoundError:
             stored_now = False
-        result.append({"ref": ref, "removed": stored_now, "listed": entry in hidden})
+        result.append({"ref": ref, "removed": stored_now, "listed": entry in known})
         if stored_now:
             present.append(name)
         hidden.add(entry)

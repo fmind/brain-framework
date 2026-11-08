@@ -41,6 +41,7 @@ exec bf run --hook pre-commit
 
 - A hook that no routine lists runs nothing, reads no input and succeeds, so the Git hook can exist before its routines.
 - `bf validate` checks the working tree, including unstaged edits.
+- A `log` routine never waits for another process reading or changing the brain, such as a long `bf validate`: its run history stays on this machine. Only writing an action waits, up to 120 seconds.
 - For `pre-push`, write `exec bf run --hook pre-push -- "$@"`: Git's arguments and the ref lines it pipes reach each routine.
 - The hook, like a routine's nested `bf` call, runs the first `bf` on `PATH`. In a brain that [pins its runtime](upgrades.md#pin-a-brains-runtime), write `exec uv run --locked bf run --hook pre-commit`: `uv` also puts the pinned `bf` first on its routines' `PATH`.
 

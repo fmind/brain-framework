@@ -5,7 +5,7 @@
       "description": "One harness with independent acquisition, delivery and schedules.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and a whole-argument {{lines:FILE}}; an assistant's also {{prompt}} and {{schema}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -77,11 +77,16 @@
           "description": "Read a structured {say, wake} answer at this JSON Pointer of the harness's JSON stdout; pass {{schema}} to the harness. Omitted, all of stdout is the message."
         },
         "schedules": {
-          "maxProperties": 32,
-          "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/AssistantSchedule" } },
-          "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
-          "title": "Schedules",
-          "type": "object"
+          "anyOf": [
+            {
+              "maxProperties": 32,
+              "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/AssistantSchedule" } },
+              "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
+              "type": "object"
+            },
+            { "type": "null" }
+          ],
+          "title": "Schedules"
         },
         "timeout": {
           "default": 900,
@@ -157,7 +162,14 @@
           "description": "Optional weekdays when the schedule may run; omitted means every day.",
           "title": "Days"
         },
-        "every": { "default": 86400, "maximum": 31536000, "minimum": 1, "title": "Every", "type": "integer" },
+        "every": {
+          "default": 86400,
+          "description": "Interval in seconds between runs, filtered by days. With at, it does not repeat runs: it is only the grace after a missed slot before bf status reports the schedule overdue.",
+          "maximum": 31536000,
+          "minimum": 1,
+          "title": "Every",
+          "type": "integer"
+        },
         "gate": {
           "anyOf": [{ "$ref": "#/$defs/Gate" }, { "type": "null" }],
           "default": null,
@@ -211,7 +223,7 @@
       "description": "An owner's process interface, without scheduling or provider-specific settings.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and a whole-argument {{lines:FILE}}; an assistant's also {{prompt}} and {{schema}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -251,7 +263,7 @@
       "description": "A deterministic check that runs before the harness and lists the events worth a model run.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and a whole-argument {{lines:FILE}}; an assistant's also {{prompt}} and {{schema}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -540,7 +552,7 @@
       "description": "A bounded sender; only explicitly idempotent adapters may retry uncertain outcomes automatically.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and a whole-argument {{lines:FILE}}; an assistant's also {{prompt}} and {{schema}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,
@@ -712,7 +724,7 @@
       "description": "A persistent JSON Lines process; timeout bounds acknowledgement writes, not healthy idle time.",
       "properties": {
         "command": {
-          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}} and {{end}}; an assistant's also {{prompt}}.",
+          "description": "Direct argv without a shell: a bare command name on PATH or a sensors/, routines/ or channels/ path, then arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and a whole-argument {{lines:FILE}}; an assistant's also {{prompt}} and {{schema}}.",
           "items": { "type": "string" },
           "maxItems": 128,
           "minItems": 1,

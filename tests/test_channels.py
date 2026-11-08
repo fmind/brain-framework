@@ -179,6 +179,14 @@ def test_an_exited_adapter_logs_its_status_and_diagnostics(brain: Store, stderr:
     assert log.endswith(f"{stderr}\n" if stderr else "==\n")
 
 
+def test_a_killed_adapter_logs_the_signal(brain: Store) -> None:
+    command = adapter(brain, "os.kill(os.getpid(), 15)\ntime.sleep(30)\n")
+    with pytest.raises(Error, match=r"channel chat: stream (exited|closed its output)"):
+        channels.stream(brain, "chat", command, {"since": START}, lambda _: None, Event())
+    [entry] = entries(brain)
+    assert heading(r"channel chat: stream (exited|closed its output).*; adapter was killed by SIGTERM").fullmatch(entry)
+
+
 def ack_size(index: int) -> int:
     return len(encode({"type": "ack", "id": f"m-{index:05d}", "cursor": ""}))
 
@@ -426,6 +434,11 @@ def test_only_an_adapter_that_stays_up_counts_as_connected(
         ({"post": "nope"}, "assistants.a.post: unknown channel nope"),
         ({"inputs": [{"channel": {"name": "chat", "mode": "read", "every": 60}}]}, "channel chat requires read"),
         ({"post": "listen"}, "assistants.a.post: channel listen requires send"),
+        # Pydantic's reason quotes an unknown tag, which could be a secret pasted in the wrong key.
+        (
+            {"inputs": [{"channel": {"name": "chat", "mode": "PRIVATE-TOKEN", "every": 60}}]},
+            "assistants.a.inputs.0.channel: 'mode' must be one of 'read', 'stream'",
+        ),
         (
             {"inputs": [{"channel": {"name": "listen", "mode": "stream"}}]},
             "assistants.a.inputs: channel listen requires send to answer its messages",
@@ -443,3 +456,4 @@ def test_an_undeclared_channel_is_named_apart_from_a_missing_capability(assistan
             }
         )
     assert reason in explain(failure.value)
+    assert "PRIVATE" not in explain(failure.value)

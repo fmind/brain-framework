@@ -665,6 +665,11 @@ else:
     for payload in ("[1]", "no-json", "{}", '{"text":"hi","unknown":true}'):
         invalid = invoke("channel", "send", "local", "--stdin", body=payload, code=2)
         assert "--stdin" in invalid.output
+    # Valid JSON over the 1 MiB input bound used to read as an invalid message, exit 2. Nothing is queued.
+    queued = Queue(brain).report()
+    oversized = invoke("channel", "send", "local", "--stdin", body=json.dumps({"text": "a" * (1 << 20)}), code=1)
+    assert "piped input exceeds 1 MiB" in str(oversized.exception)
+    assert Queue(brain).report() == queued
     invoke("channel", "read", "local", "--since", "2026-10-16", "--until", "2026-10-15", code=2)
     invoke("channel", "read", "local", code=2)
     invoke("channel", "send", "local", code=2)
@@ -1254,6 +1259,23 @@ def test_failing_idempotent_delivery_stops_retrying_and_frees_its_conversation(
     assert "stopped retrying after 2 attempts" in str(saved["error"])
     assistants.accept(messaging, "chat", [message("second")], {"personal"})
     assert queue.next(True, {"personal"}) is not None
+
+
+def test_misrouted_receipt_waits_for_inspection_even_on_an_idempotent_channel(messaging: Store) -> None:
+    configure(messaging, lambda config: config["channels"]["chat"]["send"].update(idempotent=True))
+    queue = Queue(messaging)
+    assistants.accept(messaging, "chat", [message()], {"personal"})
+    first = queue.next(True, {"personal"})
+    assert first
+    assistants.execute(messaging, first, runner=answers)
+    [delivery] = [str(item["id"]) for item in queue.outcomes(first)]
+    assert assistants.deliver(messaging, runner=lambda *_: b'{"id":"sent","conversation":"another-thread"}')
+    saved = queue.inspect(delivery)
+    # The message may have been posted elsewhere: retrying could post it again, so it holds its conversation.
+    assert saved["state"] == "uncertain"
+    assert "different conversation" in str(saved["error"])
+    assistants.accept(messaging, "chat", [message("second")], {"personal"})
+    assert queue.next(True, {"personal"}) is None
 
 
 def test_failed_standalone_send_waits_for_an_explicit_retry(messaging: Store) -> None:

@@ -11,7 +11,6 @@ from datetime import UTC, datetime, timedelta
 from functools import cache
 from threading import Lock
 from typing import Annotated, cast
-from uuid import uuid4
 
 from pydantic import Field, JsonValue, ValidationError, field_validator
 
@@ -398,8 +397,6 @@ class Queue:
                 slots,
             ),
         )
-        if error:
-            Queue.event(db, uuid4().hex, "assistant.failed", "runtime", {"job": work.id, "uncertain": False}, at)
 
     def enqueue(self, work: Work) -> None:
         with self.connect() as db:
@@ -477,10 +474,6 @@ class Queue:
             if checkpoint:
                 self.checkpoint(db, *checkpoint)
             self.trim(db)
-
-    def lifecycle(self, kind: str, source: str, data: dict[str, JsonValue]) -> None:
-        with self.connect() as db:
-            self.event(db, uuid4().hex, kind, source, data, now())
 
     def get(self, key: str) -> dict[str, object]:
         with self.connect() as db:
@@ -612,7 +605,6 @@ class Queue:
                 self.checkpoint(
                     db, f"wake:{work.assistant}", {"due": wake.due, "reason": wake.reason, "set": work.end, "job": ""}
                 )
-            self.event(db, f"completed:{work.id}", "assistant.completed", work.assistant, {"job": work.id}, now())
             self.trim(db)
 
     def _retry_attempt(self, db: sqlite3.Connection, key: str, reason: str) -> tuple[str, str]:
@@ -637,14 +629,11 @@ class Queue:
                     "UPDATE jobs SET state=?,error=?,updated=? WHERE id=? AND state NOT IN ('complete','cancelled')",
                     (outcome, message, now(), key),
                 )
-                if outcome != "pending":
-                    self.event(db, uuid4().hex, "assistant.failed", "runtime", {"job": key, "uncertain": False}, now())
                 return
             db.execute(
                 "UPDATE jobs SET state=?,error=?,updated=? WHERE id=? AND state NOT IN ('complete','cancelled')",
                 ("uncertain" if uncertain else "failed", error, now(), key),
             )
-            self.event(db, uuid4().hex, "assistant.failed", "runtime", {"job": key, "uncertain": uncertain}, now())
 
     def delivery(
         self,
@@ -716,7 +705,6 @@ class Queue:
                 "AND json_extract(payload,'$.origin.channel')=? AND json_extract(payload,'$.origin.message.id')=?",
                 (name, receipt.id),
             )
-            self.event(db, f"sent:{key}", "channel.sent", name, {"delivery": key}, now())
             self.trim(db)
 
     def delivery_failed(self, key: str, error: str, *, outcome: str = "uncertain", due: str = "") -> None:

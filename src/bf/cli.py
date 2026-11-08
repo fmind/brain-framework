@@ -57,7 +57,7 @@ from bf.retrieve import edges, identities, items, read, search
 from bf.runtime import Queue
 from bf.schemas import Kind, document
 from bf.storage import Store, expand, relative, writer
-from bf.update import KINDS, ProgramKind, run_assistant, run_routines, update
+from bf.update import KINDS, ProgramKind, run_assistant, run_routines, runnable, update
 from bf.validate import validate
 
 
@@ -550,6 +550,12 @@ def export(
     # The lines hold only claims: completeness goes to stderr, like other diagnostics, and to the exit code.
     for name in cast("list[str]", extra.get("stale", [])):
         _diagnose(f"{name}: a writer kept the cache from refreshing; retry for newer claims")
+    # Like stale, an omitted text leaves the export incomplete, yet every line it printed stays true.
+    for item in cast("list[dict[str, object]]", extra.get("omitted", [])):
+        _diagnose(
+            f"{item['brain']}: {item['file']}: text omitted: the file changed or became unreadable since the cache "
+            "refreshed; run bf build"
+        )
     problems = cast("list[dict[str, object]]", extra.get("problems", []))
     for problem in problems:
         # A referenced brain's directory and file names are its own: _diagnose escapes them.
@@ -561,7 +567,11 @@ def export(
 @app.command("collect", rich_help_panel="Collect and automate")
 def capture(
     sensor: Annotated[
-        str, typer.Argument(metavar="SENSOR", help="An enabled sensor name from bf.yaml; runs even with refresh: 0.")
+        str,
+        typer.Argument(
+            metavar="SENSOR",
+            help="A sensor name from bf.yaml; it must be enabled unless --input is given; runs even with refresh: 0.",
+        ),
     ],
     brain: RunOption = "",
     since: Annotated[str, typer.Option(help="Window start: 7d, yesterday, YYYY-MM-DD or ISO 8601.")] = "",
@@ -736,7 +746,9 @@ def perform(
         _finish(result, failed=not result["ok"])
         return
     # Git closes a hook's input; an agent's shell can hold its own open, so a direct run reads it only on request,
-    # and a hook only for the routines it runs: a hook that no routine lists succeeds at once.
+    # and a hook only for the routines it runs: a hook that no routine lists succeeds at once. A mistyped or disabled
+    # name fails first, instead of after waiting for input.
+    runnable(config, names)
     stdin = _input() if forward or (hook and hooked(config, hook)) else b""
     result = run_routines(store, names=names, hook=hook, args=args, stdin=stdin, dry_run=dry_run)
     _finish(result, failed=not result["ok"])
@@ -779,8 +791,10 @@ def channel_command(
     command = channels.operation(store, name, "send")
     if not isinstance(command, Send):
         raise Error("channel requires a send operation")
+    # Oversized or unending input keeps its own diagnostic, as for bf run, instead of reading as invalid JSON.
+    data = _input()
     try:
-        value = decode(_input())
+        value = decode(data)
         if not isinstance(value, dict):
             raise Error("send input must be a JSON object containing text")
         message = Outgoing.model_validate({"id": uuid4().hex, **value})
@@ -1040,7 +1054,7 @@ def _input() -> bytes:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise Error(
-                            "piped input did not end within 10 seconds; close it, or run bf run from a terminal"
+                            "piped input did not end within 10 seconds; close it, or run the command from a terminal"
                         )
                     if not selector.select(remaining):
                         continue
@@ -1064,7 +1078,7 @@ _GIVEN = {
     "--reproject": "give a sensor name; an empty value would rebuild the cache instead",
     "--routine": "give a routine name; an empty value names none",
     "--sensor": "give a sensor name; an empty value names none",
-    "--since": "give a start time; an empty value would collect the default window",
+    "--since": "give a start time; an empty value names none",
     "DIR": "give a directory; an empty value would name the working directory",
     "PATH": "give a directory; an empty value would name the working directory",
     "SENSOR": "give a sensor name from bf.yaml",

@@ -89,7 +89,7 @@ def issue(repository: str, item: object, start: datetime, end: datetime) -> dict
 def collect() -> list[dict[str, Any]]:
     if len(sys.argv) not in (2, 4) or not REPOSITORY.fullmatch(sys.argv[1]):
         raise _sensor.SensorError("usage: github-issues.py OWNER/REPO [START END]")
-    repository = sys.argv[1]
+    repository = sys.argv[1].lower()  # gh accepts any case; ids and the alias match github-history.py's
     start, end = _sensor.window(sys.argv[2:4])
     # GitHub search ranges are inclusive and take whole seconds: widen outward, then filter exactly.
     first = datetime.fromtimestamp(math.floor(start.timestamp()), UTC).strftime("%Y-%m-%dT%H:%M:%S+00:00")

@@ -4,6 +4,35 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+A minor release. The brain format (`version: 8`), the reply schemas, the queue format and the search cache are unchanged; `bf.yaml` accepts one more form, so no upgrade step is needed. Run `bf skills DIR` to update installed skills.
+
+### Fixed
+
+- **Text truncation no longer stops `bf update`.** A sensor with `truncate_text` or `max_text_bytes` that printed an oversized record without `attributes` raised a traceback that aborted the whole cycle; the record is now cut and stored. Cut text also sets `attributes.partial: true` beside `truncated: true`, so search, read and the evidence helper report it as incomplete, and text holding a lone surrogate gets the record's field diagnostic instead of "collector files are inaccessible".
+- **Parallel searches after an edit return fresh results.** When several searches ran at once, as an agent's parallel tool calls do, most came back `stale` and missed the edit with no writer active. A search or read now waits up to 2 seconds for the others' refresh and answers `stale` only when a writer holds the brain longer; behind a writer it therefore answers after 2 seconds instead of at once, and an exact record read still answers within 3.
+- **A `log` routine no longer waits for the brain's readers.** `bf run --hook pre-commit` failed after 120 seconds while a long `bf validate` or a collection held the brain; run history now has its own lock, only writing an action waits, and a routine's failure is saved even when the brain is busy.
+- **Stopping a parallel update no longer marks its sensors failed.** Ctrl-C, SIGTERM or a watch stop with two or more running sensors saved an error, a failure count and a backoff for each, unlike a single sensor.
+- **An assistant answer that cannot become a record fails its attempt, not its job.** Output with an escaped lone surrogate, or more than 2 MiB outside the message, was saved and then failed on every retry; now nothing is saved and the job becomes `uncertain`, or retries by itself when `idempotent`.
+- **A send receipt naming another conversation stays `uncertain` on every channel.** Idempotent channels retried it about 20 times and then released the conversation, which could post to the wrong place again.
+- **`bf status` reports a missed `at` schedule as `overdue`.** A wall-clock assistant schedule always showed `fresh`; it now turns `overdue`, and fails `bf status --check`, once a slot after its last success passes plus its `every` grace.
+- **`bf validate` checks assistant schedule gates**: a gate must name an existing script and `{{lines:FILE}}` file, like any other program.
+- **Commented-out assistant schedules load.** A `schedules:` key whose entries are all commented out made `bf.yaml` invalid; it now reads as no schedules, as other optional maps do.
+- **`bf export --kind items` keeps text and metadata together.** A file that changed or became unreadable after the cache refreshed paired the cached title and fields with its newer text; its line now leaves out `text`, as documented, and stderr says so.
+- **Exact reads and recovery steps.** A note whose entity or alias is `bf://NAME/actions/SLUG` is read by that address when no action folder answers, and the error for a reference found in several brains points to a `bf search` result's `uri` instead of a brain-qualified address that fails for an alias such as `repo:x`.
+- **Command-line input.** `bf run NAME --stdin` checks the name before reading input; `bf channel send --stdin` reports input over 1 MiB or a pipe still open after 10 seconds with that reason (exit 1) instead of invalid JSON (exit 2); `bf collect --input` no longer expands the sensor's command, so a fixture check works without its line files or HOME; and `bf collect --help` says `--input` accepts a disabled sensor.
+- **Smaller fixes.** An untraversable assistant `reply.path` gives the documented reply error; `bf status` shows `forgotten` and `expired` only when the last run had them; `forbid_patterns` problems number lines as an editor does; `bf forget` reports `listed` as it was before the call; a `bf.yaml` diagnostic no longer echoes an unknown channel `mode`; and an empty `--since` on `bf channel read` no longer claims it would collect the default window.
+- **Example programs.** The sensor kit's `fetch` stops at its timeout while a server trickles the body, and `record()` replaces lone surrogates in titles, text and attributes instead of failing the whole collection; `github-issues.py` lowercases `OWNER/REPO` like `github-history.py`: a brain that collected a mixed-case repository keeps those records under their old ids, so forget them with `bf forget` and backfill with `bf collect github-issues --since DATE`; `google-calendar.py` masks credential shapes in descriptions and locations.
+- **Documentation and skills.** The channels guide names `reply` instead of the removed `text`, the exit-1 table lists `eval`, `export`, `channel send` and `queue ID --retry`, the validate warnings list the `stale_after` warning, the schedule shape and `{{lines:FILE}}` are documented where they apply, and the prompts page recommends attaching `{{prompt}}` to its option. bf-maintain says which work retries by itself, and bf-use says the guarded-write helper takes an absolute path outside the brain.
+
+### Added
+
+- **`bf export --kind items` marks incomplete records with `"partial":true`**, as search and read already do.
+
+### Changed
+
+- **The assistant queue no longer writes lifecycle events that nothing reads**, saving one durable transaction per job start.
+- **Dependencies and repository checks.** pymdown-extensions 13.0 and sse-starlette 3.7.0; the weekly Security workflow ignores the exact fingerprints of synthetic credential URLs in pre-v20 history and runs each audit even when an earlier one fails; `scripts/eval_skills.py` grades a session killed at `--timeout`; one timing-dependent test is now deterministic.
+
 ## [v21.2.0](https://github.com/fmind/brain-framework/releases/tag/v21.2.0) - 2026-11-08
 
 A minor release. The brain format (`version: 8`), `bf.yaml`, the reply schemas, the queue format and the search cache are unchanged; run `bf skills DIR` to update installed skills.

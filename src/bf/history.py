@@ -121,7 +121,7 @@ def state(store: Store, file: str = SENSORS) -> dict[str, dict[str, object]]:
 
 
 def remember(store: Store, name: str, file: str = SENSORS, /, **values: object) -> None:
-    """Update local history while the caller holds the brain writer lock."""
+    """Update local history while the caller holds the brain writer lock or, for routines, `storage.recording`."""
     current = state(store, file)
     try:
         entry = _Run.model_validate({**current.get(name, {}), **values})

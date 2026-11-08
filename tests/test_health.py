@@ -20,7 +20,7 @@ from bf import assistants, index, records
 from bf.cli import app
 from bf.collect import collect, routine
 from bf.config import ABSENT, load, register
-from bf.health import attention, report, source_health
+from bf.health import assistant_health, attention, report, source_health
 from bf.history import log_path
 from bf.messages import Message
 from bf.models import Error, Query, encode, timestamp
@@ -507,6 +507,32 @@ def test_status_names_an_assistant_whose_work_cannot_start(brain: Store) -> None
     status = cast("dict", report([brain]))
     assert status["brains"][0]["attention"] == []
     assert status["healthy"]
+
+
+def test_a_wall_clock_schedule_is_overdue_once_a_slot_after_its_last_success_passes_unrun(brain: Store) -> None:
+    assisted(brain)
+    brain.write(
+        "bf.yaml",
+        ASSISTED.replace(
+            b"  notes:\n",
+            b"  notes:\n    schedules:\n      daily: {at: '09:00', timezone: UTC}\n      weekly: {at: '09:00', timezone: UTC, days: [mon]}\n",
+        ),
+    )
+    queue, now = Queue(brain), datetime(2026, 9, 27, 9, 30, tzinfo=UTC)  # a Sunday
+
+    def freshness(name: str, success: datetime) -> object:
+        queue.set_progress(f"schedule:notes:schedule:{name}", {"success": timestamp(success.isoformat())})
+        return cast("dict", assistant_health(brain, now=now)["notes"]["schedules"])[name]["freshness"]
+
+    # Three missed daily slots, measured from the first slot after the last success rather than the next one.
+    assert freshness("daily", datetime(2026, 9, 24, 9, 0, 5, tzinfo=UTC)) == "overdue"
+    assert {"assistant": "notes", "freshness": "overdue"} in attention(brain, now=now)
+    # A success just after today's slot, or yesterday's while today's runs, stays fresh.
+    assert freshness("daily", datetime(2026, 9, 27, 9, 0, 5, tzinfo=UTC)) == "fresh"
+    assert freshness("daily", datetime(2026, 9, 26, 9, 0, 5, tzinfo=UTC)) == "fresh"
+    # A weekly schedule that ran last Monday is fresh on Sunday, and overdue after five missed weeks.
+    assert freshness("weekly", datetime(2026, 9, 21, 9, 0, 5, tzinfo=UTC)) == "fresh"
+    assert freshness("weekly", datetime(2026, 8, 24, 9, 0, 5, tzinfo=UTC)) == "overdue"
 
 
 def test_coverage_marks_an_assistant_with_unresolved_failed_work_as_failed(brain: Store) -> None:

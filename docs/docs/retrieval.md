@@ -160,7 +160,7 @@ Queries hold up to 4,096 characters. `--limit` is 1–50 (default 10).
 | `date`, `type`, `status`          | Notes.                                                           |
 | `time`, `source`, `url`           | Records.                                                         |
 | `updated`, `observed`             | Records: the provider's `updated` time and BF's `observed` time. |
-| `"partial":true`                  | Records whose sensor kept only part of the text.                 |
+| `"partial":true`                  | Records whose sensor or text bound kept only part of the text.   |
 
 - Titles are previews of at most 200 characters ending in `…`; exact reads keep the whole title.
 - A section's title reads `Note — Parent — Child`.
@@ -318,7 +318,7 @@ A reply that fits returns whole and rejects a non-zero offset.
 | Signal                       | Meaning                                                                                                                                                      | Action                                                                                                                                   |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `problems`                   | Objects with `error` and, when known, `brain` and `file`: skipped files (up to a [listed limit](limits.md#size-bounds), then a count), identities or brains. | Repair and repeat.                                                                                                                       |
-| `stale`                      | Brains answered from a cache or record that a writer was changing.                                                                                           | Retry after it finishes.                                                                                                                 |
+| `stale`                      | Brains answered from a cache or record that a writer kept changing past a [short wait](limits.md#size-bounds).                                               | Retry after it finishes.                                                                                                                 |
 | `sources`, `sources_omitted` | [Source coverage](#source-coverage).                                                                                                                         | Check that the sources you need collected the period you ask about and did not fail; `bf read memories` and `bf status` show it offline. |
 | `next_offset`                | More items follow.                                                                                                                                           | Repeat the same request with that offset, as [continuations](#continuations) describe.                                                   |
 | Damaged cache                | BF discards and rebuilds it once.                                                                                                                            | Run `bf build` if the problem persists.                                                                                                  |

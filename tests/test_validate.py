@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import date, timedelta
 from typing import cast
 
 import pytest
@@ -710,6 +711,24 @@ def test_scripts_run_through_an_interpreter_must_exist(brain: Store) -> None:
     assert validate(brain)["valid"]
 
 
+def test_an_enabled_assistant_schedule_gate_is_checked_like_any_program(brain: Store) -> None:
+    gated = (
+        b"version: 8\nname: fixture\nassistants:\n  helper:\n    prompt: prompts/a.md\n    command: [agent]\n"
+        b"    schedules:\n      events:\n        every: 300\n"
+        b'        gate: {command: [routines/missing-gate.py, "{{lines:settings/missing.txt}}"]}\n'
+    )
+    brain.write("bf.yaml", gated)
+    brain.write("prompts/a.md", b"Review.\n")
+    gate = "bf.yaml: assistants.helper.schedules.events.gate.command"
+    assert located(validate(brain)) == [
+        f"{gate}: routines/missing-gate.py is not an executable regular file",
+        f"{gate}: settings/missing.txt does not exist; restore it or correct bf.yaml",
+    ]
+    # A disabled assistant runs no gate, like any disabled program.
+    brain.write("bf.yaml", gated.replace(b"    command: [agent]\n", b"    command: [agent]\n    enabled: false\n"))
+    assert validate(brain)["valid"]
+
+
 def test_a_linked_folder_is_told_to_become_a_regular_folder(brain: Store) -> None:
     # Linking a synced folder into concepts/ is the common case: a regular file is not the only remedy.
     shared = brain.root.parent / "shared"
@@ -772,6 +791,7 @@ def test_declarative_validate_policies_and_line_files(brain: Store) -> None:
         b"  required_status: [draft, stable]\n"
         b"  forbid_patterns:\n"
         b"    - '/Users/[A-Za-z0-9._-]+'\n"
+        b"    - '^Done$'\n"
         b"sensors:\n"
         b"  scoped:\n"
         b'    command: [echo, "{{lines:settings/missing.txt}}"]\n',
@@ -781,8 +801,19 @@ def test_declarative_validate_policies_and_line_files(brain: Store) -> None:
         "concepts/evidence.md",
         b"---\ntype: concept\nstale_after: 2099-01-01T00:00:00Z\n---\n# Evidence\n\nPath /Users/alice/secret.\n",
     )
+    # Markdown, like an editor, breaks lines at CR/LF only, not at a form feed or U+2028 pasted from the web.
+    soon = (date.today() + timedelta(days=3)).isoformat()
+    brain.write(
+        "concepts/drift.md",
+        f"---\ntype: concept\nstale_after: {soon}T00:00:00Z\n---\n# Drift\r\n\r\nA\u2028B\x0cC\r\n\r\nPath /Users/bob\r\nDone\r\n".encode(),
+    )
     report = validate(brain)
     errors = {f"{item['file']}: {item['error']}" for item in cast("list[dict[str, str]]", report["problems"])}
+    assert "concepts/drift.md: line 9: matches forbidden pattern /Users/[A-Za-z0-9._-]+" in errors
+    assert "concepts/drift.md: line 10: matches forbidden pattern ^Done$" in errors
+    assert {"warning": "stale_after is within 7 days", "file": "concepts/drift.md", "stale_after": soon} in cast(
+        "list[dict[str, str]]", report["warnings"]
+    )
     assert (
         "bf.yaml: sensors.scoped.command: settings/missing.txt does not exist; restore it or correct bf.yaml" in errors
     )

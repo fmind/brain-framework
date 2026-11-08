@@ -309,8 +309,10 @@ def test_federation_and_no_implicit_brain_access(brain: Store, tmp_path: Path) -
     assert read([brain, team], "bf://fixture/people/bob")["brain"] == "fixture"
     assert validate(team)["unresolved"] == ["bf://fixture/people/bob"]
     team.write("projects/collision.md", b"---\naliases: [person:bob]\n---\n# A different Bob\n")
-    with pytest.raises(Error, match="several brains"):
-        read([brain, team], "person:bob")
+    # The recovery names a search result's address: a bf://NAME/person:bob path would name a record instead.
+    for rel in ("", "links"):
+        with pytest.raises(Error, match=r"several brains; read a bf search result's uri \(bf://NAME/\.\.\.\)"):
+            read([brain, team], "person:bob", rel=rel)
     ambiguous = search([brain, team], Query(text="bob", target="person:bob"))
     assert ambiguous.get("problems")
     assert not any(i["brain"] == "team" for i in cast(list[dict], ambiguous["items"]))
@@ -893,6 +895,16 @@ def test_note_identities_must_reach_their_note(brain: Store, key: str, value: st
     found = search([brain], Query(text="robertneedle"))
     assert found["items"] == []
     assert message in str(found["problems"])
+
+
+@pytest.mark.parametrize("key", ["entity", "aliases"])
+def test_an_identity_at_an_action_folder_address_reads_its_note(brain: Store, key: str) -> None:
+    # Reads route an action folder to its ACTION.md; without one, the address still reaches the note claiming it.
+    people(brain)
+    declared = "[bf://fixture/actions/launch]" if key == "aliases" else "bf://fixture/actions/launch"
+    brain.write("concepts/launch.md", f"---\ntype: concept\n{key}: {declared}\n---\n# Launch\n".encode())
+    assert validate(brain)["valid"]
+    assert read([brain], "bf://fixture/actions/launch")["ref"] == "concepts/launch.md"
 
 
 def test_record_aliases_must_reach_their_record(brain: Store) -> None:

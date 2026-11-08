@@ -13,7 +13,7 @@ from typing import cast
 from bf import __version__, index, usage
 from bf.config import Selection, brain_name, load, related
 from bf.history import ASSISTANTS, ROUTINES, log_path, state
-from bf.models import CACHE, Assistant, Config, Error, Program, Sensor, decode, timestamp
+from bf.models import CACHE, Assistant, Config, Error, Program, Sensor, decode, reason, timestamp
 from bf.runtime import Queue, check_schema, check_version
 from bf.storage import QUEUE, Store
 
@@ -32,6 +32,7 @@ _COUNTERS = (
     "elapsed_seconds",
     "output_bytes",
 )
+_RETAINED = frozenset({"forgotten", "expired"})
 
 
 # Freshness of a scheduled program that has not succeeded within twice its refresh, or ever.
@@ -254,7 +255,7 @@ def assistant_health(
                     )
                 }
     except (Error, OSError) as error:
-        unavailable = str(error) if isinstance(error, Error) else "assistant queue is inaccessible; check its state"
+        unavailable = reason(error, "assistant queue is inaccessible; check its state")
     for name, settings in sorted(config.assistants.items()):
         entry = history.get(name, {})
         schedules: dict[str, dict[str, object]] = {}
@@ -269,8 +270,9 @@ def assistant_health(
                 "never"
                 if not success
                 else "fresh"
+                # Measured from the first slot after the last success: the next slot after now is never late.
                 if (
-                    now <= due + timedelta(seconds=spec.every)
+                    now <= spec.next_due(datetime.fromisoformat(success), success) + timedelta(seconds=spec.every)
                     if spec.at is not None or spec.days is not None
                     else timedelta(0) <= now - datetime.fromisoformat(success) <= timedelta(seconds=2 * spec.every)
                 )
@@ -440,7 +442,7 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
                 if isinstance(error, sqlite3.DatabaseError):
                     raise Error(CACHE) from error
                 raise
-            message = str(error) if isinstance(error, Error) else "inaccessible brain or cache; check its path"
+            message = reason(error, "inaccessible brain or cache; check its path")
             brains.append({"brain": brain_name(store), "path": str(store.root), "error": message})
             healthy = False
             continue
@@ -450,7 +452,8 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             run = {} if name in config.assistants else history.get(name, {})
             # One shape shared with retrieval coverage, plus indexed totals and local run diagnostics.
             entry: dict[str, object] = {**coverage[name], **counts.get(name, {"records": 0, "bytes": 0})}
-            if counters := {key: run[key] for key in _COUNTERS if key in run}:
+            # Retention counters show only when the last run removed or skipped records.
+            if counters := {key: run[key] for key in _COUNTERS if key in run and (run[key] or key not in _RETAINED)}:
                 entry["last_run"] = counters
             if run.get("reconciled"):
                 entry["reconciled"] = run["reconciled"]

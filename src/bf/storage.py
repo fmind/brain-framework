@@ -747,6 +747,14 @@ def appending(store: Store, name: str, wait: float = 10) -> Generator[None]:
 
 
 @contextmanager
+def recording(store: Store, wait: float = 120) -> Generator[None]:
+    """Serialize saves of run history that no brain writer orders, such as routines', which change only this
+    machine's state directory; a writer that also saves it takes this lock second."""
+    with _lock(store, "history.lock", wait, busy="another run is saving its run history; retry shortly"):
+        yield
+
+
+@contextmanager
 def collecting(store: Store, sensor: str, wait: float = 0) -> Generator[None]:
     """Order runs of one sensor without blocking offline reads while its provider is running."""
     relative(sensor)

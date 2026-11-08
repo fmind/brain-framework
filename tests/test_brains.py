@@ -72,7 +72,7 @@ def test_direct_scope_without_global_config(tmp_path: Path, monkeypatch: pytest.
     assert len(record_results["items"]) == 1
     assert "problems" not in record_results
     assert "second durable answer" in str(read(select(), "bf://second/projects/example.md#decision")["text"])
-    with pytest.raises(Error, match="brain-qualified"):
+    with pytest.raises(Error, match="several brains; read a bf search result's uri"):
         read(select(), "projects/example.md")
     with pytest.raises(Error, match="unknown brain third"):
         read(select(), "bf://third/projects/example.md")

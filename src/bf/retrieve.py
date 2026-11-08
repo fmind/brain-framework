@@ -5,6 +5,7 @@ from __future__ import annotations
 import heapq
 import json
 import sqlite3
+import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, suppress
 from datetime import UTC, datetime
@@ -261,7 +262,9 @@ _IDENTITIES = """SELECT i.ref,i.kind,i.type,i.source,i.status,json_group_array(n
 
 
 # Every indexed note and record, for retrievers outside BF such as embedding or multilingual search.
-_ITEMS = """SELECT ref,path,kind,source,title,time,type,status,url,updated,observed,fields FROM items ORDER BY ref"""
+# Each carries its file's cached fingerprint, so a file changed since the cache refreshed is not paired with it.
+_ITEMS = """SELECT i.ref,i.path,i.kind,i.source,i.title,i.time,i.type,i.status,i.url,i.updated,i.observed,i.partial,
+  i.fields,f.size,f.mtime,f.ctime,f.inode FROM items i LEFT JOIN files f ON f.path=i.path ORDER BY i.ref"""
 
 
 def edges(stores: list[Store], stack: ExitStack) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
@@ -283,30 +286,42 @@ def identities(stores: list[Store], stack: ExitStack) -> tuple[Iterator[dict[str
 
 
 def items(stores: list[Store], stack: ExitStack) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
-    """Stream every note and record with its text, read from its file, so other tools can index the brain."""
-    return _export(
+    """Stream every note and record with its text, read from its file, so other tools can index the brain.
+
+    The returned `omitted` list fills, while the stream runs, with each item whose text was left out.
+    """
+    omitted: list[dict[str, object]] = []
+    stream, extra = _export(
         stores,
         stack,
-        lambda store, name, connection: (_item(store, name, row) for row in connection.execute(_ITEMS)),
+        lambda store, name, connection: (_item(store, name, row, omitted) for row in connection.execute(_ITEMS)),
     )
+    return stream, {**extra, "omitted": omitted}
 
 
-def _item(store: Store, brain: str, row: sqlite3.Row) -> dict[str, object]:
+def _item(store: Store, brain: str, row: sqlite3.Row, omitted: list[dict[str, object]]) -> dict[str, object]:
     """One note or record: its cache metadata, then the note's Markdown or the record's text from the file.
 
-    A file that changed or vanished since the cache refreshed keeps its metadata without `text`.
+    A file that changed, vanished or became unreadable since the cache refreshed keeps its metadata without `text`
+    and is added to `omitted`.
     """
     value: dict[str, object] = {"brain": brain}
     for key in ("ref", "kind", "title", "time", "source", "type", "status", "url", "updated", "observed"):
         if row[key]:
             value[key] = row[key]
+    if row["partial"]:
+        value["partial"] = True
     if row["fields"] and (fields := json.loads(row["fields"])):
         value["fields"] = fields
+    path = str(row["path"])
     with suppress(Error, OSError, UnicodeError):
-        if row["kind"] == "record":
-            value["text"] = records.load(store, str(row["path"])).text
-        else:
-            value["text"] = store.read(str(row["path"]), MAX_NOTE).decode("utf-8")
+        record = row["kind"] == "record"
+        text = records.load(store, path).text if record else store.read(path, MAX_NOTE).decode("utf-8")
+        # Stated after the read: a file edited or replaced before or during it no longer has the cached fingerprint.
+        if store.fingerprint(path) == (row["size"], row["mtime"], row["ctime"], row["inode"]):
+            value["text"] = text
+    if "text" not in value:
+        omitted.append({"brain": brain, "file": path})
     return value
 
 
@@ -418,6 +433,7 @@ def _lookup(
     if parsed:
         selected = _brain(selected, parsed.brain, problems)
     path = parsed.path if parsed else ref
+    original = ref
     if not (parsed and parsed.fragment):
         try:
             view = pages.page(selected, path, offset=offset, counted=counted, single=single)
@@ -429,6 +445,10 @@ def _lookup(
             return {**view, "notice": NOTICE, **_problems(problems, view)}
         ref = _action(ref, parsed, path)
     found = _holders(selected, ref, problems)
+    if not found and ref != original:
+        # Without an ACTION.md, an action folder's address can still be a note's entity or alias.
+        found = _holders(selected, original, problems)
+        ref = original if found else ref
     if not found:
         # An identity with no owner reads as its links; a typed link reads as its target identity.
         view = pages.identity(stores, parsed.identity if parsed else ref, counted=counted)
@@ -438,7 +458,7 @@ def _lookup(
             return {**view, "notice": NOTICE, **_problems(problems, view)}
         _absent(problems, ref, selected)
     if len(found) > 1:
-        raise Error("reference exists in several brains; use a brain-qualified bf:// address")
+        raise Error(_SEVERAL)
     store, value = found[0]
     # A later page carries only its text slice and the read's own signals: the graph context's problems and stale
     # brains stay on the first page. A text past the page budget on its own is paged whatever that context adds, so
@@ -454,6 +474,10 @@ def _lookup(
     if counted:
         usage.note(store, "read", 1, kind=usage.exact(value))
     return reply
+
+
+# A search result's uri names its owner's file or record: bf://NAME/ before an alias such as repo:x names a record.
+_SEVERAL = "reference exists in several brains; read a bf search result's uri (bf://NAME/...)"
 
 
 def _holders(
@@ -526,7 +550,7 @@ def _related(
         raise InputError(pages.RELATIONLESS, "rel")
     found = _holders(selected, _action(ref, parsed, path), problems)
     if len(found) > 1:
-        raise Error("reference exists in several brains; use a brain-qualified bf:// address")
+        raise Error(_SEVERAL)
     if found:
         owner, value = found[0]
         owned = str(value["ref"])
@@ -663,9 +687,11 @@ def _stamp(data: bytes, nanoseconds: int) -> dict[str, object]:
 
 
 def _record(
-    store: Store, name: str, ref: str, source: str, record_id: str, *, complete: bool = False
+    store: Store, name: str, ref: str, source: str, record_id: str, *, complete: bool = False, started: float
 ) -> dict[str, object] | None:
-    found = records.find(store, source, record_id, complete=complete)
+    # The cache's freshness check already waited for a busy writer: share one records.WAIT across both waits.
+    wait = max(0.0, records.WAIT - (time.monotonic() - started))
+    found = records.find(store, source, record_id, complete=complete, wait=wait)
     if not found:
         return None
     path, record, data, nanoseconds, busy = found
@@ -704,11 +730,11 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
         if authored(parsed.path):
             value = _read(store, parsed.path)
         elif separator and "/" not in source:
-            complete = False
+            complete, started = False, time.monotonic()
             # Without a usable cache, the record's own file still answers; only absence takes a full parse.
             with suppress(Error, OSError, sqlite3.DatabaseError), index.database(store) as (connection, state):
                 complete = _complete(connection, state, source)
-            value = _record(store, name, parsed.path, source, record_id, complete=complete)
+            value = _record(store, name, parsed.path, source, record_id, complete=complete, started=started)
         else:
             with index.database(store) as (connection, _state):
                 owners = index.holders(connection, links.address(name, parsed.path))
@@ -744,7 +770,7 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
         # The digest covers the whole file, even for a section: a writer compares it before replacing the file.
         source: Source = (path, data, markdown)
         return {"brain": name, "ref": ref, "text": text, **_stamp(data, nanoseconds), "_source": source}
-    aliases, cache_error, complete = [], None, False
+    aliases, cache_error, complete, started = [], None, False, time.monotonic()
     source, separator, record_id = ref.partition(":")
     try:
         with index.database(store) as (connection, state):
@@ -757,7 +783,7 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
         # A name the cache resolved, such as a note alias jira:ATL beside a jira source, answers the read when no
         # record file holds it: proving that absence would parse the whole source and fail on any problem there.
         try:
-            value = _record(store, name, ref, source, record_id, complete=complete or bool(aliases))
+            value = _record(store, name, ref, source, record_id, complete=complete or bool(aliases), started=started)
         except BusyError:
             if not aliases:
                 raise

@@ -461,6 +461,18 @@ def test_eval_reports_ranks_and_compares_them_with_a_baseline(brain: Store, tmp_
         assert reason in plain(result.output)
 
 
+def test_eval_reads_every_page_of_a_long_note(brain: Store) -> None:
+    brain.write("concepts/long.md", b"# Long\n\n" + b"Filler sentence.\n" * 4_000 + b"Closing marker.\n")
+    first = invoke("read", "concepts/long.md", "--brain", "fixture")
+    assert "next_offset" in first
+    assert "Closing marker" not in first["text"]
+    brain.write(
+        "evals/retrieval.yaml",
+        b"version: 8\ncases:\n  - name: long\n    read: concepts/long.md\n    text: [Closing marker]\n",
+    )
+    assert invoke("eval", "--brain", "fixture")["score"] == "1/1"
+
+
 def test_starter_suite_and_qualified_reads_survive_a_related_brain(tmp_path: Path) -> None:
     personal, team = tmp_path / "brain", tmp_path / "team-brain"
     invoke("init", str(personal))
@@ -472,7 +484,7 @@ def test_starter_suite_and_qualified_reads_survive_a_related_brain(tmp_path: Pat
     # Both brains hold the same plain ref, so it resolves in neither.
     ambiguous = CliRunner().invoke(app, ["read", "concepts/welcome.md", "--brain", str(personal)])
     assert ambiguous.exit_code == 1
-    assert "brain-qualified bf:// address" in str(ambiguous.exception)
+    assert "read a bf search result's uri (bf://NAME/...)" in str(ambiguous.exception)
 
 
 def test_generated_agent_instructions_name_real_commands_and_boundaries(tmp_path: Path) -> None:
@@ -728,6 +740,7 @@ def test_edges_export_as_json_lines_across_selected_brains(
     brain.delete("projects/broken.md")
     export("--brain", "fixture")
     brain.write("projects/later.md", b"# Later\n\n[Offline](offline.md)\n")
+    monkeypatch.setattr("bf.index._CONTENDED", 0.1)
     with writer(brain):
         stale, stderr = export("--brain", "fixture")
     assert stale == both
@@ -854,6 +867,34 @@ def test_items_export_lists_notes_and_records_with_their_text(brain: Store) -> N
     note = lines["projects/offline.md"]
     assert note["kind"] == "note"
     assert note["text"] == (brain.root / "projects/offline.md").read_text()
+
+
+def test_items_export_omits_text_its_stale_metadata_no_longer_describes(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    records_file(brain, "mail", [Record(id="m1", title="Draft", text="Cut short", attributes={"partial": True})])
+    assert CliRunner().invoke(app, ["build", "--brain", "fixture"]).exit_code == 0
+    monkeypatch.setattr("bf.index._CONTENDED", 0.1)
+    brain.write("projects/offline.md", b"# Renamed\n")
+    (brain.root / records.path("meetings", "lunch")).unlink()
+    with writer(brain):
+        result = CliRunner().invoke(app, ["export", "--kind", "items", "--brain", "fixture"])
+    # The stale cache still names the old title: the new text would contradict it, and the removed record has none.
+    assert result.exit_code == 0, result.output
+    lines = {row["ref"]: row for row in map(json.loads, result.stdout.splitlines())}
+    assert "text" not in lines["projects/offline.md"]
+    assert lines["projects/offline.md"]["title"] != "Renamed"
+    assert "text" not in lines["meetings:lunch"]
+    assert lines["concepts/evidence.md"]["text"] == (brain.root / "concepts/evidence.md").read_text()
+    # A record its sensor marked incomplete says so, as in search and read.
+    assert (lines["mail:m1"]["partial"], lines["mail:m1"]["text"]) == (True, "Cut short")
+    assert "partial" not in lines["concepts/evidence.md"]
+    omitted = "text omitted: the file changed or became unreadable since the cache refreshed; run bf build"
+    assert result.stderr.splitlines() == [
+        "bf: fixture: a writer kept the cache from refreshing; retry for newer claims",
+        f"bf: fixture: {records.path('meetings', 'lunch')}: {omitted}",
+        f"bf: fixture: projects/offline.md: {omitted}",
+    ]
 
 
 def test_errors_name_what_exists(brain: Store) -> None:

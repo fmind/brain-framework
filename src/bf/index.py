@@ -48,6 +48,9 @@ BUILD = CACHE + ".new"
 _SIDECARS = ("", "-wal", "-shm", "-journal")
 # Seconds a finished build waits for connections to the generation it replaces to close.
 _PUBLISH = 30
+# Seconds a search with a cache to serve waits for the brain's lock: concurrent searches' scans and refreshes are short,
+# so only a longer writer, such as a collection's commit or a bf validate, leaves the cache served as `busy`.
+_CONTENDED = 2.0
 # Seconds a read that found a damaged generation waits for other connections to it before leaving it to the next one.
 _DISCARD = 5
 # `bf status` warns about a scanned tree once it holds more entries than this.
@@ -999,7 +1002,8 @@ def _sweep(store: Store) -> None:
 
 
 def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
-    """Refresh a changed cache, or keep serving it as `busy` while another writer or build holds the brain.
+    """Refresh a changed cache, or keep serving it as `busy` while another writer or build holds the brain beyond
+    _CONTENDED seconds.
 
     `counts` receives the entries of each scanned tree, as from `inputs`, when the check scans the brain.
     Never call it while holding the generation lock: its refresh may publish a rebuilt generation.
@@ -1021,7 +1025,7 @@ def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
             with generation(store, shared=True, wait=_PUBLISH):
                 connection = _open(store)
                 try:
-                    with reader(store, wait=0):
+                    with reader(store, wait=_CONTENDED):
                         # A live writer may have a pending journal; only an abandoned one blocks cached reads.
                         records.require_ready(store)
                         if connection is not None:
@@ -1043,7 +1047,7 @@ def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
             connection, compared = None, None
         try:
             # Without any usable generation there is nothing to serve, so wait for the other writer or build.
-            refresh(store, wait=0 if connection is not None else 120, compared=compared)
+            refresh(store, wait=_CONTENDED if connection is not None else 120, compared=compared)
         except BusyError:
             # A check whose files all matched only had folder rows to update: the cache answers as it is.
             return "ready" if compared is not None and compared.matches() else "busy"

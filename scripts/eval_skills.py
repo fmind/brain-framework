@@ -65,10 +65,16 @@ class Session:
 def parse(lines: list[str]) -> Session:
     """Read a stream-json transcript; tool uses count whether or not permission was granted."""
     session = Session()
-    for line in lines:
+    last = max((index for index, line in enumerate(lines) if line.strip()), default=-1)
+    for index, line in enumerate(lines):
         if not line.strip():
             continue
-        event = json.loads(line)
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            if index == last:
+                break  # a session killed at --timeout can tear its last line, even before trailing blank lines
+            raise EvalError(f"transcript line {index + 1} is not JSON: {error.msg}") from error
         kind = event.get("type")
         if kind == "system" and event.get("subtype") == "init":
             session.available = [str(name) for name in event.get("skills") or []]

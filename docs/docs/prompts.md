@@ -129,7 +129,7 @@ An input or manual window never reaches back to the last scheduled review. A pro
 ### How the harness receives the prompt
 
 - **Standard input by default:** stdin receives the expanded prompt's UTF-8 text.
-- **Argument with `{{prompt}}`:** if any command argument contains `{{prompt}}`, BF substitutes the expanded prompt there and closes stdin. An argument shows the expanded prompt, input included, to local process listings while the harness runs: for private messages, prefer a harness that reads standard input.
+- **Argument with `{{prompt}}`:** if any command argument contains `{{prompt}}`, BF substitutes the expanded prompt there and closes stdin. Attach it to its option, such as `-p={{prompt}}` or the harness's equivalent, so a message that starts with `--` cannot become an option. An argument shows the expanded prompt, input included, to local process listings while the harness runs: for private messages, prefer a harness that reads standard input.
 - **No shell** interprets the arguments. A CLI such as `agy` can be used directly; no Python harness wrapper is required.
 - **Answer:** without `reply`, stdout is the plain UTF-8 message. With `reply`, it is a [structured reply](#structured-replies).
 
@@ -167,7 +167,7 @@ With `reply`, the harness returns a JSON object with two members, and BF checks 
 - `reply.path` is the JSON Pointer to that object in the harness's JSON stdout, such as `/structured_output`; an empty string means the whole stdout.
 - Output that is not a JSON object, a missing value or one that does not match the schema fails the attempt exactly like a nonzero exit: BF saves no answer, writes no record and delivers nothing. The job becomes `uncertain`, or retries automatically when the assistant is `idempotent` for that run kind. The error, such as `assistant reply at /structured_output is missing or does not match bf schema --kind assistant-reply; see logs/personal.log`, never quotes the output.
 
-That last rule also catches a harness that exits 0 after a failed model call or its own timeout: it returns no structured reply. The other members of the JSON stdout stay in the record's `output` attribute.
+That last rule also catches a harness that exits 0 after a failed model call or its own timeout: it returns no structured reply. The other members of the JSON stdout stay in the record's `output` attribute. Output a record cannot hold, such as an escaped lone surrogate or more than the [2 MiB of fields other than `text`](limits.md), fails the attempt the same way.
 
 ### Gates
 
@@ -178,7 +178,7 @@ schedules:
   events: { every: 300, gate: { command: [python3, routines/ci-gate.py] } }
 ```
 
-- The gate runs like any program: no shell, from the brain folder, bounded by its `timeout` (default 120 seconds) and `max_bytes` (default 256 KiB). It receives `BF_START` and `BF_END` for the schedule's window, `BF_TRIGGER=schedule`, `BF_SCHEDULE`, and `BF_STATE_DIR` for its own cursor; its arguments support `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`. Its stderr goes to `logs/assistant.NAME.gate.SCHEDULE.log`.
+- The gate runs like any program: no shell, from the brain folder, bounded by its `timeout` (default 120 seconds) and `max_bytes` (default 256 KiB). It receives `BF_START` and `BF_END` for the schedule's window, `BF_TRIGGER=schedule`, `BF_SCHEDULE`, and `BF_STATE_DIR` for its own cursor; its arguments support `{{brain}}`, `{{home}}`, `{{start}}`, `{{end}}` and [`{{lines:FILE}}`](sensors.md#sensor-settings). Its stderr goes to `logs/assistant.NAME.gate.SCHEDULE.log`.
 - It prints one JSON object, `{"events": [...]}`, with at most 64 events holding at most 64 KiB once encoded. Each event has a `key` and optional `text` and `ref`, such as `{"key": "ci:main", "text": "CI failed on main", "ref": "memories/github-workflow-runs#…"}`.
 - No event completes the job and advances the window, without starting the harness or writing a record.
 - Events start the harness, and `{{context}}` lists them under `events`.
@@ -225,7 +225,7 @@ bf queue
 
 ## Schedule and overlap
 
-There is no default schedule. Each named schedule sets either an `every` interval in seconds or a wall-clock `at: "HH:MM"` time, with an optional IANA `timezone` and `days` list of `mon`–`sun`, and an optional [`gate`](#gates).
+There is no default schedule. Each named schedule sets an `every` interval in seconds or a wall-clock `at: "HH:MM"` time, with an optional `days` list of `mon`–`sun`, an IANA `timezone` for `at` and `days`, and an optional [`gate`](#gates). With `days`, an `every` run that falls on another day waits for the next listed day's local midnight. With `at`, the schedule runs once per listed day: `every` does not repeat it and only sets how long after a missed slot `bf status` waits before it reports the schedule `overdue` (default 86400).
 
 - Each schedule tracks its own successful evidence window. Its first run covers `lookback`; later runs start at its previous successful end.
 - Input, wake and manual runs do not advance those windows.
@@ -280,7 +280,7 @@ A failed job shows on its assistant's row instead. Busy or waiting work and a fa
 
 ### Several assistants on one stream
 
-When multiple assistants subscribe to one stream, one adapter delivers each message, and BF durably records all configured recipients before ACK. `--assistant NAME` restricts which jobs execute, so other subscribers' work stays queued. Batch inputs have separate per-assistant progress. Adding a subscriber does not replay already acknowledged messages.
+When multiple assistants subscribe to one stream, one adapter delivers each message, and BF durably records all configured recipients before ACK. `--assistant NAME` restricts which jobs execute, so other subscribers' work stays queued. Batch inputs have separate per-assistant progress. An adapter that acknowledges never redelivers acknowledged messages, so a new subscriber starts with the next message. An adapter that leaves `cursor` empty replays on reconnect, so a new subscriber also answers every replayed message admitted in the last 35 days.
 
 ## What a run records
 
@@ -312,20 +312,20 @@ How an answer ends the job:
 
 ## Assistant settings
 
-| Field        | Default   | Meaning                                                                                                                         |
-| ------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `prompt`     | required  | Markdown file below `prompts/`.                                                                                                 |
-| `command`    | required  | Harness argv; supports `{{prompt}}` and `{{schema}}`.                                                                           |
-| `reply`      | omitted   | `{path}`: JSON Pointer to the [structured reply](#structured-replies); omitted means plain text.                                |
-| `enabled`    | `true`    | Admit and execute this assistant.                                                                                               |
-| `idempotent` | `false`   | Retry failed harness attempts automatically, up to 20 attempts: `true`, or a list of run kinds.                                 |
-| `timeout`    | `900`     | Maximum harness runtime in seconds.                                                                                             |
-| `max_bytes`  | `1048576` | Maximum stdout bytes, up to 4 MiB.                                                                                              |
-| `keep`       | omitted   | Maximum generated records to retain.                                                                                            |
-| `inputs`     | `[]`      | Objects with `channel: {name, mode}`; `read` also requires `every`. Each channel needs `send` for answers.                      |
-| `post`       | omitted   | Channel where scheduled, wake and manual runs post.                                                                             |
-| `schedules`  | `{}`      | Named `{every, lookback?, gate?}` or `{at, timezone?, days?, lookback?, gate?}` settings; `lookback` defaults to 86400 (1 day). |
-| `wake`       | omitted   | `{min, max}` seconds: let a structured reply schedule one later run; requires `reply`.                                          |
+| Field        | Default   | Meaning                                                                                                                                                   |
+| ------------ | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prompt`     | required  | Markdown file below `prompts/`.                                                                                                                           |
+| `command`    | required  | Harness argv; supports `{{prompt}}`, `{{schema}}` and the [program placeholders](sensors.md#sensor-settings).                                             |
+| `reply`      | omitted   | `{path}`: JSON Pointer to the [structured reply](#structured-replies); omitted means plain text.                                                          |
+| `enabled`    | `true`    | Admit and execute this assistant.                                                                                                                         |
+| `idempotent` | `false`   | Retry failed harness attempts automatically, up to 20 attempts: `true`, or a list of run kinds.                                                           |
+| `timeout`    | `900`     | Maximum harness runtime in seconds.                                                                                                                       |
+| `max_bytes`  | `1048576` | Maximum stdout bytes, up to 4 MiB.                                                                                                                        |
+| `keep`       | omitted   | Maximum generated records to retain.                                                                                                                      |
+| `inputs`     | `[]`      | Objects with `channel: {name, mode}`; `read` also requires `every`. Each channel needs `send` for answers.                                                |
+| `post`       | omitted   | Channel where scheduled, wake and manual runs post.                                                                                                       |
+| `schedules`  | `{}`      | Named `{every, timezone?, days?, lookback?, gate?}` or `{at, timezone?, days?, every?, lookback?, gate?}` settings; `lookback` defaults to 86400 (1 day). |
+| `wake`       | omitted   | `{min, max}` seconds: let a structured reply schedule one later run; requires `reply`.                                                                    |
 
 ## Keep prompts safe
 

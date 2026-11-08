@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
 import json
 import os
@@ -21,9 +22,10 @@ import yaml
 from markdown_it import MarkdownIt
 from typer.core import TyperGroup
 
-from bf import __version__, cli, replies, retrieve
+from bf import __version__, cli, pages, replies, retrieve
 from bf.install import BLOCKED
 from bf.install import SKILLS as INSTALLED
+from bf.models import NotFoundError
 from bf.storage import Store
 from bf.validate import validate
 
@@ -106,6 +108,39 @@ def test_skill_commands_and_options_exist() -> None:
                 assert option in options, f"{name}: unknown option {option} in {shlex.join(argv)}"
             found += 1
     assert found > 80
+
+
+def test_skill_pages_and_scopes_are_valid_input(brain: Store) -> None:
+    # A renamed or narrowed page or scope form would fail with invalid input only when an agent follows the skill.
+    refs, scopes = set(), set()
+    for text in TEXTS.values():
+        spans = [
+            child.content
+            for token in MARKDOWN.parse(text)
+            for child in token.children or []
+            if child.type == "code_inline"
+        ]
+        argvs = [
+            *commands(text),
+            *(["bf", "search", *shlex.split(span)] for span in spans if span.startswith("--scope")),
+        ]
+        for argv in argvs:
+            # Literal page refs only: placeholders are uppercase, and notes, sections and records need their files.
+            if (
+                argv[1:2] == ["read"]
+                and len(argv) > 2
+                and re.fullmatch(r"[a-z0-9./-]+", argv[2])
+                and ".md" not in argv[2]
+            ):
+                refs.add(argv[2])
+            scopes |= {value for option, value in pairwise(argv) if option == "--scope" and value.lower() == value}
+    assert {"tasks", "actions", "7d"} <= refs
+    assert {"projects", "actions", "7d repo:github.com/owner/name"} <= scopes
+    for ref in refs:
+        with contextlib.suppress(NotFoundError):
+            retrieve.read([brain], ref)
+    for scope in scopes:
+        retrieve.search([brain], pages.query("evidence", scope))
 
 
 def test_skills_never_retrieve_through_a_brain_pinned_runtime() -> None:

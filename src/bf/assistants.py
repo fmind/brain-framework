@@ -48,6 +48,7 @@ from bf.models import (
     decode,
     digest,
     encode,
+    reason,
     retried,
     timestamp,
 )
@@ -82,10 +83,6 @@ class GateError(Error):
 
 class StreamStoppedError(Error):
     """A stream worker ended outside shutdown: its input would silently stop being accepted, so watch stops."""
-
-
-def _reason(error: BaseException, fallback: str = "assistant files are inaccessible") -> str:
-    return str(error) if isinstance(error, Error) else fallback
 
 
 def prepare(
@@ -143,8 +140,8 @@ def prepare(
 
 def read_failure(channel: str, error: BaseException) -> str:
     """A failed read poll, worded alike by bf update and watch, naming the channel's read log."""
-    reason = _reason(error, "its files are inaccessible").removeprefix(f"channel {channel}: ")
-    return f"channel {channel}: read failed: {reason}; see {log_path(f'channel.{channel}.read')}"
+    cause = reason(error, "its files are inaccessible").removeprefix(f"channel {channel}: ")
+    return f"channel {channel}: read failed: {cause}; see {log_path(f'channel.{channel}.read')}"
 
 
 def _oversized(store: Store, work: Work) -> str:
@@ -291,11 +288,62 @@ def _exposed(work: Work) -> AbstractContextManager[None]:
     return exposing(BF_TRIGGER=work.kind, BF_SCHEDULE=_schedule(work), BF_START=work.start, BF_END=work.end)
 
 
+def _recorded(
+    work: Work, reply: str, wake: Requested | None, metadata: dict[str, JsonValue]
+) -> tuple[Record, list[Outgoing]]:
+    """The record and deliveries an answer makes. The error never quotes the output."""
+    try:
+        record = Record(
+            id=datetime.fromisoformat(work.end).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + work.id[-8:],
+            title=reply_title(work.assistant, reply),
+            text=reply,
+            time=work.end,
+            attributes={
+                "observed": work.end,
+                "trigger": work.kind,
+                "job": work.id,
+                "window": {"start": work.start, "end": work.end},
+                **({"input": work.text} if work.text else {}),
+                **({"output": metadata} if metadata else {}),
+                **({"wake": wake.model_dump()} if wake else {}),
+                **(
+                    {
+                        "channel": work.origin.channel,
+                        "sender": work.origin.message.sender,
+                        "conversation": work.origin.message.conversation,
+                    }
+                    if work.origin
+                    else {}
+                ),
+            },
+        )
+        replies = (
+            [
+                Outgoing(
+                    id=digest(f"{work.id}:{route.channel}:{route.conversation}".encode())[:32],
+                    text=reply,
+                    conversation=route.conversation,
+                    reply_to=route.reply_to,
+                )
+                for route in work.routes
+            ]
+            if reply.strip()
+            else []
+        )
+    except ValidationError:
+        # Pydantic's message quotes the invalid input: report the cause, never the content.
+        raise Error(
+            "assistant output cannot become a record: it holds invalid Unicode or more than 2 MiB outside its "
+            f"message; see {log_path(work.assistant)}"
+        ) from None
+    return record, replies
+
+
 def _attempt(store: Store, work: Work, runner: Runner, argv: list[str], stdin: bytes) -> bytes:
-    """Run the harness once, telling it why it runs; an answer that does not parse fails the attempt."""
+    """Run the harness once, telling it why it runs; an answer that cannot be parsed or recorded fails the attempt."""
     with _exposed(work):
         raw = runner(argv, work.settings, store, work.assistant, stdin)
-    _answer(raw, work)
+    _recorded(work, *_answer(raw, work))
     return raw
 
 
@@ -318,8 +366,8 @@ def _gate(store: Store, work: Work, runner: Runner) -> list[JsonValue] | None:
                 f"see {log_path(name)}"
             ) from None
     except (Error, OSError, UnicodeError) as error:
-        reason = str(error) if isinstance(error, Error) else f"gate of schedule {schedule} failed; see {log_path(name)}"
-        raise GateError(reason) from error
+        cause = reason(error, f"gate of schedule {schedule} failed; see {log_path(name)}")
+        raise GateError(cause) from error
     events: list[JsonValue] = [event.model_dump(exclude_defaults=True) for event in reply.events]
     if len(encode(events)) > GATE_EVENT_BYTES:
         # Saved events are reused on every retry: an oversized set would fail each prompt the same way.
@@ -401,7 +449,6 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                 argv, stdin = expanded(store, work, queue)
                 if not queue.claim(key):
                     raise Error("assistant job is no longer pending; inspect bf queue")
-                queue.lifecycle("assistant.started", work.assistant, {"job": key, "kind": work.kind})
                 queue.answer(key, _attempt(store, work, runner, argv, stdin))
                 row = queue.get(key)
             if row["state"] == "answered":
@@ -410,43 +457,7 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                     raise Error("assistant returned no response to an incoming message; inspect the saved answer")
                 if work.kind in {"schedule", "wake"} and not reply and not metadata:
                     return _quiet(store, queue, work, key, wake)
-                record = Record(
-                    id=datetime.fromisoformat(work.end).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + work.id[-8:],
-                    title=reply_title(work.assistant, reply),
-                    text=reply,
-                    time=work.end,
-                    attributes={
-                        "observed": work.end,
-                        "trigger": work.kind,
-                        "job": key,
-                        "window": {"start": work.start, "end": work.end},
-                        **({"input": work.text} if work.text else {}),
-                        **({"output": metadata} if metadata else {}),
-                        **({"wake": wake.model_dump()} if wake else {}),
-                        **(
-                            {
-                                "channel": work.origin.channel,
-                                "sender": work.origin.message.sender,
-                                "conversation": work.origin.message.conversation,
-                            }
-                            if work.origin
-                            else {}
-                        ),
-                    },
-                )
-                replies = (
-                    [
-                        Outgoing(
-                            id=digest(f"{key}:{route.channel}:{route.conversation}".encode())[:32],
-                            text=reply,
-                            conversation=route.conversation,
-                            reply_to=route.reply_to,
-                        )
-                        for route in work.routes
-                    ]
-                    if reply.strip()
-                    else []
-                )
+                record, replies = _recorded(work, reply, wake, metadata)
                 queue.prepare(work, record, replies, wake)
                 row = queue.get(key)
             saved = Prepared.model_validate_json(str(row["prepared"]))
@@ -553,16 +564,18 @@ def deliver(
                 receipt = channels.send(store, name, command, message, runner=runner)
                 queue.delivered(key, name, message, receipt)
             except (Error, OSError, UnicodeError) as error:
-                reason = str(error) if isinstance(error, Error) else "channel send failed; inspect its local log"
+                cause = reason(error, "channel send failed; inspect its local log")
                 attempts = int(str(delivery["attempts"])) + 1
-                # A send command that never started sent nothing, so it retries like an idempotent one.
-                outcome, reason, due = retry_policy(
-                    command.idempotent or isinstance(error, NotStartedError),
+                # A send command that never started sent nothing, so it retries like an idempotent one. A misrouted
+                # send may have posted elsewhere: it waits for inspection even on an idempotent channel.
+                outcome, cause, due = retry_policy(
+                    (command.idempotent and not isinstance(error, channels.MisroutedError))
+                    or isinstance(error, NotStartedError),
                     delivery["job"] is not None,
                     attempts,
-                    reason,
+                    cause,
                 )
-                queue.delivery_failed(key, reason, outcome=outcome, due=due)
+                queue.delivery_failed(key, cause, outcome=outcome, due=due)
             except BaseException:
                 # Ctrl-C or SIGTERM ends this process: record the send now, not at the next recovery pass.
                 with suppress(Error, OSError):
@@ -636,9 +649,7 @@ def manual(
                 raise Error("answer saved but delivery is unresolved; inspect bf queue before retrying")
         result["status"] = "ran"
     except (Error, OSError, UnicodeError) as error:
-        result.update(
-            status="failed", error=str(error) if isinstance(error, Error) else "assistant files are inaccessible"
-        )
+        result.update(status="failed", error=reason(error, "assistant files are inaccessible"))
     return {"ok": result["status"] == "ran", "dry_run": dry_run, "assistants": [result]}
 
 
@@ -707,7 +718,7 @@ def schedule(
                     "assistant": name,
                     "schedule": slot.removeprefix("schedule:"),
                     "status": "failed",
-                    "error": _reason(error),
+                    "error": reason(error, "assistant files are inaccessible"),
                 }
             )
     return keys, failures
@@ -828,7 +839,12 @@ def _cycle(store: Store, names: set[str], at: datetime, runner: Runner) -> list[
             )
         except (Error, OSError, UnicodeError, ValueError) as error:
             results.append(
-                {"assistant": queue.get(key)["assistant"], "job": key, "status": "failed", "error": _reason(error)}
+                {
+                    "assistant": queue.get(key)["assistant"],
+                    "job": key,
+                    "status": "failed",
+                    "error": reason(error, "assistant files are inaccessible"),
+                }
             )
     failed: set[str] = set()
     while (delivery := queue.delivery(names=names, skip=tried)) is not None:
@@ -841,7 +857,12 @@ def _cycle(store: Store, names: set[str], at: datetime, runner: Runner) -> list[
         except (Error, OSError, UnicodeError, ValueError) as error:
             failed.add(key)
             results.append(
-                {"assistant": delivery["assistant"], "delivery": key, "status": "failed", "error": _reason(error)}
+                {
+                    "assistant": delivery["assistant"],
+                    "delivery": key,
+                    "status": "failed",
+                    "error": reason(error, "assistant files are inaccessible"),
+                }
             )
     results.extend(
         {
@@ -893,8 +914,8 @@ def cycle(
                 ]
             return _cycle(store, names, at, runner)
     except (Error, OSError, UnicodeError, ValueError) as error:
-        reason = _reason(error, "the assistant queue or brain files are inaccessible")
-        return [{"assistant": name, "status": "failed", "error": reason} for name in sorted(names)]
+        cause = reason(error, "the assistant queue or brain files are inaccessible")
+        return [{"assistant": name, "status": "failed", "error": cause} for name in sorted(names)]
 
 
 class Dispatcher:
@@ -1028,9 +1049,9 @@ class Dispatcher:
                     connected=connected,
                 )
             except (Error, OSError, UnicodeError) as error:
-                reason = str(error) if isinstance(error, Error) else "stream transport failed; inspect its local log"
+                cause = reason(error, "stream transport failed; inspect its local log")
                 with suppress(Error, OSError):
-                    self.queue.set_progress(f"health:channel:{channel}", {"error": reason, "at": now()})
+                    self.queue.set_progress(f"health:channel:{channel}", {"error": cause, "at": now()})
             if self.stopped.wait(delay):
                 break
             delay = min(delay * 2, 60)
@@ -1061,7 +1082,7 @@ class Dispatcher:
             config = load(self.store)
         except (Error, OSError, UnicodeError) as error:
             # Running work continues; nothing new starts until bf.yaml loads again.
-            self._record("dispatcher", _reason(error, "bf.yaml is inaccessible"))
+            self._record("dispatcher", reason(error, "bf.yaml is inaccessible"))
             return
         errors = []
         # Each section fails on its own: a full queue refusing a schedule never keeps queued work from draining.
@@ -1069,7 +1090,7 @@ class Dispatcher:
             try:
                 section()
             except (Error, OSError, UnicodeError, ValueError) as error:
-                errors.append(_reason(error, "assistant queue inaccessible"))
+                errors.append(reason(error, "assistant queue inaccessible"))
         self._record("dispatcher", "; ".join(errors))
 
     def _harvest(self) -> None:
@@ -1094,7 +1115,7 @@ class Dispatcher:
                     # Worded as bf update words it, so bf status reads the same whichever ran the poll.
                     self._record(name, read_failure(name.split(":")[2], error))
                 else:
-                    self._record(name, _reason(error, "runtime worker failed"))
+                    self._record(name, reason(error, "runtime worker failed"))
 
     def _jobs(self) -> None:
         waiting = self._waiting()

@@ -12,7 +12,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing
 from pathlib import Path
-from threading import Event
+from threading import Barrier, Event, local
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -854,7 +854,32 @@ def test_a_remount_that_changes_the_device_number_keeps_the_cache(
     assert index.refresh(brain)["changed"] == 0
 
 
-def test_a_busy_writer_serves_the_current_cache_as_stale(brain: Store) -> None:
+def test_concurrent_searches_after_an_edit_all_answer_fresh(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    refs(brain, "offline")
+    brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
+    # Every search finishes its scan before any refreshes, so each finds the others' reader or writer lock held.
+    scanning, together, first = index._scan, Barrier(4), local()  # noqa: SLF001 - align the freshness checks
+
+    def aligned(*args: Any) -> index.Scan:
+        scan = scanning(*args)
+        if not getattr(first, "done", False):
+            first.done = True
+            together.wait(10)
+        return scan
+
+    monkeypatch.setattr(index, "_scan", aligned)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        replies = list(executor.map(lambda _: search([brain], Query(text="latecomer"), counted=False), range(4)))
+    # No writer holds the brain: a search waits out the others' short refreshes instead of answering stale.
+    assert [reply.get("stale") for reply in replies] == [None] * 4
+    assert [[item["ref"] for item in cast("list[dict]", reply["items"])] for reply in replies] == [
+        ["concepts/late.md"]
+    ] * 4
+
+
+def test_a_busy_writer_serves_the_current_cache_as_stale(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A shortened bound: the writer outlasts it, so the search serves the current cache instead of waiting on.
+    monkeypatch.setattr(index, "_CONTENDED", 0.1)
     refs(brain, "offline")
     brain.write("concepts/late.md", b"# Late\n\nLatecomer.\n")
     with writer(brain):
@@ -1096,7 +1121,10 @@ def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
     assert cache_file(brain) != generation
 
 
-def test_live_pending_commit_serves_stale_cache_but_abandoned_commit_errors(brain: Store) -> None:
+def test_live_pending_commit_serves_stale_cache_but_abandoned_commit_errors(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(index, "_CONTENDED", 0.1)
     expected = refs(brain, "offline retrieval")
     with writer(brain):
         brain.write("memories/.pending/0.before", b"staged original")

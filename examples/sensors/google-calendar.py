@@ -24,6 +24,22 @@ MAX_ID, MAX_ENCODED, MAX_REF, MAX_TITLE = 4096, 7988, 8192, 4096
 MAX_LINKS = 1000
 # C0 and C1 control characters, which BF rejects in ids, titles, URLs and identities.
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# The sensor kit's `redact` patterns, copied so this script stays one file (a test keeps them equal). Best effort:
+# these shapes catch common leaks, not every secret. Each quantifier is bounded, so a long or adversarial
+# provider text costs time proportional to its length.
+_KEY = r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|\Z)"
+_PAIR = r"""(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)[a-z0-9_.-]{0,40})"""
+_PAIR += r"""(["']?\s{0,8}[:=]\s{0,8})"""
+_SECRETS = (
+    (re.compile(_KEY, re.DOTALL), "[REDACTED KEY]"),
+    (re.compile(r"(?i)\b(bearer|token|basic)(\s{1,8})[A-Za-z0-9._~+/=-]{16,4096}"), r"\1\2[REDACTED]"),
+    (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,255}|github_pat_[A-Za-z0-9_]{20,255})"), "[REDACTED]"),
+    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED]"),
+    (re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,255}"), "[REDACTED]"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[REDACTED]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}"), "[REDACTED]"),
+    (re.compile(_PAIR + r"(\"[^\"\n]{0,4096}\"|'[^'\n]{0,4096}'|[^\s,;&\"']{1,4096})"), r"\1\2[REDACTED]"),
+)
 
 
 class InvalidError(ValueError):
@@ -72,6 +88,13 @@ def run(argv: list[str], limit: int, timeout: int) -> bytes:
         child.wait()
         if child.stdout is not None:
             child.stdout.close()
+
+
+def redact(text: str) -> str:
+    """Mask common credential shapes, such as a pasted token or meeting password, before text enters a record."""
+    for pattern, replacement in _SECRETS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def line(value: object, fallback: str) -> str:
@@ -185,10 +208,11 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
             if updated:
                 # Modification time describes the observation; event time remains its start.
                 lines.append("Provider updated: " + updated)
-            if event.get("location"):
-                lines.append("Location: " + event["location"])
+            location = redact(event.get("location") or "")
+            if location:
+                lines.append("Location: " + location)
             if event.get("description"):
-                lines.append("Description:\n" + event["description"])
+                lines.append("Description:\n" + redact(event["description"]))
             references = []
             attendees = event.get("attendees", [])
             if not isinstance(attendees, list):
@@ -238,7 +262,7 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
                         "end": event_end,
                         # `updated` is BF's reserved provider-modification time: only a valid timestamp maps to it.
                         "updated": updated,
-                        "location": event.get("location", ""),
+                        "location": location,
                         "source": source,
                         "attachments": attachments,
                         "status": status,

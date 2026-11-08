@@ -14,7 +14,7 @@ from bf import assistants as assistant_runtime
 from bf import index
 from bf.collect import Runner, collect, due, due_routines, enabled, hooked, routine, run, window
 from bf.config import load
-from bf.models import Config, Error, suggest
+from bf.models import Config, Error, reason, suggest
 from bf.storage import BusyError, Store, collecting
 
 # Seconds a cycle waits for another update of the same brain before failing visibly.
@@ -25,8 +25,7 @@ ProgramKind = Literal["sensor", "routine", "assistant"]
 KINDS: frozenset[ProgramKind] = frozenset({"sensor", "routine", "assistant"})
 
 
-def _failure(error: Error | OSError | UnicodeError) -> str:
-    return str(error) if isinstance(error, Error) else "inaccessible files; check permissions and free space"
+_INACCESSIBLE = "inaccessible files; check permissions and free space"
 
 
 def selection(
@@ -160,7 +159,7 @@ def update(
                 result.update(status="skipped", skipped="another run of this sensor is still active")
                 return result, False
             except (Error, OSError, UnicodeError) as error:
-                result.update(status="failed", error=_failure(error))
+                result.update(status="failed", error=reason(error, _INACCESSIBLE))
                 return result, True
 
         if len(windows) > 1 and not dry_run:
@@ -191,7 +190,7 @@ def update(
             except BusyError:
                 result.update(status="skipped", skipped="another run of this routine is still active")
             except (Error, OSError, UnicodeError) as error:
-                result.update(status="failed", error=_failure(error))
+                result.update(status="failed", error=reason(error, _INACCESSIBLE))
                 failed = True
             ran.append(result)
     asked = assistant_runtime.cycle(
@@ -223,9 +222,20 @@ def update(
             report["index"] = index.refresh(store, wait=120, recover=True)
             failed |= bool(report["index"]["skipped"])
         except (Error, OSError, UnicodeError) as error:
-            report["index"] = {"error": _failure(error)}
+            report["index"] = {"error": reason(error, _INACCESSIBLE)}
             failed = True
     return {"ok": not failed, "dry_run": dry_run, **report}
+
+
+def runnable(config: Config, names: tuple[str, ...]) -> None:
+    """Fail on the first routine name that is unknown or disabled, suggesting routines and assistants that can run."""
+    for name in names:
+        if name not in config.routines and name not in config.assistants:
+            known = [
+                known for known, program in (*config.routines.items(), *config.assistants.items()) if program.enabled
+            ]
+            raise Error(f"unknown routine or assistant {name}; check names in bf.yaml{suggest(name, known)}")
+        enabled(config.routines, "routine", name)
 
 
 def run_routines(
@@ -245,13 +255,7 @@ def run_routines(
     """
     now = datetime.now(UTC)
     config = load(store)
-    for name in names:
-        if name not in config.routines and name not in config.assistants:
-            runnable = [
-                known for known, program in (*config.routines.items(), *config.assistants.items()) if program.enabled
-            ]
-            raise Error(f"unknown routine or assistant {name}; check names in bf.yaml{suggest(name, runnable)}")
-        enabled(config.routines, "routine", name)
+    runnable(config, names)
     selected = list(names) if names else hooked(config, hook)
     results: list[dict[str, object]] = []
     failed = False
@@ -264,7 +268,7 @@ def run_routines(
             )
             result["status"] = "skipped" if "skipped" in result else "ran"
         except (Error, OSError, UnicodeError) as error:
-            result.update(status="failed", error=_failure(error))
+            result.update(status="failed", error=reason(error, _INACCESSIBLE))
             failed = True
         results.append(result)
     return {"ok": not failed, "dry_run": dry_run, **({"hook": hook} if hook else {}), "routines": results}

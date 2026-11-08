@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import runpy
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -299,6 +300,31 @@ def test_calendar_keeps_organizer_separate_from_invited_attendees(provider: Prov
         "person:email/owner@example.test",
         "person:email/guest@example.test",
     }
+
+
+def test_calendar_masks_credentials_with_the_kit_patterns(provider: Provider) -> None:
+    # Joined at run time, so the repository's secret scan never matches a literal.
+    token = "".join(("ghp_", "A1b2C3d4E5" * 4))
+    event = {
+        **cast(list[dict], PAGE_ONE["items"])[0],
+        "description": f"Deploy with {token}.",
+        "location": f"Bridge {token}",
+    }
+    provider.install("gws", [{"match": ["events", "list"], "stdout": {"kind": "calendar#events", "items": [event]}}])
+    [record] = provider.records("google-calendar.py", "team", "2026-09-01T00:00:00Z", "2026-09-03T00:00:00Z")
+    assert "Deploy with [REDACTED]." in record.text
+    assert "Location: Bridge [REDACTED]" in record.text
+    assert record.attributes["location"] == "Bridge [REDACTED]"
+    assert token not in json.dumps(record.model_dump())
+    # The script keeps an inline copy so it stays one file: it must match the kit's patterns.
+    patterns = [
+        [
+            (pattern.pattern, pattern.flags, replacement)
+            for pattern, replacement in runpy.run_path(str(path))["_SECRETS"]
+        ]
+        for path in (ROOT / "examples/sensors/google-calendar.py", ROOT / "examples/sensors/_sensor.py")
+    ]
+    assert patterns[0] == patterns[1]
 
 
 @pytest.mark.parametrize("backdated_tip", [False, True])

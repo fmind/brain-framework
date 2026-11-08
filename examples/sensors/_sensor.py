@@ -37,6 +37,8 @@ MAX_FIELDS = 2 << 20  # Every record field other than `text`, as UTF-8 JSON.
 MAX_OUTPUT = 16 << 20  # One sensor run's JSON array; BF's `max_bytes` defaults to 64 MiB.
 # C0 and C1 control characters, which BF rejects in ids, titles, URLs and identities.
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# A surrogate code point left alone: `json.loads` already joins valid pairs, and UTF-8 cannot encode one.
+SURROGATE = re.compile(r"[\ud800-\udfff]")
 # Unicode format characters (category Cf), such as U+200B, which BF rejects in identities: two would look alike.
 INVISIBLE = re.compile(
     r"[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064"
@@ -188,7 +190,8 @@ def fetch(url: str, *, timeout: float, max_bytes: int, headers: Mapping[str, str
     try:
         with opener.open(request, timeout=timeout) as response:
             body = bytearray()
-            while chunk := response.read(65536):
+            # read1 returns after one socket read, so a trickling body cannot outlast the deadline.
+            while chunk := response.read1(65536):
                 body.extend(chunk)
                 if len(body) > max_bytes:
                     raise SensorError(f"{host} answered more than {max_bytes} bytes")
@@ -196,6 +199,7 @@ def fetch(url: str, *, timeout: float, max_bytes: int, headers: Mapping[str, str
                     raise SensorError(f"{host} exceeded the {timeout:g}s timeout")
             return bytes(body)
     except urllib.error.HTTPError as error:
+        error.close()
         raise SensorError(f"{host} answered HTTP {error.code}; check the token and URL") from None
     except (urllib.error.URLError, http.client.HTTPException, OSError):
         raise SensorError(f"cannot reach {host}; check the network and URL") from None
@@ -212,7 +216,12 @@ def fetch_json(url: str, *, timeout: float, max_bytes: int, headers: Mapping[str
 
 def _identity(value: str) -> str:
     """`value` when BF accepts it as an identity, else "": one bad provider value never fails a whole collection."""
-    ok = len(value) <= MAX_REF and IDENTITY.fullmatch(value) and not CONTROL.search(value)
+    ok = (
+        len(value) <= MAX_REF
+        and IDENTITY.fullmatch(value)
+        and not CONTROL.search(value)
+        and not SURROGATE.search(value)
+    )
     return value if ok and not INVISIBLE.search(value) else ""
 
 
@@ -250,6 +259,17 @@ def _identities(values: Iterable[object], name: str) -> list[str]:
     return list(dict.fromkeys(kept))[:MAX_LINKS]  # The caller's order sets which values a cut keeps.
 
 
+def _text(value: Any) -> Any:
+    """`value` with each lone UTF-16 surrogate, such as a JSON `\\ud83d` cut from its pair, replaced by U+FFFD."""
+    if isinstance(value, str):
+        return SURROGATE.sub("\ufffd", value)
+    if isinstance(value, Mapping):
+        return {_text(key): _text(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_text(item) for item in value]
+    return value
+
+
 def _timestamp(value: object) -> str:
     """An aware time as canonical UTC, as BF stores it, or "" for a naive, invalid or out-of-range one."""
     try:
@@ -275,9 +295,9 @@ def record(
     """One record BF accepts: invalid optional values are normalized or dropped, never a whole collection's failure.
 
     The id must already be valid, since it is the record's identity. Titles become one bounded line, text is cut to
-    BF's bound with `attributes.partial`, invalid times, URLs, links and aliases are dropped, links and aliases and
-    each `*_refs` attribute keep their first 1,000 valid identities, and an invalid `updated`, `observed`, `kind` or
-    `status` is removed.
+    BF's bound with `attributes.partial`, lone surrogates in the title, text and attributes become U+FFFD, invalid
+    times, URLs, links and aliases are dropped, links and aliases and each `*_refs` attribute keep their first 1,000
+    valid identities, and an invalid `updated`, `observed`, `kind` or `status` is removed.
     Never pass `fields`: BF computes them from your mappings.
     """
     if (
@@ -285,10 +305,11 @@ def record(
         or not id.strip()
         or len(id) > MAX_ID
         or CONTROL.search(id)
+        or SURROGATE.search(id)
         or len(quote(id, safe="/@:")) > MAX_ENCODED_ID
     ):
-        raise SensorError("a record id is empty, too long or holds control characters")
-    extra = dict(attributes or {})
+        raise SensorError("a record id is empty, too long or holds control characters or a lone surrogate")
+    extra = _text(dict(attributes or {}))
     for key in [key for key in extra if key.endswith("_refs")]:
         extra[key] = _identities(extra[key], f"attributes.{key}")
     for key in [key for key in ("updated", "observed") if key in extra]:
@@ -303,12 +324,14 @@ def record(
             del extra[key]
     if "partial" in extra and not isinstance(extra["partial"], bool):
         raise SensorError("attributes.partial must be a boolean")
+    text = _text(text)
     if len(text) > MAX_TEXT:
         text, extra["partial"] = text[:MAX_TEXT], True
-    parts = urlsplit(url) if isinstance(url, str) and len(url) <= MAX_REF and not CONTROL.search(url) else None
+    valid = isinstance(url, str) and len(url) <= MAX_REF and not CONTROL.search(url) and not SURROGATE.search(url)
+    parts = urlsplit(url) if valid else None
     item = {
         "id": id,
-        "title": " ".join(CONTROL.sub(" ", str(title)).split())[:MAX_TITLE].rstrip() or "(untitled)",
+        "title": " ".join(CONTROL.sub(" ", str(_text(title))).split())[:MAX_TITLE].rstrip() or "(untitled)",
         "text": text,
         "time": _timestamp(time),
         "url": url if parts and parts.scheme in ("http", "https") and parts.hostname else "",

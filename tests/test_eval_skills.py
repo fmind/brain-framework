@@ -87,6 +87,15 @@ def test_a_session_that_follows_the_skill_passes(tmp_path: Path) -> None:
     }
 
 
+def test_a_torn_last_line_is_ignored_but_a_corrupt_middle_line_fails() -> None:
+    lines = transcript(("Skill", {"skill": "bf-use"}))
+    killed = EVAL.parse([*lines[:2], lines[2][:20], ""])
+    assert (killed.skills, killed.outcome) == (["bf-use"], "missing")
+    # Line numbers count the transcript's own lines, blank ones included.
+    with pytest.raises(EVAL.EvalError, match="transcript line 3 is not JSON"):
+        EVAL.parse([lines[0], "", "not json", *lines[1:]])
+
+
 def test_reading_the_skill_file_counts_as_invoking_it(tmp_path: Path) -> None:
     session = EVAL.parse(transcript(("Read", {"file_path": f"{tmp_path}/.claude/skills/bf-use/SKILL.md"})))
     assert EVAL.grade(CASE, session, tmp_path, [], None)["skill"]

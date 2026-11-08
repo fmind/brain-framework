@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import http.client
+import http.server
 import json
 import os
 import runpy
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
@@ -68,7 +74,8 @@ def test_github_issues_maps_the_window_to_standard_attributes(provider: Provider
     # The search widens to whole seconds; an issue updated at the window's end belongs to the next one.
     items = [issue(1), issue(2, updated=END), issue(3, author=None, assignees=[], labels=None, body=None)]
     provider.install("gh", [{"match": ["issue", "list"], "stdout": items}])
-    result = provider.run("github-issues.py", "acme/widgets", environment=WINDOW)
+    # Typed in GitHub's display case, the repository still yields lowercase ids and aliases.
+    result = provider.run("github-issues.py", "Acme/Widgets", environment=WINDOW)
     assert result.returncode == 0, result.stderr
     first, ghost = TypeAdapter(list[Record]).validate_python(json.loads(result.stdout))
     assert (first.id, first.title) == ("acme/widgets/issues/1", "acme/widgets: Issue 1 second line")
@@ -94,6 +101,7 @@ def test_github_issues_maps_the_window_to_standard_attributes(provider: Provider
         ["repo:github.com/acme/widgets"],
     )
     [argv] = provider.calls("gh")
+    assert argv[argv.index("--repo") + 1] == "acme/widgets"
     assert argv[argv.index("--search") + 1] == "updated:2026-09-01T00:00:00+00:00..2026-09-02T00:00:00+00:00"
     assert argv[argv.index("--limit") + 1] == "501"
 
@@ -253,6 +261,59 @@ def test_fetch_stays_on_one_https_host() -> None:
             guard.redirect_request(request, None, 302, "Found", {}, target)
 
 
+class _Plain(http.client.HTTPConnection):
+    """Plain HTTP in place of HTTPS, so the body-read bounds run against a local server without a certificate."""
+
+    def __init__(self, host: str, **options: Any) -> None:
+        for tls in ("context", "check_hostname"):
+            options.pop(tls, None)
+        super().__init__(host, **options)
+
+
+def test_fetch_bounds_the_body_and_names_http_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    done = threading.Event()
+    bodies = {"/ok": b'{"ok": true}', "/bad": b"not json", "/denied": b"denied", "/huge": b"x" * 4096}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = bodies.get(self.path, b"")
+            self.send_response(401 if self.path == "/denied" else 200)
+            self.send_header("Content-Length", str(len(body) or 100))
+            self.end_headers()
+            with suppress(OSError):
+                self.wfile.write(body)
+                # Otherwise one byte every 0.1 s: each socket read succeeds, but the body never ends in time.
+                while not body and not done.wait(0.1):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - the overridden signature
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPSConnection", _Plain)
+    sensor = kit()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"https://127.0.0.1:{server.server_address[1]}"
+    try:
+        assert sensor.fetch_json(f"{base}/ok", timeout=5, max_bytes=1024) == {"ok": True}
+        with pytest.raises(sensor.SensorError, match="answered invalid JSON"):
+            sensor.fetch_json(f"{base}/bad", timeout=5, max_bytes=1024)
+        with pytest.raises(sensor.SensorError, match="answered HTTP 401; check the token and URL"):
+            sensor.fetch(f"{base}/denied", timeout=5, max_bytes=1024)
+        with pytest.raises(sensor.SensorError, match="answered more than 1024 bytes"):
+            sensor.fetch(f"{base}/huge", timeout=5, max_bytes=1024)
+        started = time.monotonic()
+        with pytest.raises(sensor.SensorError, match="exceeded the 1s timeout"):
+            sensor.fetch(f"{base}/trickle", timeout=1, max_bytes=1 << 20)
+        assert time.monotonic() - started < 5
+    finally:
+        done.set()
+        server.shutdown()
+        server.server_close()
+
+
 def test_identities_are_lowercase_encoded_or_empty() -> None:
     sensor = kit()
     assert sensor.person(" Alice.O'Neil+tag@Example.TEST ") == "person:email/alice.o%27neil+tag@example.test"
@@ -293,7 +354,19 @@ def test_record_normalizes_what_bf_would_reject() -> None:
     assert (naive["time"], naive["attributes"]) == ("", {})
     huge = sensor.record("many", "Many", attributes={"participant_refs": refs})
     assert huge["attributes"]["participant_refs"] == refs[:1000]
-    for bad in ("", " ", "a\x00b", "x" * 4097, "é" * 2000):
+    # A lone surrogate, as JSON decodes a string cut inside a UTF-16 pair, becomes U+FFFD outside the id.
+    torn = sensor.record(
+        "s",
+        "Launch \ud83d",
+        text="\ud83d",
+        url="https://example.test/\udc00",
+        links=["person:email/\ud83d@example.test"],
+        attributes={"n": ["\udc00"], "\ud83d": "x"},
+    )
+    loaded = Record.model_validate(torn)
+    assert (loaded.title, loaded.text, loaded.url, loaded.links) == ("Launch \ufffd", "\ufffd", "", [])
+    assert torn["attributes"] == {"n": ["\ufffd"], "\ufffd": "x"}
+    for bad in ("", " ", "a\x00b", "x" * 4097, "é" * 2000, "a\ud83d"):
         with pytest.raises(sensor.SensorError, match="record id"):
             sensor.record(bad, "Title")
     with pytest.raises(sensor.SensorError, match="list of identities"):

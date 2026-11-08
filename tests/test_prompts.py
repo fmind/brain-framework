@@ -19,7 +19,7 @@ from bf.collect import parse_reply, reply_title, structured_reply
 from bf.health import report
 from bf.history import ASSISTANTS, log_path, state
 from bf.messages import Message
-from bf.models import Assistant, Config, Error, Invocation, Program, Record
+from bf.models import Assistant, AssistantSchedule, Config, Error, Invocation, Program, Record
 from bf.retrieve import read
 from bf.runtime import Queue
 from bf.schemas import document
@@ -98,7 +98,7 @@ def test_configuration_validates_assistants() -> None:
     )
     with pytest.raises(ValidationError, match="unknown placeholder"):
         Assistant(prompt="prompts/a.md", command=["agy", "{{schema_file}}"])
-    with pytest.raises(ValidationError, match="unknown placeholder"):
+    with pytest.raises(ValidationError, match="unknown placeholder; use brain, home, start, end or a whole-argument"):
         Program(command=["echo", "{{prompt}}"])
     for kind in ("sensors", "routines"):
         with pytest.raises(ValidationError, match="program names must be distinct"):
@@ -110,6 +110,33 @@ def test_configuration_validates_assistants() -> None:
                     "assistants": {"assistant": {"command": ["echo"], "prompt": "prompts/a.md"}},
                 }
             )
+
+
+@pytest.mark.parametrize(
+    ("schedule", "reason"),
+    [
+        ({}, "schedule requires every or at"),
+        ({"lookback": 5}, "schedule requires every or at"),
+        ({"at": "09:00", "timezone": "Mars/Base"}, "invalid IANA timezone"),
+        ({"every": 60, "days": ["mon", "mon"]}, "days must be distinct"),
+    ],
+)
+def test_a_schedule_needs_every_or_at_a_known_timezone_and_distinct_days(schedule: dict, reason: str) -> None:
+    with pytest.raises(ValidationError, match=reason):
+        AssistantSchedule.model_validate(schedule)
+
+
+def test_days_filter_an_interval_schedule_and_every_beside_at_never_repeats_it() -> None:
+    sunday = datetime(2026, 9, 27, 9, tzinfo=UTC)
+    weekdays = AssistantSchedule.model_validate({"every": 3600, "days": ["mon"], "timezone": "Europe/Paris"})
+    # An interval due on Sunday moves to Monday's local midnight.
+    assert weekdays.next_due(sunday, "2026-09-27T08:00:00.000000Z") == datetime(2026, 9, 27, 22, tzinfo=UTC)
+    assert weekdays.next_due(sunday + timedelta(days=1), "2026-09-28T08:00:00.000000Z") == datetime(
+        2026, 9, 28, 9, tzinfo=UTC
+    )
+    # With at, every is only the overdue grace: the next run is the next day's slot, not an hour later.
+    daily = AssistantSchedule.model_validate({"every": 3600, "at": "08:00", "timezone": "UTC"})
+    assert daily.next_due(sunday, "2026-09-27T08:00:05.000000Z") == datetime(2026, 9, 28, 8, tzinfo=UTC)
 
 
 def test_expansion_and_record_preserve_harness_contract(configured: Store) -> None:
@@ -479,6 +506,51 @@ def test_invalid_structured_reply_fails_the_attempt_without_quoting_it(configure
     assert "secret" not in configured.read(log_path("checked")).decode()
 
 
+@pytest.mark.parametrize(
+    ("pointer", "output"),
+    [("/result/say", b'{"result":"secret"}'), ("/result/01", b'{"result":["secret"]}')],
+    ids=["into-a-string", "non-decimal-index"],
+)
+def test_an_untraversable_reply_path_reports_the_reply_error(configured: Store, pointer: str, output: bytes) -> None:
+    configured.write("bf.yaml", CHECKED.replace(b"/structured_output}\n    wake", f"{pointer}}}\n    wake".encode()))
+    message = f"assistant reply at {pointer} is missing or does not match bf schema --kind assistant-reply"
+    with pytest.raises(Error, match=re.escape(message)) as raised:
+        ask(configured, name="checked", output=output)
+    assert "secret" not in str(raised.value)
+    assert str(raised.value).endswith(f"see {log_path('checked')}")
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b'{"structured_output":{"say":"secret \\ud83d","wake":null}}',
+        b'{"structured_output":{"say":"secret","wake":null},"status":"secret \\ud83d"}',
+    ],
+)
+def test_structured_reply_a_record_cannot_hold_fails_the_attempt(configured: Store, output: bytes) -> None:
+    configured.write("bf.yaml", CHECKED)
+    with pytest.raises(Error, match="cannot become a record") as raised:
+        ask(configured, name="checked", output=output)
+    assert "secret" not in str(raised.value)
+    queue = Queue(configured)
+    job = cast("list[dict]", queue.report()["jobs"])[0]
+    # Like an invalid reply: the harness may have acted, but no answer is saved that could never be recorded.
+    assert job["state"] == "uncertain"
+    assert not queue.get(job["id"])["raw"]
+    assert stored(configured, "checked") == []
+
+
+def test_oversized_structured_reply_metadata_retries_an_idempotent_assistant(configured: Store) -> None:
+    configured.write("bf.yaml", CHECKED.replace(b"idempotent: true", b"idempotent: true\n    max_bytes: 4194304"))
+    output = b'{"structured_output":{"say":"Done","wake":null},"result":"' + b"x" * (3 << 20) + b'"}'
+    with pytest.raises(Error, match="more than 2 MiB outside its message"):
+        ask(configured, name="retried", output=output)
+    queue = Queue(configured)
+    job = cast("list[dict]", queue.report()["jobs"])[0]
+    assert job["state"] == "pending"
+    assert not queue.get(job["id"])["raw"]
+
+
 def test_invalid_structured_reply_retries_an_idempotent_assistant_and_fails_dry_runs(configured: Store) -> None:
     configured.write("bf.yaml", CHECKED)
     with pytest.raises(Error, match="does not match"):
@@ -538,7 +610,8 @@ def test_a_wake_is_clamped_runs_once_with_its_reason_and_is_replaced_by_a_newer_
     # The listing names when, never the model's reason.
     assert queue.report()["wakes"] == [{"assistant": "checked", "due": wake["due"], "job": None}]
     assert assistants.due_schedules(configured, {"checked"}, before + timedelta(seconds=300)) == []
-    later = before + timedelta(seconds=601)
+    # Derived from the stored wake, so a slow ask() cannot push the due time past it.
+    later = datetime.fromisoformat(str(wake["due"])) + timedelta(seconds=1)
     [due] = assistants.due_schedules(configured, {"checked"}, later)
     assert due[:2] == ("checked", "wake")
     [key], failures = assistants.schedule(configured, {"checked"}, later)

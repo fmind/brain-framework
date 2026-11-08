@@ -39,7 +39,7 @@ A channel needs at least one capability. Each capability has a `command`, and th
 
 An idle healthy stream has no total runtime deadline. The default frame limit holds the largest valid envelope however it is escaped. Print compact UTF-8 frames, such as Python's `json.dumps(message, ensure_ascii=False)`: a `\uXXXX` escape takes six bytes per character.
 
-Commands run from the brain directory without a shell. `BF_BRAIN` identifies that brain; startup-injection variables are stripped. Stderr goes to bounded `logs/channel.NAME.OPERATION.log`, never the protocol output.
+Commands run from the brain directory without a shell. Their arguments support `{{brain}}`, `{{home}}`, `{{start}}`, `{{end}}` and `{{lines:FILE}}`, as [sensor settings](sensors.md#sensor-settings) describe. `BF_BRAIN` identifies that brain; startup-injection variables are stripped. Stderr goes to bounded `logs/channel.NAME.OPERATION.log`, never the protocol output.
 
 Each stream run ends its log with one `== TIME OUTCOME after N.Ns ==` entry, even when stderr is empty. The outcome is `stopped` or the error. When the adapter ended on its own, `; adapter exited with status N` or `; adapter was killed by SIGNAL` follows.
 
@@ -110,6 +110,7 @@ What happens when a send fails or is interrupted:
 - **Assistant delivery, default channel:** it becomes `uncertain` and requires inspection. It keeps the send's error, or reads `interrupted send; inspect before retrying` when the send was killed.
 - **Standalone `bf channel send`:** watch and `bf update` never send or retry it. It becomes `failed` on an idempotent channel (`…; retry it with bf queue ID --retry`) and `uncertain` otherwise.
 - **Send command that never started,** such as one not on PATH: it sent nothing, so it fails or retries like an idempotent one. A harness that never started leaves its job `failed`, not `uncertain`, and retries it when the assistant is `idempotent` for that run kind.
+- **Receipt naming a different conversation:** the message may have reached the wrong place, so the delivery becomes `uncertain` on any channel and keeps holding its conversation.
 
 An explicit `bf queue ID --retry` starts the attempts over. Saved answers are never regenerated to retry delivery.
 
@@ -178,7 +179,7 @@ Only then should a Pub/Sub adapter acknowledge the provider message. ACK means d
 - A cursor is opaque to BF. Preserve the provider's resume and ack semantics, and advance the cursor only through accepted frames.
 - `since`, which is also `{{start}}` in a stream command, is the stream's first start and never advances.
 - A polling adapter resumes from `cursor`. It puts its provider position in each envelope's `cursor`, and each later resume frame carries the cursor of the last admitted message.
-- An adapter that leaves `cursor` empty replays everything since that first start on every reconnect. A replayed message whose 35-day identity tombstone has expired is answered again.
+- An adapter that leaves `cursor` empty replays everything since that first start on every reconnect. A replayed message whose 35-day identity tombstone has expired is answered again, and a newly added [subscriber](prompts.md#several-assistants-on-one-stream) answers every replayed message still within it.
 - A push adapter can drain its retained backlog; BF does not discard older pushed messages by timestamp.
 
 ### Adapter duties and restarts
@@ -266,20 +267,20 @@ A job reserves its answer space only when a worker starts it: `max_bytes × (7 +
 
 - An answered job reserves the same with its saved output in place of `max_bytes`. Failed and uncertain jobs reserve nothing.
 - A job that cannot reserve its space stays pending without starting its harness, reported as `assistant queue lacks answer space for this job; it waits until running work finishes`. It starts once running work frees the space. `bf run` fails instead and cancels its job.
-- A job needing more than 96 MiB fails with `assistant NAME needs N MiB of queue space per answer, more than one job may reserve; lower its max_bytes`. With one route and the 4 MiB `max_bytes` limit, no job needs that much.
+- One route and the 4 MiB `max_bytes` limit keep every job under the 96 MiB one job may reserve.
 - Retrying a saved answer reserves its space again, or fails with `assistant queue lacks space to record this saved answer; resolve other work first`.
 
 ### Retention
 
 - Completed job, event, delivery and conversation bodies each have an 8 MiB retention budget. Jobs with unresolved deliveries keep theirs.
-- Identity tombstones recognize replays, identical resends and echoes. They are deleted after 35 days, longer than Pub/Sub's 31-day redelivery. They cover completed or cancelled jobs, delivered or cancelled deliveries with their receipts, and lifecycle and input events.
+- Identity tombstones recognize replays, identical resends and echoes. They are deleted after 35 days, longer than Pub/Sub's 31-day redelivery. They cover completed or cancelled jobs, delivered or cancelled deliveries with their receipts, and input events.
 - Pending and unresolved work never expires. After those 35 days, a manual delivery ID can be reused.
 - The conversation cache holds at most 10,000 messages.
 - Compaction runs on admission and completion as well as during watch. Exact historic job bodies can expire while their evidence records remain.
 
 ### Configuration changes
 
-Queued jobs snapshot their prompt, harness and output configuration. Do not swap the `command` or `text` of an assistant that has pending work, even for a moment: work queued meanwhile keeps the changed settings, runs with them and delivers whatever that command prints, or fails once you restore them.
+Queued jobs snapshot their prompt, harness and output configuration. Do not swap the `command` or `reply` of an assistant that has pending work, even for a moment: work queued meanwhile keeps the changed settings, runs with them and delivers whatever that command prints, or fails once you restore them.
 
 - Editing an assistant's `schedules`, `inputs` or `keep` leaves its jobs runnable.
 - Once a harness answered, only removing or disabling its assistant or changing an output channel stops its saved answer.

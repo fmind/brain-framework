@@ -9,16 +9,15 @@ import subprocess
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from datetime import UTC, datetime
 from threading import Event
 
 from pydantic import ValidationError
 
-from bf.collect import PROGRAM_ENV, Runner, arguments, executable, run, starting
+from bf.collect import Runner, _now, arguments, ended, executable, program_env, run, starting
 from bf.config import load
-from bf.history import append_log, environment
+from bf.history import append_log
 from bf.messages import Batch, Message, Outgoing, Receipt
-from bf.models import Command, Error, Send, Stream, decode, encode, explain, local, timestamp
+from bf.models import Command, Error, Send, Stream, decode, encode, explain, timestamp
 from bf.storage import Store
 
 # Envelope keys a validation error may name; a provider's output controls any other key.
@@ -31,6 +30,10 @@ ESTABLISHED = 5.0
 
 class BatchOverflowError(Error):
     """A read window holds more messages than one batch carries; a shorter window may fit."""
+
+
+class MisroutedError(Error):
+    """A send receipt names another conversation: the message may have reached the wrong place, so never retry it."""
 
 
 def _invalid(error: Error | ValidationError) -> str:
@@ -83,7 +86,9 @@ def send(store: Store, name: str, command: Send, message: Outgoing, *, runner: R
     except (Error, ValidationError) as error:
         raise Error(f"channel {name}: send must return a JSON id and conversation receipt") from error
     if message.conversation and receipt.conversation != message.conversation:
-        raise Error(f"channel {name}: send receipt names a different conversation; inspect delivery before retrying")
+        raise MisroutedError(
+            f"channel {name}: send receipt names a different conversation; inspect delivery before retrying"
+        )
     return receipt
 
 
@@ -104,9 +109,7 @@ def stream(
     `connected` runs once, when BF wrote the resume frame and the adapter still runs ESTABLISHED seconds after starting.
     Every run ends with one timed log entry naming its outcome and, when the adapter exited on its own, its status.
     """
-    # Like `run`: inherited values of the variables BF sets never reach an adapter.
-    env = {key: value for key, value in environment().items() if key not in PROGRAM_ENV}
-    env["BF_BRAIN"] = str(store.root)
+    env = program_env(store)
     argv = arguments(store, command, resume.get("since", ""), "")
     argv[0] = executable(store, argv[0], env)
     child: subprocess.Popen[bytes] | None = None
@@ -220,21 +223,11 @@ def stream(
                 if pipe is not None:
                     pipe.close()
             if code is not None:
-                outcome += f"; adapter {_ended(code)}"
+                outcome += f"; adapter {ended(code)}"
             with suppress(Error, OSError):
                 append_log(
                     store,
                     f"channel.{name}.stream",
-                    f"{local(timestamp(datetime.now(UTC).isoformat()))} {outcome} after {time.monotonic() - started:.1f}s",
+                    f"{_now()} {outcome} after {time.monotonic() - started:.1f}s",
                     bytes(errors),
                 )
-
-
-def _ended(code: int) -> str:
-    if code >= 0:
-        return f"exited with status {code}"
-    try:
-        return f"was killed by {signal.Signals(-code).name}"
-    except ValueError:
-        # Real-time signals between SIGRTMIN and SIGRTMAX have no name.
-        return f"was killed by signal {-code}"

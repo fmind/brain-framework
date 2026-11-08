@@ -137,7 +137,7 @@ The command is a program on PATH or in `sensors/`, followed by its arguments, ru
 | `reconcile`      | none     | An occasional wider window; see [reconciliation](#frequent-updates-and-periodic-reconciliation).                                                                        |
 | `timeout`        | `300`    | Maximum runtime in seconds.                                                                                                                                             |
 | `max_bytes`      | 64 MiB   | Maximum output.                                                                                                                                                         |
-| `truncate_text`  | `false`  | Cut a longer `record.text` to `max_text_bytes` (default 4 MiB) on a UTF-8 codepoint boundary and set `attributes.truncated: true`; otherwise longer text fails the run. |
+| `truncate_text`  | `false`  | Cut a longer `record.text` to `max_text_bytes` (default 4 MiB) on a UTF-8 boundary and set `attributes.partial` and `truncated` to `true`; otherwise longer text fails. |
 | `max_text_bytes` | none     | Per-record UTF-8 byte ceiling (1–4,194,304); setting it also turns on truncation.                                                                                       |
 | `priority`       | `normal` | `low` [quiets a high-volume source](#quiet-a-high-volume-source).                                                                                                       |
 | `silent_after`   | none     | Seconds without a new or changed record after which a scheduled source [falls silent](schedule.md#silent-sources).                                                      |

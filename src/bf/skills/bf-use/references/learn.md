@@ -13,7 +13,7 @@ Never touch a file only to clear a review reminder. When two sessions changed th
 
 ## Guard a write
 
-When your editor cannot detect another session's save, write through the guarded-write helper with the `sha256` of your read and a path relative to the working directory. Replace one passage, which must occur exactly once:
+When your editor cannot detect another session's save, write through the guarded-write helper with the `sha256` of your read and the file's path: absolute, such as `~/brain/projects/new-website.md`, or relative to the working directory. A `bf read` ref is relative to the brain root, so outside the brain pass the absolute path. Replace one passage, which must occur exactly once:
 
 ```bash
 python3 SKILL_DIR/scripts/guarded-write.py projects/new-website.md --expect-sha256 SHA256 \

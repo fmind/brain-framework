@@ -1417,6 +1417,7 @@ def test_a_note_alias_named_like_a_source_reads_without_parsing_that_source(
     brain.write("memories/meetings/" + "0" * 64 + ".json", b"{broken")
     assert read([brain], "meetings:atlas")["ref"] == "concepts/atlas.md"
     monkeypatch.setattr(records, "WAIT", 0.1)
+    monkeypatch.setattr(index, "_CONTENDED", 0.1)
     with writer(brain):
         assert read([brain], "meetings:atlas")["ref"] == "concepts/atlas.md"
     # An exact record ref still needs its own file: a missing one of an unreadable source is not proven absent.

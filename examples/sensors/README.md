@@ -109,6 +109,7 @@ The limits below also bound the time of each call to a provider or converter, wh
 
 - Selects events overlapping the requested interval: [Google's `timeMin` bounds event end, while `timeMax` bounds event start](https://developers.google.com/workspace/calendar/api/v3/reference/events/list). It is not a modification-time feed: reconcile past windows to revisit changed events.
 - Keeps cancellations, titled `Cancelled: SUMMARY`, so they overwrite records collected earlier.
+- Masks common credential shapes in the description and location, such as a pasted access token or `password:` pair, with an inline copy of the kit's [`redact`](#write-a-sensor-with-the-kit), so the script stays one file. It is best effort: keep the brain private.
 - An invitee entry means the person was listed, not that they attended. Participant emails become lowercase `person:email/` links.
 - Keeps at most BF's 1,000 links per event: organizer, source, attachment and agenda links first, then invitees in email order. A cut sets `attributes.participants_truncated`; `attributes.participants` keeps every address.
 - Limits: 10,000 events and 20 pages; 60 seconds per `gws` call.
@@ -168,7 +169,7 @@ sensors:
 - Calls `gh issue list --search updated:...` with the owner's gh login, from `/`. GitHub's search index can lag a few minutes behind an edit: keep the default 300-second `overlap`, or add `reconcile`, so a late issue is collected in a later window.
 - Saves the title, status (`open` or `closed`, with `attributes.reason` such as `completed`), labels and body. It masks common credential shapes in the body with the kit's `redact`, which is best effort: keep the brain private.
 - Links the repository as lowercase `repo:github.com/OWNER/REPO` and accounts as lowercase `person:github.com/LOGIN` in `author_refs`, `assignee_refs` and `repository_refs`. Declare `person:github.com/LOGIN` as an alias on a person's note to join it with their `person:email/` identity.
-- Claims the alias `github:OWNER/REPO/issues/N`, as `github-history.py issues` does: collect a repository's issues with one of the two sensors, or the alias becomes ambiguous.
+- Claims the alias `github:OWNER/REPO/issues/N`, lowercased like the id, as `github-history.py issues` does: collect a repository's issues with one of the two sensors, or the alias becomes ambiguous.
 - Limits: 500 updated issues per window and 16 MiB from `gh`, 60 seconds per call. A busier window fails and keeps saved records: shorten `refresh`.
 
 Preview it with `bf collect github-issues --since 7d --dry-run`. Expected result: each sample's `id` is `OWNER/REPO/issues/N`, its `text` starts with `Repository:` and its `links` hold `repo:github.com/` and `person:github.com/` identities.
@@ -213,7 +214,7 @@ Preview it with `bf collect github-issues --since 7d --dry-run`. Expected result
 - `window()` and `state_dir()`: the run's `[START, END)` from `BF_START` and `BF_END`, and the private, machine-local folder in `BF_STATE_DIR` for cursors. That folder can disappear: treat an empty one as a first run.
 - `run(argv, timeout=, max_bytes=)` and `fetch(url, timeout=, max_bytes=)` with `fetch_json`: a bounded provider CLI started from `/` without a shell, and a bounded HTTPS GET that refuses redirects to another host or to plain HTTP. Neither echoes provider output.
 - `person(email)`, `account(host, login)` and `repo(host, owner, name)`: lowercase, percent-encoded identities, or `""` when BF would reject one.
-- `record(id, title, ...)` and `emit(records)`: records normalized to BF's [limits](../../docs/docs/limits.md#size-bounds), such as one-line titles, valid URLs and at most 1,000 links or values per `*_refs` list, printed as one JSON array; duplicate ids fail.
+- `record(id, title, ...)` and `emit(records)`: records normalized to BF's [limits](../../docs/docs/limits.md#size-bounds), such as one-line titles, valid URLs, U+FFFD for a lone UTF-16 surrogate outside the id and at most 1,000 links or values per `*_refs` list, printed as one JSON array; duplicate ids fail.
 - `redact(text)`: a best-effort mask for common credential shapes, such as bearer tokens, GitHub and AWS keys, private key blocks and `password=` pairs.
 - `main(collect, failure)` and `fail(message)`: exit 1 with nothing on stdout and one content-free stderr line, so BF keeps the saved records.
 

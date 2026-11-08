@@ -141,6 +141,8 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
         # Before 18.1.4 these rebuilt the whole cache, collected the default window or named an unknown program "".
         (["build", "--reproject", ""], "--reproject"),
         (["collect", "calendar", "--since", ""], "--since"),
+        # Its reason used to say the empty value would collect the default window: a channel read has none.
+        (["channel", "read", "chat", "--since", ""], "--since: give a start time; an empty value names none"),
         (["collect", ""], "SENSOR"),
         # An empty --input, as an unset variable gives, used to run the sensor and save records instead of checking.
         (["collect", "calendar", "--input", ""], "--input"),

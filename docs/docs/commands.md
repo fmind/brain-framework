@@ -114,7 +114,7 @@ Each line has:
 }
 ```
 
-A file that changed since the cache refreshed keeps its line without `text`; run `bf build` first for a complete export. The text is your evidence: send it only to services your [privacy](privacy.md) choices allow.
+A record its sensor kept only part of adds `"partial":true`, as in [search](retrieval.md#search). A file that changed or became unreadable since the cache refreshed keeps its line without `text` and prints `bf: BRAIN: FILE: text omitted: …` on stderr; run `bf build` first for a complete export. The text is your evidence: send it only to services your [privacy](privacy.md) choices allow.
 
 A busy cache is noted on stderr. A skipped file prints `bf: BRAIN: FILE: ERROR` on stderr and makes the command exit 1 after the other lines.
 
@@ -191,16 +191,18 @@ A well-formed ref that names nothing exits 1 and suggests what exists:
 
 Commands also exit 1 in these cases:
 
-| Command                     | Exits 1 when                                                                                                                            |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `update`, `run`             | A program fails; successful programs keep their results.                                                                                |
-| `update`, `build`, `forget` | The refreshed cache skipped files.                                                                                                      |
-| `status --check`            | `healthy` is false: on problems, an unavailable cache, brain or reference, and every [`attention`](#status-sources-and-routines) entry. |
-| `validate`                  | It finds problems; warnings never fail it.                                                                                              |
-| `skills`                    | It keeps a folder holding your edits, foreign files or a newer bf's copy; see [skills](agents.md#install-the-skills).                   |
-| `skills --check`            | Any skill is not current.                                                                                                               |
-
-`attention` entries include scheduled programs that failed, are `overdue` or `never` succeeded, or fell silent, unresolved assistant work and failing channels.
+| Command                     | Exits 1 when                                                                                                                  |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `update`, `run`             | A program fails; successful programs keep their results.                                                                      |
+| `update`, `build`, `forget` | The refreshed cache skipped files.                                                                                            |
+| `status --check`            | `healthy` is false: on problems, an unavailable cache, brain or reference, and every [`attention`](#attention-entries) entry. |
+| `eval`                      | A case fails; a lower rank alone does not fail it ([checks](checks.md)).                                                      |
+| `export`                    | It skipped a file.                                                                                                            |
+| `channel send`              | The delivery's state is not `delivered`.                                                                                      |
+| `queue ID --retry`          | A retried channel delivery is still not `delivered`.                                                                          |
+| `validate`                  | It finds problems; warnings never fail it.                                                                                    |
+| `skills`                    | It keeps a folder holding your edits, foreign files or a newer bf's copy; see [skills](agents.md#install-the-skills).         |
+| `skills --check`            | Any skill is not current.                                                                                                     |
 
 ## Using replies
 

@@ -193,10 +193,4 @@ Removing state loses collection windows and freshness history, never notes or re
 
 ### Assistant queue state
 
-Assistant obligations live separately under the private `bf/runtime/` state directory. See [queue recovery](channels.md#queue-and-recovery).
-
-- This durable queue is bound to physical brain identity, path and name.
-- Never delete it with disposable caches or run history.
-- Resolve its work with `bf queue` before moving or renaming a brain.
-- A drained queue follows a rename or a move within one filesystem. The queue, and the program state of a brain that has one, also follow a new device number for the same folder, such as btrfs can assign at boot.
-- Unresolved work refuses execution until the brain is restored. Collection never waits for it.
+Assistant obligations live in the private `bf/runtime/` state folder. This queue is durable: never delete it with caches or run history. [Where the queue lives](channels.md#where-the-queue-lives) and [Move or rename a brain](channels.md#move-or-rename-a-brain) explain how it follows a rename, a move or a new device number, and [queue recovery](channels.md#queue-and-recovery) how to resolve its work.

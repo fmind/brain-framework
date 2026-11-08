@@ -10,7 +10,7 @@ from pathlib import Path
 from bf import index, links
 from bf.config import brain_name, load
 from bf.markdown import preview
-from bf.models import Error
+from bf.models import Error, reason
 from bf.storage import Store
 
 # A read lists at most CLAIMS outgoing claims, and at most RELATION of any one relation.
@@ -42,7 +42,7 @@ UNAVAILABLE = "inaccessible brain or cache; run bf status"
 def problem(store: Store, brain: str, error: BaseException, fallback: str = UNAVAILABLE) -> dict[str, object]:
     """A selected brain's failure as a reply problem, without the brain's path: an Error's own reason, otherwise
     `fallback`. `brain` names the brain, or its folder does when its bf.yaml did not load."""
-    message = str(error) if isinstance(error, Error) else fallback
+    message = reason(error, fallback)
     return {"brain": brain or brain_name(store), "error": message.replace(str(store.root), "<brain>")}
 
 

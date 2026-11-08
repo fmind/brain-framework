@@ -107,6 +107,9 @@ def test_collect_dry_run_then_upsert(configured: Store) -> None:
         "end": END,
         "error": "",
         "failures": 0,
+        # Retention counters reset each run, so status never reports an earlier run's.
+        "forgotten": 0,
+        "expired": 0,
         **{key: value for key, value in result.items() if key != "sensor"},
     }
 
@@ -867,7 +870,8 @@ def test_cancelled_update_stops_sensors_running_in_parallel(configured: Store, t
         assert stdout == b""
         for pid in pids:
             assert ended(pid), f"collector process {pid} survived"
-        assert "success" not in json.dumps(state(configured, SENSORS))
+        # Stopping an update is not a sensor failure: no error, failure count or run is saved.
+        assert state(configured, SENSORS) == {}
         assert all(records.files(configured, marker.name) == [] for marker in markers)
     finally:
         for leader in pids[::2]:
@@ -1156,17 +1160,29 @@ def test_line_list_file_expansion_and_oversized_text_truncation(configured: Stor
 
     def fake(argv: list[str], *_: object) -> bytes:
         seen.append(argv)
-        return emit({"id": "r1", "title": "UTF-8 boundary", "text": "héllo world", "attributes": {"keep": 1}})
+        return emit(
+            {"id": "r1", "title": "UTF-8 boundary", "text": "héllo world", "attributes": {"keep": 1, "partial": False}},
+            # Without attributes, which once crashed the run, and with it bf update.
+            {"id": "r2", "title": "Bare", "text": "alpha beta gamma"},
+        )
 
     result = collect(configured, "scoped", start=START, end=END, runner=fake, clock=lambda: NOW)
     assert seen == [["echo", "org/alpha", "org/beta"]]
-    assert result["records"] == 1
+    assert result["records"] == 2
     stored_record = records.find(configured, "scoped", "r1")
     assert stored_record is not None
-    # "héllo world" is 12 UTF-8 bytes; 10 bytes cuts cleanly before the end and marks attributes.truncated.
+    # "héllo world" is 12 UTF-8 bytes; 10 bytes cuts cleanly before the end and marks the text partial.
     assert stored_record[1].text == "héllo wor"
-    assert stored_record[1].attributes["truncated"] is True
-    assert stored_record[1].attributes["keep"] == 1
+    observed = timestamp(NOW.isoformat())
+    assert stored_record[1].attributes == {"keep": 1, "partial": True, "truncated": True, "observed": observed}
+    bare = records.find(configured, "scoped", "r2")
+    assert bare is not None
+    assert bare[1].text == "alpha beta"
+    assert bare[1].attributes == {"partial": True, "truncated": True, "observed": observed}
+    # Retrieval reports the cut text as incomplete evidence.
+    found = CliRunner().invoke(app, ["search", "alpha", "--scope", "memories/scoped", "--brain", "fixture"])
+    assert found.exit_code == 0, found.output
+    assert [item.get("partial") for item in json.loads(found.stdout)["items"]] == [True]
     with pytest.raises(Exception, match="lines placeholder"):
         Sensor(command=["echo", "{{lines:../escape.txt}}"])
 
@@ -1183,6 +1199,18 @@ def test_oversized_text_fails_without_truncation_opt_in(configured: Store) -> No
             clock=lambda: NOW,
         )
     assert records.find(configured, "sample", "big") is None
+
+
+def test_truncation_leaves_invalid_unicode_text_to_record_validation(configured: Store) -> None:
+    configured.write(
+        "bf.yaml", b"version: 8\nname: fixture\nsensors:\n  sample:\n    command: [echo]\n    truncate_text: true\n"
+    )
+    # A lone surrogate cannot be measured in UTF-8: the run names the field, not inaccessible files.
+    with pytest.raises(Error, match=r"0\.text: .*unicode.*; nothing was written"):
+        collect(
+            configured, "sample", start=START, end=END, runner=lambda *_: b'[{"id":"a","title":"t","text":"\\udce9"}]'
+        )
+    assert records.files(configured, "sample") == []
 
 
 def test_update_executes_due_sensors_concurrently(configured: Store) -> None:

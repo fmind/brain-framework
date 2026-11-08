@@ -769,7 +769,8 @@ def test_home_and_review_use_okf_project_status(brain: Store, status: str) -> No
     assert "review" not in entries["projects/log.md"]
 
 
-def test_period_pages_report_each_problem_and_stale_brain_once(brain: Store) -> None:
+def test_period_pages_report_each_problem_and_stale_brain_once(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(index, "_CONTENDED", 0.1)
     brain.write("projects/bad.md", b"---\nstale_after: soon\n---\n# Bad\n")
     for ref in ("2026-08", "memories/meetings", "memories/meetings/2026-08"):
         problems = cast("list[dict[str, object]]", read([brain], ref)["problems"])

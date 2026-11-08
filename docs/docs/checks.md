@@ -31,7 +31,7 @@ A valid New website note can still omit the reason for its decision: validation 
 - **Each enabled program**:
   - a script run directly must be an executable regular file;
   - behind a command on PATH, such as `[uv, run, ..., sensors/brief.py]`, the first `sensors/`, `routines/` or `channels/` path among the arguments must exist;
-  - channel `send`, `read` and `stream` commands are checked the same way;
+  - channel `send`, `read` and `stream` commands, and an enabled assistant's schedule `gate` commands, are checked the same way;
   - any `{{lines:relative/path.txt}}` argument file must exist, and the expanded command hold at most 128 items;
   - an enabled assistant's `prompt` file must be a regular file of at most 120,000 bytes.
 - **Policy rules** declared under `validate:` in `bf.yaml`, if any. Entry notes are projects, concepts and `ACTION.md` notes other than `index.md` and `log.md`.
@@ -57,7 +57,10 @@ How problems are reported:
 | ---------------------------------------------------------- | --------------------------------------------------------------------- |
 | `record links are not namespaced identities or URLs`       | Fix the sensor's `links` or `url`, then collect again, as below.      |
 | `an interrupted write left this temporary file; delete it` | A killed write left this `.write-` file beside its target: delete it. |
+| `stale_after is within N days`                             | Review the note named by `file`, then move its `stale_after` later.   |
 | `identities differ only by letter case`                    | Choose one spelling, as below.                                        |
+
+The stale warning appears only with `validate.warn_stale_days` set, once per entry note whose `stale_after` falls within that many days or has passed, with that date in `stale_after`, such as `2026-11-10`.
 
 The record links warning appears once per source, with its `records` count and one `file` to inspect. A window sensor rewrites only the records its window returns, so [backfill](sensors.md#backfills-and-coverage) older ones with `bf collect SENSOR --since DATE`.
 
