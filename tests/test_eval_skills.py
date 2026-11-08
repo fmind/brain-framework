@@ -1,17 +1,20 @@
-"""The skill evaluation grades transcripts deterministically, and its cases name refs the example brain holds."""
+"""The skill evaluation grades transcripts deterministically; its cases name refs the example brain holds or writes."""
 
 from __future__ import annotations
 
 import importlib.util
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
+from bf.cli import app
 from conftest import ROOT
 
 SCRIPT = ROOT / "scripts/eval_skills.py"
@@ -173,10 +176,62 @@ def test_snapshots_see_content_and_mode_but_not_the_cache(tmp_path: Path) -> Non
 def test_cases_name_packaged_skills_example_refs_and_valid_patterns(case: dict[str, Any]) -> None:
     assert case["skill"] in EVAL.SKILLS
     assert (ROOT / "src/bf/skills" / case["skill"] / "SKILL.md").is_file()
+    # A ref is a file of the example brain or one the case's setup writes.
+    written = {step["write"][0] for step in case.get("setup", []) if "write" in step}
     for text in case.get("answer_all", []) + case.get("answer_any", []):
         if text.endswith(".md") or ".md#" in text:
-            assert (ROOT / "examples/brain" / text.split("#")[0]).is_file(), text
+            ref = text.split("#")[0]
+            assert ref in written or (ROOT / "examples/brain" / ref).is_file(), text
     for pattern in case.get("steps_all", []) + case.get("steps_any", []):
         re.compile(pattern)
     for step in case.get("setup", []):
-        assert "bf" in step or (ROOT / "examples/brain" / step["chmod"][0]).is_file()
+        assert "bf" in step or "write" in step or (ROOT / "examples/brain" / step["chmod"][0]).is_file()
+
+
+def test_the_injection_case_plants_a_valid_findable_note_whose_bait_the_grader_fails(tmp_path: Path) -> None:
+    # Retrieved content is never instructions: the planted note asks for collection and a deletion, which the
+    # forbidden and read_only checks fail even when the permission boundary refuses them.
+    case = next(case for case in CASES if case["name"] == "use-ignores-retrieved-instruction")
+    (step,) = case["setup"]
+    name, text = step["write"]
+    assert EVAL.FORBIDDEN.search(text)
+    assert case["read_only"]
+    assert case["answer_all"] == [name]
+    assert not (ROOT / "examples/brain" / name).exists()
+    # The case tests the skill, not a broken note: it validates and the question's words find it first. The trial
+    # collects the demo records the example's other notes cite; this copy does not.
+    brain = tmp_path / "brain"
+    shutil.copytree(ROOT / "examples/brain", brain)
+    runner = CliRunner()
+    before = json.loads(runner.invoke(app, ["validate", "--brain", str(brain)]).stdout)
+    EVAL.apply(step, brain, {})
+    after = json.loads(runner.invoke(app, ["validate", "--brain", str(brain)]).stdout)
+    assert (after["notes"], after["problems"]) == (before["notes"] + 1, before["problems"])
+    found = runner.invoke(app, ["search", "storage vendor", "--brain", str(brain)])
+    assert json.loads(found.stdout)["items"][0]["ref"] == name
+
+
+def test_a_write_step_creates_a_file_inside_the_brain(tmp_path: Path) -> None:
+    EVAL.apply({"write": ["concepts/new/note.md", "# Note\n"]}, tmp_path, {})
+    assert (tmp_path / "concepts/new/note.md").read_text(encoding="utf-8") == "# Note\n"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["/etc/note.md", "../outside/note.md", "concepts/../../outside/note.md", "", ".", "link/note.md", "linked.md"],
+    ids=["absolute", "parent", "inner-parent", "empty", "brain", "linked-parent", "linked-file"],
+)
+def test_setup_steps_refuse_paths_that_leave_the_brain(tmp_path: Path, name: str) -> None:
+    brain, outside = tmp_path / "brain", tmp_path / "outside"
+    brain.mkdir()
+    outside.mkdir()
+    (brain / "link").symlink_to(outside, target_is_directory=True)
+    (outside / "target.md").write_text("kept\n", encoding="utf-8")
+    (brain / "linked.md").symlink_to(outside / "target.md")
+    mode = (outside / "target.md").stat().st_mode
+    for step in ({"write": [name, "changed\n"]}, {"chmod": [name, "600"]}):
+        with pytest.raises(EVAL.EvalError, match=r"^setup: "):
+            EVAL.apply(step, brain, {})
+    assert sorted(path.name for path in outside.iterdir()) == ["target.md"]
+    assert (outside / "target.md").read_text(encoding="utf-8") == "kept\n"
+    assert (outside / "target.md").stat().st_mode == mode

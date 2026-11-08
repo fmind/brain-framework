@@ -2,14 +2,22 @@
 
 import json
 import re
+import shlex
 import shutil
 from pathlib import Path
 
+import pytest
+import yaml
 from typer.testing import CliRunner
 
 from bf.cli import app
 from bf.config import load
 from bf.storage import Store
+
+EXAMPLE = Path(__file__).parents[1] / "examples/brain"
+SKILLS = sorted((EXAMPLE / "skills").glob("*/SKILL.md"))
+# The Agent Skills specification's frontmatter keys: https://agentskills.io/specification
+SPEC = {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 
 
 def test_example_collects_searches_and_resumes(tmp_path: Path) -> None:
@@ -92,3 +100,36 @@ def test_example_broader_relation_page_matches_the_readme(tmp_path: Path) -> Non
     assert [(item["ref"], item["relation"]) for item in items] == [
         ("actions/2026-09-25_retention-review/outputs/decision.md", "depends-on")
     ]
+
+
+def test_example_instructions_are_the_generated_starter_plus_its_own_rules(tmp_path: Path) -> None:
+    # The skill evaluation copies this brain: its agents load what a new brain's agents load, plus one local rule.
+    assert CliRunner().invoke(app, ["init", str(tmp_path / "new")]).exit_code == 0
+    title, starter = (tmp_path / "new/AGENTS.md").read_text().split("\n", 1)
+    example_title, example = (EXAMPLE / "AGENTS.md").read_text().split("\n", 1)
+    assert (title, example_title) == ("# Brain", "# Example brain")
+    # A refresh replaces the text above this heading and keeps the owner's rules below it.
+    assert "\n## Your rules\n" in starter
+    assert example.startswith(starter)
+    assert "fictional evidence" in example.removeprefix(starter)
+
+
+@pytest.mark.parametrize("entry", SKILLS, ids=lambda path: path.parent.name)
+def test_example_skills_follow_the_specification_and_their_reads_run(tmp_path: Path, entry: Path) -> None:
+    text = entry.read_text(encoding="utf-8")
+    frontmatter = yaml.safe_load(text.split("---\n")[1])
+    assert set(frontmatter) <= SPEC
+    assert frontmatter["name"] == entry.parent.name
+    assert re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", frontmatter["name"])
+    assert len(frontmatter["name"]) <= 64
+    assert 1 <= len(frontmatter["description"].strip()) <= 1024
+    assert 1 <= len(frontmatter.get("compatibility", "unset").strip()) <= 500
+    # A brain-local procedure retrieves through the installed bf, never a brain's pinned runtime.
+    assert not re.search(r"\buv\s+run\b", text)
+    brain = tmp_path / "example"
+    shutil.copytree(EXAMPLE, brain)
+    reads = re.findall(r"`(bf (?:read|search)\b[^`]*)`", text)
+    assert reads
+    for command in reads:
+        result = CliRunner().invoke(app, [*shlex.split(command)[1:], "--brain", str(brain)])
+        assert result.exit_code == 0, (command, result.output)

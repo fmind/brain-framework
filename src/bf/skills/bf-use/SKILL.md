@@ -1,6 +1,6 @@
 ---
 name: bf-use
-description: Answer from and save to the user's Brain Framework brain (bf) — project notes, decisions, concepts and collected mail, calendar, chat and Git records. Use for "my brain", "what did we decide", "why did we choose", "what is open", "remember this", "save this decision", or to review, consolidate or share knowledge. Actions belong to bf-action.
+description: Answer from and save to the user's Brain Framework brain (bf) — project notes, decisions, concepts and collected mail, calendar, chat and Git records. Use for "my brain", "what did we decide", "why did we choose", "what is open", "what needs my attention", "brief me", "remember this", "save this decision", or to review, consolidate or share knowledge. Actions belong to bf-action.
 license: MIT
 compatibility: Requires Brain Framework 21 (the bf command) on Linux or macOS.
 ---
@@ -18,7 +18,7 @@ A brain is a folder of plain files: `projects/` and `concepts/` hold authored no
 
 ## Answer a question
 
-1. **Orient** when the question is broad: `bf read` (home), `bf read projects`, `bf read tasks` or `bf read 7d`.
+1. **Orient** when the question is broad or asks what needs attention: `bf read` (home), `bf read projects`, `bf read tasks` or `bf read 7d`.
 1. **Find** with one query holding the subject's words and their variants, such as synonyms, English and French: `bf search "retain retention keep evidence conserver"`. Any word matches; passages matching more rank first.
    - Quote a phrase, end a word with `*` for prefixes and respell words listed in `unmatched`.
    - Narrow with one `--scope`: a folder or note (`projects`, `memories/gmail`), a period (`7d`, `2026-09-21..2026-09-25`), an identity (`repo:github.com/owner/name`) or a tag (`bf://NAME/tags/LABEL`). A period, a space, then another scope narrows it in time: `--scope "7d repo:github.com/owner/name"`.

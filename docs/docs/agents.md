@@ -138,9 +138,30 @@ The [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/
 
 Copy them into a folder only you write, such as your personal brain's `hooks/`. Hosts run them at every session or prompt, so never register a hook from a brain others can push to. The [hooks README](https://github.com/fmind/brain-framework/blob/main/examples/hooks/README.md#connect-the-host) installs, previews and connects them for Claude Code and Codex.
 
+## Add your own workflow skills
+
+The packaged skills stay generic. Keep procedures specific to your work, such as a weekly review, in the brain's `skills/` folder, one folder per skill. The [example brain's weekly review](https://github.com/fmind/brain-framework/blob/main/examples/brain/skills/weekly-review/SKILL.md) shows one:
+
+```text
+skills/weekly-review/SKILL.md
+```
+
+- **Format**: write each skill in the [Agent Skills format](https://agentskills.io/specification). The frontmatter `name` matches the folder, and the `description` says when to use the skill, within 1,024 characters.
+- **Lookups**: a procedure finds evidence with the installed `bf search` and `bf read`, never through a brain's pinned runtime or `uv run`, which would run code the brain supplies.
+- **Checks**: the specification's reference validator, [`skills-ref`](https://github.com/agentskills/agentskills/tree/main/skills-ref), checks the frontmatter and naming rules. Install it as its README shows, then run `skills-ref validate ~/brain/skills/weekly-review`.
+
+Hosts discover skills in their own folders, so connect each skill on each machine. For Claude Code, link it into the brain's `.claude/skills/`:
+
+```bash
+mkdir -p ~/brain/.claude/skills
+ln -s ../../skills/weekly-review ~/brain/.claude/skills/weekly-review
+```
+
+Add `/.claude/skills/` to the brain's `.gitignore`, then start a new session in the brain and ask: “Run my weekly review.” Each machine chooses its own hosts and links. A host follows a linked skill as instructions: link only skills you wrote or reviewed, and review a linked skill again after pulling changes others made to it in a [team brain](team.md).
+
 ## Refresh brain instructions
 
-The generated `AGENTS.md` is short, because every session loads it. It covers the brain's layout, the orient, find, verify and answer loop, when a reply is incomplete, which commands need the user's authority and when to save an outcome. Authoring rules live in the `bf-use` skill.
+The generated `AGENTS.md` is short, because every session loads it. It covers the brain's layout, the orient, find, verify and answer loop, when a reply is incomplete, which commands need the user's authority and when to save an outcome. Authoring rules live in the `bf-use` skill. It ends with a `## Your rules` heading: write your own rules below it.
 
 `bf init` writes it once, so it keeps the guidance of the BF version that created the brain. Compare it with the installed version's template:
 
@@ -151,7 +172,7 @@ diff "$scratch/brain/AGENTS.md" ~/brain/AGENTS.md
 rm -r "$scratch"
 ```
 
-The generated file is the same for every brain, so no output means your instructions match. Otherwise copy the new guidance into `~/brain/AGENTS.md` by hand, keep your additions and run `bf validate`. The scratch brain is never registered.
+The generated file is the same for every brain. Your rules show as added lines after `## Your rules`; any other difference is new guidance. To refresh, replace the text above `## Your rules` with the template's and keep your rules below it. A brain created before this heading existed needs one manual merge: copy the whole template, then move your additions below the heading. The scratch brain is never registered.
 
 ## Boundaries
 

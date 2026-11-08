@@ -156,6 +156,10 @@ bf read concepts/selected-evidence.md --brain "$bf_team"
 
 The integration test exercises this isolated destination with retrieval cases. It checks this prepared fixture, not automatic redaction of arbitrary notes. For real transfers, use the [sharing guide](../../src/bf/skills/bf-use/references/share.md); review the complete candidate for its audience before an authorized write or publication.
 
+## Try a brain-local skill
+
+`skills/weekly-review/SKILL.md` is a workflow skill kept with this brain. It reads the home, projects, tasks and recent-activity pages, then proposes note updates and writes only the ones you approve. To try it with an agent host and a `bf` on PATH, link it into this copy's host folder, as [Add your own workflow skills](../../docs/docs/agents.md#add-your-own-workflow-skills) shows for Claude Code. Then start a session in the copy and ask “Run my weekly review.” Its answer depends on the model and these fictional notes; no outcome is asserted. `bf validate` and `bf eval` ignore `skills/`, so their results above stay the same.
+
 ## Clean up
 
 Remove only this disposable copy and the shell wrapper:

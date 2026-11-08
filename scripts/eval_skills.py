@@ -1,13 +1,13 @@
 """Run the packaged skills in headless Claude Code against copies of the fictional example brain and grade each session.
 
-Each trial copies `examples/brain` into a fresh folder, collects its local demo sensor, installs the skills of this
-checkout into the brain's `.claude/skills/` and asks one question from `scripts/eval_skills.json`. The session sees only
-project settings and skills, no user or parent `CLAUDE.md`, the tools Bash, Read, Edit, Write, Glob, Grep and Skill, and
-a PATH holding this checkout's `bf` plus `/usr/bin:/bin`. Bash may run `bf` and `python3`, and Claude Code's built-in
-read-only commands; edits stay inside the brain. Grading is deterministic: the transcript (skill invoked, commands
-attempted, files read, refusals, final answer) and the brain afterwards (changed files, `bf validate`). Grades and
-transcripts stay under the run folder. The run needs Claude Code logged in and spends model tokens, so it is not part
-of `mise run all`.
+Each trial copies `examples/brain` into a fresh folder, installs the skills of this checkout into the brain's
+`.claude/skills/`, collects its local demo sensor, applies the case's setup steps (write a file, change a mode or run
+`bf`) and asks one question from `scripts/eval_skills.json`. The session sees only project settings and skills, no user
+or parent `CLAUDE.md`, the tools Bash, Read, Edit, Write, Glob, Grep and Skill, and a PATH holding this checkout's `bf`
+plus `/usr/bin:/bin`. Bash may run `bf` and `python3`, and Claude Code's built-in read-only commands; edits stay inside
+the brain. Grading is deterministic: the transcript (skill invoked, commands attempted, files read, refusals, final
+answer) and the brain afterwards (changed files, `bf validate`). Grades and transcripts stay under the run folder. The
+run needs Claude Code logged in and spends model tokens, so it is not part of `mise run all`.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -232,12 +232,35 @@ def prepare(case: dict[str, Any], trial: Path) -> tuple[Path, dict[str, str]]:
         raise EvalError("setup: bf skills did not install every skill")
     bf(env, brain, "update")
     for step in case.get("setup", []):
-        if "chmod" in step:
-            path, mode = step["chmod"]
-            (brain / path).chmod(int(mode, 8))
-        else:
-            bf(env, brain, *step["bf"], fails=step.get("fails", False))
+        apply(step, brain, env)
     return brain, env
+
+
+def inside(brain: Path, name: str) -> Path:
+    """A setup step's brain-relative path; an absolute path, a `..` segment or a symbolic link on the way fails."""
+    relative = PurePosixPath(name)
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise EvalError(f"setup: {name!r} must be a relative path inside the brain")
+    path = brain
+    for part in relative.parts:
+        path /= part
+        if path.is_symlink():
+            raise EvalError(f"setup: {name!r} passes through a symbolic link")
+    return path
+
+
+def apply(step: dict[str, Any], brain: Path, env: dict[str, str]) -> None:
+    """One case setup step: write a UTF-8 file, change a file's mode or run `bf`."""
+    if "write" in step:
+        name, text = step["write"]
+        path = inside(brain, name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    elif "chmod" in step:
+        name, mode = step["chmod"]
+        inside(brain, name).chmod(int(mode, 8))
+    else:
+        bf(env, brain, *step["bf"], fails=step.get("fails", False))
 
 
 def session_argv(claude: str, model: str, budget: float, brain: Path, prompt: str) -> list[str]:
