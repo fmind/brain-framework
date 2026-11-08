@@ -18,7 +18,7 @@ jobs:
       - name: Install locked toolchain
         uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: 2026.11.3 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
+          version: 2026.11.4 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
           cache: false # These artifacts can be published; never restore a PR cache.
       - name: Match release version to tag
         if: github.ref_type == 'tag'
@@ -57,7 +57,7 @@ jobs:
       - name: Install locked toolchain
         uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
-          version: 2026.11.3 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
+          version: 2026.11.4 # Deliberate pin; v5's 24-hour release-age default applies only without a version.
           cache: false # These artifacts can be published; never restore a PR cache.
       - name: Run tests
         run: mise run test

@@ -31,7 +31,7 @@ A minor release. The brain format (`version: 8`), the reply schemas, the queue f
 ### Changed
 
 - **The assistant queue no longer writes lifecycle events that nothing reads**, saving one durable transaction per job start.
-- **Dependencies and repository checks.** pymdown-extensions 13.0 and sse-starlette 3.7.0; the weekly Security workflow ignores the exact fingerprints of synthetic credential URLs in pre-v20 history and runs each audit even when an earlier one fails; `scripts/eval_skills.py` grades a session killed at `--timeout`; one timing-dependent test is now deterministic.
+- **Dependencies and repository checks.** pymdown-extensions 13.0 and sse-starlette 3.7.0; the workflows pin mise 2026.11.4, which `mise.toml` now requires; the weekly Security workflow ignores the exact fingerprints of synthetic credential URLs in pre-v20 history and runs each audit even when an earlier one fails; `scripts/eval_skills.py` grades a session killed at `--timeout`; one timing-dependent test is now deterministic.
 
 ## [v21.2.0](https://github.com/fmind/brain-framework/releases/tag/v21.2.0) - 2026-11-08
 

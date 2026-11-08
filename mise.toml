@@ -1,6 +1,6 @@
 # https://mise.jdx.dev/configuration.html
 # Fail early on a mise older than the one CI pins (keep equal to the workflow `version:`).
-min_version = "2026.11.3"
+min_version = "2026.11.4"
 
 [tools]
 betterleaks = "1.10.0"
