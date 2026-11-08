@@ -22,6 +22,7 @@ import os
 import re
 import selectors
 import ssl
+import stat
 import subprocess
 import sys
 import time
@@ -39,6 +40,7 @@ MAX_ID, MAX_ENCODED_ID, MAX_TITLE, MAX_TEXT = 4096, 7988, 4096, 4 << 20
 MAX_REF, MAX_LINKS = 8192, 1000  # One URL, link, alias or field value; links, aliases and mapped values per record.
 MAX_FIELDS = 2 << 20  # Every record field other than `text`, as UTF-8 JSON.
 MAX_OUTPUT = 16 << 20  # One sensor run's JSON array; BF's `max_bytes` defaults to 64 MiB.
+MAX_SECRET = 64 << 10  # One credential file read by `secret`.
 # C0 and C1 control characters, which BF rejects in ids, titles, URLs and identities.
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # A surrogate code point left alone: `json.loads` already joins valid pairs, and UTF-8 cannot encode one.
@@ -118,6 +120,49 @@ def state_dir() -> Path:
     return path
 
 
+def secret(path: str | os.PathLike[str]) -> str:
+    """The credential in a private file outside the brain, such as a token in `~/.config/acme/token` with mode 600.
+
+    Pass the file's path as a sensor argument, such as `"{{home}}/.config/acme/token"`: unlike variables exported in
+    a shell profile, it reaches the sensor under systemd and launchd too. The file must be a regular file, not a
+    link, owned by you with no group or other permission, outside `BF_BRAIN` and at most 64 KiB of UTF-8. One
+    trailing newline is removed. Errors name the file and the problem, never its content.
+    """
+    file = Path(path).expanduser()
+    name = file.name or "secret"
+    if not file.is_absolute():
+        raise SensorError(f"secret file {name} needs an absolute path outside the brain")
+    try:
+        info = file.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise SensorError(f"secret file {name} must be a regular file, not a link or special file")
+        if info.st_uid != os.getuid():
+            raise SensorError(f"secret file {name} must be owned by you")
+        if info.st_mode & 0o077:
+            raise SensorError(f"secret file {name} is open to your group or others; run chmod 600 on it")
+        if info.st_size > MAX_SECRET:
+            raise SensorError(f"secret file {name} exceeds {MAX_SECRET} bytes")
+        brain = os.environ.get("BF_BRAIN", "")
+        if brain and file.resolve(strict=True).is_relative_to(Path(brain).resolve()):
+            raise SensorError(f"secret file {name} is inside the brain; move it to a private folder outside it")
+        # Opening without following a link, then comparing inodes, reads the very file checked above.
+        with os.fdopen(os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            data = handle.read(MAX_SECRET + 1)
+    except OSError:
+        raise SensorError(f"cannot read secret file {name}; check that it exists and is readable") from None
+    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) or len(data) > MAX_SECRET:
+        raise SensorError(f"secret file {name} changed while it was read; retry")
+    try:
+        value = data.decode("utf-8")
+    except UnicodeError:
+        raise SensorError(f"secret file {name} is not UTF-8 text") from None
+    value = value[:-2] if value.endswith("\r\n") else value.removesuffix("\n")
+    if not value:
+        raise SensorError(f"secret file {name} is empty")
+    return value
+
+
 def run(argv: Sequence[str], *, timeout: float, max_bytes: int) -> bytes:
     """Run a provider CLI with literal argv, no shell, from `/`, and return its bounded stdout.
 
@@ -179,8 +224,9 @@ class _SameHostHttps(urllib.request.HTTPRedirectHandler):
 def fetch(url: str, *, timeout: float, max_bytes: int, headers: Mapping[str, str] | None = None) -> bytes:
     """GET an HTTPS URL with verified TLS and return its bounded body; refuses other schemes and credentials in URLs.
 
-    Redirects stay on the same HTTPS host. Pass tokens in `headers`, loaded at run time from the environment, never
-    from a file in the brain. `timeout` bounds each socket operation and the whole body read.
+    Redirects stay on the same HTTPS host. Pass tokens in `headers`, read at run time with `secret` from a private file
+    outside the brain, never from bf.yaml, the command line or the brain. `timeout` bounds each socket operation and
+    the whole body read.
     """
     parts = urlsplit(url)
     if parts.scheme != "https" or not parts.hostname or parts.username or CONTROL.search(url):

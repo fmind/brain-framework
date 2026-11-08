@@ -23,7 +23,7 @@ from bf.config import ABSENT, load, register
 from bf.health import assistant_health, attention, report, source_health
 from bf.history import log_path
 from bf.messages import Message
-from bf.models import Error, Query, encode, timestamp
+from bf.models import WEEKDAYS, Error, Query, encode, timestamp
 from bf.retrieve import read, search
 from bf.runtime import Queue
 from bf.storage import QUEUE, Store, runtime_store, state_store
@@ -533,6 +533,54 @@ def test_a_wall_clock_schedule_is_overdue_once_a_slot_after_its_last_success_pas
     # A weekly schedule that ran last Monday is fresh on Sunday, and overdue after five missed weeks.
     assert freshness("weekly", datetime(2026, 9, 21, 9, 0, 5, tzinfo=UTC)) == "fresh"
     assert freshness("weekly", datetime(2026, 8, 24, 9, 0, 5, tzinfo=UTC)) == "overdue"
+
+
+def test_a_schedule_without_a_success_needs_attention_only_once_due(brain: Store) -> None:
+    assisted(brain)
+    weekdays = b"      morning: {at: '07:30', timezone: UTC, days: [mon, tue, wed, thu, fri]}\n"
+    brain.write("bf.yaml", ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + weekdays))
+    sunday, monday = datetime(2026, 9, 27, 19, 5, tzinfo=UTC), datetime(2026, 9, 28, 7, 31, tzinfo=UTC)
+    # Declared on Sunday evening: it has not run, which its freshness says, but its first slot is Monday morning.
+    status = cast("dict", report([brain], now=sunday))
+    notes = status["brains"][0]["assistants"]["notes"]
+    assert (notes["freshness"], notes["schedules"]["morning"]["freshness"]) == ("never", "never")
+    assert notes["schedules"]["morning"]["next_due"] == timestamp(monday.replace(minute=30).isoformat())
+    assert (status["brains"][0]["attention"], status["healthy"]) == ([], True)
+    assert attention(brain, now=sunday) == []
+    # Monday's slot passed without a run: the dispatcher would start it now, so it is late.
+    late = [{"assistant": "notes", "freshness": "never"}]
+    status = cast("dict", report([brain], now=monday))
+    assert (status["brains"][0]["attention"], status["healthy"]) == (late, False)
+    assert attention(brain, now=monday) == late
+    # An interval schedule without a success is due at once, even beside one that waits.
+    brain.write(
+        "bf.yaml",
+        ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + weekdays + b"      hourly: {every: 3600}\n"),
+    )
+    assert attention(brain, now=sunday) == late
+    # One that ran keeps its own freshness: the waiting schedule alone never makes the assistant late.
+    Queue(brain).set_progress("schedule:notes:schedule:hourly", {"success": timestamp(sunday.isoformat())})
+    assert assistant_health(brain, now=sunday)["notes"]["freshness"] == "never"
+    assert attention(brain, now=sunday) == []
+
+
+def test_status_check_passes_before_a_new_schedule_first_falls_due(brain: Store) -> None:
+    assisted(brain)
+    # A weekday three days away is never today, even if the test crosses midnight.
+    later = WEEKDAYS[(datetime.now(UTC).weekday() + 3) % 7]
+    waiting = f"      weekly: {{at: '00:00', timezone: UTC, days: [{later}]}}\n".encode()
+    command = ["status", "--check", "--brain", str(brain.root)]
+    brain.write("bf.yaml", ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + waiting))
+    result = CliRunner().invoke(app, command)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["brains"][0]["assistants"]["notes"]["freshness"] == "never"
+    brain.write(
+        "bf.yaml",
+        ASSISTED.replace(b"  notes:\n", b"  notes:\n    schedules:\n" + waiting + b"      hourly: {every: 3600}\n"),
+    )
+    result = CliRunner().invoke(app, command)
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["brains"][0]["attention"] == [{"assistant": "notes", "freshness": "never"}]
 
 
 def test_coverage_marks_an_assistant_with_unresolved_failed_work_as_failed(brain: Store) -> None:

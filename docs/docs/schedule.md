@@ -149,6 +149,7 @@ To keep collecting without an open terminal, run `bf watch --json` as a user ser
 
 - **Set `PATH`**: a service does not read your shell profile. List the folders of `bf` and of every provider CLI your programs call, as `command -v bf` and `command -v gh` print them. Prefer stable folders, such as mise or asdf shims, to version-specific ones.
 - **Copy `XDG_CONFIG_HOME` and `XDG_STATE_HOME`** when your shell sets them, so the service shares registration, run history and the assistant queue with your terminal.
+- **Expect no profile variables**: the units below set only `PATH`, so variables exported in your shell profile, such as a provider token, are absent there. [Credentials](sensors.md#credentials) says where programs find them instead.
 - **Keep it current and private**: edit the file by hand when `bf`, the brain or a provider CLI moves. Keep it out of a shared brain's Git history, since it holds your paths.
 
 On Linux, save a systemd user service as `~/.config/systemd/user/bf-watch.service`:
@@ -274,13 +275,15 @@ Run history is local, even when records are shared, so check health on the colle
 | --------- | ------------------------------------------------------------------- |
 | `fresh`   | Scheduled and succeeded on this machine within twice its `refresh`. |
 | `overdue` | Scheduled and has succeeded, but not within twice its `refresh`.    |
-| `never`   | Scheduled with no local success.                                    |
+| `never`   | Scheduled with no local success; it needs attention once due.       |
 | `manual`  | `refresh: 0`.                                                       |
 | `unknown` | A disabled program or historical source.                            |
 
 A sensor succeeds only with a collection reaching the moment it runs: one that only [backfilled](sensors.md#backfills-and-coverage) older windows stays `never`.
 
-`bf status --check` exits 1 for every [`attention`](commands.md#attention-entries) entry, such as a scheduled program that is `overdue`, `never` succeeded, last failed or [fell silent](#silent-sources). See [`messaging`](commands.md#messaging) for the assistant and channel fields.
+`bf status --check` exits 1 for every [`attention`](commands.md#attention-entries) entry, such as a scheduled program that is `overdue`, last failed, [fell silent](#silent-sources) or is due and `never` succeeded. See [`messaging`](commands.md#messaging) for the assistant and channel fields.
+
+A sensor or routine with no local success is due at once. A new assistant schedule joins `attention` only once it is due, when watch would start it: a `mon`–`fri` schedule `at: "07:30"` declared on Sunday evening shows `never`, but stays out until Monday at 07:30. An `every` schedule is due at once, unless its `days` exclude today.
 
 ### Silent sources
 

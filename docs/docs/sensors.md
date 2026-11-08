@@ -167,6 +167,38 @@ Every sensor and routine runs from the brain's root with standard input empty (o
 
 Values of these variables in your own environment never reach a program. [Assistants](prompts.md) also receive why they run.
 
+#### Credentials {#credentials}
+
+Give a program its credentials in this order of preference:
+
+1. **A provider CLI login**, such as `gh auth login`. The CLI, such as `gh`, `gws` or `gcloud`, keeps the token, and the program only calls it.
+2. **A private file outside the brain**, readable only by you (mode `600`), passed by path, such as `"{{home}}/.config/acme/token"`. It works under systemd and launchd, whose [service files](schedule.md#run-watch-as-a-service) pass only `PATH`. The kit's `secret()` [reads it](#build-a-sensor-with-the-kit).
+3. **The OS keyring**, for interactive sessions only: a Secret Service keyring is often locked for a user service that runs while you are logged out.
+
+Never put a secret in `bf.yaml`, a command's arguments, the brain or a service file. Arguments show in process listings, and the brain may be shared through Git.
+
+#### Set a program's environment
+
+To give one program its own variables, such as the account a provider CLI uses, start its command with `env`:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/sensors/
+sensors:
+  gmail:
+    command: [
+      env,
+      "GOOGLE_WORKSPACE_CLI_CONFIG_DIR={{home}}/.config/gws-personal",
+      sensors/gmail-headers.py,
+      "{{start}}",
+      "{{end}}",
+    ]
+    refresh: 3600
+```
+
+To share settings between programs, keep them in a line file, such as `[env, "{{lines:settings/google.env}}", sensors/gmail-headers.py, ...]` with one `NAME=value` per line. Line files do not expand `{{home}}`: write absolute paths there.
+
+`env` sets these values after BF [removes startup variables](limits.md#processes-and-logs), so they reach the program as written. Keep this recipe for settings such as accounts and profiles: never set `LD_*`, `DYLD_*`, `PYTHON*` or `NODE_OPTIONS` here, and never a secret.
+
 ## Quiet a high-volume source
 
 A feed that collects many records a day, such as news headlines, can crowd period pages and search. Mark it `low` to keep it as background evidence:
@@ -184,7 +216,7 @@ sensors:
 
 ## Any source you can script
 
-A CLI, API, database query or export can become a sensor. The script owns authentication, pagination, rate limits and field selection. Prefer provider CLIs for credentials and never print secrets. For example, a feedback sensor could print this fictional record, linked to the project:
+A CLI, API, database query or export can become a sensor. The script owns authentication, pagination, rate limits and field selection. [Credentials](#credentials) says where it finds its tokens; never print secrets. For example, a feedback sensor could print this fictional record, linked to the project:
 
 ```json
 [{
@@ -274,7 +306,7 @@ See [process safeguards](limits.md#processes-and-logs) for timeouts and cancella
 
 ## Build a sensor with the kit
 
-[`_sensor.py`](https://github.com/fmind/brain-framework/blob/main/examples/sensors/_sensor.py) is a standard-library helper file to copy next to your sensors, from the tag matching `bf --version`. It reads the window and state directory from the variables above, runs provider CLIs and fetches HTTPS pages within time and size bounds, builds identities, masks credential shapes and prints records within BF's bounds. [`github-issues.py`](https://github.com/fmind/brain-framework/blob/main/examples/sensors/README.md) shows a complete sensor built on it. The kit is a file you own and review, not a dependency: update it deliberately, like any copied example.
+[`_sensor.py`](https://github.com/fmind/brain-framework/blob/main/examples/sensors/_sensor.py) is a standard-library helper file to copy next to your sensors, from the tag matching `bf --version`. It reads the window and state directory from the variables above, reads a private [credential file](#credentials) with `secret()`, runs provider CLIs and fetches HTTPS pages within time and size bounds, builds identities, masks credential shapes and prints records within BF's bounds. [`github-issues.py`](https://github.com/fmind/brain-framework/blob/main/examples/sensors/README.md) shows a complete sensor built on it. The kit is a file you own and review, not a dependency: update it deliberately, like any copied example.
 
 Print attributes from the [standard vocabulary](schema.md#standard-vocabulary), such as `author_refs` or `status`, and a brain created by `bf init` maps them without any `fields:` setting; other brains map them explicitly.
 

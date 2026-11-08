@@ -35,10 +35,6 @@ _COUNTERS = (
 _RETAINED = frozenset({"forgotten", "expired"})
 
 
-# Freshness of a scheduled program that has not succeeded within twice its refresh, or ever.
-_LATE = frozenset({"overdue", "never"})
-
-
 def _freshness(program: Program | None, success: str, now: datetime) -> str:
     """Scheduled programs are fresh within twice their refresh, based on local run history.
 
@@ -309,14 +305,33 @@ def assistant_health(
     return result
 
 
+def _late(settings: Program | Assistant, health: Mapping[str, object], now: datetime) -> bool:
+    """Whether a scheduled program is `overdue`, or has `never` succeeded and is due now by the dispatcher's rule.
+
+    A scheduled sensor or routine without a success is due at once. An assistant is late once one of its `never`
+    schedules falls due: a weekday `at` schedule declared on Sunday waits for Monday's slot. No grace period applies,
+    so a schedule that does not run shows from its slot.
+    """
+    if health["freshness"] != "never" or not isinstance(settings, Assistant):
+        return health["freshness"] in {"overdue", "never"}
+    schedules = health.get("schedules")
+    return isinstance(schedules, Mapping) and any(
+        isinstance(item := schedules.get(name), Mapping)
+        and item.get("freshness") == "never"
+        and spec.next_due(now) <= now
+        for name, spec in settings.schedules.items()
+    )
+
+
 def _attention(
     config: Config,
     sources: dict[str, dict[str, object]],
     routines: dict[str, dict[str, object]],
     assistants: dict[str, dict[str, object]],
+    now: datetime,
 ) -> list[dict[str, object]]:
-    """Scheduled programs this machine runs that failed, have not succeeded recently or, for a source, fell silent, and
-    assistants with failed work however it was asked."""
+    """Scheduled programs this machine runs that failed, are late or, for a source, fell silent, and assistants with
+    failed work however it was asked."""
     result: list[dict[str, object]] = []
     for kind, healths, programs in (
         ("sensor", {name: health for name, health in sources.items() if name not in config.assistants}, config.sensors),
@@ -335,7 +350,7 @@ def _attention(
                     if isinstance(settings, Assistant)
                     else settings.refresh
                 )
-                and (failed or silent or health["freshness"] in _LATE)
+                and (failed or silent or _late(settings, health, now))
             ):
                 result.append(
                     {
@@ -371,6 +386,7 @@ def attention(
         source_health(store, counts, now=now, config=config),
         routine_health(store, now=now, config=config),
         assistant_health(store, now=now, config=config),
+        now,
     )
 
 
@@ -475,7 +491,7 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             )
         # The reasons a brain is unhealthy, beside its problems: the home page's late or failed programs, then
         # unresolved assistant work and failing channels.
-        alerts = _attention(config, coverage, routines, assistants)
+        alerts = _attention(config, coverage, routines, assistants, now)
         named = {entry.get("assistant") for entry in alerts}
         alerts += [
             {"assistant": name, "freshness": str(assistants.get(name, {}).get("freshness", "unknown")), "failed": True}

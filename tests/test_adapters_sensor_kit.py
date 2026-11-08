@@ -236,6 +236,53 @@ def test_run_is_bounded_reaped_and_starts_outside_the_brain(tmp_path: Path, monk
         sensor.run([str(tmp_path / "missing")], timeout=30, max_bytes=1024)
 
 
+def test_secret_reads_only_a_private_file_outside_the_brain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sensor = kit()
+    brain, private = tmp_path / "brain", tmp_path / "config"
+    brain.mkdir()
+    private.mkdir()
+    monkeypatch.setenv("BF_BRAIN", str(brain))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def write(name: str, data: bytes, mode: int = 0o600, folder: Path = private) -> Path:
+        (path := folder / name).write_bytes(data)
+        path.chmod(mode)
+        return path
+
+    token = write("token", f"{SECRET}\n".encode())
+    assert sensor.secret(token) == sensor.secret("~/config/token") == SECRET
+    # Exactly one trailing newline goes, as an editor or `echo` writes it.
+    assert sensor.secret(write("windows", f"{SECRET}\r\n".encode())) == SECRET
+    assert sensor.secret(write("blank", b"a\n\n")) == "a\n"
+    assert sensor.secret(write("full", b"x" * (64 << 10))) == "x" * (64 << 10)
+    (link := private / "link").symlink_to(token)
+    os.mkfifo(fifo := private / "fifo", 0o600)
+    # A folder linked into the brain resolves inside it, wherever its own path is.
+    (alias := tmp_path / "alias").symlink_to(brain, target_is_directory=True)
+    write("inside", SECRET.encode(), folder=brain)
+    for path, message in (
+        (link, "must be a regular file"),
+        (fifo, "must be a regular file"),
+        (write("group", SECRET.encode(), 0o640), "open to your group or others; run chmod 600"),
+        (write("others", SECRET.encode(), 0o604), "open to your group or others; run chmod 600"),
+        (brain / "inside", "inside the brain"),
+        (alias / "inside", "inside the brain"),
+        (write("large", (SECRET * 2000).encode()[: 65 << 10]), "exceeds 65536 bytes"),
+        (write("empty", b"\n"), "is empty"),
+        (write("binary", SECRET.encode() + b"\xff"), "not UTF-8"),
+        (private / "missing", "cannot read secret file missing"),
+        ("config/token", "needs an absolute path"),
+    ):
+        with pytest.raises(sensor.SensorError, match=message) as error:
+            sensor.secret(path)
+        assert SECRET not in str(error.value)
+    # A copied sensor fails closed on a shared token file: one line naming the problem, never the token.
+    body = "import os\n_sensor.main(lambda: [_sensor.record('a', _sensor.secret(os.environ['TOKEN']))], 'x')\n"
+    result = driver(tmp_path, body, {"TOKEN": str(private / "group")})
+    failed(result, SECRET)
+    assert "secret file group is open to your group or others" in result.stderr
+
+
 def test_fetch_stays_on_one_https_host() -> None:
     sensor = kit()
     for url in (
