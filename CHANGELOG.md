@@ -4,7 +4,7 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
-A minor release. The brain format (`version: 8`), the reply schemas, the queue format and the search cache are unchanged; `bf.yaml` accepts one more form, so no upgrade step is needed. Run `bf skills DIR` to update installed skills.
+A minor release. The brain format (`version: 8`), the reply schemas, the queue format and the search cache are unchanged, though period pages return fewer fields per `changed` record; `bf.yaml` accepts one more form, so no upgrade step is needed. Run `bf skills DIR` to update installed skills.
 
 ### Fixed
 
@@ -26,10 +26,13 @@ A minor release. The brain format (`version: 8`), the reply schemas, the queue f
 
 ### Added
 
+- **`bf export --scope SCOPE` exports only what a search with that scope would search.** It takes the same scopes as `bf search --scope`, such as `memories/gmail`, `memories/gmail/7d`, `projects` or `7d repo:github.com/owner/name`, and fails the same way. `bf export --kind items --scope memories/SOURCE` gives a script or routine every record of one source in one stream, with no page to follow, instead of reading `memories/` files; with `--kind edges` or `--kind identities`, a scope keeps what its items assert or answer to.
 - **`bf export --kind items` marks incomplete records with `"partial":true`**, as search and read already do.
 
 ### Changed
 
+- **BF gives a program 5 seconds to clean up before killing it.** When a run ends, times out, overflows `max_bytes` or is cancelled, and when watch stops a stream adapter, BF sends SIGTERM to the program's process group, waits up to 5 seconds, then sends SIGKILL to what remains, so a sensor can remove a private temporary copy in a SIGTERM handler. A run lasts at most its `timeout` plus this grace, programs stopped together share one grace, and a run BF stops still fails with its cause, such as `program timed out after 300s`. The sensor kit and bf-maintain show the handler.
+- **Period pages leave more room for their items.** `bf read 7d`, `bf read 2026-10` and other period pages list each `changed` record with only `ref`, `kind`, `title`, `time` and `updated`, as the home page does; read a ref for its excerpt, URL and fields. On a brain with 67 sources a 7-day page now holds 35 items instead of 19.
 - **The assistant queue no longer writes lifecycle events that nothing reads**, saving one durable transaction per job start.
 - **Dependencies and repository checks.** pymdown-extensions 13.0 and sse-starlette 3.7.0; the workflows pin mise 2026.11.4, which `mise.toml` now requires; the weekly Security workflow ignores the exact fingerprints of synthetic credential URLs in pre-v20 history and runs each audit even when an earlier one fails; `scripts/eval_skills.py` grades a session killed at `--timeout`; one timing-dependent test is now deterministic.
 
