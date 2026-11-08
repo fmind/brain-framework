@@ -8,6 +8,10 @@ record format `version: 8`; review it like any sensor code, since it belongs to 
 The kit enforces the record bounds in https://fmind.github.io/brain-framework/docs/limits/. A sensor built on it
 prints one JSON array of records, or fails closed: exit 1, nothing on stdout and one content-free line on stderr,
 so BF keeps the records it saved. Importing it opens no connection and starts no process.
+
+BF stops a sensor's process group with SIGTERM and sends SIGKILL 5 seconds later. A sensor that keeps a private
+temporary copy can turn SIGTERM into an exit, `signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))`, so its
+`finally` blocks and `tempfile` contexts remove the copy.
 """
 
 from __future__ import annotations
@@ -119,8 +123,8 @@ def run(argv: Sequence[str], *, timeout: float, max_bytes: int) -> bytes:
 
     Its stderr is discarded, never echoed: it can quote private data. It starts from `/` because some CLIs, such as
     gws, load a `.env` file from their working directory or any parent, and one in the brain could switch accounts.
-    The child stays in BF's process group, so BF's cancellation kills it too; the kit kills it on timeout or
-    overflow, and BF ends any descendant when the sensor exits.
+    The child stays in BF's process group, so BF's stop reaches it too; the kit kills it on timeout or overflow,
+    and BF ends any descendant when the sensor exits.
     """
     name = Path(argv[0]).name
     env = {key: value for key, value in os.environ.items() if key not in LOCAL}

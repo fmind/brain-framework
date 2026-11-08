@@ -251,6 +251,28 @@ time.sleep(60)
     assert heading("stopped").fullmatch(entries(brain)[-1])
 
 
+def test_a_stopped_stream_adapter_gets_sigterm_before_the_kill(brain: Store) -> None:
+    # An adapter can close its provider connection on SIGTERM; BF's own stop is not reported as the adapter's exit.
+    command = adapter(
+        brain,
+        f"""
+import signal
+def clean(*_):
+    open("cleaned", "w").close()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, clean)
+print({json.dumps(json.dumps(envelope()))}, flush=True)
+time.sleep(60)
+""",
+    )
+    stopped = Event()
+    started = time.monotonic()
+    channels.stream(brain, "chat", command, {"since": START}, lambda _: stopped.set(), stopped)
+    assert time.monotonic() - started < 10
+    assert brain.read("cleaned") == b""
+    assert heading("stopped").fullmatch(entries(brain)[-1])
+
+
 @pytest.mark.parametrize(("limit", "accepted"), [(None, True), (65_536, False)])
 def test_the_default_frame_limit_holds_the_largest_valid_text(
     brain: Store, limit: int | None, *, accepted: bool

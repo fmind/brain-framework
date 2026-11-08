@@ -99,10 +99,14 @@ Other variables, including provider credentials and absolute `PATH` entries, rem
 How a run ends:
 
 - A run ends when the program exits and its standard output closes.
-- When a run ends, successful or not, BF kills the program's whole process group. Background helpers end with it unless they leave that group, as daemons that start their own session do.
+- When a run ends, successful or not, BF stops the program's whole process group. Background helpers end with it unless they leave that group, as daemons that start their own session do.
+- To stop a group, BF sends SIGTERM, waits up to 5 seconds for every process in it to exit, then sends SIGKILL to what remains. A program can trap SIGTERM to remove private temporary files, such as a copied database, within that grace.
 - A timeout, cancellation or closed terminal ends a run early, as does output beyond `max_bytes` from a sensor or action routine. Partial output never replaces stored records.
-- Cancellation during startup waits until BF owns the new process, then kills its group too.
-- A program that another process kills, such as the out-of-memory killer, fails naming the signal: `program was killed by SIGKILL`.
+- A run therefore lasts at most its `timeout` plus the 5-second grace. BF reads no output during the grace, so a program that keeps writing only fills its pipe until SIGKILL.
+- Programs stopped together, such as parallel sensors on Ctrl-C or the programs of a closing watch, share one grace. A second Ctrl-C while a single program is stopping sends SIGKILL at once.
+- Cancellation during startup waits until BF owns the new process, then stops its group too.
+- A run BF stops fails with its cause, such as `program timed out after 300s`, even when the program exits on SIGTERM.
+- A program that another process kills, such as the out-of-memory killer, or that ends itself with a signal fails naming the signal: `program was killed by SIGKILL` or `program was killed by SIGTERM`.
 - A background helper that keeps standard output open more than a second after the exit fails the run. Redirecting its output, for example to `/dev/null`, avoids that failure, not the kill.
 - A helper holding only stderr never delays or fails the run.
 - Watch, and the service files in [Run watch as a service](schedule.md#run-watch-as-a-service), allow at least 60 seconds after a stop request, so an interrupted record write can roll back.

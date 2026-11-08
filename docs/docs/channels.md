@@ -186,7 +186,7 @@ Only then should a Pub/Sub adapter acknowledge the provider message. ACK means d
 
 - Read control frames continuously, or emit one message and wait for its ACK. BF bounds frame and ACK buffers.
 - Provider retry, subscription renewal and acknowledgement-deadline extension belong to the adapter.
-- BF restarts failed transports with 1–60-second backoff and kills their process groups when watch exits.
+- BF restarts failed transports with 1–60-second backoff and stops their process groups when watch exits. An adapter can trap SIGTERM to close its provider connection within the [grace](limits.md#processes-and-logs).
 - An adapter still running 5 seconds after BF wrote its resume frame counts as connected. Its earlier transport error clears from `bf status`, and the backoff restarts at 1 second.
 - An adapter that exits sooner keeps its error. So does a refused admission, such as a full queue, until a message is admitted again.
 - Do not run two consumers against the same exclusive provider subscription. BF owns one stream per used channel in one brain, not across separate brains.

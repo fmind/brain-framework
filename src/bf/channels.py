@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import selectors
-import signal
 import subprocess
 import time
 from collections.abc import Callable
@@ -13,7 +12,7 @@ from threading import Event
 
 from pydantic import ValidationError
 
-from bf.collect import Runner, _now, arguments, ended, executable, program_env, run, starting
+from bf.collect import Runner, _now, arguments, ended, executable, program_env, run, starting, stop
 from bf.config import load
 from bf.history import append_log
 from bf.messages import Batch, Message, Outgoing, Receipt
@@ -216,9 +215,7 @@ def stream(
                             break
                         errors.extend(chunk)
                 del errors[:-_STDERR]
-            with suppress(ProcessLookupError):
-                os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
+            stop(child)
             for pipe in (child.stdin, child.stdout, child.stderr):
                 if pipe is not None:
                     pipe.close()

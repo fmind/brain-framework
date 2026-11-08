@@ -52,6 +52,9 @@ from bf.validate import broken_links
 _LOG = 256 << 10
 # Seconds a finished program's background descendants may keep its stdout open.
 _DRAIN = 1.0
+# Seconds a stopped program's process group has between SIGTERM and SIGKILL: enough to remove private temporary files,
+# short enough that Ctrl-C stays responsive. Programs stopped together, such as parallel sensors, wait concurrently.
+GRACE = 5.0
 # Window sensors catch up at most this far after a pause.
 CATCH_UP = timedelta(days=30)
 # A failed program's first retry waits this long, doubling per consecutive failure up to its refresh.
@@ -157,6 +160,47 @@ def starting() -> Generator[None]:
         if pending is not None:
             signum, frame = pending
             handlers[signum](signum, frame)
+
+
+def stop(child: subprocess.Popen[bytes]) -> None:
+    """End a program's whole process group: SIGTERM, then SIGKILL to whatever remains after GRACE seconds.
+
+    BF reads no output meanwhile, so a program that keeps writing blocks on its full pipes until the kill. An
+    interruption during the grace, such as a second Ctrl-C, kills at once and propagates.
+    """
+    # Descendants can keep pipes open after their leader exits; end the whole session.
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        child.wait()
+        return
+    except PermissionError as error:
+        # macOS refuses signals to a group left with zombies only; on Linux, the group may run as another user.
+        try:
+            child.wait(timeout=GRACE)
+        except subprocess.TimeoutExpired:
+            raise Error("cannot stop the program: permission denied") from error
+        return
+    deadline = time.monotonic() + GRACE
+    remaining = True
+    try:
+        while remaining and (left := deadline - time.monotonic()) > 0:
+            try:
+                child.wait(timeout=min(left, 0.05))
+            except subprocess.TimeoutExpired:
+                continue
+            try:
+                # Signal 0 only checks that the group still has a member, now that the leader is reaped.
+                os.killpg(child.pid, 0)
+            except ProcessLookupError, PermissionError:
+                remaining = False
+            else:
+                time.sleep(min(left, 0.05))
+    finally:
+        if remaining:
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
 
 
 class NotStartedError(Error):
@@ -313,19 +357,19 @@ def run(
         raise
     finally:
         if child is not None:
-            # Descendants can keep pipes open after their leader exits; end the whole session.
-            with suppress(ProcessLookupError):
-                os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
-            for pipe in (child.stdin, child.stdout, child.stderr):
-                if pipe is not None and not pipe.closed:
-                    pipe.close()
-            shown = bytes(output[-_LOG:]) if logged else b""
-            diagnostics = bytes(errors[-_LOG:])
-            body = shown + (b"-- stderr --\n" + diagnostics if shown and diagnostics else diagnostics)
-            # A log is a diagnostic: failing to write it never changes the run's own outcome.
-            with suppress(Error, OSError):
-                append_log(store, name, f"{_now()} {outcome} after {time.monotonic() - started:.1f}s", body)
+            try:
+                stop(child)
+            finally:
+                # A second interruption during the grace still closes the pipes and logs the run.
+                for pipe in (child.stdin, child.stdout, child.stderr):
+                    if pipe is not None and not pipe.closed:
+                        pipe.close()
+                shown = bytes(output[-_LOG:]) if logged else b""
+                diagnostics = bytes(errors[-_LOG:])
+                body = shown + (b"-- stderr --\n" + diagnostics if shown and diagnostics else diagnostics)
+                # A log is a diagnostic: failing to write it never changes the run's own outcome.
+                with suppress(Error, OSError):
+                    append_log(store, name, f"{_now()} {outcome} after {time.monotonic() - started:.1f}s", body)
 
 
 def _window(start: str, end: str) -> tuple[str, str]:

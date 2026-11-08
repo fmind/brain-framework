@@ -22,6 +22,7 @@ from typing import Any, NoReturn, cast
 import pytest
 from typer.testing import CliRunner
 
+from bf import collect as collect_module
 from bf import records
 from bf.cli import app, main
 from bf.collect import Runner, collect, due, run
@@ -398,6 +399,8 @@ def test_background_descendants_cannot_hold_a_finished_program(
     ("signum", "name"),
     [
         (signal.SIGKILL, "SIGKILL"),
+        # A program ending itself with SIGTERM reads differently from BF's own stop, which fails as a timeout.
+        (signal.SIGTERM, "SIGTERM"),
         # Real-time signals between SIGRTMIN and SIGRTMAX have no name in Python.
         pytest.param(40, "signal 40", marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux signal")),
     ],
@@ -410,6 +413,170 @@ def test_a_program_killed_by_a_signal_names_it(
     with pytest.raises(Error, match=f"^program was killed by {name}$"):
         run(["sh", "-c", f"kill -{int(signum)} $$"], Sensor(command=["sh"]), configured, "sample")
     assert f"program was killed by {name} after" in (configured.root / log_path("sample")).read_text()
+
+
+def test_a_stopped_program_cleans_up_within_the_grace(
+    configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A program keeping a private temporary copy, such as a browser history database, removes it on SIGTERM.
+    # Before, BF's SIGKILL left the copy behind.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    copy = shlex.quote(str(tmp_path / "copy"))
+    script = f"touch {copy}; trap 'rm -f {copy}; exit 143' TERM; while :; do sleep 0.1; done"
+    started = time.monotonic()
+    with pytest.raises(Error, match=r"^program timed out after 1s$"):
+        run(["sh", "-c", script], Sensor(command=["sh"], timeout=1), configured, "sample")
+    assert time.monotonic() - started < 3
+    assert not (tmp_path / "copy").exists()
+    # BF's own stop still reads as the timeout, never as the program's `killed by SIGTERM`.
+    assert "program timed out after 1s after" in (configured.root / log_path("sample")).read_text()
+
+
+@pytest.mark.parametrize(
+    ("script", "match", "least"),
+    [
+        ("while :; do sleep 0.1; done", r"^program timed out after 1s$", 2),
+        # BF stops reading at max_bytes: during the grace, the writer only fills its pipe.
+        ("while :; do printf abc; done", r"^program output exceeded max_bytes$", 1),
+    ],
+    ids=["timeout", "overflow"],
+)
+def test_a_program_ignoring_sigterm_is_killed_after_the_grace(
+    configured: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str, match: str, least: float
+) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setattr(collect_module, "GRACE", 1.0)
+    pidfile = tmp_path / "descendant"
+    started = time.monotonic()
+    with pytest.raises(Error, match=match):
+        # Ignored signals are inherited: the background descendant ignores SIGTERM too.
+        run(
+            ["sh", "-c", "trap '' TERM; " + background(pidfile) + script],
+            Sensor(command=["sh"], timeout=1, max_bytes=128),
+            configured,
+            "sample",
+        )
+    # At most the timeout plus the grace, and never less than the grace.
+    assert least <= time.monotonic() - started < least + 2
+    assert ended(pidfile)
+
+
+def test_a_program_bf_cannot_signal_fails_within_the_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A group running as another user, such as under sudo, refuses SIGTERM: fail visibly instead of waiting forever.
+    monkeypatch.setattr(collect_module, "GRACE", 0.5)
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    killpg = os.killpg
+
+    def refused(pid: int, number: int) -> None:
+        if pid == child.pid and number == signal.SIGTERM:
+            raise PermissionError
+        killpg(pid, number)
+
+    monkeypatch.setattr(os, "killpg", refused)
+    started = time.monotonic()
+    try:
+        with pytest.raises(Error, match=r"^cannot stop the program: permission denied$"):
+            collect_module.stop(child)
+        assert time.monotonic() - started < 2
+    finally:
+        child.kill()
+        child.wait()
+
+
+def stubborn(store: Store, markers: list[Path]) -> dict[str, object]:
+    """Sensors that record SIGTERM in `MARKER.term`, then keep running until SIGKILL; returns their bf.yaml."""
+    store.write(
+        "sensors/stubborn.sh",
+        b"#!/bin/sh\n"
+        b"trap 'touch \"$1.term\"' TERM\n"
+        b'printf "%s\\n" "$$" > "$1.tmp"\n'
+        b'mv "$1.tmp" "$1"\n'
+        b"while :; do sleep 1; done\n",
+    )
+    (store.root / "sensors/stubborn.sh").chmod(0o700)
+    sensors = {
+        marker.name: {"command": ["sensors/stubborn.sh", str(marker)], "refresh": 60, "timeout": 120}
+        for marker in markers
+    }
+    return {"version": 8, "name": "fixture", "sensors": sensors}
+
+
+def graced(seconds: float) -> list[str]:
+    """Interpreter arguments that run the bf CLI with another grace."""
+    return ["-c", f"import bf.collect; bf.collect.GRACE = {seconds}; from bf.cli import main; main()"]
+
+
+def test_cancelled_parallel_programs_share_one_grace(configured: Store, tmp_path: Path) -> None:
+    markers = [tmp_path / "first", tmp_path / "second"]
+    configured.write("bf.yaml", json.dumps(stubborn(configured, markers)).encode())
+    child = subprocess.Popen(  # noqa: S603 - exercise the CLI boundary with temporary, synthetic collectors
+        [sys.executable, *graced(3), "update", "--brain", str(configured.root)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+    pids: list[int] = []
+    try:
+        deadline = time.monotonic() + 20
+        while not all(marker.exists() for marker in markers) and time.monotonic() < deadline and child.poll() is None:
+            time.sleep(0.02)
+        assert all(marker.exists() for marker in markers), "collectors did not start"
+        pids = [int(marker.read_text()) for marker in markers]
+        signalled = time.monotonic()
+        child.send_signal(signal.SIGTERM)
+        _, stderr = child.communicate(timeout=20)
+        elapsed = time.monotonic() - signalled
+        assert child.returncode == 130, stderr.decode()
+        assert all(Path(f"{marker}.term").exists() for marker in markers)
+        # Both programs got the grace at once: two graces in turn would take 6 seconds.
+        assert 3 <= elapsed < 5.5
+        for pid in pids:
+            assert ended(pid), f"collector process {pid} survived"
+    finally:
+        for leader in pids:
+            with suppress(ProcessLookupError):
+                os.killpg(leader, signal.SIGKILL)
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)
+
+
+def test_a_second_interrupt_kills_during_the_grace(configured: Store, tmp_path: Path) -> None:
+    marker = tmp_path / "sample"
+    configured.write("bf.yaml", json.dumps(stubborn(configured, [marker])).encode())
+    child = subprocess.Popen(  # noqa: S603 - exercise the CLI boundary with a temporary, synthetic collector
+        [sys.executable, *graced(60), "collect", "sample", "--brain", str(configured.root), "--since", START],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+    pid = 0
+    try:
+        deadline = time.monotonic() + 20
+        while not marker.exists() and time.monotonic() < deadline and child.poll() is None:
+            time.sleep(0.02)
+        assert marker.exists(), "collector did not start"
+        pid = int(marker.read_text())
+        child.send_signal(signal.SIGINT)
+        term = Path(f"{marker}.term")
+        while not term.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert term.exists(), "the collector got no SIGTERM"
+        child.send_signal(signal.SIGINT)
+        # The second Ctrl-C ends the 60-second grace at once.
+        _, stderr = child.communicate(timeout=10)
+        assert child.returncode == 130, stderr.decode()
+        assert ended(pid), "the collector survived"
+        # The interrupted grace still logs the run.
+        log = (configured.root / log_path("sample")).read_text()
+        assert re.search(r"== \S+ failed after [0-9.]+s ==\n\Z", log), log
+    finally:
+        if pid:
+            with suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+        if child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)
 
 
 def test_brain_collectors_run_from_the_brain_root(configured: Store, monkeypatch: pytest.MonkeyPatch) -> None:
