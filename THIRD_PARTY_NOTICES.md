@@ -1635,15 +1635,15 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-## sse-starlette 3.6.0
+## sse-starlette 3.7.0
 
 Source: <https://github.com/sysid/sse-starlette>
 
 License: `BSD-3-Clause`
 
-Evidence: `sse_starlette-3.6.0.dist-info/licenses/LICENSE`
+Evidence: `sse_starlette-3.7.0.dist-info/licenses/LICENSE`
 
-### sse_starlette-3.6.0.dist-info/licenses/LICENSE
+### sse_starlette-3.7.0.dist-info/licenses/LICENSE
 
 ```text
 Copyright © 2020, [sysid](https://sysid.github.io/).
