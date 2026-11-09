@@ -10,6 +10,7 @@ import re
 import sqlite3
 import stat
 import time
+from collections import Counter
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager, suppress
 from contextvars import ContextVar
@@ -109,8 +110,9 @@ CREATE VIRTUAL TABLE vocabulary USING fts5vocab(search, row);
 -- Each indexed word of four or more letters or digits, folded as search folds it, whose stem differs from it,
 -- beside that stem: `word*` also matches the stems of the words it begins, which the stemmer can shorten below it or
 -- respell, such as `organ` for organization. A word the stemmer leaves alone, such as an identifier, is its own
--- vocabulary term. A word no passage holds any more stays until the next full build; expansion skips it.
-CREATE TABLE words(word TEXT PRIMARY KEY, stem TEXT NOT NULL) WITHOUT ROWID;
+-- vocabulary term. `held` counts its occurrences in the passages: a refresh subtracts those of the files it drops,
+-- and a word no passage holds any more leaves, as a full build would never store it.
+CREATE TABLE words(word TEXT PRIMARY KEY, stem TEXT NOT NULL, held INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE names(name TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY(name, item)) WITHOUT ROWID;
 CREATE TABLE links(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
 CREATE TABLE tags(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
@@ -166,8 +168,10 @@ SPELLED, EXPANSIONS = 3, 64
 # and stems. In ASCII text, a plain character set finds the same runs about a third faster.
 _WORD = re.compile(rf"[^\W_]{{{SPELLED + 1},}}")
 _ASCII_WORD = re.compile(rf"[A-Za-z0-9]{{{SPELLED + 1},}}")
-# Distinct candidate words tokenized per in-memory batch while a refresh fills `words`, which bounds its memory.
+# Distinct candidate words tokenized per in-memory batch while a refresh counts `words`, which bounds its memory.
 _SPELLINGS = 20_000
+# Separates words in one in-memory row: a private-use character is a token of its own and never part of a candidate.
+_APART = "\ue000"
 # A lexical result names at most this many other matching records that share its URL.
 ALSO = 5
 # A lexical result names at most this many other matching sections of its note.
@@ -566,24 +570,26 @@ def _insert(
     return cast("int", item)
 
 
-# The passages of the files a refresh indexed, by path.
-_INDEXED = (
+# The passages of these files, by path.
+_PASSAGES = (
     "SELECT title,text,names,context FROM search WHERE rowid IN (SELECT p.id FROM items i "
     "JOIN passages p ON p.item=i.id WHERE i.path IN (SELECT value FROM json_each(?)))"
 )
 
 
-def _spell(connection: sqlite3.Connection, paths: Sequence[str] | None) -> None:
-    """Add to `words` each word whose stem differs from its folded spelling, with that stem, from the passages of these
-    indexed files or of every passage, read back once their files indexed without error.
+def _spell(connection: sqlite3.Connection, paths: Sequence[str] | None, change: int = 1) -> None:
+    """Count in `words` each word whose stem differs from its folded spelling, with that stem, in the passages of these
+    files or of every passage: `change` 1 adds the files a refresh indexed without error, read back from the index,
+    and -1 subtracts the files it is about to drop, so a word no passage holds any more leaves `words`.
 
-    Batches bound memory: a word in several batches is tokenized again, and `words` keeps it once.
+    Both directions read the same stored passages, so a file subtracts exactly what it added. Batches bound memory: a
+    word in several batches is tokenized again.
     """
     rows = connection.execute(
-        "SELECT title,text,names,context FROM search" if paths is None else _INDEXED,
+        "SELECT title,text,names,context FROM search" if paths is None else _PASSAGES,
         () if paths is None else (json.dumps(paths),),
     )
-    words: set[str] = set()
+    words: Counter[str] = Counter()
     for row in rows:
         for column in row:
             if column.isascii():
@@ -593,36 +599,49 @@ def _spell(connection: sqlite3.Connection, paths: Sequence[str] | None) -> None:
             else:
                 words.update(_WORD.findall(column))
         if len(words) >= _SPELLINGS:
-            _respell(connection, words)
+            _respell(connection, words, change)
             words.clear()
-    _respell(connection, words)
+    _respell(connection, words, change)
 
 
-def _respell(connection: sqlite3.Connection, words: Collection[str]) -> None:
-    """Store the words of one batch that their stem respells."""
-    pairs = _spellings(sorted(words)) if words else []
+def _respell(connection: sqlite3.Connection, words: Counter[str], change: int) -> None:
+    """Add or subtract the occurrences of the words of one batch that their stem respells."""
+    candidates = sorted(words)
+    held: Counter[tuple[str, str]] = Counter()
+    for candidate, tokens in zip(candidates, _spellings(candidates) if candidates else [], strict=True):
+        for pair in tokens:
+            held[pair] += words[candidate]
+    rows = [
+        (word, stem, count * change) for (word, stem), count in held.items() if word != stem and len(word) > SPELLED
+    ]
     connection.executemany(
-        "INSERT OR IGNORE INTO words VALUES(?,?)",
-        [(word, stem) for word, stem in pairs if word != stem and len(word) > SPELLED],
+        "INSERT INTO words VALUES(?,?,?) ON CONFLICT(word) DO UPDATE SET held=held+excluded.held", rows
     )
+    if change < 0:
+        connection.executemany("DELETE FROM words WHERE word=? AND held<=0", [(word,) for word, _, _ in rows])
 
 
-def _spellings(words: Sequence[str]) -> list[tuple[str, str]]:
-    """Each token of these words as the search table indexes it, folded without and with its stemmer.
+def _spellings(words: Sequence[str]) -> list[list[tuple[str, str]]]:
+    """Each word's tokens as the search table indexes them, folded without and with its stemmer.
 
     FTS5 tokenizes them itself, so each stem is exactly a term of the passages holding the word, whatever the
     candidate regex split. The words form one row of two in-memory tables, whose tokens pair up by position: one row
-    costs about half as much as a row per word.
+    costs about half as much as a row per word. A private-use character between words, a token no candidate holds,
+    tells which word each token comes from.
     """
     with closing(sqlite3.connect(":memory:")) as memory:
         for table, tokenizer in (("folded", _FOLDED), ("stemmed", _TOKENIZER)):
             memory.execute(f"CREATE VIRTUAL TABLE {table} USING fts5(x, tokenize={tokenizer!r})")
             memory.execute(f"CREATE VIRTUAL TABLE {table}_tokens USING fts5vocab({table}, instance)")
-            memory.execute(f"INSERT INTO {table}(rowid,x) VALUES(1,?)", (" ".join(words),))
-        folded = dict(memory.execute("SELECT offset,term FROM folded_tokens"))
-        return sorted(
-            {(folded[offset], term) for offset, term in memory.execute("SELECT offset,term FROM stemmed_tokens")}
-        )
+            memory.execute(f"INSERT INTO {table}(rowid,x) VALUES(1,?)", (f" {_APART} ".join(words),))
+        stems = dict(memory.execute("SELECT offset,term FROM stemmed_tokens"))
+        spelled: list[list[tuple[str, str]]] = [[]]
+        for offset, term in memory.execute("SELECT offset,term FROM folded_tokens ORDER BY offset"):
+            if term == _APART:
+                spelled.append([])
+            else:
+                spelled[-1].append((term, stems[offset]))
+        return spelled
 
 
 def _facts(values: Mapping[str, JsonValue], config: Config) -> str:
@@ -1003,6 +1022,8 @@ def _fill(
     vanished = sorted((compared.stored.keys() & compared.scope) - compared.trees.keys())
     with connection:
         connection.execute("BEGIN")
+        if not new:
+            _spell(connection, removed + changed, -1)
         for path in () if new else (removed + changed):
             _drop(connection, path)
         for path in changed:
@@ -1312,14 +1333,14 @@ def _string(term: str) -> str:
 @lru_cache(maxsize=256)
 def _forms(word: str) -> tuple[str, str] | None:
     """A word's folded spelling and stem as the search table indexes them; None unless it is one token."""
-    pairs = _spellings([word])
-    return pairs[0] if len(pairs) == 1 else None
+    pairs = set(_spellings([word])[0])
+    return pairs.pop() if len(pairs) == 1 else None
 
 
 # The words a prefix begins whose stems differ from them, one per stem, in stem order.
 _CHANGED = (
     "SELECT stem,min(word) FROM words WHERE word>=:folded AND word<:end AND substr(stem,1,:length)!=:stem "
-    "GROUP BY stem ORDER BY stem"
+    "GROUP BY stem ORDER BY stem LIMIT :limit"
 )
 # The terms a prefix begins: words the stemmer leaves alone index as themselves. The vocabulary returns terms in
 # order, so the limit needs no sort.
@@ -1335,8 +1356,8 @@ def _expanded(connection: sqlite3.Connection, term: str) -> str:
     in stem order: FTS5 matches the stemmed prefix, so `pay*` would otherwise miss `payment` and `organi*` miss
     `organ`.
 
-    Stems that the stemmed prefix already begins are left out, and so are stems the index no longer holds. Each word
-    is a quoted FTS5 string, and the lookups bind their values.
+    Stems that the stemmed prefix already begins are left out. Each word is a quoted FTS5 string, and the lookups bind
+    their values.
     """
     string = _string(term)
     forms = _forms(term[:-1]) if term.endswith("*") and " " not in term else None
@@ -1344,19 +1365,14 @@ def _expanded(connection: sqlite3.Connection, term: str) -> str:
         return string
     folded, stem = forms
     values = {"folded": folded, "end": folded + "\U0010ffff", "length": len(stem), "stem": stem, "limit": EXPANSIONS}
-    spellings: dict[str, str] = {}
-    for found, word in connection.execute(_CHANGED, values):
-        # A removed passage's word stays in `words` until the next full build: it must not take a live stem's place.
-        if connection.execute(_MATCHES, (_string(word),)).fetchone() is not None:
-            spellings[found] = word
-            if len(spellings) == EXPANSIONS:
-                break
+    # `words` holds only words some passage holds, so each stem is one the index holds.
+    spellings: dict[str, str] = dict(connection.execute(_CHANGED, values))
     if folded != stem:
         # Only a prefix the stemmer respells, such as `pay` as `pai`, misses words that index as themselves, such as
         # `payment`. Such a term is its own spelling once it stems to itself.
         candidates = [row[0] for row in connection.execute(_UNCHANGED, values) if row[0] not in spellings]
         own = _spellings(candidates) if candidates else []
-        spellings.update((word, word) for word, stemmed in own if word == stemmed)
+        spellings.update((word, word) for tokens in own for word, stemmed in tokens if word == stemmed)
     spelled = [_string(spellings[found]) for found in sorted(spellings)[:EXPANSIONS]]
     return f"({' OR '.join([string, *spelled])})" if spelled else string
 

@@ -172,7 +172,7 @@ Values of these variables in your own environment never reach a program. [Assist
 Give a program its credentials in this order of preference:
 
 1. **A provider CLI login**, such as `gh auth login`. The CLI, such as `gh`, `gws` or `gcloud`, keeps the token, and the program only calls it.
-2. **A private file outside the brain**, readable only by you (mode `600`), passed by path, such as `"{{home}}/.config/acme/token"`. It works under systemd and launchd, whose [service files](schedule.md#run-watch-as-a-service) pass only `PATH`. The kit's `secret()` [reads it](#build-a-sensor-with-the-kit).
+2. **A private file outside the brain**, readable only by you, such as with mode `600`, passed by path, such as `"{{home}}/.config/acme/token"`. It works under systemd and launchd, whose [service files](schedule.md#run-watch-as-a-service) pass only `PATH`. The kit's `secret()` [reads it](#build-a-sensor-with-the-kit).
 3. **The OS keyring**, for interactive sessions only: a Secret Service keyring is often locked for a user service that runs while you are logged out.
 
 Never put a secret in `bf.yaml`, a command's arguments, the brain or a service file. Arguments show in process listings, and the brain may be shared through Git.

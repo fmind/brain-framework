@@ -1002,13 +1002,33 @@ def test_removed_words_leave_the_64_stems_to_words_the_brain_still_holds(tmp_pat
     assert refs(store, "pay*") == ["concepts/old.md"]
     store.write("concepts/old.md", b"# Old\n\nNothing left.\n")
     store.write("concepts/new.md", b"# New\n\nThe payzzxing and payzzzx here.\n")
-    # The removed words stay in `words` until the next full build; their stems sort first but match nothing.
+    # An incremental refresh removes the words no passage holds any more, as a full build never stores them.
     reply = search([store], Query(text="pay*"))
     assert [item["ref"] for item in cast("list[dict[str, str]]", reply["items"])] == ["concepts/new.md"]
     assert "unmatched" not in reply
     with index.session(), index.database(store) as (connection, _):
-        assert connection.execute("SELECT count(*) FROM words WHERE word LIKE 'pay%'").fetchone()[0] == 71
+        rows = connection.execute("SELECT word,held FROM words WHERE word LIKE 'pay%'").fetchall()
+        assert [tuple(row) for row in rows] == [("payzzxing", 1)]
         assert index.expand(connection, "pay*") == {"pay*": '("pay"* OR "payzzxing" OR "payzzzx")'}
+
+
+def test_a_removed_word_stops_expanding_a_prefix_whose_stem_another_word_holds(tmp_path: Path) -> None:
+    store = blank(tmp_path)
+    store.write("concepts/charter.md", b"# Charter\n\nThe organization charter.\n")
+    store.write("concepts/plan.md", b"# Plan\n\nA plan for the organization and its organizations.\n")
+    assert sorted(refs(store, "organi*")) == ["concepts/charter.md", "concepts/plan.md"]
+    # `organ` holds the stem of organization: the removed word must not expand `organi*` to it, which a full build
+    # would never do. Through the review, the word stayed and the note kept matching.
+    store.write("concepts/charter.md", b"# Charter\n\nThe heart is an organ.\n")
+    store.write("concepts/plan.md", b"# Plan\n\nA plan for the organizations.\n")
+    assert refs(store, "organi*") == ["concepts/charter.md", "concepts/plan.md"]
+    store.write("concepts/plan.md", b"# Plan\n\nA plan.\n")
+    incremental = search([store], Query(text="organi*"))
+    assert (incremental["items"], incremental["unmatched"]) == ([], ["organi*"])
+    index.refresh(store, full=True)
+    assert search([store], Query(text="organi*")) == incremental
+    with index.session(), index.database(store) as (connection, _):
+        assert connection.execute("SELECT count(*) FROM words WHERE word LIKE 'organ%'").fetchone()[0] == 0
 
 
 def test_search_names_query_words_that_match_nothing(brain: Store, tmp_path: Path) -> None:
@@ -1324,6 +1344,19 @@ def test_assistant_records_are_marked_generated_in_search_and_exact_reads(brain:
     later = read([brain], "digest:long", offset=cast("int", first["next_offset"]))
     assert first["generated"] is True
     assert later["generated"] is True
+    # Listings leave the mark out: the source page already names the assistant's records.
+    listing = read([brain], "memories/digest")
+    assert "generated" not in listing
+    assert [item.get("generated") for item in cast("list[dict]", listing["items"])] == [None, None]
+    # A retired assistant kept declared with `enabled: false` keeps its records marked; a removed one loses the mark.
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nassistants:\n  digest:\n    prompt: prompts/digest.md\n    command: [harness]\n"
+        b"    enabled: false\n",
+    )
+    assert read([brain], "digest:d1")["generated"] is True
+    brain.write("bf.yaml", b"version: 8\nname: fixture\n")
+    assert "generated" not in read([brain], "digest:d1")
 
 
 def test_only_entry_notes_rank_above_evidence(brain: Store) -> None:

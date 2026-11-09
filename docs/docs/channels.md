@@ -88,7 +88,7 @@ An omitted or empty conversation requests the endpoint's default destination, su
 
 Notification is a send-only channel, not a special BF transport. The [desktop adapter](https://github.com/fmind/brain-framework/blob/main/examples/channels/channels/desktop.py) in the `desktop` example above is one to copy:
 
-- It shows each message with `notify-send` on Linux or `osascript` on macOS, passing the text only as arguments.
+- It shows each message with `notify-send` on Linux or `osascript` on macOS, passing the text only as arguments, never as script code. Arguments show in process listings while the notifier runs, so other users of the computer can read those 1,000 characters: use it on a computer only you log into, or hide other users' processes, such as with Linux's `hidepid` mount option.
 - Its receipt names the requested conversation, or `desktop` by default.
 - It shows the first 1,000 characters, ending with `…`: a notification points to the answer, which the assistant's record keeps whole.
 - A missing notifier exits 1 without echoing the text, so the delivery fails visibly.

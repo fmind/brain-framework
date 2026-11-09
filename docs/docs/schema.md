@@ -64,7 +64,7 @@ Their `title` values are `Config`, `UserConfig` and `Suite`. `--kind search-repl
 - `bf.yaml`: `# yaml-language-server: $schema=https://raw.githubusercontent.com/fmind/brain-framework/vVERSION/docs/bf.schema.json`, where `VERSION` is `bf --version`.
 - `evals/retrieval.yaml`: the same line ending in `eval.schema.json`.
 
-The editor then flags a misspelled key, such as `refesh`, as you type. The editor downloads the schema; BF itself stays offline. The version keeps the schema of the release you run, because the next major's schema may reject keys this one accepts. After upgrading BF, change the version in each modeline to check the keys the new release added.
+The editor then flags a misspelled key, such as `refesh`, as you type. The editor downloads the schema; BF itself stays offline. The version keeps the schema of the release you run, because the next major's schema may reject keys this one accepts. The published schemas reject unknown keys, so until you change the version, the editor flags a key a newer release added as an error, though `bf validate` accepts it. After upgrading BF, change the version in each modeline.
 
 | File                              | Published schema                    |
 | --------------------------------- | ----------------------------------- |

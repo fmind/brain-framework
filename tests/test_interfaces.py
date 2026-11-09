@@ -562,13 +562,20 @@ def test_new_brains_point_editors_at_the_schemas_of_their_release(tmp_path: Path
             "sensors.brief.fields.kind.path: expected a JSON pointer starting with /",
         ),
         (
+            (
+                "assistants:\n  helper:\n    command: [python3]\n    prompt: prompts/helper.md\n"
+                "    reply: {path: structured_output}\n"
+            ),
+            "assistants.helper.reply.path: expected a JSON pointer starting with /, or empty for the whole stdout",
+        ),
+        (
             "sensors:\n  brief:\n    command: python3 sensors/brief.py\n",
             "sensors.brief.command: expected an argv list, one string per argument, such as [python3, script.py]",
         ),
         # Other reasons keep their wording.
         ("watch: {interval: 1}\n", "watch.interval: Input should be greater than or equal to 5"),
     ],
-    ids=["setting", "section", "union-tag", "at", "path", "command", "other"],
+    ids=["setting", "section", "union-tag", "at", "path", "reply-path", "command", "other"],
 )
 def test_bf_yaml_mistakes_get_plain_reasons_and_the_closest_allowed_key(
     brain: Store, config: str, expected: str
@@ -578,7 +585,7 @@ def test_bf_yaml_mistakes_get_plain_reasons_and_the_closest_allowed_key(
         load(brain)
     assert str(caught.value) == f"invalid bf.yaml: {expected}"
     # Values are never quoted.
-    assert not {"25:61", "attributes~2kind", "sensors/brief.py"} & set(str(caught.value).split())
+    assert not {"25:61", "attributes~2kind", "structured_output", "sensors/brief.py"} & set(str(caught.value).split())
 
 
 @pytest.mark.parametrize("full", [False, True], ids=["minimal", "full"])

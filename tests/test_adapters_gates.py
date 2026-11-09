@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -97,6 +98,24 @@ def test_reports_records_observed_in_the_window_once(provider: Provider, tmp_pat
     assert [event["key"] for event in events(gate(provider, state, "mail"))] == [
         "bf://fixture/mail:new@2026-09-29T10:45:00.000000Z"
     ]
+
+
+def test_a_long_record_address_gets_a_hashed_key_and_is_still_reported_once(provider: Provider, tmp_path: Path) -> None:
+    ref = "mail:" + "x" * 300
+    export = lines(item(ref, "2026-09-29T10:30:00Z", title="Long address"))
+    provider.install("bf", [{"match": ["export"], "stdout": export, "repeat": True}])
+    state = tmp_path / "state"
+    version = f"bf://fixture/{ref}@2026-09-29T10:30:00.000000Z"
+    # BF accepts event keys of at most 256 characters: a longer one becomes the source and the version's digest.
+    assert events(gate(provider, state, "mail")) == [
+        {
+            "key": f"mail:sha256:{hashlib.sha256(version.encode()).hexdigest()}",
+            "text": "Long address",
+            "ref": f"bf://fixture/{ref}",
+        }
+    ]
+    result = gate(provider, state, "mail")
+    assert (result.returncode, result.stdout, result.stderr) == (0, '{"events": []}\n', "")
 
 
 def test_records_of_referenced_brains_are_named_by_address(provider: Provider, tmp_path: Path) -> None:

@@ -157,7 +157,7 @@ mkdir -p ~/brain/.claude/skills
 ln -s ../../skills/weekly-review ~/brain/.claude/skills/weekly-review
 ```
 
-Add `/.claude/skills/` to the brain's `.gitignore`, then start a new session in the brain and ask: “Run my weekly review.” Each machine chooses its own hosts and links. A host follows a linked skill as instructions: link only skills you wrote or reviewed, and review a linked skill again after pulling changes others made to it in a [team brain](team.md).
+Add `/.claude/skills/` to the brain's `.gitignore`, then start a new session in the brain and ask: “Run my weekly review.” Each machine chooses its own hosts and links. A host follows a linked skill as instructions, and a link applies each change to the skill's folder at once: link skills this way only in a brain no one else writes. In a [team brain](team.md), install skills only from a reviewed copy outside the clone, as its setup explains.
 
 ## Refresh brain instructions
 

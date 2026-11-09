@@ -33,7 +33,22 @@ An [assistant](prompts.md) can watch what your sensors collect and speak first:
 assistants:
   triage:
     prompt: prompts/triage.md
-    command: [claude, --print, --output-format, json, --json-schema, "{{schema}}"] # your harness and its permissions
+    # Claude Code may run only bf read and bf search, plus what its settings allow: swap in your harness.
+    command:
+      [
+        claude,
+        --print,
+        --output-format,
+        json,
+        --json-schema,
+        "{{schema}}",
+        --tools,
+        "Read,Grep,Glob,Bash",
+        --allowedTools,
+        "Bash(bf read *),Bash(bf search *)",
+        --permission-mode,
+        dontAsk,
+      ]
     reply: { path: /structured_output } # {say, wake}
     post: desktop # a channel you declare
     wake: { min: 600, max: 86400 }

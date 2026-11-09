@@ -94,18 +94,18 @@ Name the routine `weekly-review` in `bf.yaml`, after its file: [Prepare a weekly
 
 `records-gate.py` turns a frequent assistant schedule into an event-driven one: your harness runs only when a source gained or changed records. The [four-tool walkthrough](../../docs/docs/context-hub.md#hear-of-each-change-once) runs it on a fictional Jira record. [Gates](../../docs/docs/prompts.md#gates) describes what BF does with its events.
 
-Copy it to `routines/records-gate.py` in your brain and name it as a schedule's gate. This schedule checks the mail source every 10 minutes and reports messages only:
+Copy it to `routines/records-gate.py` in your brain and name it as a schedule's gate. This schedule checks an `issues` source, collected by the [GitHub issues sensor](../sensors/README.md#github-issues), every 10 minutes and reports open issues only:
 
 ```yaml
 schedules:
-  mail: { every: 600, gate: { command: [python3, routines/records-gate.py, mail, --where, kind=message] } }
+  issues: { every: 600, gate: { command: [python3, routines/records-gate.py, issues, --where, status=open] } }
 ```
 
 Usage: `records-gate.py SOURCE [SOURCE...] [--where FIELD=VALUE]... [--period PERIOD]`.
 
 - For each source, it runs `bf export --kind items --scope memories/SOURCE` and reads the lines as they arrive.
 - It keeps the records BF [observed](../../docs/docs/schema.md#record-revisions-and-provenance), meaning first collected or seen changed, from 10 minutes before the window's start until its end. The 10 minutes reach a collection that started before the previous check but finished after it.
-- `--where kind=message` keeps the records whose `kind` field reads `message`. Repeated conditions must all hold. Numbers and booleans read as JSON writes them, such as `1` or `true`.
+- `--where status=open` keeps the records whose `status` field reads `open`, as that sensor prints it. A field the source's sensor does not print never matches, so check a record with `bf read` before filtering on it. Repeated conditions must all hold. Numbers and booleans read as JSON writes them, such as `1` or `true`.
 - It prints one event per record, newest first, and remembers each one in `BF_STATE_DIR/records-gate.json`, so the harness hears of a record again only when it changes:
 
 ```json
@@ -129,7 +129,7 @@ Limits:
 - **Collection lag:** a collection that runs longer than 10 minutes, beyond the default 300-second sensor timeout, can finish after the checks that could still reach its records.
 - **Many changes:** a check reports at most 63 records, within the 64 KiB BF accepts. One more event, such as `mail:more`, counts the older ones and points to the source page.
 - **Failures:** when bf is missing, the export fails, prints an invalid line or warns on stderr, such as about a busy cache, the gate prints one `records-gate:` line that quotes no record, remembers nothing and exits 1. BF then retries it. A missing `BF_START`, `BF_END` or `BF_STATE_DIR` exits 2.
-- **Brain problems:** an invalid file anywhere in the brain or a referenced brain, or an unavailable referenced brain, fails even a scoped export, and so every check. BF retries the gate up to 20 times, for about an hour. The job then waits in `bf queue` and blocks the schedule ([schedule and overlap](../../docs/docs/prompts.md#schedule-and-overlap)): fix the file, then run `bf queue ID --retry`.
+- **Brain problems:** an invalid file anywhere in the brain or a referenced brain, such as a typo in an unrelated note's frontmatter, or an unavailable referenced brain, fails even a scoped export, and so every check. BF retries the gate up to 20 times, for about an hour. The job then waits in `bf queue` and blocks the schedule ([schedule and overlap](../../docs/docs/prompts.md#schedule-and-overlap)): fix the file, then run `bf queue ID --retry`.
 - **Memory:** remembered records are forgotten 35 days after BF observed them. Deleting `records-gate.json` reports the current window's records again. The file holds up to 64 MiB: beyond that, the gate forgets the oldest records first and says so on stderr.
 
 The gate uses only Python 3.11's standard library and runs no shell. Its tests, in `tests/test_adapters_gates.py`, run it against a fake `bf` and inside a real `bf update`.

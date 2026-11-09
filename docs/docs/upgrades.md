@@ -40,13 +40,13 @@ This site follows the repository's current code, which can be newer than your in
 
 A release number reads MAJOR.MINOR.PATCH. Within one major release:
 
-- `search` and `read` [replies](retrieval.md#reply-schemas) only gain optional fields.
+- `search` and `read` [replies](retrieval.md#reply-schemas) only gain optional fields or narrow what they return, such as leaving out an optional field or tightening a value: validate them with their schemas and never rely on an optional field.
 - `bf.yaml`, evaluation suites and the machine registry only widen: a file that loads keeps loading.
 - The brain format `version` stays the same.
 
 Minor releases add features; patch releases fix bugs, including input BF misread. A major release ships whenever the design needs it and batches related breaks where practical. It adds no compatibility layer; its manual upgrade steps are in the [changelog](../changelog.md). Breaks held for the next major release are listed in [governance](https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md#next-major).
 
-A new brain format `version` means stored files need converting: record files, the `memories/` layout, notes, evaluation suites or the fields `bf.yaml` declares. Other breaks keep `version`, with manual upgrade steps: changed program settings, such as sensors, routines, assistants, channels and watch, or a stricter rule that rejects input which loaded before. [Contributing](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md#keep-the-contract) holds the full rule.
+A new brain format `version` means stored files need converting: record files, the `memories/` layout, notes, evaluation suites or the fields `bf.yaml` declares. Other breaks keep `version`, with manual upgrade steps: changed program settings, such as sensors, routines, assistants, channels and watch, or a stricter rule that rejects input which loaded before. [Contributing](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md#keep-the-contract) says how contributors check the contract.
 
 ## Update
 

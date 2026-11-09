@@ -241,7 +241,7 @@ Preview it with `bf collect github-issues --since 7d --dry-run`. Expected result
 
 - `window()` and `state_dir()`: the run's `[START, END)` from `BF_START` and `BF_END`, and the private, machine-local folder in `BF_STATE_DIR` for cursors. That folder can disappear: treat an empty one as a first run.
 - `run(argv, timeout=, max_bytes=)` and `fetch(url, timeout=, max_bytes=)` with `fetch_json`: a bounded provider CLI started from `/` without a shell, and a bounded HTTPS GET that refuses redirects to another host or to plain HTTP. Neither echoes provider output.
-- `secret(path)`: a credential read from a private regular file you own with mode `600`, outside the brain and at most 64 KiB, with one trailing newline removed; errors never quote its content ([credentials](../../docs/docs/sensors.md#credentials)).
+- `secret(path)`: a credential read from a private regular file you own that only you can read, such as with mode `600`, outside the brain and at most 64 KiB, with one trailing newline removed; errors never quote its content ([credentials](../../docs/docs/sensors.md#credentials)).
 - `person(email)`, `account(host, login)` and `repo(host, owner, name)`: lowercase, percent-encoded identities, or `""` when BF would reject one.
 - `record(id, title, ...)` and `emit(records)`: records normalized to BF's [limits](../../docs/docs/limits.md#size-bounds), such as one-line titles, valid URLs, U+FFFD for a lone UTF-16 surrogate outside the id and at most 1,000 links or values per `*_refs` list, printed as one JSON array; duplicate ids fail.
 - `redact(text)`: a best-effort mask for common credential shapes, such as bearer tokens, GitHub and AWS keys, private key blocks and `password=` pairs.

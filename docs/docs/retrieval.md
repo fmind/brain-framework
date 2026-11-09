@@ -154,14 +154,14 @@ Queries hold up to 4,096 characters. `--limit` is 1–50 (default 10).
 | Several brains         | Results alternate by each brain's own rank; positions are not comparable across brains.                                                                                                              |
 | Invalid input          | A query without any word or identity, such as `!!!`, exits 2.                                                                                                                                        |
 
-| Item fields                       | Carried by                                                                                            |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `ref`, `kind`, `title`, `excerpt` | Every item.                                                                                           |
-| `date`, `type`, `status`          | Notes.                                                                                                |
-| `time`, `source`, `url`           | Records.                                                                                              |
-| `updated`, `observed`             | Records: the provider's `updated` time and BF's `observed` time.                                      |
-| `"partial":true`                  | Records whose sensor or text bound kept only part of the text.                                        |
-| `"generated":true`                | Model output of one of the brain's own [assistants](prompts.md#what-a-run-records); listings omit it. |
+| Item fields                       | Carried by                                                                                                      |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `ref`, `kind`, `title`, `excerpt` | Every item.                                                                                                     |
+| `date`, `type`, `status`          | Notes.                                                                                                          |
+| `time`, `source`, `url`           | Records.                                                                                                        |
+| `updated`, `observed`             | Records: the provider's `updated` time and BF's `observed` time.                                                |
+| `"partial":true`                  | Records whose sensor or text bound kept only part of the text.                                                  |
+| `"generated":true`                | Model output of an [assistant](prompts.md#what-a-run-records) the brain's `bf.yaml` declares; listings omit it. |
 
 - Titles are previews of at most 200 characters ending in `…`; exact reads keep the whole title.
 - A section's title reads `Note — Parent — Child`.

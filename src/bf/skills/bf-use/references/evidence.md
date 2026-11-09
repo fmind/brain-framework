@@ -2,7 +2,7 @@
 
 Use when a consequential decision must stay explainable after its sources change, or when reviewing an explicit dependency. Capture only the selected evidence that decision needs, never the whole brain.
 
-A search result or record read marked `"generated":true` is an assistant's model output: never cite it as the source of a fact; read and cite what it cites.
+A search result or record read marked `"generated":true` is an assistant's model output: never cite it as the source of a fact; read and cite what it cites. The mark follows the assistants `bf.yaml` declares, so a removed or renamed assistant's records lose it: treat a record whose attributes hold an assistant run's `trigger`, `job` and `window` as model output too.
 
 ## Triage a selected passage
 

@@ -6,6 +6,8 @@ Usage: desktop.py send [--title TITLE] [--notifier notify-send|osascript]
 BF pipes one outgoing message to `send`. The script shows its text with notify-send on Linux or osascript on macOS,
 passing the text as an argument, never as script code, and prints the receipt BF expects. A notification is a
 pointer, not the answer: text beyond 1,000 characters ends with an ellipsis, and the assistant's record keeps it all.
+Arguments show in process listings while the notifier runs: on a computer other people log into, they can read that
+text, so hide other users' processes, such as with Linux's `hidepid` mount option, or use another channel.
 """
 
 from __future__ import annotations

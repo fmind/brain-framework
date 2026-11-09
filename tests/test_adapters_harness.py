@@ -14,7 +14,7 @@ from conftest import ROOT, Provider
 ADAPTER = "harness.py"
 FOLDER = "prompts/routines"
 BASE = ["--print", "--permission-mode", "dontAsk"]
-WIDE = ["--input-arg", "--dangerously-skip-permissions", "--input-arg", "--add-dir=drafts"]
+WIDE = ["--input-arg", "--allowedTools=Edit(projects/**)", "--input-arg", "--add-dir=drafts"]
 
 
 def wrap(provider: Provider, *arguments: str, trigger: str | None = None, stdin: str | None = None):
@@ -26,7 +26,7 @@ def test_a_run_answering_a_message_gets_the_input_arguments_at_the_end(provider:
     provider.install("agent", [{"match": [], "stdout": "answer"}])
     result = wrap(provider, *WIDE, "--", "agent", *BASE, trigger="input")
     assert (result.returncode, result.stdout, result.stderr) == (0, "answer", "")
-    assert provider.calls("agent") == [[*BASE, "--dangerously-skip-permissions", "--add-dir=drafts"]]
+    assert provider.calls("agent") == [[*BASE, "--allowedTools=Edit(projects/**)", "--add-dir=drafts"]]
 
 
 @pytest.mark.parametrize("trigger", ["schedule", "wake", "manual", None, "", "INPUT", "input ", "inputs", "junk"])

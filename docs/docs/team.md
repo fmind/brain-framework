@@ -71,13 +71,13 @@ Register agent host hooks, such as `hooks/`, and install a shared brain's `skill
 git fetch
 reviewed=$(git rev-parse '@{u}')
 git diff --name-status "HEAD...$reviewed" -- . ':!projects/*.md' ':!concepts/*.md' ':!actions/*.md' ':!memories/*.json'
-git diff --name-status "HEAD...$reviewed" -- '*AGENTS.md' '*CLAUDE.md' '*SKILL.md' '*.claude/*' '*.agents/*'
+git diff --name-status "HEAD...$reviewed" -- '*AGENTS*.md' '*CLAUDE*.md' '*SKILL.md' '*.claude/*' '*.agents/*'
 ```
 
 `@{u}` is the branch your clone tracks, such as `origin/main`. Each line gives a file's full path and whether it was added, modified, deleted or renamed:
 
 - **The first list** shows every change except Markdown under `projects/`, `concepts/` and `actions/` and JSON under `memories/`. It covers programs, `bf.yaml`, prompts, hooks, `.env` files and the runtime pin.
-- **The second list** shows the `AGENTS.md`, `CLAUDE.md`, `SKILL.md`, `.claude/` and `.agents/` files of every folder. Agents load them as instructions or configuration, even from a folder of notes the first list hides.
+- **The second list** shows the `AGENTS.md`, `CLAUDE.md`, `SKILL.md`, `.claude/` and `.agents/` files of every folder, with variants such as `AGENTS.override.md` and `CLAUDE.local.md`. Agents load them as instructions or configuration, even from a folder of notes the first list hides.
 
 Read each listed file's change with `git diff "HEAD...$reviewed" -- FILE`. A script that a `bf.yaml` command names is a program, even outside `sensors/`. Then, in the same shell, merge exactly the commit you reviewed:
 

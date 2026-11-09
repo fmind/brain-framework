@@ -33,7 +33,7 @@ channels:
 assistants:
   personal:
     prompt: prompts/personal.md
-    # Claude Code may run only bf read and bf search, and returns {say, wake}.
+    # Claude Code may run only bf read and bf search, plus what its settings allow, and returns {say, wake}.
     command:
       [
         claude,
@@ -66,6 +66,7 @@ bf read memories/personal
 What each run does:
 
 - The harness reads the evidence since the last brief with `bf read` and `bf search`, and returns a [structured reply](#structured-replies).
+- `dontAsk` refuses each call that would need approval, but still runs what your Claude Code settings allow, such as [`permissions.allow`](https://code.claude.com/docs/en/permissions) rules in your user settings or in the brain's `.claude/settings.json`. Run `/permissions` in the brain and remove wider rules before you rely on a read-only harness or make it `idempotent`.
 - A `say` goes to `desktop`; `null` sends nothing. Every run writes a record in `memories/personal/`.
 - `bf run personal` runs it now and posts too, at your model's cost.
 - Each weekday at 08:00, Paris time, a watch or a timer running `bf update` starts it ([run unattended](#run-unattended)). Added after 08:00 on a weekday, it runs at the next `bf update` ([schedule and overlap](#schedule-and-overlap)).
@@ -237,7 +238,7 @@ schedules:
   mail: { every: 300, gate: { command: [python3, routines/records-gate.py, mail] } }
 ```
 
-Here the [records gate](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py), copied to `routines/`, starts the harness once for each new or changed `mail` record. Its [guide](https://github.com/fmind/brain-framework/blob/main/examples/routines/README.md#react-to-new-records) lists its options, cost and limits.
+Here the [records gate](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py), copied to `routines/`, reports each new or changed `mail` record once: a check that finds any starts the harness once with all of them. Its [guide](https://github.com/fmind/brain-framework/blob/main/examples/routines/README.md#react-to-new-records) lists its options, cost and limits. Its export fails while any file of the brain, or of a brain it references, is invalid, so each check fails and retries until you fix that file.
 
 - The gate runs like any program: no shell, from the brain folder, bounded by its `timeout` (default 120 seconds) and `max_bytes` (default 256 KiB). It receives `BF_START` and `BF_END` for the schedule's window, `BF_TRIGGER=schedule`, `BF_SCHEDULE`, and `BF_STATE_DIR` for its own cursor; its arguments support `{{brain}}`, `{{home}}`, `{{start}}`, `{{end}}` and [`{{lines:FILE}}`](sensors.md#sensor-settings). Its stderr goes to `logs/assistant.NAME.gate.SCHEDULE.log`.
 - It prints one JSON object, `{"events": [...]}`, with at most 64 events holding at most 64 KiB once encoded. Each event has a `key` and optional `text` and `ref`, such as `{"key": "ci:main", "text": "CI failed on main", "ref": "memories/github-workflow-runs#…"}`.
@@ -245,7 +246,7 @@ Here the [records gate](https://github.com/fmind/brain-framework/blob/main/examp
 - Events start the harness, and `{{context}}` lists them under `events`.
 - A gate that fails, or prints anything else, fails its job without starting the harness. Nothing acted, so the job retries by itself after 2, 4, … up to 300 seconds, for up to 20 attempts; the error never quotes the output.
 - BF saves the events before the harness starts, and a retried job reuses them without running the gate again. A gate may therefore remember what it reported in `BF_STATE_DIR`, such as "this workflow already failed", so the model hears of each event once. An interruption between the gate's exit and that save can lose that run's events.
-- A gate reads collected records through `bf export --kind items --scope memories/SOURCE` ([export](commands.md#export-the-graph)), as [routines do](routines.md#write-a-routine), and keeps the lines whose `observed` time falls in its window. Collection keeps `observed` while a record is unchanged, so an unchanged record never comes back.
+- A gate reads collected records through `bf export --kind items --scope memories/SOURCE` ([export](commands.md#export-the-graph)), as [routines do](routines.md#write-a-routine), and keeps the lines whose `observed` time is recent. Collection keeps `observed` while a record is unchanged, so an unchanged record never comes back. `observed` is stamped when a collection starts, so a collection still running at one check shows its records at a later one, dated before that check's window: reach back past your longest collection, as the records gate does, and remember the reported keys in `BF_STATE_DIR` so none repeats. Start from the records gate rather than filtering on the window alone.
 - Collection never starts a gate, and an assistant's own writes wake nothing unless a gate reads them.
 - Only the schedule's own jobs, from `bf update` or watch, run its gate: `bf run NAME` starts the harness without it.
 
@@ -358,7 +359,7 @@ Each successful run writes one record in `memories/NAME/`, a source like a senso
 | `time`       | The window's end.                                                                                                                                                                                                          |
 | `attributes` | `observed` (the window's end), `trigger` (the kind of run: `input`, `schedule`, `wake` or `manual`), `job`, `window` (`start`, `end`), and when present `input`, `output`, `wake`, `channel`, `sender` and `conversation`. |
 
-Records are model output, ranked like low-priority sources: inspect the evidence they cite before trusting their claims. Search results and exact reads mark them `"generated":true`.
+Records are model output, ranked like low-priority sources: inspect the evidence they cite before trusting their claims. Search results and exact reads mark them `"generated":true`. The mark and the low rank follow the assistants `bf.yaml` declares, so removing or renaming an assistant leaves its records unmarked. To retire one whose records you keep, leave it declared with `enabled: false`, which runs it no more, or delete its `memories/NAME/`.
 
 - BF saves raw harness output in the durable queue before parsing or publishing the record.
 - With `reply`, the other JSON members remain record output metadata. The structured reply is removed, or replaced with `null` when it is an array element so other indices stay stable.
@@ -433,7 +434,7 @@ An assistant that reads untrusted evidence and can act can be steered by that ev
 assistants:
   scout:
     prompt: prompts/scout.md
-    # Read-only, so its failed runs can retry by themselves.
+    # Read-only while your Claude Code settings allow nothing more, so its failed runs can retry by themselves.
     command:
       [
         claude,
@@ -483,6 +484,6 @@ assistants:
 
 The [messaging example](https://github.com/fmind/brain-framework/tree/main/examples/channels) runs both offline, with stand-ins for the harness and the chat.
 
-With one assistant, the [harness wrapper](https://github.com/fmind/brain-framework/blob/main/examples/prompts/routines/harness.py) adds arguments only to runs that answer a message, when [`BF_TRIGGER`](#know-why-it-runs) is `input`. For example, `[python3, routines/harness.py, --input-arg, --dangerously-skip-permissions, --, agy, …]` approves every Antigravity tool call for your messages alone. Such a run still reads evidence with those wider permissions, so admit only your own messages ([choose inputs](#choose-inputs)). Without that flag, Antigravity [soft-denies](https://antigravity.google/docs/cli/headless/) a refused action and still exits 0: allowlist the read-only commands its scheduled prompts rely on, such as `bf read` and `bf search`, in its settings.
+With one assistant, the [harness wrapper](https://github.com/fmind/brain-framework/blob/main/examples/prompts/routines/harness.py) adds arguments only to runs that answer a message, when [`BF_TRIGGER`](#know-why-it-runs) is `input`. Add one bounded rule, such as an edit rule for `projects/` like the actor's, and admit only your own messages ([choose inputs](#choose-inputs)): such a run still reads evidence, so its arguments bound what injected text can make it do. Never add a flag that approves every tool call, such as `--dangerously-skip-permissions`: a steered run could then run any command and send data out, the combination [trust boundaries](privacy.md#trust-boundaries) rule out. When the harness reads untrusted evidence, split it in two as above. Antigravity [soft-denies](https://antigravity.google/docs/cli/headless/) a refused action and still exits 0: allowlist the read-only commands its prompts rely on, such as `bf read` and `bf search`, in its settings.
 
 See [recovery](channels.md#queue-and-recovery) and [privacy](privacy.md).

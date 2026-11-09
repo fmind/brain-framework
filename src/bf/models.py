@@ -315,7 +315,7 @@ _EXPLAINED = 5
 # jargon or a raw regular expression.
 _PLAIN = {
     ("string_pattern_mismatch", "at"): "expected HH:MM such as 08:00",
-    # The examples fit every place: a field path and an assistant's reply path, a sensor and a harness command.
+    # A field path and an assistant's reply path, which `explain` extends; a sensor and a harness command.
     ("string_pattern_mismatch", "path"): "expected a JSON pointer starting with /",
     ("list_type", "command"): "expected an argv list, one string per argument, such as [python3, script.py]",
 }
@@ -396,7 +396,9 @@ def explain(error: ValidationError, known: Collection[str] | None = None) -> str
             hint = suggest(last, _keys(error.title, item["loc"][:-1])) if isinstance(last, str) else ""
             reason = "unknown key" + hint
         elif known is None and (plain := _PLAIN.get((item["type"], str(last)))):
-            reason = plain
+            # An assistant's reply path, unlike a field path, may also be empty.
+            reply = len(item["loc"]) == 4 and item["loc"][0] == "assistants" and item["loc"][2:] == ("reply", "path")
+            reason = plain + (", or empty for the whole stdout" if reply else "")
         return f"{location}: {reason}" if location else reason
 
     errors = error.errors(include_url=False, include_input=False)

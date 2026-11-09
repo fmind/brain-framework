@@ -249,6 +249,9 @@ def test_the_skill_configures_the_assistant_guides_claude_code_command() -> None
     assert len(guide) == 1
     assert commands(TEXTS["src/bf/skills/bf-maintain/references/integrations.md"]) == guide
     assert commands((ROOT / "examples/prompts/README.md").read_text(encoding="utf-8")) == guide
+    # The front pages show a mail-gated assistant: copied as is, it must not inherit wider permissions.
+    for page in ("README.md", "docs/docs/index.md"):
+        assert commands((ROOT / page).read_text(encoding="utf-8")) == guide, page
     # An assistant reads untrusted evidence: only the listed tools exist, and a call that needs approval is refused, even
     # when the owner's settings accept edits.
     (command,) = guide
