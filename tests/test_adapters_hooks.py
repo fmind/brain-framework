@@ -437,10 +437,14 @@ def test_session_context_names_a_silent_source_only_while_it_is_otherwise_fresh(
         {"sensor": "papers", "freshness": "fresh", "silent": True},
         {"sensor": "feeds", "freshness": "overdue", "silent": True},
         {"sensor": "mail", "freshness": "fresh", "failed": True, "silent": True},
+        {"sensor": "rss", "freshness": "fresh", "degraded": True},
     ]
     install(provider, "git@github.com:fmind/brain-framework.git", home={**HOME, "attention": attention})
     lines = session(provider).stdout.splitlines()
-    assert "- Collection needs attention: papers silent, feeds overdue, mail failed; see `bf status`." in lines
+    assert (
+        "- Collection needs attention: papers silent, feeds overdue, mail failed, rss degraded; see `bf status`."
+        in lines
+    )
 
 
 def test_session_context_lists_a_note_linking_with_several_relations_once(provider: Provider) -> None:

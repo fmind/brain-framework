@@ -72,7 +72,7 @@ bf read actions
 bf validate
 ```
 
-The review writes an action when projects need review, tasks are open, items fall in the last seven days, or scheduled programs failed, are `overdue`, are due but `never` succeeded or [fell silent](schedule.md#silent-sources). The reply names the new `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, with a random 8-character suffix. Empty output creates nothing. With `refresh: 604800`, `bf update` and `bf watch` also run it weekly.
+The review writes an action when projects need review, tasks are open, items fall in the last seven days, or scheduled programs failed, are `overdue`, are due but `never` succeeded, [fell silent](schedule.md#silent-sources) or [keep missing parts](sensors.md#report-partial-coverage). The reply names the new `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, with a random 8-character suffix. Empty output creates nothing. With `refresh: 604800`, `bf update` and `bf watch` also run it weekly.
 
 The action lists, in order:
 

@@ -150,7 +150,7 @@ def mention(item: dict) -> str:
 
 
 def attention(home: dict) -> list[str]:
-    """One line per scheduled program the home page says failed, is late on this machine or, for a source, fell silent.
+    """One line per scheduled program the home page says failed, is late on this machine or, for a source, fell silent or keeps missing parts.
 
     Program names come from bf.yaml; code spans keep them inert.
     """
@@ -163,6 +163,7 @@ def attention(home: dict) -> list[str]:
         state = [STATES[entry["freshness"]]] if entry.get("freshness") in STATES else []
         state += ["last attempt failed"] if entry.get("failed") else []
         state += ["no new or changed record within its `silent_after`"] if entry.get("silent") else []
+        state += ["recent runs missed parts; its log names them"] if entry.get("degraded") else []
         lines.append(f"- {kind.capitalize()} {code(entry[kind])}{where}: {'; '.join(state) or 'needs attention'}.")
     return lines
 

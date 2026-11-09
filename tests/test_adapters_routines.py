@@ -304,12 +304,14 @@ def test_weekly_review_says_why_a_silent_source_needs_attention() -> None:
     attention = [
         {"sensor": "mail", "freshness": "fresh", "silent": True},
         {"sensor": "feed", "freshness": "overdue", "silent": True},
+        {"sensor": "rss", "freshness": "fresh", "degraded": True},
     ]
     home = {"projects": [], "tasks": EMPTY_TASKS, "upcoming": [], "attention": attention}
     text = "\n".join(weekly_review().render("2026-09-25", home, {"total": 0}))
     lines = text.splitlines()
     assert "- Sensor `mail`: no new or changed record within its `silent_after`." in lines
     assert "- Sensor `feed`: overdue; no new or changed record within its `silent_after`." in lines
+    assert "- Sensor `rss`: recent runs missed parts; its log names them." in lines
     assert "- 0 items in the period, and a sensor needing attention may have missed some." in lines
     validate_okf("actions/2026-09-25_weekly-review/ACTION.md", text.encode())
 

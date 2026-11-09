@@ -23,7 +23,7 @@ An exact read above 32 KiB returns its text in pages; the first carries the back
 
 ## Check coverage
 
-Inspect `problems`, `stale` and `sources` before interpreting a result, and retry shortly after a `stale` reply. Search lists the sources of returned records plus any that failed, are `overdue` or `never` collected, or fell `silent`; an empty reply or a `memories` scope lists every searched source. A backfill extends a source's `window` without making it fresh, and a fresh cache never proves fresh provider evidence ([source coverage](https://fmind.github.io/brain-framework/docs/retrieval/#source-coverage)). Search and read refresh the `.bf/` cache, so a read-only brain fails with a write-access error: grant access or use a copy.
+Inspect `problems`, `stale` and `sources` before interpreting a result, and retry shortly after a `stale` reply. Search lists the sources of returned records plus any that failed, are `overdue` or `never` collected, fell `silent` or are `degraded`; an empty reply or a `memories` scope lists every searched source. A backfill extends a source's `window` without making it fresh, and a fresh cache never proves fresh provider evidence ([source coverage](https://fmind.github.io/brain-framework/docs/retrieval/#source-coverage)). Search and read refresh the `.bf/` cache, so a read-only brain fails with a write-access error: grant access or use a copy.
 
 ## Follow the graph
 
@@ -34,6 +34,6 @@ Inspect `problems`, `stale` and `sources` before interpreting a result, and retr
 
 ## Pages worth knowing
 
-- Home shows as many projects as fit, those needing review first, and `attention` for programs that failed, are `overdue` or are due but `never` succeeded and for silent sources; `bf read projects` lists every project, and the [review guide](review.md) interprets their signals.
+- Home shows as many projects as fit, those needing review first, and `attention` for programs that failed, are `overdue` or are due but `never` succeeded and for silent or lastingly degraded sources; `bf read projects` lists every project, and the [review guide](review.md) interprets their signals.
 - `bf read tasks` lists open checkboxes in projects, concepts and `ACTION.md` notes; only `deprecated` closes a note's tasks.
 - Period pages place records by event `time`, else by `observed`; `memories/SOURCE/undated` lists records without event time.

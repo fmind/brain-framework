@@ -189,7 +189,7 @@ def render(repo: str, page: dict, project: dict | None, attention: list, stale: 
             f"  - {' '.join(filter(None, [day(i.get('date')), plain(i.get('title', ''))]))} ({code(address(i))})"
             for i in newest
         )
-    # Scheduled sensors, routines and assistants that failed, are late or fell silent: their evidence may be older or
+    # Scheduled sensors, routines and assistants that failed, are late, fell silent or keep missing parts: their evidence may be older or
     # sparser than it looks. A stopped sensor falls silent too: its failure or lateness names what to repair first.
     late = [
         f"{plain(entry.get('sensor') or entry.get('routine') or entry.get('assistant'), 64)} "
@@ -198,6 +198,8 @@ def render(repo: str, page: dict, project: dict | None, attention: list, stale: 
             if entry.get("failed")
             else "silent"
             if entry.get("silent") and entry.get("freshness") == "fresh"
+            else "degraded"
+            if entry.get("degraded") and entry.get("freshness") == "fresh"
             else plain(entry.get("freshness"), 16)
         )
         for entry in attention

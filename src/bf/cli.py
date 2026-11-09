@@ -965,7 +965,8 @@ def report(
         bool,
         typer.Option(
             help="Exit 1 on problems, an unavailable cache, brain or reference, scheduled programs that failed, are "
-            "overdue, due but never succeeded or fell silent, unresolved assistant work, or a failing channel."
+            "overdue, due but never succeeded or fell silent, sources degraded three runs in a row, unresolved "
+            "assistant work, or a failing channel."
         ),
     ] = False,
     watch: Annotated[

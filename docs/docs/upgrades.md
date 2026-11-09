@@ -40,7 +40,7 @@ This site follows the repository's current code, which can be newer than your in
 
 A release number reads MAJOR.MINOR.PATCH. Within one major release:
 
-- `search` and `read` [replies](retrieval.md#reply-schemas) only gain optional fields or narrow what they return, such as leaving out an optional field or tightening a value: validate them with their schemas and never rely on an optional field.
+- `search`, `read` and `status` [replies](retrieval.md#reply-schemas) only gain optional fields or narrow what they return, such as leaving out an optional field or tightening a value: validate them with their schemas and never rely on an optional field.
 - `bf.yaml`, evaluation suites and the machine registry only widen: a file that loads keeps loading.
 - The brain format `version` stays the same.
 

@@ -133,7 +133,7 @@ Keep each capture within its evidence's audience and Git policy. A capture of a 
 
 The [example hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add context without the agent asking:
 
-- The **session hook** prints the current repository's project: its status, review deadline, next task and linked notes. It also lists programs that are overdue, never collected or failed, and sources that [fell silent](schedule.md#silent-sources).
+- The **session hook** prints the current repository's project: its status, review deadline, next task and linked notes. It also lists programs that are overdue, never collected or failed, and sources that [fell silent](schedule.md#silent-sources) or [keep missing parts](sensors.md#report-partial-coverage).
 - The optional **prompt hook** searches at most eight content words of each prompt, waits up to 5 seconds and prints the refs of up to three matching notes. It passes words of every prompt to `bf search` as an argument.
 
 Copy them into a folder only you write, such as your personal brain's `hooks/`. Hosts run them at every session or prompt, so never register a hook from a brain others can push to. The [hooks README](https://github.com/fmind/brain-framework/blob/main/examples/hooks/README.md#connect-the-host) installs, previews and connects them for Claude Code and Codex.
