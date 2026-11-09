@@ -221,7 +221,7 @@ inputs/, originals/                      # imports to process and retained origi
 .bf/                                     # disposable search cache; ignored by Git
 ```
 
-Search covers Markdown under `projects/`, `concepts/` and `actions/`, and records under `memories/`. An [assistant's](prompts.md#what-a-run-records) records hold model output, so they rank like a low-priority source. Everything else is configuration, programs and media.
+Search covers Markdown under `projects/`, `concepts/` and `actions/`, and records under `memories/`. An [assistant's](prompts.md#what-a-run-records) records hold model output, so they rank like a low-priority source. Everything else is configuration, programs and media. Keep the brain's own agent procedures under `skills/`, as [Add your own workflow skills](agents.md#add-your-own-workflow-skills) shows.
 
 Ignored by Git does not mean disposable:
 

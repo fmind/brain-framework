@@ -14,7 +14,7 @@ Open a [feature request](https://github.com/fmind/brain-framework/issues/new?tem
 
 ## Scope decisions
 
-Each decision states why it holds and what evidence would reopen it. This list was first recorded on 2026-11-08. Propose crossing a decision rather than working around it.
+Each decision states why it holds and what evidence would reopen it. This list was first recorded on 2026-11-08; a line without its own `Changed` date dates from then. Propose crossing a decision rather than working around it.
 
 - **Plain files stay the core.** Notes are Markdown, each record is one JSON file, the graph holds only explicit links and search is offline and lexical. Why: a brain stays readable and editable without BF. Reopen: a recurring task plain files cannot serve. See [what stays authoritative](docs/docs/concepts.md#what-stays-authoritative).
 - **No model inference, provider SDK, plugin framework, importable SDK or record sync.** Integrations ship as the copy-in sensor kit, the standard vocabulary and `bf collect --input`. Why: provider CLIs keep their credentials and the core stays small. Reopen: an integration none of these can express. Since [v20.1.0](https://github.com/fmind/brain-framework/releases/tag/v20.1.0).

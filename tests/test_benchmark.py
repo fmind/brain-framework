@@ -32,9 +32,10 @@ def benchmark(*args: str, cwd: Path | None = None, env: dict[str, str] | None = 
 def test_benchmark_reports_every_measurement_on_a_tiny_corpus(tmp_path: Path) -> None:
     report = benchmark("--dir", str(tmp_path / "benchmark"))
     assert report["corpus"] == {"records": 30, "body_chars": 1024, "notes": 2, "repeats": 1, "batch": 5}
-    reads = {"note_edit", "selective", "common", "question", "typo", "timeline", "home", "exact_read"}
+    reads = {"note_edit", "selective", "common", "question", "prefix", "typo", "timeline", "home", "exact_read"}
     writes = {"changed_record", "unchanged_record", "upsert_add", "upsert_update", "upsert_remove"}
     assert set(report["seconds"]) == {"build", *reads, *writes}
+    assert report["cache_bytes"] > 0
     # The temporary brain is removed; only its parent directory remains.
     assert list((tmp_path / "benchmark").iterdir()) == []
 

@@ -44,7 +44,7 @@ A release number reads MAJOR.MINOR.PATCH. Within one major release:
 - `bf.yaml`, evaluation suites and the machine registry only widen: a file that loads keeps loading.
 - The brain format `version` stays the same.
 
-Minor releases add features; patch releases fix bugs, including input BF misread. A major release ships whenever the design needs it and batches related breaks where practical. It adds no compatibility layer; its manual upgrade steps are in the [changelog](../changelog.md).
+Minor releases add features; patch releases fix bugs, including input BF misread. A major release ships whenever the design needs it and batches related breaks where practical. It adds no compatibility layer; its manual upgrade steps are in the [changelog](../changelog.md). Breaks held for the next major release are listed in [governance](https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md#next-major).
 
 A new brain format `version` means stored files need converting: record files, the `memories/` layout, notes, evaluation suites or the fields `bf.yaml` declares. Other breaks keep `version`, with manual upgrade steps: changed program settings, such as sensors, routines, assistants, channels and watch, or a stricter rule that rejects input which loaded before. [Contributing](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md#keep-the-contract) holds the full rule.
 
@@ -90,7 +90,7 @@ See [skill installation](agents.md#install-the-skills) before passing `--force`.
 
 `bf init` writes a brain's files once, so a release's new defaults never reach an existing brain by themselves:
 
-- Merge new `AGENTS.md` guidance by hand, as [Refresh brain instructions](agents.md#refresh-brain-instructions) shows.
+- Refresh `AGENTS.md`: replace the text above `## Your rules` with a scratch copy's and keep your rules below it, as [Refresh brain instructions](agents.md#refresh-brain-instructions) shows.
 - Add new [standard vocabulary](schema.md#standard-vocabulary) fields, such as `part-of` and `label`, to use the sensors that print them.
 - Add or update the [editor schema](schema.md#editor-schemas) line of `bf.yaml` and `evals/*.yaml`, so its version matches `bf --version`.
 

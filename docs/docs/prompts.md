@@ -358,7 +358,7 @@ Each successful run writes one record in `memories/NAME/`, a source like a senso
 | `time`       | The window's end.                                                                                                                                                                                                          |
 | `attributes` | `observed` (the window's end), `trigger` (the kind of run: `input`, `schedule`, `wake` or `manual`), `job`, `window` (`start`, `end`), and when present `input`, `output`, `wake`, `channel`, `sender` and `conversation`. |
 
-Records are model output, ranked like low-priority sources: inspect the evidence they cite before trusting their claims.
+Records are model output, ranked like low-priority sources: inspect the evidence they cite before trusting their claims. Search results and exact reads mark them `"generated":true`.
 
 - BF saves raw harness output in the durable queue before parsing or publishing the record.
 - With `reply`, the other JSON members remain record output metadata. The structured reply is removed, or replaced with `null` when it is an array element so other indices stay stable.

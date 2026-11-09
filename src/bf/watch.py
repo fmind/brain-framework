@@ -29,7 +29,7 @@ from rich.text import Text
 from bf.assistants import Dispatcher, StreamStoppedError
 from bf.collect import next_due, starting
 from bf.config import load
-from bf.health import assistant_health
+from bf.health import assistant_health, is_late
 from bf.history import ROUTINES, SENSORS, environment, log_path, state
 from bf.models import Error, WatchSettings, decode, local, present, printable, terminal, timestamp
 from bf.runtime import Queue
@@ -75,6 +75,13 @@ class Row:
     # An assistant's successful runs and the record its latest run wrote.
     runs: int | None = None
     record: str = ""
+    # A `never` assistant whose schedules are not due yet: as in bf status, it needs no attention until one is.
+    early: bool = False
+
+
+def needs_attention(row: Row) -> bool:
+    """Whether the attention count and the Tab filter include the row."""
+    return row.status in ATTENTION and not row.early
 
 
 # The table marks each kind beside its name; sensors carry none.
@@ -171,6 +178,7 @@ def snapshot(
                 log=log_path(name) if error else "",
                 runs=cast(int, health["runs"]),
                 record=str(health.get("record", "")),
+                early=status is State.NEVER and not is_late(settings, health, now),
             )
         )
     return rows
@@ -296,7 +304,7 @@ class Dashboard:
 
     def visible(self) -> list[Row]:
         rows = sorted(
-            (row for row in self.rows if not self.attention or row.status in ATTENTION),
+            (row for row in self.rows if not self.attention or needs_attention(row)),
             key=lambda row: (row.name, row.kind),
         )
         # Stable ties stay alphabetical, and unknown values stay last in either direction.
@@ -456,7 +464,7 @@ class Dashboard:
             no_wrap=True,
             overflow="ellipsis",
         )
-        count, needing = len(self.rows), sum(row.status in ATTENTION for row in self.rows)
+        count, needing = len(self.rows), sum(needs_attention(row) for row in self.rows)
         summary = Text(
             f"{count} program{'' if count == 1 else 's'}   "
             + ("" if self.observe else f"{sum(row.included for row in self.rows)} selected   ")

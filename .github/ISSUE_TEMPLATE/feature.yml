@@ -18,6 +18,13 @@ body:
       description: The smallest useful change, the observable outcome, and how you would compare it with the current workflow or the same notes read directly.
     validations:
       required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope decision crossed
+      description: Name the GOVERNANCE.md scope decision this request crosses, if any, and the evidence that would reopen it. See https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md#scope-decisions.
+    validations:
+      required: false
   - type: checkboxes
     id: constraints
     attributes:

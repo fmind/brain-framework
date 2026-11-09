@@ -305,7 +305,7 @@ def assistant_health(
     return result
 
 
-def _late(settings: Program | Assistant, health: Mapping[str, object], now: datetime) -> bool:
+def is_late(settings: Program | Assistant, health: Mapping[str, object], now: datetime) -> bool:
     """Whether a scheduled program is `overdue`, or has `never` succeeded and is due now by the dispatcher's rule.
 
     A scheduled sensor or routine without a success is due at once. An assistant is late once one of its `never`
@@ -350,7 +350,7 @@ def _attention(
                     if isinstance(settings, Assistant)
                     else settings.refresh
                 )
-                and (failed or silent or _late(settings, health, now))
+                and (failed or silent or is_late(settings, health, now))
             ):
                 result.append(
                     {

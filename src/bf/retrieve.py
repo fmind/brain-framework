@@ -206,7 +206,7 @@ def _tied(row: tuple[dict[str, object] | None, ...]) -> list[dict[str, object]]:
 
 
 def _coverage(coverage: list[dict[str, object]], items: list[dict[str, object]], *, whole: bool) -> dict[str, object]:
-    """The sources of returned records and those needing attention; `sources_omitted` counts the other searched ones.
+    """The sources of returned records and those whose evidence may be missing; `sources_omitted` counts the rest.
 
     An empty reply, or a search of collected evidence alone, keeps every searched source: coverage is its answer.
     """

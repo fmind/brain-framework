@@ -88,6 +88,7 @@ def test_github_issues_maps_the_window_to_standard_attributes(provider: Provider
         "status": "closed",
         "reason": "completed",
         "labels": ["bug"],
+        "label_refs": ["label:github.com/acme/widgets/bug"],
         "updated": "2026-09-01T10:00:00.000000Z",
         "author_refs": ["person:github.com/alice-dev"],
         "assignee_refs": ["person:github.com/bob"],
@@ -281,6 +282,31 @@ def test_secret_reads_only_a_private_file_outside_the_brain(tmp_path: Path, monk
     result = driver(tmp_path, body, {"TOKEN": str(private / "group")})
     failed(result, SECRET)
     assert "secret file group is open to your group or others" in result.stderr
+
+
+def test_secret_names_an_unknown_home_and_finds_the_brain_by_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sensor = kit()
+    brain = tmp_path / "brain"
+    brain.mkdir()
+    (token := brain / "token").write_bytes(SECRET.encode())
+    token.chmod(0o600)
+    monkeypatch.setenv("BF_BRAIN", str(brain))
+    # An unknown user's home folder fails as one diagnostic, never as a RuntimeError traceback.
+    with pytest.raises(sensor.SensorError, match="names an unknown home folder"):
+        sensor.secret("~no-such-user-for-bf-tests/token")
+    # A case-insensitive volume reaches the brain by another spelling; the folder's identity still matches.
+    real, spelled = os.stat, str(tmp_path / "BRAIN")
+    monkeypatch.setenv("BF_BRAIN", spelled)
+    monkeypatch.setattr(os, "stat", lambda target, *a, **k: real(brain if str(target) == spelled else target, *a, **k))
+    with pytest.raises(sensor.SensorError, match="inside the brain") as error:
+        sensor.secret(token)
+    assert SECRET not in str(error.value)
+    # Without the brain BF names, it stops before reading the file.
+    monkeypatch.setenv("BF_BRAIN", str(tmp_path / "missing"))
+    with pytest.raises(sensor.SensorError, match="cannot find the brain in BF_BRAIN"):
+        sensor.secret(token)
 
 
 def test_fetch_stays_on_one_https_host() -> None:

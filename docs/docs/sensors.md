@@ -197,7 +197,7 @@ sensors:
 
 To share settings between programs, keep them in a line file, such as `[env, "{{lines:settings/google.env}}", sensors/gmail-headers.py, ...]` with one `NAME=value` per line. Line files do not expand `{{home}}`: write absolute paths there.
 
-`env` sets these values after BF [removes startup variables](limits.md#processes-and-logs), so they reach the program as written. Keep this recipe for settings such as accounts and profiles: never set `LD_*`, `DYLD_*`, `PYTHON*` or `NODE_OPTIONS` here, and never a secret.
+`env` sets these values after BF [removes startup variables](limits.md#processes-and-logs), so they reach the program as written. It runs the script as a command, so the script still needs its executable bit. Keep this recipe for settings such as accounts and profiles: never set a variable BF [removes](limits.md#processes-and-logs), such as `LD_*`, `PYTHON*` or `NODE_OPTIONS`, and never a secret.
 
 ## Quiet a high-volume source
 

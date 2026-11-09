@@ -53,15 +53,15 @@ The dashboard shows each program's state, last success, next due time, returned 
 
 This is the fictional [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch), sorted by state: `unavailable` failed, `calendar` updated its record, `git` added one, and the manual and disabled sensors stay idle.
 
-| Key                   | Effect                                                                       |
-| --------------------- | ---------------------------------------------------------------------------- |
-| `j` / `k`, arrows     | Select a program and show its details, including its log and latest action.  |
-| `g` / `G`, Home / End | Select the first or last program.                                            |
-| Tab                   | Show only programs needing attention: failed, never collected or due.        |
-| `f` (or `u`)          | Reload `bf.yaml` and check due work now; queues one check during an update.  |
-| Space                 | Pause or resume future checks; an active update finishes.                    |
-| `?`                   | Toggle the guide: every key, sort field and count explained.                 |
-| `q`                   | Cancel any active update and quit. Ctrl-C or closing the terminal exits 130. |
+| Key                   | Effect                                                                                                |
+| --------------------- | ----------------------------------------------------------------------------------------------------- |
+| `j` / `k`, arrows     | Select a program and show its details, including its log and latest action.                           |
+| `g` / `G`, Home / End | Select the first or last program.                                                                     |
+| Tab                   | Show only programs needing attention: failed, due, or [never collected once due](#timing-and-health). |
+| `f` (or `u`)          | Reload `bf.yaml` and check due work now; queues one check during an update.                           |
+| Space                 | Pause or resume future checks; an active update finishes.                                             |
+| `?`                   | Toggle the guide: every key, sort field and count explained.                                          |
+| `q`                   | Cancel any active update and quit. Ctrl-C or closing the terminal exits 130.                          |
 
 Press `f` after adding a reviewed sensor or routine to `bf.yaml`: its row appears and it runs if due. A new assistant's row appears too, but it runs only after you restart watch. Refresh respects selectors, pause, `refresh` and failure backoff.
 

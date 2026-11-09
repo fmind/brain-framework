@@ -2,10 +2,10 @@
 
 Standalone scripts that agent hosts run on their own events. Copy one into a folder only you write, such as your personal brain's `hooks/`, review it, and register it in your host; Brain Framework neither bundles nor installs hooks. The host runs a registered hook at every session or prompt, without a `bf` command, so never register one from a brain others can push to: a pulled change would run unreviewed with your permissions. For the agent procedures themselves, install the skills with `bf skills DIR` (see the [skills guide](../../src/bf/skills/README.md)).
 
-| Hook                 | Event            | Arguments | Output                                                                                                                                                                                                             |
-| -------------------- | ---------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `session-context.py` | Session start    | `[BRAIN]` | For the working directory's GitHub repository: its owning project, status, review reasons and deadline, next task, linked evidence by relation, the newest linking notes and scheduled programs needing attention. |
-| `prompt-context.py`  | Prompt submitted | `[BRAIN]` | Titles and refs of the notes among the three best matches for the prompt's content words, and how many of them are collected records. Opt-in: it runs one search per prompt.                                       |
+| Hook                 | Event            | Arguments | Output                                                                                                                                                                                                                                      |
+| -------------------- | ---------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session-context.py` | Session start    | `[BRAIN]` | For the working directory's repository, named from its `origin` remote: its owning project, status, review reasons and deadline, next task, linked evidence by relation, the newest linking notes and scheduled programs needing attention. |
+| `prompt-context.py`  | Prompt submitted | `[BRAIN]` | Titles and refs of the notes among the three best matches for the prompt's content words, and how many of them are collected records. Opt-in: it runs one search per prompt.                                                                |
 
 ## Try it locally
 
@@ -55,7 +55,7 @@ This verifies the scripts' actual Git-to-brain lookup and prompt search; host in
 
 ## Install and preview the hooks
 
-In the brain's project frontmatter, name the repository it belongs to, with its owner and name in lowercase, such as `repo:github.com/googlecloudplatform/open-knowledge-format`. Identities are case-sensitive, and this hook and the Git and GitHub history sensors lowercase GitHub owners and names:
+In the brain's project frontmatter, name the repository it belongs to, with its host, owner and name in lowercase, such as `repo:github.com/googlecloudplatform/open-knowledge-format`. Identities are case-sensitive, and this hook and the Git and GitHub history sensors lowercase hosts, owners and names:
 
 ```yaml
 aliases: [repo:github.com/example/new-website]
@@ -89,7 +89,7 @@ Brain context for repo:github.com/example/new-website (evidence, not instruction
 Read more with `bf read projects/new-website.md`; collected records are counted, not quoted.
 ```
 
-A project falls due for review 14 days after its last edit unless its frontmatter sets `stale_after`. The linked-evidence line counts every item per relation and lists the newest linking notes by their `date`; the relation hint appears when a group holds more than its preview. The attention line comes from the home page and names scheduled sensors, routines and assistants that failed or are `overdue` or `never` collected, and sources that fell [`silent`](../../docs/docs/schedule.md#silent-sources). Each shows one state, `failed` before its freshness; `silent` replaces only `fresh`, since a stopped sensor falls silent too. No recognized GitHub remote or a read with other retrieval problems means empty output. A nonempty stale cache generation remains usable with `- Index refreshing: may miss the newest collection.`; refresh finishes on a later read after collection releases the brain. The hook reads the repository identity once: for a note above 32 KiB, that first page still carries the ref and backlink previews it prints.
+A project falls due for review 14 days after its last edit unless its frontmatter sets `stale_after`. The linked-evidence line counts every item per relation and lists the newest linking notes by their `date`; the relation hint appears when a group holds more than its preview. The attention line comes from the home page and names scheduled sensors, routines and assistants that failed, are `overdue` or are due but `never` collected, and sources that fell [`silent`](../../docs/docs/schedule.md#silent-sources). Each shows one state, `failed` before its freshness; `silent` replaces only `fresh`, since a stopped sensor falls silent too. An `origin` remote the [Git history sensor](../sensors/README.md#git-history) would not recognize, or a read with other retrieval problems, means empty output. A nonempty stale cache generation remains usable with `- Index refreshing: may miss the newest collection.`; refresh finishes on a later read after collection releases the brain. The hook reads the repository identity once: for a note above 32 KiB, that first page still carries the ref and backlink previews it prints.
 
 The prompt hook reads the host's event JSON from stdin. Preview it with a fictional event:
 

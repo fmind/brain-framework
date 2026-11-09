@@ -128,10 +128,18 @@ def secret(path: str | os.PathLike[str]) -> str:
     link, owned by you with no group or other permission, outside `BF_BRAIN` and at most 64 KiB of UTF-8. One
     trailing newline is removed. Errors name the file and the problem, never its content.
     """
-    file = Path(path).expanduser()
-    name = file.name or "secret"
+    name = Path(path).name or "secret"
+    try:
+        file = Path(path).expanduser()
+    except RuntimeError:
+        raise SensorError(f"secret file {name} names an unknown home folder; pass an absolute path") from None
     if not file.is_absolute():
         raise SensorError(f"secret file {name} needs an absolute path outside the brain")
+    brain = os.environ.get("BF_BRAIN", "")
+    try:
+        root = Path(brain).stat() if brain else None
+    except OSError:
+        raise SensorError("cannot find the brain in BF_BRAIN; run the sensor through bf, which sets it") from None
     try:
         info = file.lstat()
         if not stat.S_ISREG(info.st_mode):
@@ -142,8 +150,9 @@ def secret(path: str | os.PathLike[str]) -> str:
             raise SensorError(f"secret file {name} is open to your group or others; run chmod 600 on it")
         if info.st_size > MAX_SECRET:
             raise SensorError(f"secret file {name} exceeds {MAX_SECRET} bytes")
-        brain = os.environ.get("BF_BRAIN", "")
-        if brain and file.resolve(strict=True).is_relative_to(Path(brain).resolve()):
+        # Folder identities, unlike spellings, also find the brain through a case-insensitive or bind-mounted path.
+        parents = file.resolve(strict=True).parents
+        if root is not None and any(os.path.samestat(root, parent.stat()) for parent in parents):
             raise SensorError(f"secret file {name} is inside the brain; move it to a private folder outside it")
         # Opening without following a link, then comparing inodes, reads the very file checked above.
         with os.fdopen(os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:

@@ -4,7 +4,7 @@ Use for failed or overdue collection, backfills, interrupted writes, watch and s
 
 ## Read bf status
 
-Agents read `bf status`, a JSON snapshot that runs nothing, never the interactive `bf status --watch`; the [status reference](https://fmind.github.io/brain-framework/docs/commands/#status-sources-and-routines) lists every field. Start from `attention`: scheduled programs that `failed`, are `overdue` (no success within twice their `refresh`) or `never` succeeded, and `silent` sources, which gained no new or changed record within their `silent_after`, whatever their freshness. Then:
+Agents read `bf status`, a JSON snapshot that runs nothing, never the interactive `bf status --watch`; the [status reference](https://fmind.github.io/brain-framework/docs/commands/#status-sources-and-routines) lists every field. Start from `attention`: scheduled programs that `failed`, are `overdue` (no success within twice their `refresh`) or are due but `never` succeeded, and `silent` sources, which gained no new or changed record within their `silent_after`, whatever their freshness. Then:
 
 - `cache` `busy` means another writer works, and replies carry `stale` meanwhile; `stale` or `missing` with `pending_transaction: true` means an interrupted record write awaits recovery.
 - `runtime` names the `installed` version and the `pinned` one the brain's `uv.lock` names, if any.
@@ -12,7 +12,7 @@ Agents read `bf status`, a JSON snapshot that runs nothing, never the interactiv
 - An assistant appears under `assistants`, with its `runs`, `last_success` and latest `record`, and under `sources`, with its records. `attention` also names an assistant with failed or uncertain jobs or schedules that cannot start, and a failing `channel`; `messaging` holds the queue's jobs, deliveries and `transports` errors.
 - A failed program shows its `error`, consecutive `failures` and `log`; a disabled one reports no failure.
 
-`bf status --check` exits 1 on a scheduled program that failed or is `overdue` or `never`, on a `silent` source, on an assistant, unless disabled, with failed or uncertain jobs or schedules that cannot start, on a channel with an unresolved delivery that failed or is uncertain or a stream or read error (`bf queue` lists them), on problems, a `stale` or `missing` cache, an unavailable brain or an unreadable `brains:` reference.
+`bf status --check` exits 1 on a scheduled program that failed, is `overdue` or is due but `never` succeeded, on a `silent` source, on an assistant, unless disabled, with failed or uncertain jobs or schedules that cannot start, on a channel with an unresolved delivery that failed or is uncertain or a stream or read error (`bf queue` lists them), on problems, a `stale` or `missing` cache, an unavailable brain or an unreadable `brains:` reference.
 
 ## Diagnose and recover
 
@@ -59,7 +59,7 @@ bf skills ~/.agents/skills --check
 
 ## Refresh brain instructions
 
-`bf init` writes a brain's `AGENTS.md` once. After an upgrade, diff it against a scratch `bf init` copy, merge new guidance by hand, keep the owner's additions and run `bf validate` ([refresh brain instructions](https://fmind.github.io/brain-framework/docs/agents/#refresh-brain-instructions)).
+`bf init` writes a brain's `AGENTS.md` once. After an upgrade, diff it against a scratch `bf init` copy, replace the text above `## Your rules` with the copy's, keep the owner's rules below it and run `bf validate` ([refresh brain instructions](https://fmind.github.io/brain-framework/docs/agents/#refresh-brain-instructions)).
 
 ## Selected GitHub history
 

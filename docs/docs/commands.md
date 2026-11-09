@@ -303,7 +303,7 @@ A brain also lists `warnings` when a source or authored folder holds more than 8
 
 Like the home page, `attention` lists:
 
-- scheduled programs this machine runs that `failed`, are `overdue` or `never` succeeded, or are [`silent`](schedule.md#silent-sources), such as `{"sensor":"mail","freshness":"never","failed":true}`;
+- scheduled programs this machine runs that `failed`, are `overdue`, are due but `never` succeeded ([timing and health](schedule.md#timing-and-health)), or are [`silent`](schedule.md#silent-sources), such as `{"sensor":"mail","freshness":"never","failed":true}`;
 - assistants with failed or uncertain jobs, whatever their schedules.
 
 Status also lists:

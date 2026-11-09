@@ -107,7 +107,8 @@ The limits below also bound the time of each call to a provider or converter, wh
 - Skips symlinked directories, hidden repositories without a worktree in scope, bot or test authors and repositories named with `--skip`: the repository's name or any of its worktrees' paths skips it whole.
 - Skips folders it cannot read, or whose names are not UTF-8 or contain control characters, with a count on stderr. Window mode keeps records already saved.
 - Fails the run and names the repository when Git fails or times out there, such as a worktree whose repository moved, damaged objects, another owner's checkout or a stalled mount. Repair it or add `--skip RELATIVE_REPO`.
-- Links GitHub remotes as lowercase `repo:github.com/owner/name` and author emails as lowercase `person:email/` identities. Identities are case-sensitive: write note aliases the same way.
+- Links the `origin` remote as lowercase `repo:HOST/OWNER/NAME` for `https://HOST/OWNER/NAME`, `ssh://git@HOST/OWNER/NAME` and `git@HOST:OWNER/NAME` remotes, with or without `.git`. A remote with a token or another user, a port, a nested group or an ssh alias without a dotted host, such as `git@work:team/site.git`, gets no remote identity.
+- Links author emails as lowercase `person:email/` identities. Identities are case-sensitive: write note aliases the same way.
 - Limits: 200 repositories, 10,000 commits per window and 16 MiB of output; 30 seconds per `git log` and 10 per remote lookup.
 
 ### Local documents
@@ -240,6 +241,7 @@ Preview it with `bf collect github-issues --since 7d --dry-run`. Expected result
 
 - `window()` and `state_dir()`: the run's `[START, END)` from `BF_START` and `BF_END`, and the private, machine-local folder in `BF_STATE_DIR` for cursors. That folder can disappear: treat an empty one as a first run.
 - `run(argv, timeout=, max_bytes=)` and `fetch(url, timeout=, max_bytes=)` with `fetch_json`: a bounded provider CLI started from `/` without a shell, and a bounded HTTPS GET that refuses redirects to another host or to plain HTTP. Neither echoes provider output.
+- `secret(path)`: a credential read from a private regular file you own with mode `600`, outside the brain and at most 64 KiB, with one trailing newline removed; errors never quote its content ([credentials](../../docs/docs/sensors.md#credentials)).
 - `person(email)`, `account(host, login)` and `repo(host, owner, name)`: lowercase, percent-encoded identities, or `""` when BF would reject one.
 - `record(id, title, ...)` and `emit(records)`: records normalized to BF's [limits](../../docs/docs/limits.md#size-bounds), such as one-line titles, valid URLs, U+FFFD for a lone UTF-16 surrogate outside the id and at most 1,000 links or values per `*_refs` list, printed as one JSON array; duplicate ids fail.
 - `redact(text)`: a best-effort mask for common credential shapes, such as bearer tokens, GitHub and AWS keys, private key blocks and `password=` pairs.

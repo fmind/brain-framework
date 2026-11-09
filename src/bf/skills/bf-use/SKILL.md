@@ -30,6 +30,7 @@ A brain is a folder of plain files: `projects/` and `concepts/` hold authored no
    - Exit 2 names the invalid argument: fix it.
    - `stale` (a busy cache): retry shortly. `problems` (skipped files, identities or brains): report them; `bf validate` names files and `bf-maintain` repairs them. Either makes a result incomplete, and an incomplete or empty result never proves absence.
    - A source `overdue`, `never` collected, `failed` or `silent` may lack evidence; collecting it needs `bf-maintain` and the user's authority.
+   - A result marked `generated` is an assistant's model output: read what it cites before relying on it.
 1. **Answer** with the conclusion, its refs and the remaining uncertainty; distinguish what the brain records from what is true now.
 
 For the fictional [first decision](https://fmind.github.io/brain-framework/docs/getting-started/):

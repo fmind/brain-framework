@@ -32,8 +32,9 @@ import bf.watch as watching
 from bf.assistants import Dispatcher
 from bf.cli import _cancel, app
 from bf.config import load
+from bf.health import attention
 from bf.history import state
-from bf.models import Error, WatchSettings, encode, local, timestamp
+from bf.models import WEEKDAYS, Error, WatchSettings, encode, local, timestamp
 from bf.runtime import Queue
 from bf.storage import Store, collecting, state_store
 from bf.watch import (
@@ -1258,6 +1259,28 @@ def test_snapshot_reads_one_bf_yaml_while_an_editor_saves_it(brain: Store, monke
     rows = {row.name: row for row in snapshot(brain)}
     assert rows["helper"].kind == "assistant"
     assert "renamed" not in rows
+
+
+def test_a_new_assistant_schedule_needs_attention_only_once_due(brain: Store) -> None:
+    # A weekday three days away is never today, even if the test crosses midnight.
+    later = WEEKDAYS[(datetime.now(UTC).weekday() + 3) % 7]
+    waiting = HELPER + f"    schedules:\n      weekly: {{at: '00:00', timezone: UTC, days: [{later}]}}\n".encode()
+    brain.write("bf.yaml", b"version: 8\nname: fixture\n" + waiting)
+    dashboard = Dashboard("fixture", rows=snapshot(brain))
+    [helper] = dashboard.rows
+    # As in bf status, the row says `never` but stays out of attention until its first slot.
+    assert (helper.status, helper.early, attention(brain)) == (State.NEVER, True, [])
+    assert "0 need attention" in screen(dashboard, 120, 30)
+    dashboard.key("\t")
+    assert dashboard.visible() == []
+    # An interval schedule without a success is due at once, so both views count it.
+    brain.write("bf.yaml", b"version: 8\nname: fixture\n" + waiting + b"      hourly: {every: 3600}\n")
+    dashboard.replace_rows(snapshot(brain))
+    [helper] = dashboard.rows
+    assert (helper.status, helper.early) == (State.NEVER, False)
+    assert attention(brain) == [{"assistant": "helper", "freshness": "never"}]
+    assert dashboard.visible() == [helper]
+    assert "1 needs attention" in screen(dashboard, 120, 30)
 
 
 def test_watch_signals_the_update_then_stops_the_dispatcher_then_waits(
