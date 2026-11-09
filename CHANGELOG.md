@@ -4,6 +4,12 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+A patch release. Fresh installs of 21.3.0 and 21.4.0 resolve Typer 0.29, published on 2026-11-09, and fail; installations made before it, and brains that lock their dependencies, are unaffected. Nothing else changes: upgrade with `uv tool upgrade brain-framework`.
+
+### Fixed
+
+- **`bf` commands no longer fail under Typer 0.29.** BF passes the command context to an option's error hint, which Typer 0.29 no longer accepts, so a fresh install resolved Typer 0.29 and its commands stopped with a `TypeError`. BF now requires `typer<0.29`.
+
 ## [v21.4.0](https://github.com/fmind/brain-framework/releases/tag/v21.4.0) - 2026-11-09
 
 A minor release. The brain format (`version: 8`), `bf.yaml` and the queue format are unchanged; the `search` and `read` reply schemas gain two optional fields, `generated` and `degraded`, `bf status` replies gain a published schema, sensors may report what they missed, and the search cache rebuilds itself once because its format changed. Run `bf skills DIR` to update installed skills, and copy the example programs you use again from the release tag to get their changes. An existing brain can merge the new `AGENTS.md` template once to gain its `## Your rules` heading and its instruction to load `bf-use` first ([refresh brain instructions](https://fmind.github.io/brain-framework/docs/agents/#refresh-brain-instructions)); nothing else needs an upgrade step. After a sensor reports `incomplete`, its run history no longer loads in 21.3.0 or earlier, so a downgrade loses that sensor's local run history.

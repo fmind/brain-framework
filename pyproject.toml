@@ -42,7 +42,9 @@ dependencies = [
   "pydantic>=2.13.5,<3",
   "pyyaml>=6.0.3,<7",
   "rich>=15.0.0,<16",
-  "typer>=0.27.2,<1",
+  # cli.py passes the Click context to Parameter.get_error_hint(), which typer 0.29 no longer accepts:
+  # raise the cap together with that call.
+  "typer>=0.27.2,<0.29",
 ]
 
 [project.optional-dependencies]
