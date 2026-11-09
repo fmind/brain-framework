@@ -7,7 +7,7 @@ description: Collect a selected local document or highlight, configure sensors a
 
 A sensor turns a selected source into searchable evidence. This walkthrough replaces the tutorial sensor from Getting started with a reviewed one that collects the same fictional brief. You then point the decision's evidence link at the new record. No provider credentials are needed.
 
-A sensor prints one JSON array of [records](brain.md#records); BF validates them and saves each by id. A sensor must fail when collection is incomplete: BF cannot detect pages a script silently skipped.
+A sensor prints one JSON array of [records](brain.md#records); BF validates them and saves each by id. A sensor must fail, or [report what it missed](#report-partial-coverage), when collection is incomplete: BF cannot detect pages a script silently skipped.
 
 ## Your first sensor
 
@@ -303,6 +303,26 @@ The [GitHub history walkthrough](https://github.com/fmind/brain-framework/blob/m
 - Different sensors may run at the same time.
 
 See [process safeguards](limits.md#processes-and-logs) for timeouts and cancellation.
+
+## Report partial coverage {#report-partial-coverage}
+
+A sensor that reads several feeds or accounts can keep what most of them returned when one fails. It then prints an object instead of the array, with the records and how many of the parts it tried were missed:
+
+```json
+{ "records": [{ "id": "post-1", "title": "Release notes" }], "incomplete": { "missed": 1, "of": 3 } }
+```
+
+- `records` holds the records, as the array would.
+- `missed` and `of` are integers, with `1 <= missed <= of`. The object holds no other key, and an invalid one fails the run before anything is saved, naming the field.
+- The sensor chooses the unit, such as feeds, accounts or calendars. It names what it missed, and why, on stderr: BF keeps that in `logs/SENSOR.log`, never in status or retrieval.
+
+Such a run saves its records and succeeds, but removes no record:
+
+- A snapshot keeps the records it did not list, even with `--allow-removal`: they may belong to the part it missed.
+- `expire_after` waits for the next complete run, since an undated record the sensor did not print would otherwise age out. Forgotten records still leave and are never stored again.
+- The run reply, and its `bf update` row, repeat `incomplete`. A window run still advances the window: to revisit a missed feed's items, keep a cursor per feed in the [state directory](#what-a-program-receives) or use [reconciliation](#frequent-updates-and-periodic-reconciliation).
+
+`bf status`, search coverage and `memories` pages show the source as `"degraded": {"runs": 1, "missed": 1, "of": 3}`, where `runs` counts the incomplete committed runs in a row. After three, a scheduled source joins `attention`, which fails `bf status --check` ([timing and health](schedule.md#timing-and-health)). The next complete run clears both, and a failed run changes neither. With the [kit](#build-a-sensor-with-the-kit), pass the counts to `emit`, as in `emit(records, missed=1, of=3)`.
 
 ## Build a sensor with the kit
 

@@ -3,11 +3,13 @@
 Copy this file next to your sensors (`sensors/_sensor.py`) and `import _sensor` from a sensor in the same folder:
 Python finds it beside the script it runs. It is not an importable `bf` module, and it must stay standard-library
 only (Python 3.11+), because sensors run with the owner's `python3`. Written for Brain Framework 20.1 and later,
-record format `version: 8`; review it like any sensor code, since it belongs to your brain once copied.
+record format `version: 8`, and 21.4 or later for `emit`'s `missed`; review it like any sensor code, since it
+belongs to your brain once copied.
 
 The kit enforces the record bounds in https://fmind.github.io/brain-framework/docs/limits/. A sensor built on it
-prints one JSON array of records, or fails closed: exit 1, nothing on stdout and one content-free line on stderr,
-so BF keeps the records it saved. Importing it opens no connection and starts no process.
+prints one JSON array of records, reports what it missed when it tolerates a failed part such as one feed of
+three, or fails closed: exit 1, nothing on stdout and one content-free line on stderr, so BF keeps the records it
+saved. Importing it opens no connection and starts no process.
 
 BF stops a sensor's process group with SIGTERM and sends SIGKILL 5 seconds later. A sensor that keeps a private
 temporary copy can turn SIGTERM into an exit, `signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))`, so its
@@ -41,6 +43,7 @@ MAX_REF, MAX_LINKS = 8192, 1000  # One URL, link, alias or field value; links, a
 MAX_FIELDS = 2 << 20  # Every record field other than `text`, as UTF-8 JSON.
 MAX_OUTPUT = 16 << 20  # One sensor run's JSON array; BF's `max_bytes` defaults to 64 MiB.
 MAX_SECRET = 64 << 10  # One credential file read by `secret`.
+MAX_COUNT = 2**53 - 1  # The parts a run may report missing or tried, as `emit`'s `missed` and `of`.
 # C0 and C1 control characters, which BF rejects in ids, titles, URLs and identities.
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # A surrogate code point left alone: `json.loads` already joins valid pairs, and UTF-8 cannot encode one.
@@ -404,11 +407,18 @@ def record(
     return item
 
 
-def emit(records: Iterable[Mapping[str, Any]], *, max_bytes: int = MAX_OUTPUT) -> None:
+def emit(records: Iterable[Mapping[str, Any]], *, missed: int = 0, of: int = 0, max_bytes: int = MAX_OUTPUT) -> None:
     """Print every record as ONE JSON array on stdout, or fail before printing anything.
+
+    A sensor that tolerates a failed part, such as one feed or account of three, passes `missed=1, of=3`, counted
+    before the call: it then prints `{"records": [...], "incomplete": {"missed": 1, "of": 3}}`, so BF saves the
+    records, removes none this run and reports the source `degraded`. Name the missed parts on stderr, which BF
+    keeps in the sensor's log, never in status. With `missed=0` it prints the plain array.
 
     Refuses duplicate ids, which would hide one item, and `fields`, which BF computes itself.
     """
+    if type(missed) is not int or type(of) is not int or not 0 <= missed <= of <= MAX_COUNT:
+        raise SensorError(f"missed and of must be integers with 0 <= missed <= of <= {MAX_COUNT}")
     items, seen = [], set()
     for item in records:
         identifier = item.get("id")
@@ -418,8 +428,9 @@ def emit(records: Iterable[Mapping[str, Any]], *, max_bytes: int = MAX_OUTPUT) -
             raise SensorError("a sensor never prints fields; BF computes them from bf.yaml mappings")
         seen.add(identifier)
         items.append(item)
+    document = {"records": items, "incomplete": {"missed": missed, "of": of}} if missed else items
     try:
-        payload = json.dumps(items, ensure_ascii=False, allow_nan=False).encode()
+        payload = json.dumps(document, ensure_ascii=False, allow_nan=False).encode()
     except (TypeError, ValueError, UnicodeError):
         raise SensorError("a record holds a value JSON cannot represent") from None
     if len(payload) > max_bytes:

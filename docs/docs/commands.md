@@ -216,7 +216,9 @@ Commands also exit 1 in these cases:
 
 ## Using replies
 
-Every reply states times with your local offset. Dates and field values follow the [retrieval reference](retrieval.md). Files, run history and the cache keep UTC. Search and read replies follow that reference. `problems` is always a list of objects with `error` and, when known, `brain` and `file`.
+Every reply states times with your local offset. Dates and field values follow the [retrieval reference](retrieval.md). Files, run history and the cache keep UTC. Search and read replies follow that reference and its [reply schemas](retrieval.md#reply-schemas); `bf status` replies follow the [status schema](../status-reply.schema.json), which `bf schema --kind status-reply` prints. `problems` is always a list of objects with `error` and, when known, `brain` and `file`.
+
+A `collect` reply, and each collected sensor row of an `update` reply, repeats `incomplete` when the sensor [reported what it missed](sensors.md#report-partial-coverage): that run removed no record except forgotten ones.
 
 An `update` reply has:
 
@@ -255,6 +257,7 @@ A `run` reply has `ok`, `dry_run`, any `hook` and its `routines`, each with a `s
 | `freshness`                          | `fresh`, `overdue`, `never`, `manual` or `unknown`; see [timing and health](schedule.md#timing-and-health).                                                                                                                                                       |
 | `records`, `bytes`, `latest`         | Indexed records of the source, their size on disk and the newest event time.                                                                                                                                                                                      |
 | `changed`, `silent`                  | When this brain last gained a new or changed record of the source, and `true` when that is older than its [`silent_after`](schedule.md#silent-sources).                                                                                                           |
+| `degraded`                           | The last committed run [reported missing parts](sensors.md#report-partial-coverage): `{runs, missed, of}`, with `runs` the incomplete runs in a row; absent after a complete run.                                                                                 |
 | `mode`, `window`                     | Sensor mode and, for window sensors, the contiguous collected interval `{since, until}`.                                                                                                                                                                          |
 | `last_collected`                     | The last collection that brought the source up to date, which freshness counts from; a [backfill](sensors.md#backfills-and-coverage) never does.                                                                                                                  |
 | `last_success`                       | The last successful run of a routine or assistant, reported instead of `last_collected`.                                                                                                                                                                          |
@@ -304,6 +307,7 @@ A brain also lists `warnings` when a source or authored folder holds more than 8
 Like the home page, `attention` lists:
 
 - scheduled programs this machine runs that `failed`, are `overdue`, are due but `never` succeeded ([timing and health](schedule.md#timing-and-health)), or are [`silent`](schedule.md#silent-sources), such as `{"sensor":"mail","freshness":"never","failed":true}`;
+- scheduled sources whose last three or more committed runs reported missing parts ([`degraded`](sensors.md#report-partial-coverage)), such as `{"sensor":"feeds","freshness":"fresh","degraded":true}`;
 - assistants with failed or uncertain jobs, whatever their schedules.
 
 Status also lists:

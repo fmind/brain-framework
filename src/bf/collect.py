@@ -61,6 +61,8 @@ CATCH_UP = timedelta(days=30)
 BACKOFF = timedelta(minutes=1)
 # A snapshot may remove half of its catalog, or up to this many records, without --allow-removal.
 SHRINK_FLOOR = 10
+# The largest count a sensor may report missing or tried: replies keep it an exact JSON integer.
+MAX_COUNT = 2**53 - 1
 # Reprojected records committed per transaction; a reply lists at most LIMIT records that failed.
 REPROJECT = 1000
 LIMIT = 200
@@ -440,6 +442,30 @@ def _coverage(
     return {"start": interval[0], "end": interval[1]}, contiguous and (sensor.mode == "snapshot" or end >= observed)
 
 
+def _envelope(printed: object) -> tuple[object, dict[str, int]]:
+    """The records a sensor printed and what it reported missing: a JSON array alone, or the object
+    `{"records": [...], "incomplete": {"missed": N, "of": M}}` with integers 1 <= N <= M and no other keys.
+
+    Errors name the field, never a value or an unknown key, which the provider's output controls.
+    """
+    if not isinstance(printed, dict):
+        return printed, {}
+    if printed.keys() != {"records", "incomplete"}:
+        raise Error("collector must print one JSON array of records, or an object holding only records and incomplete")
+    incomplete = printed["incomplete"]
+    if not isinstance(incomplete, dict) or incomplete.keys() != {"missed", "of"}:
+        raise Error("incomplete must be an object holding only missed and of")
+    for key in ("of", "missed"):
+        # A bool is an int to Python, and 1.0 is no count.
+        if type(incomplete[key]) is not int or not 1 <= incomplete[key] <= MAX_COUNT:
+            raise Error(f"incomplete.{key} must be an integer from 1 to {MAX_COUNT}")
+    if incomplete["missed"] > incomplete["of"]:
+        raise Error("incomplete.missed must not exceed incomplete.of")
+    if not isinstance(printed["records"], list):
+        raise Error("records must be one JSON array of records")
+    return printed["records"], {"missed": incomplete["missed"], "of": incomplete["of"]}
+
+
 def _project(position: int, record: Record, sensor: Sensor, config: Config, observed: str) -> Record:
     """Map one printed record and stamp when it was observed; an error names its zero-based position, never a value."""
     try:
@@ -483,8 +509,10 @@ def collect(
 
     A snapshot that would empty its catalog, or remove more than half of it and more than SHRINK_FLOOR
     records, fails unless `allow_removal` accepts it for this run. Records of the source's forgotten list, and with
-    `expire_after` records older than its cutoff, are removed and never stored again. A `fixture` replaces the
-    sensor's output in a preview that runs nothing, even for a disabled sensor: a contract test of saved output.
+    `expire_after` records older than its cutoff, are removed and never stored again. A run whose sensor reports
+    `incomplete` removes no other record, whatever its mode or `allow_removal`: a lost feed or account must not
+    erase evidence. A `fixture` replaces the sensor's output in a preview that runs nothing, even for a disabled
+    sensor: a contract test of saved output.
     """
     start, end = _window(start, end)
     config = load(store)
@@ -512,7 +540,7 @@ def collect(
                 # A fixture runs nothing, so its placeholders never need this machine's line files or HOME.
                 argv = [] if fixture is not None else arguments(store, sensor, start, end)
                 raw = runner(argv, sensor, store, name, b"")
-            printed = decode(raw)
+            printed, incomplete = _envelope(decode(raw))
             text_limit = sensor.max_text_bytes or (4 << 20)
             truncated_count = 0
             if isinstance(printed, list):
@@ -567,13 +595,16 @@ def collect(
                 "requested_end": end,
                 "reconcile": reconcile,
                 "output_bytes": len(raw),
+                **({"incomplete": incomplete} if incomplete else {}),
             }
-            snapshot = sensor.mode == "snapshot"
+            # An incomplete snapshot updates what it printed, like a window: absent records may sit in the lost part.
+            snapshot = sensor.mode == "snapshot" and not incomplete
+            expire_stored = not incomplete
             if dry_run:
                 # What a real run would change, from the records as they are: an interrupted commit that the run
                 # would first recover fails the preview instead, as reads do.
                 with records.reading(store):
-                    kept = records.retention(store, name, incoming, cutoff=cutoff)
+                    kept = records.retention(store, name, incoming, cutoff=cutoff, expire_stored=expire_stored)
                     counts, _ = records.plan(store, name, kept.kept, snapshot=snapshot)
                     if snapshot:
                         # The plan also removes these files; a real run counts them as forgotten or expired.
@@ -592,7 +623,7 @@ def collect(
                 # An interrupted commit may have removed files already: count the catalog it restores.
                 records.recover(store)
                 # Read under the lock, so a concurrent bf forget is either seen or waits for this run.
-                kept = records.retention(store, name, incoming, cutoff=cutoff)
+                kept = records.retention(store, name, incoming, cutoff=cutoff, expire_stored=expire_stored)
                 # Forgotten and expired records leave on purpose: only other removals need --allow-removal.
                 if snapshot and not allow_removal and (refusal := _shrink(store, name, kept)):
                     raise Error(refusal)
@@ -600,7 +631,9 @@ def collect(
                 result.update(records=len(kept.kept), **_retention(kept))
                 committed = True
                 result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
-                coverage, latest = _coverage(state(store).get(name, {}), start, end, observed, sensor)
+                previous = state(store).get(name, {})
+                coverage, latest = _coverage(previous, start, end, observed, sensor)
+                streak = cast(int, previous.get("incomplete_runs", 0))
                 remember(
                     store,
                     name,
@@ -615,8 +648,17 @@ def collect(
                     **{
                         "forgotten": 0,
                         "expired": 0,
-                        **{key: value for key, value in result.items() if key != "sensor"},
+                        **{key: value for key, value in result.items() if key not in {"sensor", "incomplete"}},
                     },
+                    # A complete run resets an incomplete streak; history without one gains no keys, so an earlier
+                    # 21.x release still loads it.
+                    **(
+                        {**incomplete, "incomplete_runs": streak + 1}
+                        if incomplete
+                        else {"missed": 0, "of": 0, "incomplete_runs": 0}
+                        if streak
+                        else {}
+                    ),
                 )
         except (Error, OSError, UnicodeError) as error:
             message = (
@@ -632,8 +674,9 @@ def collect(
             )
             _failed(store, name, SENSORS, started, message, error, dry_run=dry_run)
         counts = ", ".join(f"{result.get(key, 0)} {key}" for key in ("added", "updated", "unchanged", "removed"))
+        missing = f"; missed {incomplete['missed']} of {incomplete['of']}" if incomplete else ""
         with suppress(Error, OSError):
-            append_log(store, name, f"{_now()} collected {result['records']} records: {counts}")
+            append_log(store, name, f"{_now()} collected {result['records']} records: {counts}{missing}")
         return result
 
 

@@ -33,6 +33,9 @@ _COUNTERS = (
     "output_bytes",
 )
 _RETAINED = frozenset({"forgotten", "expired"})
+# Committed runs in a row reporting missing items before a scheduled source needs attention: one lost feed can be a
+# passing provider error, three are a lasting gap.
+DEGRADED = 3
 
 
 def _freshness(program: Program | None, success: str, now: datetime) -> str:
@@ -60,6 +63,22 @@ def _silent(sensor: Sensor | None, success: str, changed: str, now: datetime) ->
     if not success or not changed:
         return False
     return now - datetime.fromisoformat(changed) > timedelta(seconds=sensor.silent_after)
+
+
+def degradation(entry: Mapping[str, object]) -> dict[str, object] | None:
+    """What a sensor's last committed run reported missing, and how many committed runs in a row did; None after a
+    complete run. Labels and reasons stay in the sensor's log."""
+    # Run history is validated already: each count is a non-negative integer.
+    runs, missed, of = (int(cast("int", entry.get(key, 0))) for key in ("incomplete_runs", "missed", "of"))
+    if runs < 1 or not 1 <= missed <= of:
+        return None
+    return {"runs": runs, "missed": missed, "of": of}
+
+
+def lasting(health: Mapping[str, object]) -> bool:
+    """Whether a source's runs reported missing items DEGRADED times in a row: one alert, not one per lost feed."""
+    degraded = health.get("degraded")
+    return isinstance(degraded, Mapping) and int(cast("int", degraded["runs"])) >= DEGRADED
 
 
 def source_health(
@@ -115,6 +134,9 @@ def source_health(
             item["failed"] = True
         if _silent(settings, success, changed.get(name, ""), now):
             item["silent"] = True
+        # The records may lack what the missed parts hold, whatever the sensor's state now.
+        if degraded := degradation(entry):
+            item["degraded"] = degraded
         result[name] = item
     return result
 
@@ -330,8 +352,8 @@ def _attention(
     assistants: dict[str, dict[str, object]],
     now: datetime,
 ) -> list[dict[str, object]]:
-    """Scheduled programs this machine runs that failed, are late or, for a source, fell silent, and assistants with
-    failed work however it was asked."""
+    """Scheduled programs this machine runs that failed, are late or, for a source, fell silent or reported missing
+    items DEGRADED runs in a row, and assistants with failed work however it was asked."""
     result: list[dict[str, object]] = []
     for kind, healths, programs in (
         ("sensor", {name: health for name, health in sources.items() if name not in config.assistants}, config.sensors),
@@ -340,7 +362,7 @@ def _attention(
     ):
         for name, health in healths.items():
             settings, failed = programs.get(name), health.get("failed")
-            silent = health.get("silent")
+            silent, degraded = health.get("silent"), lasting(health)
             if (
                 settings
                 and settings.enabled
@@ -350,7 +372,7 @@ def _attention(
                     if isinstance(settings, Assistant)
                     else settings.refresh
                 )
-                and (failed or silent or is_late(settings, health, now))
+                and (failed or silent or degraded or is_late(settings, health, now))
             ):
                 result.append(
                     {
@@ -358,6 +380,7 @@ def _attention(
                         "freshness": health["freshness"],
                         **({"failed": True} if failed else {}),
                         **({"silent": True} if silent else {}),
+                        **({"degraded": True} if degraded else {}),
                     }
                 )
     return result
@@ -366,8 +389,8 @@ def _attention(
 def attention(
     store: Store, now: datetime | None = None, counts: Mapping[str, Mapping[str, object]] | None = None
 ) -> list[dict[str, object]]:
-    """Scheduled sensors, routines and assistants this machine runs that failed, are late or fell silent, and
-    assistants with failed work.
+    """Scheduled sensors, routines and assistants this machine runs that failed, are late, fell silent or keep
+    reporting missing items, and assistants with failed work.
 
     `counts` are the indexed counts per source, as `index.sources` gives them, from a caller holding the cache open:
     opening it again would wait behind a publish that waits for that caller.

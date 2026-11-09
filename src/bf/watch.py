@@ -29,7 +29,7 @@ from rich.text import Text
 from bf.assistants import Dispatcher, StreamStoppedError
 from bf.collect import next_due, starting
 from bf.config import load
-from bf.health import assistant_health, is_late
+from bf.health import DEGRADED, assistant_health, degradation, is_late
 from bf.history import ROUTINES, SENSORS, environment, log_path, state
 from bf.models import Error, WatchSettings, decode, local, present, printable, terminal, timestamp
 from bf.runtime import Queue
@@ -77,11 +77,19 @@ class Row:
     record: str = ""
     # A `never` assistant whose schedules are not due yet: as in bf status, it needs no attention until one is.
     early: bool = False
+    # A sensor's last committed run reported missing items: `runs` in a row, `missed` of `of`, as in bf status.
+    degraded: dict[str, object] | None = None
 
 
 def needs_attention(row: Row) -> bool:
-    """Whether the attention count and the Tab filter include the row."""
-    return row.status in ATTENTION and not row.early
+    """Whether the attention count and the Tab filter include the row: as in bf status, a scheduled sensor counts once
+    DEGRADED committed runs in a row reported missing items."""
+    lasting = (
+        row.degraded is not None
+        and int(cast(int, row.degraded["runs"])) >= DEGRADED
+        and row.status not in {State.MANUAL, State.DISABLED}
+    )
+    return (row.status in ATTENTION and not row.early) or lasting
 
 
 # The table marks each kind beside its name; sensors carry none.
@@ -141,6 +149,7 @@ def snapshot(
                     log=log_path(name) if error else "",
                     action=str(entry.get("action", "")),
                     records=cast(int | None, entry.get("records")),
+                    degraded=degradation(entry) if kind == "sensor" else None,
                 )
             )
     # The same bf.yaml as the rows above, even when an editor saves it meanwhile.
@@ -415,7 +424,17 @@ class Dashboard:
         if row.error:
             detail.append(clean(row.error) + "\n", style="red")
             detail.append("Log: " + clean(row.log) + "\n", style="dim")
-        elif row.action:
+        if row.degraded is not None:
+            # The sensor's log names what it missed; the counts alone never carry provider text.
+            runs = int(cast(int, row.degraded["runs"]))
+            detail.append(
+                f"Last run missed {cast(int, row.degraded['missed']):,} of {cast(int, row.degraded['of']):,}; "
+                f"{runs} incomplete run{'' if runs == 1 else 's'} in a row\n",
+                style="yellow",
+            )
+            if not row.error:
+                detail.append("Log: " + clean(log_path(row.name)) + "\n", style="dim")
+        if row.action and not row.error:
             detail.append("Latest action: " + clean(row.action) + "\n")
         if row.runs is not None:
             detail.append(f"Runs: {row.runs:,}\n")

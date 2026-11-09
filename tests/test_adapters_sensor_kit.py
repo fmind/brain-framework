@@ -213,6 +213,30 @@ def test_main_emits_one_array_or_fails_closed(tmp_path: Path) -> None:
         assert message in result.stderr
 
 
+def test_emit_reports_what_a_tolerant_sensor_missed(tmp_path: Path, brain: Store) -> None:
+    records = "[_sensor.record('a', 'A'), _sensor.record('b', 'B')]"
+    plain = driver(tmp_path, f"_sensor.emit({records}, missed=0, of=3)\n")
+    assert [item["id"] for item in json.loads(plain.stdout)] == ["a", "b"]
+    # One feed of three failed: the sensor names it on stderr, for BF's log, and reports the count.
+    body = f"print('feed 2 timed out', file=sys.stderr)\n_sensor.emit({records}, missed=1, of=3)\n"
+    partial = driver(tmp_path, body)
+    assert partial.returncode == 0, partial.stderr
+    printed = json.loads(partial.stdout)
+    assert printed["incomplete"] == {"missed": 1, "of": 3}
+    assert [item["id"] for item in printed["records"]] == ["a", "b"]
+    # BF accepts what the kit prints, as a saved-output check shows.
+    brain.write("bf.yaml", b"version: 8\nname: fixture\nsensors:\n  feeds:\n    command: [echo]\n")
+    saved = tmp_path / "partial.json"
+    saved.write_text(partial.stdout)
+    reply = CliRunner().invoke(app, ["collect", "feeds", "--input", str(saved), "--brain", str(brain.root)])
+    assert reply.exit_code == 0, reply.output
+    assert json.loads(reply.stdout)["incomplete"] == {"missed": 1, "of": 3}
+    for counts in ("missed=2, of=1", "missed=-1, of=1", "missed=True, of=1", "missed=1.0, of=2", "missed=1, of=2**53"):
+        result = driver(tmp_path, f"_sensor.main(lambda: _sensor.emit([], {counts}) or [], 'x')\n")
+        failed(result)
+        assert "missed and of must be integers" in result.stderr
+
+
 def test_run_is_bounded_reaped_and_starts_outside_the_brain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sensor = kit()
     monkeypatch.chdir(tmp_path)

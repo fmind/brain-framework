@@ -233,7 +233,9 @@ def test_attention_reasons_are_explained_where_bf_status_is_read() -> None:
     # A flag's schema may carry a description too, which once left `silent` out of the reasons.
     reasons = {name for name, schema in coverage.items() if isinstance(schema, dict) and schema.get("const") is True}
     assert {"failed", "silent"} <= reasons
-    reasons |= {"overdue", "never"}
+    # So is a source's lasting gap, an object in coverage and a flag in attention.
+    assert "degraded" in coverage
+    reasons |= {"overdue", "never", "degraded"}
     text = TEXTS["src/bf/skills/bf-maintain/references/operations.md"]
     assert {reason for reason in reasons if f"`{reason}`" not in text} == set()
 

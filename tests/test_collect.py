@@ -11,7 +11,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -1405,3 +1405,174 @@ def test_update_executes_due_sensors_concurrently(configured: Store) -> None:
     assert report["ok"] is True
     assert peak == 2
     assert [item["sensor"] for item in report["sensors"]] == ["s1", "s2"]
+
+
+def envelope(missed: int, of: int, *items: Mapping[str, object]) -> bytes:
+    return json.dumps({"records": list(items), "incomplete": {"missed": missed, "of": of}}).encode()
+
+
+def test_an_incomplete_run_saves_its_records_and_counts_the_runs_in_a_row(configured: Store) -> None:
+    one: dict[str, object] = {"id": "a", "title": "A"}
+    two: dict[str, object] = {"id": "b", "title": "B"}
+    first = collect(configured, "sample", start=START, end=END, runner=lambda *_: envelope(1, 3, one, two))
+    assert (first["records"], first["added"], first["incomplete"]) == (2, 2, {"missed": 1, "of": 3})
+    assert len(records.files(configured, "sample")) == 2
+    entry = state(configured)["sample"]
+    assert (entry["missed"], entry["of"], entry["incomplete_runs"], entry["error"]) == (1, 3, 1, "")
+    # The reply's counts reach history; the reply's own `incomplete` object does not.
+    assert "incomplete" not in entry
+    # Labels and reasons stay in the sensor's log, which names only the counts.
+    assert (
+        "collected 2 records: 2 added, 0 updated, 0 unchanged, 0 removed; missed 1 of 3"
+        in configured.read(log_path("sample")).decode()
+    )
+    collect(configured, "sample", start=START, end=END, runner=lambda *_: envelope(2, 3, one))
+    assert {key: state(configured)["sample"][key] for key in ("missed", "of", "incomplete_runs")} == {
+        "missed": 2,
+        "of": 3,
+        "incomplete_runs": 2,
+    }
+    # A failed run changes neither the counts nor the streak: they describe the last committed run.
+    with pytest.raises(Error, match="invalid JSON"):
+        collect(configured, "sample", start=START, end=END, runner=lambda *_: b"broken")
+    assert state(configured)["sample"]["incomplete_runs"] == 2
+    # A complete run, a plain array, resets them.
+    complete = collect(configured, "sample", start=START, end=END, runner=lambda *_: emit(one, two))
+    assert "incomplete" not in complete
+    assert {key: state(configured)["sample"][key] for key in ("missed", "of", "incomplete_runs")} == {
+        "missed": 0,
+        "of": 0,
+        "incomplete_runs": 0,
+    }
+    # A source that never reported missing items keeps a history an earlier 21.x release still loads.
+    collect(configured, "folders", start=START, end=END, runner=lambda *_: emit(one))
+    assert not {"missed", "of", "incomplete_runs"} & set(state(configured)["folders"])
+    # Update rows carry the run reply, `incomplete` included.
+    later = NOW + timedelta(hours=2)
+    rows = cast("Any", update(configured, now=later, runner=lambda *_: envelope(1, 2, one)))["sensors"]
+    assert {row["sensor"]: row.get("incomplete") for row in rows}["sample"] == {"missed": 1, "of": 2}
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["collect", "preview"])
+@pytest.mark.parametrize(
+    ("printed", "message"),
+    [
+        # A provider-controlled key is never quoted.
+        ({"records": [], "incomplete": {"missed": 1, "of": 2}, "From: ceo@corp.example": 1}, "only records and"),
+        ({"records": []}, "only records and incomplete"),
+        ({"records": [], "incomplete": [1, 2]}, "incomplete must be an object holding only missed and of"),
+        ({"records": [], "incomplete": {"missed": 1}}, "holding only missed and of"),
+        ({"records": [], "incomplete": {"missed": 1, "of": 2, "ceo@corp.example": 3}}, "holding only missed and of"),
+        ({"records": [], "incomplete": {"missed": 3, "of": 2}}, "incomplete.missed must not exceed incomplete.of"),
+        ({"records": [], "incomplete": {"missed": 0, "of": 2}}, "incomplete.missed must be an integer from 1"),
+        ({"records": [], "incomplete": {"missed": -1, "of": 2}}, "incomplete.missed must be an integer from 1"),
+        ({"records": [], "incomplete": {"missed": 1, "of": 0}}, "incomplete.of must be an integer from 1"),
+        ({"records": [], "incomplete": {"missed": 1.0, "of": 2}}, "incomplete.missed must be an integer"),
+        ({"records": [], "incomplete": {"missed": "1", "of": 2}}, "incomplete.missed must be an integer"),
+        ({"records": [], "incomplete": {"missed": True, "of": 2}}, "incomplete.missed must be an integer"),
+        ({"records": [], "incomplete": {"missed": 1, "of": 2**53}}, "incomplete.of must be an integer from 1 to"),
+        ({"records": {"id": "a"}, "incomplete": {"missed": 1, "of": 2}}, "records must be one JSON array"),
+        ({"records": [{"id": "a"}], "incomplete": {"missed": 1, "of": 2}}, "0.title: Field required"),
+    ],
+)
+def test_an_invalid_envelope_fails_before_saving_anything(
+    configured: Store, printed: dict[str, object], message: str, *, dry_run: bool
+) -> None:
+    collect(configured, "folders", start=START, end=END, runner=catalog(3))
+    before = sorted((configured.root / "memories/folders").iterdir())
+    output = json.dumps(printed).encode()
+    with pytest.raises(Error, match=re.escape(message)) as failure:
+        collect(configured, "folders", start=START, end=END, runner=lambda *_: output, dry_run=dry_run)
+    assert "ceo@corp" not in str(failure.value)
+    assert "nothing was written" in str(failure.value)
+    assert sorted((configured.root / "memories/folders").iterdir()) == before
+    entry = state(configured)["folders"]
+    assert "ceo@corp" not in json.dumps(entry)
+    assert bool(entry["error"]) is not dry_run
+    assert "incomplete_runs" not in entry
+
+
+def test_an_incomplete_snapshot_removes_no_record(configured: Store) -> None:
+    collect(configured, "folders", start=START, end=END, runner=catalog(30))
+    files = set(records.files(configured, "folders"))
+    # One account of two answered: four known folders and a new one. A complete snapshot would refuse or remove 26.
+    partial = envelope(1, 2, *({"id": f"item-{n}", "title": f"Item {n}, renamed"} for n in (*range(4), 99)))
+    preview = collect(configured, "folders", start=START, end=END, runner=lambda *_: partial, dry_run=True)
+    assert {key: preview[key] for key in ("added", "updated", "unchanged", "removed")} == {
+        "added": 1,
+        "updated": 4,
+        "unchanged": 0,
+        "removed": 0,
+    }
+    assert "removal_refused" not in preview
+    # --allow-removal accepts a removal; it never turns an incomplete snapshot into one.
+    result = collect(configured, "folders", start=START, end=END, runner=lambda *_: partial, allow_removal=True)
+    assert (result["removed"], result["incomplete"]) == (0, {"missed": 1, "of": 2})
+    assert set(records.files(configured, "folders")) == files | {records.path("folders", "item-99")}
+    assert state(configured)["folders"]["error"] == ""
+    # The next complete snapshot removes what it no longer lists, behind the same guard as before.
+    with pytest.raises(Error, match="would remove 26 of 31 records"):
+        collect(configured, "folders", start=START, end=END, runner=catalog(5))
+
+
+def test_an_incomplete_run_expires_nothing_stored_but_still_honors_forgotten_records(configured: Store) -> None:
+    old: dict[str, object] = {"id": "old", "title": "Old", "time": "2020-01-01T00:00:00Z"}
+    undated: dict[str, object] = {"id": "undated", "title": "Undated"}
+    private: dict[str, object] = {"id": "private", "title": "Private"}
+    collect(
+        configured, "folders", start=START, end=END, runner=lambda *_: emit(old, undated, private), clock=lambda: NOW
+    )
+    forgotten = CliRunner().invoke(app, ["forget", "folders:private", "--brain", str(configured.root)])
+    assert forgotten.exit_code == 0, forgotten.output
+    configured.write("bf.yaml", CONFIG.replace(b"mode: snapshot\n", b"mode: snapshot\n    expire_after: 3600\n"))
+    later = lambda: NOW + timedelta(days=1)  # noqa: E731 - one clock for both runs
+    # The feed holding `undated` was lost: a complete run would expire it, unprinted and unseen for a day.
+    again = {"id": "older", "title": "Older", "time": "2019-01-01T00:00:00Z"}
+    result = collect(
+        configured, "folders", start=START, end=END, runner=lambda *_: envelope(1, 2, old, again, private), clock=later
+    )
+    assert (result["records"], result["forgotten"], result["expired"], result["removed"]) == (0, 1, 2, 0)
+    # Printed records past the cutoff and forgotten ones are still not stored; stored records stay.
+    assert set(records.files(configured, "folders")) == {records.path("folders", key) for key in ("old", "undated")}
+    complete = collect(configured, "folders", start=START, end=END, runner=lambda *_: emit(), clock=later)
+    assert (complete["expired"], records.files(configured, "folders")) == (2, [])
+
+
+def test_saved_output_checks_accept_the_incomplete_envelope(configured: Store, tmp_path: Path) -> None:
+    fixture = tmp_path / "partial.json"
+    fixture.write_bytes(envelope(1, 4, {"id": "a", "title": "A"}))
+    result = CliRunner().invoke(app, ["collect", "sample", "--input", str(fixture), "--brain", str(configured.root)])
+    assert result.exit_code == 0, result.output
+    reply = json.loads(result.stdout)
+    assert (reply["records"], reply["incomplete"]) == (1, {"missed": 1, "of": 4})
+    assert records.files(configured, "sample") == []
+    assert state(configured) == {}
+    fixture.write_bytes(json.dumps({"records": [], "incomplete": {"missed": 5, "of": 4}}).encode())
+    invalid = CliRunner().invoke(app, ["collect", "sample", "--input", str(fixture), "--brain", str(configured.root)])
+    assert invalid.exit_code == 1
+    assert "incomplete.missed must not exceed incomplete.of" in str(invalid.exception)
+
+
+def test_run_history_of_an_earlier_release_keeps_loading(configured: Store) -> None:
+    # Every key a 21.3.0 sensor entry could hold, none of the newer ones.
+    entry = {
+        "run": END,
+        "success": END,
+        "start": START,
+        "end": END,
+        "error": "",
+        "failures": 0,
+        **dict.fromkeys(("records", "added", "updated", "unchanged", "removed", "forgotten", "expired"), 1),
+        "requested_start": START,
+        "requested_end": END,
+        "reconcile": False,
+        "reconciled": END,
+        "elapsed_seconds": 0.5,
+        "output_bytes": 10,
+    }
+    state_store(configured.root).write(SENSORS, encode({"sample": entry}))
+    assert state(configured)["sample"] == entry
+    assert "degraded" not in source_health(configured, now=NOW)["sample"]
+    collect(configured, "sample", start=START, end=END, runner=lambda *_: envelope(1, 2), clock=lambda: NOW)
+    assert state(configured)["sample"]["incomplete_runs"] == 1
+    assert source_health(configured, now=NOW)["sample"]["degraded"] == {"runs": 1, "missed": 1, "of": 2}

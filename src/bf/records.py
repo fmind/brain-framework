@@ -531,12 +531,16 @@ class Retention:
     expired: int
 
 
-def retention(store: Store, source: str, printed: list[Record], *, cutoff: str) -> Retention:
+def retention(
+    store: Store, source: str, printed: list[Record], *, cutoff: str, expire_stored: bool = True
+) -> Retention:
     """Split printed records and stored files by the source's forgotten list and, with a cutoff, by age.
 
     Counts are distinct records, whether printed, stored or both. A record the sensor still prints is never expired
-    by when it was observed: only its own event time ages it. A stored file that does not load is left alone, as
-    `prune` does: `bf validate` reports it. The caller holds a brain lock, so `bf forget` cannot interleave.
+    by when it was observed: only its own event time ages it. Without `expire_stored`, as for a run that reported
+    missing items, stored files leave only when forgotten: an undated record of a lost feed would otherwise age out
+    because the run did not print it. A stored file that does not load is left alone, as `prune` does: `bf validate`
+    reports it. The caller holds a brain lock, so `bf forget` cannot interleave.
     """
     hidden = forgotten(store, source)
     forgot: set[str] = set()
@@ -558,7 +562,7 @@ def retention(store: Store, source: str, printed: list[Record], *, cutoff: str) 
             forgot.add(entry)
             removals.append(name)
             continue
-        if entry in alive:
+        if entry in alive or not expire_stored:
             continue
         if entry in expired:
             removals.append(name)

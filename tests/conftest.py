@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import best_match
 from pydantic import TypeAdapter
 
-from bf import replies, retrieve, schemas
+from bf import health, replies, retrieve, schemas
 from bf.config import register
 from bf.models import MAX_REPLY, Record, encode
 from bf.records import path as record_path
@@ -191,25 +191,40 @@ def provider(tmp_path: Path) -> Provider:
 # Every reply a test produces must match the strict declaration of its kind, which rejects undeclared fields, and
 # that kind's published schema a client validates against, as MCP clients do with `outputSchema`. The open search
 # schema alone would also accept many read pages.
-_STRICT = {"search-reply": Draft202012Validator(replies.SEARCH), "read-reply": Draft202012Validator(replies.READ)}
-_PUBLISHED = {kind: Draft202012Validator(schemas.document(kind)) for kind in ("search-reply", "read-reply")}
+_REPLIES: dict[schemas.Kind, dict[str, object]] = {
+    "search-reply": replies.SEARCH,
+    "read-reply": replies.READ,
+    "status-reply": replies.STATUS,
+}
+_STRICT = {kind: Draft202012Validator(schema) for kind, schema in _REPLIES.items()}
+_PUBLISHED = {kind: Draft202012Validator(schemas.document(kind)) for kind in _REPLIES}
+
+
+def _published(kind: schemas.Kind, result: dict[str, object]) -> None:
+    error = best_match(_STRICT[kind].iter_errors(result))
+    assert error is None, f"{list(error.absolute_path)}: {error.message[:300]}"
+    assert _PUBLISHED[kind].is_valid(result), f"the published {kind} schema rejects it"
 
 
 @pytest.fixture(autouse=True)
 def published_replies(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Search and read replies return through `bounded`: validate each one against its kind's reply schemas."""
-    bounded = retrieve.bounded
+    """Search and read replies return through `bounded`, status replies from `health.report`: validate each one
+    against its kind's reply schemas. Tests call `health.report` through the module, so this check sees them."""
+    bounded, report = retrieve.bounded, health.report
 
     def checked(value: dict[str, object], limit: int = MAX_REPLY) -> dict[str, object]:
         result = bounded(value, limit)
         # Every read shape requires `page` or `sha256`, which the strict search declaration forbids.
-        kind = "read-reply" if "page" in result or "sha256" in result else "search-reply"
-        error = best_match(_STRICT[kind].iter_errors(result))
-        assert error is None, f"{list(error.absolute_path)}: {error.message[:300]}"
-        assert _PUBLISHED[kind].is_valid(result), f"the published {kind} schema rejects it"
+        _published("read-reply" if "page" in result or "sha256" in result else "search-reply", result)
+        return result
+
+    def status(stores: list[Store], now: datetime | None = None) -> dict[str, object]:
+        result = report(stores, now)
+        _published("status-reply", result)
         return result
 
     monkeypatch.setattr(retrieve, "bounded", checked)
+    monkeypatch.setattr(health, "report", status)
 
 
 @pytest.fixture(autouse=True)

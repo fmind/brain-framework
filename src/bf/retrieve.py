@@ -218,6 +218,7 @@ def _coverage(coverage: list[dict[str, object]], items: list[dict[str, object]],
         or (entry["brain"], entry["source"]) in returned
         or entry.get("failed")
         or entry.get("silent")
+        or entry.get("degraded")
         or entry.get("freshness") in _ATTENTION
     ]
     omitted = len(coverage) - len(kept)

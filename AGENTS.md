@@ -32,7 +32,7 @@ BF supports one loop: **gather → normalize → organize and connect → act �
 
 ## Where to work
 
-- **`src/bf/`**: Modules are named by concern; [CONTRIBUTING](CONTRIBUTING.md#set-up-and-check-a-change) maps each area to its modules and focused tests. `replies.py` declares the `search` and `read` replies, and `tests/conftest.py` validates every reply the suite produces, so describe a new field there first. Only `mcp.py` imports the optional MCP SDK, lazily; `scripts/test_package.py` checks the base install without it.
+- **`src/bf/`**: Modules are named by concern; [CONTRIBUTING](CONTRIBUTING.md#set-up-and-check-a-change) maps each area to its modules and focused tests. `replies.py` declares the `search`, `read` and `status` replies, and `tests/conftest.py` validates every reply the suite produces, so describe a new field there first. Only `mcp.py` imports the optional MCP SDK, lazily; `scripts/test_package.py` checks the base install without it.
 - **`src/bf/skills/`**: The packaged skills (`bf-use`, `bf-action`, `bf-setup`, `bf-maintain`); `tests/test_skills.py` checks their text and `mise run eval:skills` their behavior (it spends tokens). Put decision, action and learning conventions in these skills, not the core format.
 - **`src/bf/starter/` and `examples/brain/`**: Their `AGENTS.md` files are sample content for users, not rules for this repository.
 - **`examples/`**: Scripts users copy into their brains, run as processes with fake providers in `tests/test_adapters_*.py`. They and the skills' `scripts/` use only the standard library of Python 3.11.

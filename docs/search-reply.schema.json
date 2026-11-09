@@ -87,6 +87,16 @@
           "format": "date-time",
           "type": "string"
         },
+        "degraded": {
+          "description": "The source's last committed collection reported that it missed `missed` of the `of` parts it tried, such as feeds or accounts, and `runs` committed collections in a row did: its records may lack what those parts hold. A complete collection clears it.",
+          "properties": {
+            "missed": { "minimum": 1, "type": "integer" },
+            "of": { "minimum": 1, "type": "integer" },
+            "runs": { "minimum": 1, "type": "integer" }
+          },
+          "required": ["runs", "missed", "of"],
+          "type": "object"
+        },
         "failed": { "const": true },
         "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
         "last_collected": {

@@ -13,10 +13,9 @@ import pytest
 from pydantic import JsonValue, ValidationError
 from typer.testing import CliRunner
 
-from bf import assistants, collect, pages, records
+from bf import assistants, collect, health, pages, records
 from bf.cli import app
 from bf.collect import parse_reply, reply_title, structured_reply
-from bf.health import report
 from bf.history import ASSISTANTS, log_path, state
 from bf.messages import Message
 from bf.models import Assistant, AssistantSchedule, Config, Error, Invocation, Program, Record
@@ -264,7 +263,7 @@ def test_assistant_records_are_retrievable_but_lower_priority(configured: Store)
 
 def test_status_and_watch_show_assistant_schedules_and_records(configured: Store) -> None:
     result = update(configured, runner=lambda *_: REPLY, kinds=frozenset({"assistant"}))
-    brain = cast("list[dict]", report([configured])["brains"])[0]
+    brain = cast("list[dict]", health.report([configured])["brains"])[0]
     assert brain["assistants"]["assistant"]["schedules"]["review"]["freshness"] == "fresh"
     assert brain["assistants"]["assistant"]["record"] == cast("list[dict]", result["assistants"])[0]["record"]
     assert brain["assistants"]["piped"]["freshness"] == "manual"

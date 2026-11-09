@@ -34,22 +34,22 @@ Pages are computed views, not files. They combine the selected brains; `bf read 
 
 ### Ordering and review signals
 
-| View                  | Order or preview                                                                                                                                              |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Projects              | Newest `updated` first, deprecated notes last; task counts and the first open task as `next`.                                                                 |
-| Concepts              | Title order.                                                                                                                                                  |
-| Actions               | Newest first.                                                                                                                                                 |
-| Home `projects`       | Those needing review first, each group newest first.                                                                                                          |
-| Home `projects` size  | As many as fit the 32 KiB page beside the other sections, measured as the reply prints.                                                                       |
-| Home `projects_total` | Counts every project that is not deprecated; `bf read projects` lists them all.                                                                               |
-| Home `actions`        | The 10 latest actions.                                                                                                                                        |
-| Home `changed`        | Other notes dated in the last 7 days, since projects list their own in `projects`.                                                                            |
-| Home `changed` fields | Only `ref`, `kind`, `title`, `date`, `modified` and `review`.                                                                                                 |
-| Home `activity`       | Record counts of the last 24 hours.                                                                                                                           |
-| Home `upcoming`       | Items in the next 7 days.                                                                                                                                     |
-| Home size             | `changed` and `upcoming` hold at most 20 items, without excerpts.                                                                                             |
-| Period `changed`      | Up to 20 records changed upstream in the period but placed outside it, on every page; only `ref`, `kind`, `title`, `time` and `updated`.                      |
-| Home `attention`      | Scheduled programs that failed, are `overdue` or are due but `never` succeeded on this machine, and sources that fell [`silent`](schedule.md#silent-sources). |
+| View                  | Order or preview                                                                                                                                                                                      |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Projects              | Newest `updated` first, deprecated notes last; task counts and the first open task as `next`.                                                                                                         |
+| Concepts              | Title order.                                                                                                                                                                                          |
+| Actions               | Newest first.                                                                                                                                                                                         |
+| Home `projects`       | Those needing review first, each group newest first.                                                                                                                                                  |
+| Home `projects` size  | As many as fit the 32 KiB page beside the other sections, measured as the reply prints.                                                                                                               |
+| Home `projects_total` | Counts every project that is not deprecated; `bf read projects` lists them all.                                                                                                                       |
+| Home `actions`        | The 10 latest actions.                                                                                                                                                                                |
+| Home `changed`        | Other notes dated in the last 7 days, since projects list their own in `projects`.                                                                                                                    |
+| Home `changed` fields | Only `ref`, `kind`, `title`, `date`, `modified` and `review`.                                                                                                                                         |
+| Home `activity`       | Record counts of the last 24 hours.                                                                                                                                                                   |
+| Home `upcoming`       | Items in the next 7 days.                                                                                                                                                                             |
+| Home size             | `changed` and `upcoming` hold at most 20 items, without excerpts.                                                                                                                                     |
+| Period `changed`      | Up to 20 records changed upstream in the period but placed outside it, on every page; only `ref`, `kind`, `title`, `time` and `updated`.                                                              |
+| Home `attention`      | Scheduled programs that failed, are `overdue` or are due but `never` succeeded on this machine, sources that fell [`silent`](schedule.md#silent-sources), and sources `degraded` three runs in a row. |
 
 - Records of a [`priority: low`](sensors.md#quiet-a-high-volume-source) source leave period `items`, `changed` and home `upcoming`. Period `sources` and home `activity` keep their counts with `"priority":"low"`.
 - Only `deprecated` closes a note: it ranks last and leaves every home section, reminders and the task list.
@@ -215,7 +215,7 @@ Identities are case-sensitive and resolve only through explicit aliases, entitie
 
 ### Source coverage
 
-- Search lists in `sources` the sources of returned records, and those whose evidence may be missing because they `failed`, are `overdue` or `never` collected, or fell `silent`. `sources_omitted` counts the others.
+- Search lists in `sources` the sources of returned records, and those whose evidence may be missing because they `failed`, are `overdue` or `never` collected, fell `silent` or are `degraded`. `sources_omitted` counts the others.
 - A reply without items, or a search scoped to `memories` or `memories/SOURCE`, lists every searched source: coverage is then the answer.
 - Authored-folder and tag scopes, and tag searches without a `memories` scope, search notes alone and omit both fields.
 
@@ -230,6 +230,7 @@ Identities are case-sensitive and resolve only through explicit aliases, entitie
 | `page`                     | On the `memories` overview: the source's page.                                                                                                    |
 | `changed`                  | On `memories` pages: when this brain last gained a new or changed record of the source.                                                           |
 | `silent`                   | `true` when `changed` is older than the source's [`silent_after`](schedule.md#silent-sources); a record read's `collection` omits it.             |
+| `degraded`                 | `{runs, missed, of}` when the last committed run [reported missing parts](sensors.md#report-partial-coverage): its records may lack them.         |
 
 ## Notes, records and identities
 
@@ -354,7 +355,7 @@ These changes go unseen until `bf build`:
 
 ## Reply schemas
 
-`bf search` and `bf read` replies follow published JSON Schemas (draft 2020-12), shared by the CLI and MCP: [search](../search-reply.schema.json) and [read](../read-reply.schema.json). Validate a saved reply against the installed version's schema:
+`bf search` and `bf read` replies follow published JSON Schemas (draft 2020-12), shared by the CLI and MCP: [search](../search-reply.schema.json) and [read](../read-reply.schema.json). `bf status` replies follow the [status](../status-reply.schema.json) schema. Validate a saved reply against the installed version's schema:
 
 ```bash
 bf schema --kind search-reply > search-reply.schema.json

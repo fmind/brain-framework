@@ -79,6 +79,11 @@ class _Run(Model):
     output_bytes: int = Field(default=0, ge=0)
     action: str = ""
     failures: int = Field(default=0, ge=0)
+    # A sensor's last committed run that reported missing items: `missed` of the `of` parts it tried, and how many
+    # committed runs in a row reported some. A complete run resets them; a failed one changes neither.
+    missed: int = Field(default=0, ge=0)
+    of: int = Field(default=0, ge=0)
+    incomplete_runs: int = Field(default=0, ge=0)
     # An assistant's successful runs since its history began, and the record its latest run wrote.
     runs: int = Field(default=0, ge=0)
     record: str = ""

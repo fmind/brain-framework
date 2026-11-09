@@ -15,7 +15,7 @@ import termios
 import time
 from collections.abc import Callable
 from concurrent import futures
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event
@@ -1259,6 +1259,38 @@ def test_snapshot_reads_one_bf_yaml_while_an_editor_saves_it(brain: Store, monke
     rows = {row.name: row for row in snapshot(brain)}
     assert rows["helper"].kind == "assistant"
     assert "renamed" not in rows
+
+
+def test_a_sensor_that_keeps_missing_parts_needs_attention_after_three_runs(brain: Store) -> None:
+    brain.write("bf.yaml", CONFIG)
+    now = datetime.now(UTC).isoformat()
+
+    def history(runs: int) -> None:
+        missing = {"success": now, "run": now, "incomplete_runs": runs, "missed": 1, "of": 3}
+        # A manual and a disabled sensor show their gap, but neither needs attention, as in bf status.
+        state_store(brain.root).write(
+            "sensors.json", encode(dict.fromkeys(("calendar", "manual", "disabled"), missing))
+        )
+
+    history(2)
+    dashboard = Dashboard("fixture", rows=snapshot(brain))
+    rows = {row.name: row for row in dashboard.rows}
+    assert rows["calendar"].degraded == {"runs": 2, "missed": 1, "of": 3}
+    assert rows["calendar"].status is State.FRESH
+    assert not any(watching.needs_attention(rows[name]) for name in ("calendar", "manual", "disabled"))
+    history(3)
+    dashboard.replace_rows(snapshot(brain))
+    rows = {row.name: row for row in dashboard.rows}
+    assert {"sensor": "calendar", "freshness": "fresh", "degraded": True} in attention(brain)
+    assert [name for name in ("calendar", "manual", "disabled") if watching.needs_attention(rows[name])] == ["calendar"]
+    dashboard.key("\t")
+    assert rows["calendar"] in dashboard.visible()
+    detail = dashboard.details(rows["calendar"]).plain
+    assert "Last run missed 1 of 3; 3 incomplete runs in a row" in detail
+    assert "Log: logs/calendar.log" in detail
+    # The JSON stream carries the same counts.
+    assert json.loads(json.dumps(asdict(rows["calendar"])))["degraded"] == {"runs": 3, "missed": 1, "of": 3}
+    assert rows["git"].degraded is None
 
 
 def test_a_new_assistant_schedule_needs_attention_only_once_due(brain: Store) -> None:

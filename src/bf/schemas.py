@@ -4,7 +4,7 @@ from typing import Literal, cast
 
 from bf.models import Config, UserConfig
 
-Kind = Literal["brain", "registry", "eval", "search-reply", "read-reply", "assistant-reply"]
+Kind = Literal["brain", "registry", "eval", "search-reply", "read-reply", "status-reply", "assistant-reply"]
 
 
 def _open(value: object) -> object:
@@ -29,16 +29,14 @@ def _open(value: object) -> object:
 def document(kind: Kind = "brain") -> dict[str, object]:
     """Describe structural constraints; semantic validation remains with the owning command."""
     from bf.evaluate import Suite
-    from bf.replies import ASSISTANT, READ, SEARCH
+    from bf.replies import ASSISTANT, READ, SEARCH, STATUS
 
     if kind == "assistant-reply":
         # Strict on purpose: a harness's structured-output mode needs every property declared and no extra ones.
         return {"$schema": "https://json-schema.org/draft/2020-12/schema", **ASSISTANT}
-    if kind in ("search-reply", "read-reply"):
+    if kind in ("search-reply", "read-reply", "status-reply"):
         # Replies are plain dictionaries: their schemas are declared, and tests validate real replies against them.
-        return {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            **cast("dict[str, object]", _open(SEARCH if kind == "search-reply" else READ)),
-        }
+        reply = {"search-reply": SEARCH, "read-reply": READ, "status-reply": STATUS}[kind]
+        return {"$schema": "https://json-schema.org/draft/2020-12/schema", **cast("dict[str, object]", _open(reply))}
     model = {"brain": Config, "registry": UserConfig, "eval": Suite}[kind]
     return {"$schema": "https://json-schema.org/draft/2020-12/schema", **model.model_json_schema()}

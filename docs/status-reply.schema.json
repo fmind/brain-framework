@@ -1,0 +1,321 @@
+{
+  "$defs": {
+    "Assistant": {
+      "properties": {
+        "error": { "description": "The last attempt's diagnostic; it never quotes provider output.", "type": "string" },
+        "failed": { "const": true },
+        "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
+        "inputs": {
+          "items": {
+            "description": "A channel input as bf.yaml declares it, such as its `name` and its `mode`, `read` or `stream`; its settings may grow.",
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "last_success": {
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "log": { "description": "The program's log in the brain, such as logs/NAME.log.", "type": "string" },
+        "record": { "description": "The record its latest run wrote.", "type": "string" },
+        "runs": { "description": "Successful runs since its history began.", "minimum": 0, "type": "integer" },
+        "schedules": {
+          "additionalProperties": {
+            "properties": {
+              "every": { "minimum": 1, "type": "integer" },
+              "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
+              "last_success": {
+                "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+                "format": "date-time",
+                "type": "string"
+              },
+              "next_due": {
+                "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+                "format": "date-time",
+                "type": "string"
+              }
+            },
+            "required": ["freshness", "every"],
+            "type": "object"
+          },
+          "description": "Each named timer: its interval in seconds, next due time, last success and freshness.",
+          "type": "object"
+        },
+        "state": { "enum": ["active", "disabled"] }
+      },
+      "required": ["state", "freshness", "runs", "schedules", "inputs"],
+      "type": "object"
+    },
+    "Attention": {
+      "description": "A program that needs action, named by its kind.",
+      "properties": {
+        "assistant": { "type": "string" },
+        "channel": { "type": "string" },
+        "degraded": {
+          "const": true,
+          "description": "Three or more committed collections in a row reported missing parts; the source's `degraded` coverage gives the counts."
+        },
+        "failed": { "const": true },
+        "freshness": { "type": "string" },
+        "routine": { "type": "string" },
+        "sensor": { "type": "string" },
+        "silent": {
+          "const": true,
+          "description": "The source gained no new or changed record within its `silent_after`, whatever its freshness."
+        }
+      },
+      "required": ["freshness"],
+      "type": "object"
+    },
+    "Problem": {
+      "description": "Why part of a reply may be incomplete; an incomplete empty result does not prove absence.",
+      "properties": { "brain": { "type": "string" }, "error": { "type": "string" }, "file": { "type": "string" } },
+      "required": ["error"],
+      "type": "object"
+    },
+    "Routine": {
+      "properties": {
+        "action": { "description": "The latest action the routine wrote.", "type": "string" },
+        "error": { "description": "The last attempt's diagnostic; it never quotes provider output.", "type": "string" },
+        "failed": { "const": true },
+        "failures": { "description": "Consecutive failed attempts.", "minimum": 0, "type": "integer" },
+        "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
+        "last_success": {
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "log": { "description": "The program's log in the brain, such as logs/NAME.log.", "type": "string" },
+        "state": { "enum": ["active", "disabled"] }
+      },
+      "required": ["state", "freshness"],
+      "type": "object"
+    },
+    "Source": {
+      "description": "A source's collection state as search coverage reports it, its indexed totals and this machine's last run.",
+      "properties": {
+        "bytes": { "description": "The size of the source's record files on disk.", "minimum": 0, "type": "integer" },
+        "changed": {
+          "description": "When this brain last gained a new or changed record of the source.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "degraded": {
+          "description": "The source's last committed collection reported that it missed `missed` of the `of` parts it tried, such as feeds or accounts, and `runs` committed collections in a row did: its records may lack what those parts hold. A complete collection clears it.",
+          "properties": {
+            "missed": { "minimum": 1, "type": "integer" },
+            "of": { "minimum": 1, "type": "integer" },
+            "runs": { "minimum": 1, "type": "integer" }
+          },
+          "required": ["runs", "missed", "of"],
+          "type": "object"
+        },
+        "error": { "description": "The last attempt's diagnostic; it never quotes provider output.", "type": "string" },
+        "failed": { "const": true },
+        "failures": { "description": "Consecutive failed attempts.", "minimum": 0, "type": "integer" },
+        "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
+        "last_collected": {
+          "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "last_run": {
+          "description": "Counters of the last committed collection, a backfill included; `forgotten` and `expired` only when nonzero.",
+          "properties": {
+            "added": { "minimum": 0, "type": "integer" },
+            "elapsed_seconds": { "minimum": 0, "type": "number" },
+            "expired": { "minimum": 0, "type": "integer" },
+            "forgotten": { "minimum": 0, "type": "integer" },
+            "output_bytes": { "minimum": 0, "type": "integer" },
+            "reconcile": { "type": "boolean" },
+            "records": { "minimum": 0, "type": "integer" },
+            "removed": { "minimum": 0, "type": "integer" },
+            "requested_end": {
+              "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+              "format": "date-time",
+              "type": "string"
+            },
+            "requested_start": {
+              "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+              "format": "date-time",
+              "type": "string"
+            },
+            "unchanged": { "minimum": 0, "type": "integer" },
+            "updated": { "minimum": 0, "type": "integer" }
+          },
+          "type": "object"
+        },
+        "latest": {
+          "description": "The newest event time of its indexed records.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "log": { "description": "The program's log in the brain, such as logs/NAME.log.", "type": "string" },
+        "mode": { "enum": ["window", "snapshot"] },
+        "reconciled": { "description": "The last scheduled reconciliation.", "format": "date-time", "type": "string" },
+        "records": { "minimum": 0, "type": "integer" },
+        "silent": {
+          "const": true,
+          "description": "The scheduled source gained no new or changed record within its `silent_after`."
+        },
+        "state": { "enum": ["active", "disabled", "historical"] },
+        "window": {
+          "properties": {
+            "since": {
+              "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+              "format": "date-time",
+              "type": "string"
+            },
+            "until": {
+              "description": "ISO 8601 date-time with the local offset, such as 2026-09-28T14:00:00+02:00.",
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          "required": ["since", "until"],
+          "type": "object"
+        }
+      },
+      "required": ["state", "freshness", "records", "bytes"],
+      "type": "object"
+    },
+    "Usage": {
+      "description": "Local searches, searches that found nothing and reads over one window.",
+      "properties": {
+        "empty": { "minimum": 0, "type": "integer" },
+        "empty_kinds": { "description": "Counts of searches that found nothing, per scope kind.", "type": "object" },
+        "empty_terms": {
+          "description": "The words searches that found nothing used most, with their counts.",
+          "items": {
+            "properties": { "count": { "minimum": 0, "type": "integer" }, "term": { "type": "string" } },
+            "required": ["term", "count"],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "kinds": { "description": "Counts per operation, then per scope or page kind.", "type": "object" },
+        "read": { "minimum": 0, "type": "integer" },
+        "search": { "minimum": 0, "type": "integer" },
+        "since": {
+          "description": "The oldest event counted, when an older release's rotation cut it.",
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": ["search", "empty", "read"],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "brains": {
+      "items": {
+        "anyOf": [
+          {
+            "properties": {
+              "assistants": { "additionalProperties": { "$ref": "#/$defs/Assistant" }, "type": "object" },
+              "attention": { "items": { "$ref": "#/$defs/Attention" }, "type": "array" },
+              "brain": { "type": "string" },
+              "cache": { "enum": ["ready", "busy", "stale", "missing"] },
+              "coverage": {
+                "description": "Sources and indexed records per source state.",
+                "properties": {
+                  "active": {
+                    "properties": {
+                      "records": { "minimum": 0, "type": "integer" },
+                      "sources": { "minimum": 0, "type": "integer" }
+                    },
+                    "required": ["sources", "records"],
+                    "type": "object"
+                  },
+                  "disabled": {
+                    "properties": {
+                      "records": { "minimum": 0, "type": "integer" },
+                      "sources": { "minimum": 0, "type": "integer" }
+                    },
+                    "required": ["sources", "records"],
+                    "type": "object"
+                  },
+                  "historical": {
+                    "properties": {
+                      "records": { "minimum": 0, "type": "integer" },
+                      "sources": { "minimum": 0, "type": "integer" }
+                    },
+                    "required": ["sources", "records"],
+                    "type": "object"
+                  }
+                },
+                "required": ["active", "disabled", "historical"],
+                "type": "object"
+              },
+              "messaging": {
+                "description": "The assistant queue as bf queue lists it, without message bodies: `jobs`, `deliveries`, `counts`, `delivery_counts`, `delivery_failures`, `transports` and `wakes`.",
+                "type": "object"
+              },
+              "notes": { "minimum": 0, "type": "integer" },
+              "path": { "type": "string" },
+              "pending_transaction": { "const": true },
+              "problems": { "items": { "$ref": "#/$defs/Problem" }, "type": "array" },
+              "routines": { "additionalProperties": { "$ref": "#/$defs/Routine" }, "type": "object" },
+              "runtime": {
+                "description": "The installed bf version and the one the brain's uv.lock pins, if any.",
+                "properties": { "installed": { "type": "string" }, "pinned": { "type": "string" } },
+                "required": ["installed"],
+                "type": "object"
+              },
+              "sources": { "additionalProperties": { "$ref": "#/$defs/Source" }, "type": "object" },
+              "usage": {
+                "properties": { "30d": { "$ref": "#/$defs/Usage" }, "7d": { "$ref": "#/$defs/Usage" } },
+                "required": ["7d", "30d"],
+                "type": "object"
+              },
+              "warnings": {
+                "description": "Never fail `--check`.",
+                "items": {
+                  "description": "A `warning`, such as `directory nears the scan limit` with its `directory`, `entries` and `limit`.",
+                  "required": ["warning"],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "brain",
+              "path",
+              "runtime",
+              "cache",
+              "notes",
+              "problems",
+              "attention",
+              "sources",
+              "coverage",
+              "usage"
+            ],
+            "title": "Brain",
+            "type": "object"
+          },
+          {
+            "description": "A brain that cannot be read or is ambiguous.",
+            "properties": {
+              "brain": { "type": "string" },
+              "error": { "type": "string" },
+              "path": { "type": "string" }
+            },
+            "required": ["brain", "error"],
+            "title": "Unavailable brain",
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    },
+    "healthy": {
+      "description": "False on a problem or attention entry, a stale or missing cache, or an unavailable brain or reference.",
+      "type": "boolean"
+    }
+  },
+  "required": ["healthy", "brains"],
+  "title": "bf status reply",
+  "type": "object"
+}

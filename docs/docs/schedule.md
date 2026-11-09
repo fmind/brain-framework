@@ -46,6 +46,7 @@ The dashboard shows each program's state, last success, next due time, returned 
 
 - `never` means no success on this machine, such as a sensor that only backfilled older windows.
 - `failed` means the last attempt failed.
+- A sensor's details show `Last run missed N of M` while its last committed run [reported missing parts](sensors.md#report-partial-coverage); after three such runs in a row, a scheduled sensor needs attention.
 - Items counts the records the last committed collection returned, even a backfill, not the stored total.
 - Manual and disabled programs stay visible without running.
 
@@ -53,15 +54,15 @@ The dashboard shows each program's state, last success, next due time, returned 
 
 This is the fictional [offline watch demo](https://github.com/fmind/brain-framework/tree/main/examples/watch), sorted by state: `unavailable` failed, `calendar` updated its record, `git` added one, and the manual and disabled sensors stay idle.
 
-| Key                   | Effect                                                                                                |
-| --------------------- | ----------------------------------------------------------------------------------------------------- |
-| `j` / `k`, arrows     | Select a program and show its details, including its log and latest action.                           |
-| `g` / `G`, Home / End | Select the first or last program.                                                                     |
-| Tab                   | Show only programs needing attention: failed, due, or [never collected once due](#timing-and-health). |
-| `f` (or `u`)          | Reload `bf.yaml` and check due work now; queues one check during an update.                           |
-| Space                 | Pause or resume future checks; an active update finishes.                                             |
-| `?`                   | Toggle the guide: every key, sort field and count explained.                                          |
-| `q`                   | Cancel any active update and quit. Ctrl-C or closing the terminal exits 130.                          |
+| Key                   | Effect                                                                                                                                   |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `j` / `k`, arrows     | Select a program and show its details, including its log and latest action.                                                              |
+| `g` / `G`, Home / End | Select the first or last program.                                                                                                        |
+| Tab                   | Show only programs needing attention: failed, due, [never collected once due](#timing-and-health), or missing parts three runs in a row. |
+| `f` (or `u`)          | Reload `bf.yaml` and check due work now; queues one check during an update.                                                              |
+| Space                 | Pause or resume future checks; an active update finishes.                                                                                |
+| `?`                   | Toggle the guide: every key, sort field and count explained.                                                                             |
+| `q`                   | Cancel any active update and quit. Ctrl-C or closing the terminal exits 130.                                                             |
 
 Press `f` after adding a reviewed sensor or routine to `bf.yaml`: its row appears and it runs if due. A new assistant's row appears too, but it runs only after you restart watch. Refresh respects selectors, pause, `refresh` and failure backoff.
 
@@ -281,7 +282,7 @@ Run history is local, even when records are shared, so check health on the colle
 
 A sensor succeeds only with a collection reaching the moment it runs: one that only [backfilled](sensors.md#backfills-and-coverage) older windows stays `never`.
 
-`bf status --check` exits 1 for every [`attention`](commands.md#attention-entries) entry, such as a scheduled program that is `overdue`, last failed, [fell silent](#silent-sources) or is due and `never` succeeded. See [`messaging`](commands.md#messaging) for the assistant and channel fields.
+`bf status --check` exits 1 for every [`attention`](commands.md#attention-entries) entry, such as a scheduled program that is `overdue`, last failed, [fell silent](#silent-sources), is due and `never` succeeded, or a source whose last three or more committed runs [reported missing parts](sensors.md#report-partial-coverage) (`degraded`). See [`messaging`](commands.md#messaging) for the assistant and channel fields.
 
 A sensor or routine with no local success is due at once. A new assistant schedule joins `attention` only once it is due, when watch would start it: a `mon`–`fri` schedule `at: "07:30"` declared on Sunday evening shows `never`, but stays out until Monday at 07:30. An `every` schedule is due at once, unless its `days` exclude today.
 
