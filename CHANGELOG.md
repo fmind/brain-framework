@@ -6,11 +6,12 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## [v21.4.1](https://github.com/fmind/brain-framework/releases/tag/v21.4.1) - 2026-11-09
 
-A patch release. Fresh installs of 21.3.0 and 21.4.0 resolve Typer 0.29, published on 2026-11-09, and fail; installations made before it, and brains that lock their dependencies, are unaffected. Nothing else changes: upgrade with `uv tool upgrade brain-framework`.
+A patch release. Fresh installs of 21.3.0 and 21.4.0 resolve Typer 0.29, published on 2026-11-09, and fail; installations made before it, and brains that lock their dependencies, are unaffected. Upgrade with `uv tool upgrade brain-framework`, then run `bf skills DIR` to update installed skills.
 
 ### Fixed
 
 - **`bf` commands no longer fail under Typer 0.29.** BF passes the command context to an option's error hint, which Typer 0.29 no longer accepts, so a fresh install resolved Typer 0.29 and its commands stopped with a `TypeError`. BF now requires `typer<0.29`.
+- **Concurrent guarded writes no longer give up when a lock file is being removed.** On macOS, opening the lock file that another writer of the same note was removing could fail as missing, so the bf-use guarded-write helper reported the file as busy instead of locking again; it now retries until its usual wait ends.
 
 ## [v21.4.0](https://github.com/fmind/brain-framework/releases/tag/v21.4.0) - 2026-11-09
 

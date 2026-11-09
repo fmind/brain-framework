@@ -224,6 +224,12 @@ def lock(directory: int, name: str, wait: float) -> Generator[None]:
             leaf = f"{target.st_dev:x}-{target.st_ino:x}.lock"
             try:
                 fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=folder)
+            except FileNotFoundError as error:
+                # macOS can report a lock file its last holder is removing as missing, even with O_CREAT: retry.
+                if time.monotonic() >= deadline:
+                    raise LockError from error
+                time.sleep(0.02)
+                continue
             except OSError as error:
                 raise LockError from error
             try:

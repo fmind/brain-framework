@@ -199,6 +199,28 @@ def test_write_expands_a_quoted_home(brain: Store) -> None:
     assert (brain.root / NOTE).read_bytes() == written
 
 
+def test_a_lock_file_vanishing_while_it_opens_is_retried(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    # macOS CI: opening a lock file its last holder was removing failed with ENOENT despite O_CREAT, so a waiting
+    # writer gave up as if the lock were held instead of locking again.
+    helper = module()
+    path = brain.root / NOTE
+    digest = helper.digest(path.read_bytes())
+    opened, failed = helper.os.open, []
+
+    def vanishing(name: object, *args: object, **kwargs: object) -> int:
+        if str(name).endswith(".lock") and not failed:
+            failed.append(name)
+            raise FileNotFoundError(2, "No such file or directory", name)
+        return opened(name, *args, **kwargs)
+
+    monkeypatch.setattr(helper.os, "open", vanishing)
+    reported = helper.write(path, digest, helper.whole(b"# Locked again\n"))
+    assert failed
+    assert path.read_bytes() == b"# Locked again\n"
+    assert reported == helper.digest(b"# Locked again\n")
+    assert not locks()
+
+
 def test_concurrent_writes_of_one_read_keep_exactly_one(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     # Two sessions read the same digest. Unserialized, both pass the second check before either renames: both report
     # success and one edit silently disappears. The second check waits here until the other writer reaches its own.
