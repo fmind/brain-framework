@@ -4,6 +4,8 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v21.4.1](https://github.com/fmind/brain-framework/releases/tag/v21.4.1) - 2026-11-09
+
 A patch release. Fresh installs of 21.3.0 and 21.4.0 resolve Typer 0.29, published on 2026-11-09, and fail; installations made before it, and brains that lock their dependencies, are unaffected. Nothing else changes: upgrade with `uv tool upgrade brain-framework`.
 
 ### Fixed
