@@ -534,7 +534,7 @@ def test_cancelled_parallel_programs_share_one_grace(configured: Store, tmp_path
             assert ended(pid), f"collector process {pid} survived"
     finally:
         for leader in pids:
-            with suppress(ProcessLookupError):
+            with suppress(ProcessLookupError, PermissionError):
                 os.killpg(leader, signal.SIGKILL)
         if child.poll() is None:
             child.kill()
@@ -572,7 +572,7 @@ def test_a_second_interrupt_kills_during_the_grace(configured: Store, tmp_path: 
         assert re.search(r"== \S+ failed after [0-9.]+s ==\n\Z", log), log
     finally:
         if pid:
-            with suppress(ProcessLookupError):
+            with suppress(ProcessLookupError, PermissionError):
                 os.killpg(pid, signal.SIGKILL)
         if child.poll() is None:
             child.kill()
@@ -1000,7 +1000,7 @@ main()
         assert records.files(configured, "sample") == []
     finally:
         if pids:
-            with suppress(ProcessLookupError):
+            with suppress(ProcessLookupError, PermissionError):
                 os.killpg(pids[0], signal.SIGKILL)
         if child.poll() is None:
             child.kill()
@@ -1042,7 +1042,7 @@ def test_cancelled_update_stops_sensors_running_in_parallel(configured: Store, t
         assert all(records.files(configured, marker.name) == [] for marker in markers)
     finally:
         for leader in pids[::2]:
-            with suppress(ProcessLookupError):
+            with suppress(ProcessLookupError, PermissionError):
                 os.killpg(leader, signal.SIGKILL)
         if child.poll() is None:
             child.kill()

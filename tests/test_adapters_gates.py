@@ -378,11 +378,12 @@ def test_stopping_the_gate_stops_its_export(provider: Provider, tmp_path: Path) 
                     assert time.monotonic() < deadline, "the export outlived its gate"
                     time.sleep(0.05)
     finally:
-        with suppress(ProcessLookupError):
-            os.killpg(child.pid, signal.SIGKILL)
+        if not stopped or child.poll() is None:
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(child.pid, signal.SIGKILL)
         child.wait(timeout=30)
         if not stopped and ready.exists():
-            with suppress(ProcessLookupError, ValueError):
+            with suppress(ProcessLookupError, PermissionError, ValueError):
                 os.kill(int(ready.read_text()), signal.SIGKILL)
 
 
