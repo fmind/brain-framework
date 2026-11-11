@@ -266,7 +266,7 @@ Provider retention cannot guarantee historical evidence, so the team keeps durab
 def records_file(store: Store, source: str, records: list[Record]) -> None:
     """Write each record to its own SHA-256-named file, as collection does."""
     for record in records:
-        store.write(record_path(source, record.id), encode(record.model_dump(exclude_defaults=True)))
+        store.write(record_path(source, record.id), encode(record.model_dump(exclude_defaults=True)), durable=False)
 
 
 @pytest.fixture

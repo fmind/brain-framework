@@ -2,7 +2,7 @@
 type: action
 status: draft
 updated: 2026-01-01
-description: One sentence on the requested outcome.
+summary: One sentence on the requested outcome.
 ---
 
 # Action title

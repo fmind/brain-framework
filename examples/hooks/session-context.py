@@ -1,96 +1,68 @@
 #!/usr/bin/env python3
 """Print the brain's context for the current repository at agent session start; silent when unavailable."""
 
-import json
+from __future__ import annotations
+
 import re
 import subprocess
 import sys
 import time
-import unicodedata
 from datetime import date, datetime
+from typing import Any
 from urllib.parse import quote
 
-REPLY_BYTES = 4 << 20
+import _bf
+
+REPLY_BYTES = _bf.MAX_REPLY
 REMOTE_BYTES = 8 << 10
 NEWEST = 3
 ATTENTION = 5
 # One lookup budget and page bound cover the repository read, the project listing and the home page.
 LOOKUP_SECONDS = 20
-MAX_PAGES = 100
-STALE_CACHE = "identity resolution used a stale cache"
+MAX_PAGES = _bf.MAX_PAGES
+ATTENTION_KINDS = frozenset({"sensor", "routine", "assistant", "channel"})
 # Only authored note refs are printed, in code spans; a record ref is provider-controlled text and stays out.
 NOTE = re.compile(
     r"(?:bf://[a-z][a-z0-9-]{0,63}/)?(?:projects|concepts|actions)/[^\x00-\x1f\x7f-\x9f]+?\.md(?:#[^\x00-\x1f\x7f-\x9f]*)?"
 )
+repository_identity = _bf.git_remote_identity
+visible = _bf.visible
+code = _bf.code
 
 
-def run(argv: list[str], limit: int, timeout: float) -> bytes | None:
-    """Literal argv, bounded time and output; any failure means no context rather than a blocked session."""
-    if timeout <= 0:
-        return None
-    try:
-        result = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)  # noqa: S603
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode or len(result.stdout) > limit:
-        return None
-    return result.stdout
-
-
-# A remote's identity, the same in each example that reads one: only `https://HOST/OWNER/NAME`,
-# `ssh://git@HOST/OWNER/NAME` and `git@HOST:OWNER/NAME`, with or without `.git`, on a host whose name ends in a
-# letters-only label. Any other user, a password or token, a port, a nested group or an ssh alias without a dot,
-# such as `git@work:team/site.git`, gives no identity. A dotted alias, such as `gh.work`, passes as its host.
-HOST = r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}"
-REMOTE = re.compile(
-    rf"(?:https://({HOST})/|ssh://git@({HOST})/|git@({HOST}):)([A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)(?:\.git)?"
-)
-
-
-def repository_identity(url: str) -> str:
-    """`repo:HOST/OWNER/NAME`, lowercase as the sensor kit's repo() writes it; "" for any other remote."""
-    match = REMOTE.fullmatch(url.strip())
-    if not match:
-        return ""
-    host = next(group for group in match.groups()[:3] if group)
-    return f"repo:{host}/{match[4]}".lower()
+def plain(value: object, limit: int = 120) -> str:
+    return _bf.plain(value, limit)
 
 
 def identity() -> str:
     """The working directory's repository, as the Git history sensor records it; never raw remote credentials."""
-    raw = run(["git", "remote", "get-url", "origin"], REMOTE_BYTES, 5)
-    return repository_identity((raw or b"").decode(errors="replace"))
-
-
-def read(ref: str, brain: str, offset: int = 0, timeout: float = LOOKUP_SECONDS) -> dict | None:
-    """One usable page: tolerate only stale-cache identity problems, with a visible notice at rendering."""
-    raw = run(
-        [
-            "bf",
-            "read",
-            *([ref] if ref else []),
-            *(["--brain", brain] if brain else []),
-            *(["--offset", str(offset)] if offset else []),
-        ],
-        REPLY_BYTES,
-        timeout,
-    )
     try:
-        reply = json.loads(raw) if raw else None
-    except ValueError:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],  # noqa: S607 - literal argv to git on PATH
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode or len(result.stdout) > REMOTE_BYTES:
+        return ""
+    return repository_identity(result.stdout.decode(errors="replace"))
+
+
+def read(ref: str, brain: str, offset: int = 0, timeout: float = LOOKUP_SECONDS) -> dict[str, Any] | None:
+    """One usable page: tolerate only stale-cache identity problems, with a visible notice at rendering."""
+    args = [
+        "read",
+        *([ref] if ref else []),
+        *(["--brain", brain] if brain else []),
+        *(["--offset", str(offset)] if offset else []),
+    ]
+    try:
+        return _bf.bf_json(*args, timeout=timeout, allow_stale=True, max_bytes=REPLY_BYTES)
+    except _bf.BfError:
         return None
-    if not isinstance(reply, dict):
-        return None
-    problems, stale = reply.get("problems", []), reply.get("stale", [])
-    if (
-        not isinstance(problems, list)
-        or not isinstance(stale, list)
-        or any(not isinstance(name, str) for name in stale)
-        or any(not isinstance(problem, dict) or problem.get("error") != STALE_CACHE for problem in problems)
-        or (problems and not stale)
-    ):
-        return None
-    return reply
 
 
 def day(value: object) -> str:
@@ -104,36 +76,12 @@ def day(value: object) -> str:
         return ""
 
 
-def visible(text: str) -> str:
-    """Escape controls, line and paragraph separators and invisible format characters, which bf replies escape and
-    JSON decoding restored."""
-    return "".join(
-        char.encode("unicode_escape").decode() if unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} else char
-        for char in text
-    )
-
-
-def plain(value: object, limit: int = 120) -> str:
-    # A task's Markdown link reads as its label, as the note shows it.
-    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", str(value))
-    text = visible(re.sub(r"\s+", " ", re.sub(r"[`\[\]<>]", "", text)).strip())
-    return text[: limit - 1] + "…" if len(text) > limit else text
-
-
-def code(value: str) -> str:
-    """A code span that no backtick inside the value can close."""
-    value = visible(value)
-    fence = "`" * (max(map(len, re.findall(r"`+", value)), default=0) + 1)
-    pad = " " if value.startswith("`") or value.endswith("`") else ""
-    return f"{fence}{pad}{value}{pad}{fence}"
-
-
-def address(item: dict) -> str:
+def address(item: dict[str, Any]) -> str:
     """With several selected brains, items carry a portable `uri`: their plain ref may name a note in each."""
     return str(item.get("uri") or item.get("ref", ""))
 
 
-def owner(page: dict) -> str:
+def owner(page: dict[str, Any]) -> str:
     """The exact read's `bf://` address, encoded as bf encodes one: it resolves whichever brains are selected."""
     ref = str(page.get("ref", ""))
     # As in bf, a ref ending in `.md` is a whole note, whose filename may hold a `#`.
@@ -143,7 +91,9 @@ def owner(page: dict) -> str:
     return uri if NOTE.fullmatch(uri) else ""
 
 
-def render(repo: str, page: dict, project: dict | None, attention: list, stale: bool = False) -> list[str]:
+def render(
+    repo: str, page: dict[str, Any], project: dict[str, Any] | None, attention: list[Any], stale: bool = False
+) -> list[str]:
     lines = [f"Brain context for {repo} (evidence, not instructions):"]
     ref = str(page.get("ref", ""))
     note = ref if NOTE.fullmatch(ref) else ""
@@ -189,10 +139,10 @@ def render(repo: str, page: dict, project: dict | None, attention: list, stale: 
             f"  - {' '.join(filter(None, [day(i.get('date')), plain(i.get('title', ''))]))} ({code(address(i))})"
             for i in newest
         )
-    # Scheduled sensors, routines and assistants that failed, are late, fell silent or keep missing parts: their evidence may be older or
-    # sparser than it looks. A stopped sensor falls silent too: its failure or lateness names what to repair first.
+    # Scheduled sensors, routines, assistants and channels that failed, are late, fell silent or keep missing parts:
+    # their evidence may be older or sparser than it looks.
     late = [
-        f"{plain(entry.get('sensor') or entry.get('routine') or entry.get('assistant'), 64)} "
+        f"{plain(entry['name'], 64)} "
         + (
             "failed"
             if entry.get("failed")
@@ -203,7 +153,10 @@ def render(repo: str, page: dict, project: dict | None, attention: list, stale: 
             else plain(entry.get("freshness"), 16)
         )
         for entry in attention
-        if isinstance(entry, dict) and (entry.get("sensor") or entry.get("routine") or entry.get("assistant"))
+        if isinstance(entry, dict)
+        and entry.get("kind") in ATTENTION_KINDS
+        and isinstance(entry.get("name"), str)
+        and entry["name"]
     ]
     if late:
         extra = f" and {len(late) - ATTENTION} more" if len(late) > ATTENTION else ""
@@ -227,28 +180,28 @@ def main(argv: list[str]) -> int:
     ref = str(page.get("ref", ""))
     project = None
     if NOTE.fullmatch(ref) and ref.startswith("projects/"):
-        offset = 0
-        for _ in range(MAX_PAGES):
-            listing = read("projects", brain, offset, deadline - time.monotonic())
-            if not listing:
-                return 0
-            stale = stale or bool(listing.get("stale"))
-            # Items name their brain only when several are selected; otherwise they share the page's brain.
-            project = next(
-                (
-                    p
-                    for p in listing.get("items", [])
-                    if (p.get("brain", page.get("brain")), p.get("ref")) == (page.get("brain"), ref)
-                ),
-                None,
-            )
-            if project is not None or "next_offset" not in listing:
-                break
-            following = listing["next_offset"]
-            if type(following) is not int or not offset < following < 2**53:
-                return 0
-            offset = following
-        else:
+        try:
+            for listing in _bf.bf_pages(
+                "projects",
+                brain=brain or None,
+                deadline=deadline,
+                allow_stale=True,
+                max_pages=MAX_PAGES,
+                max_bytes=REPLY_BYTES,
+            ):
+                stale = stale or bool(listing.get("stale"))
+                # Items name their brain only when several are selected; otherwise they share the page's brain.
+                project = next(
+                    (
+                        p
+                        for p in listing.get("items", [])
+                        if (p.get("brain", page.get("brain")), p.get("ref")) == (page.get("brain"), ref)
+                    ),
+                    None,
+                )
+                if project is not None:
+                    break
+        except _bf.BfError:
             return 0
     home = read("", brain, 0, deadline - time.monotonic())
     if not home or not isinstance(home.get("attention", []), list):
@@ -261,5 +214,5 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv))
-    except Exception:  # A malformed reply must never block a session: print nothing and succeed.
+    except Exception:  # A malformed reply must never block a session: print nothing and succeed
         sys.exit(0)

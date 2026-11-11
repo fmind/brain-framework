@@ -1,24 +1,16 @@
 # Identities, tags and relations
 
-Use when changing a note's tags, identity or relations; the [link reference](https://fmind.github.io/brain-framework/docs/link-reference/) owns the exact rules. Never infer an identity or a relation from similar names or prose: write only what a source or the user states.
+Use when changing tags, identities or relations; the [link reference](https://fmind.github.io/brain-framework/docs/link-reference/) owns exact rules. Never infer identities or relations from prose or similar names.
 
-## Link notes and name a relation
+## Links and relations
 
-Relative links start from the file holding them; in `projects/` and `concepts/`, a leading `/` starts from that folder. A link to a page, such as `tasks`, takes no `#section`.
-
-A typed link states a relation: `[Decision](bf://NAME/projects/new-website.md?rel=depends-on#decision)`, where `NAME` is the `name` in `bf.yaml`.
-
-- `?rel=` is the only query a `bf://` link takes; it precedes the fragment and is rejected on any other link.
-- The subject is the note's `entity`, otherwise its file: to state another subject's relation, write the link in that subject's note.
-- The link's section is the claim's `origin`: keep the supporting observation beside it.
-- In a `bf://` link to a record, percent-encode a `#` or `?` of its id as `%23` or `%3F`.
-
-Declare each relation once under `fields:` in `bf.yaml`: `bf init` declares the [standard vocabulary](https://fmind.github.io/brain-framework/docs/schema/#standard-vocabulary), including `owner`, `depends-on`, `related-to` and `supersedes`, and `cites`, `links` and `tagged-with` are reserved. Check `bf.yaml` before adding one: a name it already lists is a duplicate key that breaks every command. `bf validate` names an undeclared relation, whose links stay untyped. Merge a new relation into the existing mapping, since a second `fields:` key is invalid:
+- Relative links resolve from the containing file; in `projects/` and `concepts/`, a leading `/` resolves from that bundle root. Page links (`tasks`, `review`) take no `#section`.
+- Typed links use `bf://` with `?rel=` before any `#section`: `[Decision](bf://NAME/projects/new-website.md?rel=depends-on#decision)`. The subject is the note's `entity` (else its file) and the containing section is `origin`. Percent-encode `#` and `?` in record ids (`%23`, `%3F`) inside `bf://` links.
+- Relations are declared once under top-level `fields:` in `bf.yaml` (`bf init` declares the [standard vocabulary](https://fmind.github.io/brain-framework/docs/schema/#standard-vocabulary), including `owner`, `depends-on`, `related-to`, `supersedes`; `cites`, `links`, `tagged-with` are reserved). Merge new entries into the existing `fields:` mapping:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schema/
 fields:
-  # Keep the existing entries, such as depends-on.
   verifies:
     description: This authored check explicitly verifies the target claim.
     type: identity
@@ -26,34 +18,11 @@ fields:
     relation: true
 ```
 
-`broader: PARENT` makes a relation a narrower kind of another; `targets: ["repo:"]` restricts the identities it may point to, failing collection or validation outside them.
+`broader: PARENT` rolls narrower claims into parent `--rel` pages; `targets: ["repo:"]` restricts allowed identity prefixes. Non-`bf://` relations on a note go in frontmatter `fields:` (`owner: [person:email/bob@example.test]`).
 
-## Set declared fields in a note
+## Stable identities, tags and related brains
 
-A relation to an identity that is not a `bf://` address, such as a person or a repository, belongs under the note's frontmatter `fields:`, where the whole note supports it:
-
-```yaml
-fields:
-  owner: [person:email/bob@example.test]
-  depends-on: [repo:github.com/example/new-website]
-```
-
-A declared field at the top level of the frontmatter asserts nothing.
-
-## Give a subject a stable identity
-
-A file address is enough for most notes. When sources name the same subject differently, a project, concept or `ACTION.md` note may declare:
-
-- `entity: bf://NAME/people/ID`, or another logical path of this brain, when the note owns that identity.
-- `aliases:` with verified namespaced identities (`scheme:value`), never display names, spelled as the sensors write them, since identities are case-sensitive.
-- `resource:` with the URI of the asset the note describes, such as `https://github.com/example/new-website`.
-
-Link to a record ref such as `jira:PROJ-1` rather than repeating it as an alias, which would make both owners ambiguous. A BF identity uses this brain's own name and names a whole subject, never a `#section`, note file, page or `SOURCE:ID`; link to another brain instead of claiming its identity. Retype an identity that `bf validate` reports for an invisible character. Give sections that need a durable ref an explicit anchor (`## Display title {#stable-id}`), and keep the brain's `name` stable across clones.
-
-## Reuse topic labels
-
-Browse `bf read tags` before adding `tags: [agents, retrieval]`, and reuse established lowercase hyphenated labels. Tags are exact, case-sensitive and local to their brain; linking to `bf://NAME/tags/LABEL` does not tag a note.
-
-## Relate another brain
-
-Related brains belong in `bf.yaml` as `brains: {team: {path: ../team}}`, relative to the declaring brain; search and read include direct references only. A link to another brain never adds it to retrieval, and `bf validate` lists such links under `unresolved`. References and registration never grant permission to run another brain's programs.
+- OKF notes may declare `entity: bf://NAME/people/ID`, `aliases: [scheme:value]` (exact, case-sensitive identities, never display names or `SOURCE:ID` record refs) and `resource:` URIs.
+- A `bf://` identity must use this brain's `name` and name a whole logical subject — never a `#section`, `.md` file, page, `SOURCE:ID` record or `bf://NAME/actions/SLUG` action folder (link to the action instead). Use `{#stable-id}` anchors on durable headings.
+- Check `bf read tags` and reuse lowercase hyphenated `tags: [agents, retrieval]`; prose links to `bf://NAME/tags/LABEL` do not tag a note.
+- Declare related brains in `bf.yaml` (`brains: {team: {path: ../team}}`) for one-hop retrieval; foreign links alone stay `unresolved` in `bf validate` and never grant execution authority.

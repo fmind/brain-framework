@@ -5,11 +5,7 @@ description: Connect any messaging surface through passive send, read and stream
 
 # Channels
 
-A channel connects your brain to a messaging surface, such as a chat, an inbox or desktop notifications. It is a named endpoint with optional `send`, `read` and `stream` capabilities, each run as a command. Declare it in `bf.yaml`, test it with `bf channel send` or `bf channel read`, then let [assistants](prompts.md) read from it and post to it.
-
-BF understands JSON envelopes and argv, not Google Chat, Slack, email or desktop notifications. The script owns provider access, sender admission, destination restrictions and transport details. Put scripts under `channels/`, or use an executable already on PATH. One script can serve several channel names with different arguments.
-
-Channels have no schedule or polling interval. An assistant chooses its inputs, its `post` channel and its batch-read cadence. A stream adapter implements push, Pub/Sub, long polling or fast polling itself. A stream's stdin and stdout carry only transport frames, such as messages and acknowledgements; answers always go through `send`.
+A channel connects your brain to a messaging surface — chat, inbox or desktop notifications — through passive `send`, `read` and `stream` commands declared in `bf.yaml`. BF handles JSON envelopes, durable queueing and retries; your script under `channels/` (or on PATH) owns provider credentials, sender authentication and destination bounds.
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/channels/
@@ -29,23 +25,19 @@ channels:
 
 ## Capability settings
 
-A channel needs at least one capability. Each capability has a `command`, and these settings with their defaults:
+Each channel defines at least one capability (`send`, `read` or `stream`):
 
 | Setting      | `send` and `read` (finite)                           | `stream` (long-lived)                                          |
 | ------------ | ---------------------------------------------------- | -------------------------------------------------------------- |
-| `timeout`    | 300 seconds of runtime, from 1 to 3,600              | 30 seconds for a blocked acknowledgement pipe, from 1 to 3,600 |
-| `max_bytes`  | 64 MiB of output, up to 256 MiB                      | 1 MiB per frame, from 1 KiB to 1 MiB                           |
+| `timeout`    | 300s runtime (1–3,600)                               | 30s blocked ACK pipe timeout (1–3,600); idle has no limit      |
+| `max_bytes`  | 64 MiB stdout (up to 256 MiB)                        | 1 MiB per UTF-8 frame (1 KiB–1 MiB; emit `ensure_ascii=False`) |
 | `idempotent` | `send` only; see [retries](#retries-and-idempotency) | Not available                                                  |
 
-An idle healthy stream has no total runtime deadline. The default frame limit holds the largest valid envelope however it is escaped. Print compact UTF-8 frames, such as Python's `json.dumps(message, ensure_ascii=False)`: a `\uXXXX` escape takes six bytes per character.
-
-Commands run from the brain directory without a shell. Their arguments support `{{brain}}`, `{{home}}`, `{{start}}`, `{{end}}` and `{{lines:FILE}}`, as [sensor settings](sensors.md#sensor-settings) describe. `BF_BRAIN` identifies that brain; startup-injection variables are stripped. Stderr goes to bounded `logs/channel.NAME.OPERATION.log`, never the protocol output.
-
-Each stream run ends its log with one `== TIME OUTCOME after N.Ns ==` entry, even when stderr is empty. The outcome is `stopped` or the error. When the adapter ended on its own, `; adapter exited with status N` or `; adapter was killed by SIGNAL` follows.
+Commands run from the brain root without a shell, expand `{{brain}}`, `{{home}}`, `{{start}}`, `{{end}}` and `{{lines:FILE}}`, receive `BF_BRAIN` with loader-injection variables stripped, and log stderr to `logs/channel.NAME.OPERATION.log` (streams append `== TIME OUTCOME after N.Ns ==` on exit). Copy [`examples/channels/channels/_bf.py`](https://github.com/fmind/brain-framework/blob/main/examples/channels/channels/_bf.py) alongside your channel scripts for `read_envelope()` and `emit_receipt()`.
 
 ## Message envelope
 
-A read or stream returns admitted messages in this shape:
+`read` and `stream` emit verified, sender-authorized messages in this shape:
 
 ```json
 {
@@ -57,24 +49,13 @@ A read or stream returns admitted messages in this shape:
 }
 ```
 
-- **Required:** `id`, `sender`, `conversation`, `time` and `text`. IDs must be stable across redelivery.
-- **Optional:** `reply_to`, `cursor` and `own` (default false). `own: true` suppresses the bot's output.
-
-The adapter must verify provider authenticity and authorize the sender before emitting. Preserve sender identity; do not label every incoming message as the owner. Conversation identity is scoped by the channel, so another channel's identical thread ID does not share context.
-
-Filter bot echoes in the adapter. BF also drops a message whose ID matches one of that channel's send receipts from the last 35 days, but an echo can arrive before its send returns.
-
-A provider edit that reuses an admitted message's ID keeps the admitted version: the edit starts no job and never stops later messages. To answer edits, give each revision a new stable ID.
-
-Envelope limits:
-
-- IDs and routing fields hold at most 4,096 characters and no control or format characters.
-- `text` holds at most 32,768 characters.
-- An invalid envelope fails naming the field and the reason, never the value: `channel NAME: invalid stream message envelope: FIELD: REASON`, or `channel NAME: read must return a complete JSON messages batch: messages.N.FIELD: REASON` for a read.
+- **Required**: `id` (stable across redelivery), `sender`, `conversation` (scoped per channel), `time`, `text` (<= 32,768 chars; routing fields <= 4,096 chars without control/format chars).
+- **Optional**: `reply_to`, `cursor`, `own` (`true` records conversation context without triggering an answer).
+- Filter bot echoes in the adapter (BF also drops IDs matching the channel's last 35 days of send receipts). Edits reusing an admitted `id` are ignored; assign a new stable `id` to answer edits.
 
 ## Send
 
-`send` receives one JSON object on stdin, then exits with one JSON receipt on stdout:
+`send` reads one JSON delivery request on stdin and prints one JSON receipt on stdout:
 
 ```json
 { "id": "stable-delivery-id", "text": "Here is the answer.", "conversation": "thread-7", "reply_to": "message-42" }
@@ -84,123 +65,50 @@ Envelope limits:
 { "id": "provider-message-43", "conversation": "thread-7" }
 ```
 
-An omitted or empty conversation requests the endpoint's default destination, such as a new thread in one fixed chat. A reply carries its original conversation and message ID. The receipt must preserve the requested conversation.
-
-Notification is a send-only channel, not a special BF transport. The [desktop adapter](https://github.com/fmind/brain-framework/blob/main/examples/channels/channels/desktop.py) in the `desktop` example above is one to copy:
-
-- It shows each message with `notify-send` on Linux or `osascript` on macOS, passing the text only as arguments, never as script code. Arguments show in process listings while the notifier runs, so other users of the computer can read those 1,000 characters: use it on a computer only you log into, or hide other users' processes, such as with Linux's `hidepid` mount option.
-- Its receipt names the requested conversation, or `desktop` by default.
-- It shows the first 1,000 characters, ending with `…`: a notification points to the answer, which the assistant's record keeps whole.
-- A missing notifier exits 1 without echoing the text, so the delivery fails visibly.
-
-Use a configured endpoint directly from the brain directory:
+Omitted or empty `conversation` targets the endpoint's default destination; receipts must preserve a requested `conversation`. Copy [`desktop.py`](https://github.com/fmind/brain-framework/blob/main/examples/channels/channels/desktop.py) (with [`_bf.py`](https://github.com/fmind/brain-framework/blob/main/examples/channels/channels/_bf.py)) for `notify-send` / `osascript` notifications (note: desktop notifier argv is visible in local process listings). Test directly:
 
 ```bash
 printf '%s\n' '{"text":"The review is ready."}' | bf channel send desktop --stdin
 ```
 
-The command creates a delivery ID if omitted, saves the obligation, attempts that delivery and prints its state and receipt. A non-delivered result exits 1; the [messaging example](https://github.com/fmind/brain-framework/tree/main/examples/channels) shows a failed send and its retry.
-
-A provider length limit should fail visibly and leave the saved answer intact: silently truncating answers can remove essential qualifications.
-
 ### Retries and idempotency
 
-Declare `idempotent: true` only when repeating an identical delivery ID and payload cannot create another visible message. Use the provider's idempotency mechanism or a durable adapter implementation.
+Set `send.idempotent: true` only when repeating the same delivery `id` and payload cannot post duplicate messages. BF persists the delivery ID for 35 days before calling `send`:
 
-BF persists the delivery ID before calling send and reuses it on retry. For [35 days](#queue-and-recovery), sending that ID again returns the saved delivery when the content is identical and fails when it differs. A deliberately new send needs a new ID.
-
-What happens when a send fails or is interrupted:
-
-- **Assistant delivery, idempotent channel:** it retries on its own after 2, 4, 8… seconds, at most 300 seconds apart. After 20 attempts it becomes `failed` (`…; stopped retrying after 20 attempts; retry or cancel it with bf queue`).
-- **Assistant delivery, default channel:** it becomes `uncertain` and requires inspection. It keeps the send's error, or reads `interrupted send; inspect before retrying` when the send was killed.
-- **Standalone `bf channel send`:** watch and `bf update` never send or retry it. It becomes `failed` on an idempotent channel (`…; retry it with bf queue ID --retry`) and `uncertain` otherwise.
-- **Send command that never started,** such as one not on PATH: it sent nothing, so it fails or retries like an idempotent one. A harness that never started leaves its job `failed`, not `uncertain`, and retries it when the assistant is `idempotent` for that run kind.
-- **Receipt naming a different conversation:** the message may have reached the wrong place, so the delivery becomes `uncertain` on any channel and keeps holding its conversation.
-
-An explicit `bf queue ID --retry` starts the attempts over. Saved answers are never regenerated to retry delivery.
+- **Idempotent channel (`send.idempotent: true`)**: failed or interrupted assistant deliveries **and standalone `bf channel send` deliveries** retry automatically in `bf watch` and `bf update` with exponential backoff (2, 4, 8… up to 300s, max 20 attempts) before becoming `failed` (`…; stopped retrying after 20 attempts; retry or cancel it with bf queue`).
+- **Default channel (`idempotent: false`)**: failed or interrupted sends become `uncertain` (`interrupted send; inspect before retrying`) and hold their conversation until resolved with `bf queue`.
+- **Command never started** (such as missing executable) fails without sending and retries when idempotent; a receipt naming a mismatched `conversation` always becomes `uncertain`.
+- **Input job failure notice**: when a channel-originated `input` job enters terminal `failed` or `uncertain` state and a reply channel (`assistant.post` or the input channel's `send`) can send to that thread, BF enqueues one deterministic notice: `[bf] <assistant> did not finish (<state>); run bf queue to inspect.`
 
 ## Read
 
-`read` is a finite, complete `[start,end)` batch. BF expands `{{start}}` and `{{end}}` in argv. The script must finish all provider pagination and print one object:
-
-```json
-{
-  "messages": [
-    {
-      "id": "message-42",
-      "sender": "owner-id",
-      "conversation": "thread-7",
-      "time": "2026-10-16T09:00:00Z",
-      "text": "What needs my attention?"
-    }
-  ]
-}
-```
-
-A batch holds at most 1,000 unique messages, all inside its requested window. Fail rather than return a partial successful batch. Incomplete results, duplicate IDs, extra pagination fields and out-of-window messages fail without advancing input progress.
-
-Test a read by hand:
+`read` returns one complete `[start, end)` batch of up to 1,000 unique messages (`{"messages": [...]}`), failing rather than returning partial pages:
 
 ```bash
 bf channel read chat-home --since 2026-10-16T08:00:00Z --until 2026-10-16T10:00:00Z
 ```
 
-Manual reads invoke no assistant and move no subscription checkpoint. A manual `bf channel read` of a window holding more than 1,000 messages fails: split it into smaller windows.
-
-### Read inputs
-
-An assistant `mode: read` input requires `every` seconds. Its first activation starts at the current time. Later calls overlap the last 30 seconds to catch modest provider indexing delays, and deduplicate by message ID.
-
-This overlap is a bounded lateness allowance, not a guarantee for arbitrary delayed history. Use a durable stream for reliable provider event delivery, or fetch older history explicitly.
-
-### Catch up on a backlog
-
-A read input whose window holds more than 1,000 messages catches up in parts:
-
-- It reads again from its checkpoint, without the overlap, halving the window until a part fits.
-- It admits that part and moves its checkpoint to the part's end. The next part is twice as long, up to the end of the poll's window.
-- A poll admits at most 16 parts. Halving does not count, since it ends at one second.
-- While a backlog remains, watch polls the input again about a second later instead of after `every`. `bf update` continues at its next run.
-- More than 1,000 messages within one second fail with `channel NAME: more than 1000 messages fall within one second; read them with a stream input`. Every part admitted before is kept.
+Assistant `mode: read` inputs require `every` seconds, start at activation time, overlap the previous 30 seconds (deduplicating by `id`), and bisect backlogs exceeding 1,000 messages down to 1-second windows (up to 16 parts per poll; >1,000 messages in 1s fails asking for `mode: stream`).
 
 ## Stream
 
-A stream is a long-lived subprocess. BF writes a resume frame on stdin:
+`stream` runs a long-lived subprocess under `bf watch`. BF writes a resume frame on stdin:
 
 ```json
 { "type": "resume", "since": "2026-10-16T09:00:00Z", "cursor": "" }
 ```
 
-The adapter emits one message envelope per stdout line and flushes. BF commits the message, every configured recipient and its transport checkpoint to the local queue, then sends:
+For each stdout message line, BF commits the event, all subscriber jobs and `cursor` to the durable queue, then writes:
 
 ```json
 { "type": "ack", "id": "message-42", "cursor": "" }
 ```
 
-Only then should a Pub/Sub adapter acknowledge the provider message. ACK means durable acceptance, not a completed model answer. On process failure, unacknowledged input must be redelivered with the same ID.
-
-### Resume position
-
-- A cursor is opaque to BF. Preserve the provider's resume and ack semantics, and advance the cursor only through accepted frames.
-- `since`, which is also `{{start}}` in a stream command, is the stream's first start and never advances.
-- A polling adapter resumes from `cursor`. It puts its provider position in each envelope's `cursor`, and each later resume frame carries the cursor of the last admitted message.
-- An adapter that leaves `cursor` empty replays everything since that first start on every reconnect. A replayed message whose 35-day identity tombstone has expired is answered again, and a newly added [subscriber](prompts.md#several-assistants-on-one-stream) answers every replayed message still within it.
-- A push adapter can drain its retained backlog; BF does not discard older pushed messages by timestamp.
-
-### Adapter duties and restarts
-
-- Read control frames continuously, or emit one message and wait for its ACK. BF bounds frame and ACK buffers.
-- Provider retry, subscription renewal and acknowledgement-deadline extension belong to the adapter.
-- BF restarts failed transports with 1–60-second backoff and stops their process groups when watch exits. An adapter can trap SIGTERM to close its provider connection within the [grace](limits.md#processes-and-logs).
-- An adapter still running 5 seconds after BF wrote its resume frame counts as connected. Its earlier transport error clears from `bf status`, and the backoff restarts at 1 second.
-- An adapter that exits sooner keeps its error. So does a refused admission, such as a full queue, until a message is admitted again.
-- Do not run two consumers against the same exclusive provider subscription. BF owns one stream per used channel in one brain, not across separate brains.
+Acknowledge upstream Pub/Sub or broker messages only after receiving `ack`. BF restarts disconnected streams with 1–60s backoff (resetting after 5s connected) and stops their process groups on exit. Populate `cursor` in polling adapters so reconnects resume from the last admitted message instead of replaying from `since`.
 
 ## Queue and recovery
 
-BF keeps assistant jobs and channel deliveries in a durable local queue. The guarantee is durable local acceptance and conservative recovery, not universal exactly-once execution: only a provider or adapter idempotency guarantee makes send retries safe.
-
-`bf queue` lists job and delivery identities, states and errors without message bodies. `bf queue ID` explicitly opens a job or delivery, including private input and output.
+`bf queue` lists job, delivery and wake metadata without message text; `bf queue ID` opens one item's full payload:
 
 ```bash
 bf queue
@@ -210,86 +118,29 @@ bf queue DELIVERY_ID --retry
 bf queue JOB_ID --cancel
 ```
 
-`bf status --check` fails for every [`attention`](commands.md#attention-entries) entry, such as a failed or uncertain job, an overdue schedule or a failing channel; [`messaging`](commands.md#messaging) holds the queue details.
-
-### Retry, cancel and hold
-
-- A job retry resumes its saved answer or preparation when available. Otherwise it permits another harness attempt, which can repeat external tool effects: inspect first.
-- A delivery retry immediately attempts only that saved delivery, so standalone sends need no assistant or watcher.
-- Cancellation retains identity tombstones and unblocks subsequent work. Cancelling a scheduled job skips its window.
-- A `failed` delivery no longer holds later work of its conversation or schedule; an `uncertain` one does until resolved.
-- Failed work remains visible if its assistant is removed, and keeps `bf status --check` failing until resolved. A disabled assistant's work stays listed in `bf queue` without failing it.
-
-### Interrupted attempts
-
-An attempt is recorded when it ends. Ctrl-C or SIGTERM during `bf run`, `bf update`, `bf channel send` or a delivery's `bf queue ID --retry` records it before the process exits.
-
-An attempt killed outright, as by the out-of-memory killer, stays `running` or `sending` in `bf queue` and `messaging`. It is recorded by the first of:
-
-- a running watch, within about a minute;
-- the next `bf update`;
-- `bf queue ID --retry` or `--cancel` naming it, which needs neither watch nor assistants.
-
-The job then becomes `uncertain` (`interrupted harness attempt; inspect before retrying`); the delivery follows its channel's [retry policy](#retries-and-idempotency). While the process still runs, retry and cancel refuse with `job is still running; retry or cancel it once its attempt ends` or `delivery is still being sent; retry or cancel it once its attempt ends`.
+- `--retry` reuses a saved answer when available, or permits a new harness attempt (inspect side effects first); `--cancel` records tombstones and unblocks the conversation or schedule.
+- Crashed processes left `running` or `sending` are recovered by `bf watch`, `bf update` or `bf queue ID --retry|--cancel` (`interrupted harness attempt; inspect before retrying`). Active processes refuse with `job is still running; retry or cancel it once its attempt ends` or `delivery is still being sent; retry or cancel it once its attempt ends`.
 
 ### Where the queue lives
 
-The SQLite queue is **durable state**, unlike the disposable `.bf/` search cache or run counters. Preserve and back it up with the brain; do not delete it to recover from corruption.
+`queue.sqlite3` under `$XDG_STATE_HOME/bf/runtime/<dev>-<ino>/` is **durable state** (`synchronous=EXTRA`): back it up while no BF process runs, keep any `-journal` rollback file (`assistant queue holds an interrupted write; run bf queue to recover it`), and never delete it to clear errors. Schema mismatches report `assistant queue predates this release; preserve it and follow the upgrade steps in the changelog` or `unexpected assistant queue schema; preserve it and repair it`.
 
-- **Location:** the private BF state directory under `$XDG_STATE_HOME/bf/runtime/` (normally `~/.local/state/bf/runtime/`), in the folder named by the brain's physical identity: `stat -L -c %d-%i BRAIN`, or `stat -L -f %d-%i BRAIN` on macOS. The queue is bound to the brain's path and name.
-- **Backups:** each commit is durable when it returns (SQLite's `synchronous=EXTRA` in its default rollback-journal mode). A copy of `queue.sqlite3` taken while no BF process runs is therefore a complete backup.
-- **Interrupted writes:** a BF process killed while writing leaves a `queue.sqlite3-journal` file beside it, which holds what rolls that write back: keep both. `bf status` then reports `assistant queue holds an interrupted write; run bf queue to recover it`, and `bf queue` or any execution command rolls it back.
-- **Format:** there is one current queue format, with no automatic migration. `bf status` reports a refused queue. One from an earlier release reads `assistant queue predates this release; preserve it and follow the upgrade steps in the changelog`. One another build created reads `unexpected assistant queue schema; preserve it and repair it`.
+Capacity and retention bounds:
+
+- Up to 10,000 unfinished obligations, 256 MiB database ceiling (96 MiB admission ceiling: `assistant queue is full; finish, retry or cancel unfinished work before accepting more` or `assistant queue is full: admitted N of M messages; …`).
+- Answer reservation (`max_bytes × (7 + 6 × routes) + (job size + 64 KiB) × (1 + routes)`): jobs wait when busy (`assistant queue lacks answer space for this job; it waits until running work finishes`) or refuse saved-answer retries when full (`assistant queue lacks space to record this saved answer; resolve other work first`).
+- Completed bodies compact within 8 MiB budgets; identity tombstones last 35 days; unresolved work never expires.
 
 ### Move or rename a brain
 
-Resolve queued work before renaming or moving a brain, or changing its execution configuration.
+Drain `bf queue` before moving or renaming a brain:
 
-- A rename, or a move within one filesystem, keeps the queue. Once no job or delivery is unresolved, the next `bf queue` or execution command rebinds it to the new path or name. `bf status` reads it normally meanwhile.
-- While work admitted under the old path or name remains, those commands refuse. `bf status` reports it as a problem: `assistant queue holds unresolved work admitted under this brain's previous path or name; …`. Restore the path or name, resolve the work with `bf queue`, then move or rename the brain again.
-- Collection never uses the queue, so it never waits for the binding.
-- A copy, or a move to another filesystem, gives the brain a new physical identity and an empty queue. The old queue stays in its former folder.
-- A new device number for the same folder, such as btrfs numbering a device anew at boot, keeps the queue and, with it, the programs' private state. The next BF command that needs them renames the folder with the same inode whose queue is bound to the brain's path. Without a queue, the programs' private `BF_STATE_DIR` folders stay under the old number, so a program that keeps a cursor there starts again from its `lookback`; run history and window resume follow the brain's path and are kept. The same path and inode on another disk, such as a cloned disk swapped in, takes the queue too.
-- When several such folders are bound to the brain, assistant commands refuse with `several assistant queues in the state folder runtime/ are bound to this brain (…)`, and when one cannot be read, such as after an interrupted write, with `assistant queue in the state folder runtime/ (NAMES) may belong to this brain but cannot be read`. Rename the right folder as the error says and move the others out. Collection and watch keep running meanwhile.
-
-### Capacity
-
-| Limit                  | Value                                                                |
-| ---------------------- | -------------------------------------------------------------------- |
-| Unfinished obligations | 10,000, counting each job's future deliveries                        |
-| Database size          | 256 MiB, of which work may fill 192 MiB                              |
-| Admission              | Stops once stored bytes plus started jobs' answer space reach 96 MiB |
-
-- Admitting a message, schedule or send charges twice its stored size. A refused admission reads `assistant queue is full; finish, retry or cancel unfinished work before accepting more`.
-- At the defaults, a full 1,000-message read batch and hundreds of jobs fit.
-- A read batch that does not fit admits its longest time-ordered prefix and moves the input's progress to the last admitted message. It reports `assistant queue is full: admitted N of M messages; …`, and the next poll reads the rest.
-- A stream leaves a message it cannot admit unacknowledged, for its provider to redeliver.
-- These checks cannot prevent external disk or filesystem failures.
-
-### Answer space
-
-A job reserves its answer space only when a worker starts it: `max_bytes × (7 + 6 × routes) + (job size + 64 KiB) × (1 + routes)`. Routes are the deliveries the run makes: one when it answers a message or posts, none otherwise. This is about 13 MiB at the 1 MiB default with one route.
-
-- An answered job reserves the same with its saved output in place of `max_bytes`. Failed and uncertain jobs reserve nothing.
-- A job that cannot reserve its space stays pending without starting its harness, reported as `assistant queue lacks answer space for this job; it waits until running work finishes`. It starts once running work frees the space. `bf run` fails instead and cancels its job.
-- One route and the 4 MiB `max_bytes` limit keep every job under the 96 MiB one job may reserve.
-- Retrying a saved answer reserves its space again, or fails with `assistant queue lacks space to record this saved answer; resolve other work first`.
-
-### Retention
-
-- Completed job, event, delivery and conversation bodies each have an 8 MiB retention budget. Jobs with unresolved deliveries keep theirs.
-- Identity tombstones recognize replays, identical resends and echoes. They are deleted after 35 days, longer than Pub/Sub's 31-day redelivery. They cover completed or cancelled jobs, delivered or cancelled deliveries with their receipts, and input events.
-- Pending and unresolved work never expires. After those 35 days, a manual delivery ID can be reused.
-- The conversation cache holds at most 10,000 messages.
-- Compaction runs on admission and completion as well as during watch. Exact historic job bodies can expire while their evidence records remain.
+- Same-filesystem moves/renames rebind automatically once no unresolved work remains; otherwise assistant commands refuse (`assistant queue holds unresolved work admitted under this brain's previous path or name; …`) while collection continues unaffected.
+- Device renumbering (such as btrfs across reboots) rebinds by inode and path; ambiguous or unreadable runtime folders report `several assistant queues in the state folder runtime/ are bound to this brain (…)` or `assistant queue in the state folder runtime/ (NAMES) may belong to this brain but cannot be read`.
 
 ### Configuration changes
 
-Queued jobs snapshot their prompt, harness and output configuration. Do not swap the `command` or `reply` of an assistant that has pending work, even for a moment: work queued meanwhile keeps the changed settings, runs with them and delivers whatever that command prints, or fails once you restore them.
+Queued jobs snapshot their prompt, harness and channel settings. Drain `bf queue` before editing `command` or `reply`:
 
-- Editing an assistant's `schedules`, `inputs` or `keep` leaves its jobs runnable.
-- Once a harness answered, only removing or disabling its assistant or changing an output channel stops its saved answer.
-- A job that no worker tried while its configuration differed runs once you restore it.
-- A job a worker tried meanwhile is `failed` with `assistant configuration changed; restore it, then retry or cancel this job with bf queue`, or `output channel configuration changed; …` for a channel's `send` command. After restoring the configuration, it needs `bf queue ID --retry`, or `--cancel` to abandon it. Until then it blocks later jobs of its conversation or schedule.
-- While `bf.yaml` does not load, a starting job waits (`the job waits until bf.yaml loads: …`) instead of failing.
-- A delivery whose channel was removed or whose `send` command changed sends nothing and becomes `uncertain`, still holding its conversation: `channel configuration changed; restore it, then retry or cancel this delivery with bf queue`. Editing a channel therefore cannot silently send old work to a new destination.
+- Editing `schedules`, `inputs` or `keep` leaves queued jobs runnable, and invalid `bf.yaml` pauses starting jobs (`the job waits until bf.yaml loads: …`).
+- Changing `command`, `reply` or an output channel's `send` while work is queued blocks affected jobs as `failed` (`assistant configuration changed; restore it, then retry or cancel this job with bf queue` or `output channel configuration changed; …`) and affected deliveries as `uncertain` (`channel configuration changed; restore it, then retry or cancel this delivery with bf queue`) so old work never silently runs new commands or routes to a new destination.

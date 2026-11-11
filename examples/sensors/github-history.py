@@ -5,71 +5,23 @@ Usage: github-history.py OWNER/REPO commits|issues|pulls START END [--branch NAM
 Use window mode. Dates select commits or the latest issue/PR modification, not historical revisions.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
-import os
 import re
-import selectors
-import subprocess
-import sys
-import time
-from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+import _sensor
+
 MAX_BYTES = 16 << 20
 MAX_PAGES = 100
 MAX_RECORDS = 10000
-CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-
-
-class InvalidError(ValueError):
-    """A content-free diagnostic safe to show on stderr."""
-
-
-def run(argv: list[str], limit: int, timeout: int) -> bytes:
-    """Bound provider output while it runs; inherit Brain Framework's cancellable process group."""
-    # Only literal provider commands reach this helper; no shell interprets argv. It starts them from /, so none depends
-    # on the folder BF runs the sensor from: gws, for one, loads a `.env` file from its working directory or any parent,
-    # and one in the brain could switch its account. A Git hook's repository variables, such as GIT_DIR, would make
-    # git -C read that one repository for every path, so they stay out.
-    local = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
-    local += ("GIT_ALTERNATE_OBJECT_DIRECTORIES",)
-    env = {key: value for key, value in os.environ.items() if key not in local}
-    child = subprocess.Popen(
-        argv, cwd="/", env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    output = bytearray()
-    deadline = time.monotonic() + timeout
-    try:
-        if child.stdout is None:
-            raise ValueError("provider pipe is missing")
-        with selectors.DefaultSelector() as selector:
-            os.set_blocking(child.stdout.fileno(), False)
-            selector.register(child.stdout, selectors.EVENT_READ)
-            while selector.get_map() or child.poll() is None:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("provider exceeded its timeout")
-                if not selector.get_map():
-                    with suppress(subprocess.TimeoutExpired):
-                        child.wait(timeout=0.05)
-                for key, _ in selector.select(0.05):
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                    output.extend(chunk)
-                    if len(output) > limit:
-                        raise InvalidError("a GitHub page exceeds its byte limit")
-        if code := child.wait():
-            raise subprocess.CalledProcessError(code, argv)
-        return bytes(output)
-    finally:
-        if child.poll() is None:
-            child.kill()
-        child.wait()
-        if child.stdout is not None:
-            child.stdout.close()
+KINDS = {"commits": "commit", "issues": "issue", "pulls": "pull-request"}
+LABELS = {"issues": "Issue", "pulls": "Pull request"}
+InvalidError = _sensor.InvalidError
 
 
 def instant(value: object) -> datetime:
@@ -94,7 +46,7 @@ def request(endpoint: str, parameters: dict[str, str]) -> tuple[Any, str]:
     argv = ["gh", "api", "--hostname", "github.com", "--method", "GET", "--include", endpoint]
     for key, value in parameters.items():
         argv.extend(["--raw-field", f"{key}={value}"])
-    raw = run(argv, MAX_BYTES, 60).decode("utf-8")
+    raw = _sensor.run(argv, timeout=60, max_bytes=MAX_BYTES).decode("utf-8")
     parts = re.split(r"\r?\n\r?\n", raw, maxsplit=1)
     if len(parts) != 2 or not re.match(r"HTTP/\S+ 200(?: |\r?\n)", parts[0]):
         raise InvalidError("GitHub returned an invalid response")
@@ -135,7 +87,8 @@ def page(endpoint: str, parameters: dict[str, str], number: int) -> tuple[list[d
 
 def record(repository: str, kind: str, item: dict[str, Any]) -> dict[str, Any]:
     """Keep selected evidence and stable identities; raw API objects never reach attributes."""
-    repo_ref = "repo:github.com/" + repository
+    owner, name = repository.split("/", 1)
+    repo_ref = _sensor.repo("github.com", owner, name)
     attributes: dict[str, Any]
     if kind == "commits":
         key = string(item["sha"])
@@ -174,23 +127,23 @@ def record(repository: str, kind: str, item: dict[str, Any]) -> dict[str, Any]:
         attributes = {"number": number, "status": state, "updated": updated}
         if merged:
             attributes["merged"] = merged
-        text = f"Repository: {repository}\n{kind.title()}: #{number}\nState: {state}\n\n{body}"
+        text = f"Repository: {repository}\n{LABELS[kind]}: #{number}\nState: {state}\n\n{body}"
         route = "pull" if kind == "pulls" else "issues"
         url = f"https://github.com/{repository}/{route}/{number}"
         alias = f"github:{repository}/{route}/{number}"
     instant(when)
     attributes["repository_refs"] = [repo_ref]
-    attributes["kind"] = kind
-    return {
-        "id": f"{repository}/{kind}/{key}",
-        "title": " ".join(CONTROL.sub(" ", f"{repository}: {title}").split())[:4096],
-        "text": text,
-        "time": when,
-        "url": url,
-        "links": [repo_ref],
-        "aliases": [alias],
-        "attributes": attributes,
-    }
+    attributes["kind"] = KINDS[kind]
+    return _sensor.record(
+        f"{repository}/{kind}/{key}",
+        f"{repository}: {title}",
+        text=text,
+        time=when,
+        url=url,
+        links=[repo_ref],
+        aliases=[alias],
+        attributes=attributes,
+    )
 
 
 def collect(repository: str, kind: str, start: str, end: str, branch: str) -> list[dict[str, Any]]:
@@ -260,19 +213,15 @@ def main() -> None:
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", args.repository):
         parser.error("repository must be OWNER/REPO on github.com")
-    if not args.branch or len(args.branch) > 1024 or CONTROL.search(args.branch):
+    if not args.branch or len(args.branch) > 1024 or _sensor.CONTROL.search(args.branch):
         parser.error("branch must be a bounded name without control characters")
-    try:
-        records = collect(args.repository.lower(), args.kind, args.start, args.end, args.branch)
-        print(json.dumps(records, ensure_ascii=True))
-    except InvalidError as error:
-        print(f"GitHub collection failed: {error}", file=sys.stderr)
-        sys.exit(1)
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError, RecursionError):
-        print(
-            "GitHub collection failed: invalid response or provider failure; check gh access and retry", file=sys.stderr
-        )
-        sys.exit(1)
+    _sensor.cli(
+        lambda: _sensor.emit(
+            collect(args.repository.lower(), args.kind, args.start, args.end, args.branch), max_bytes=MAX_BYTES
+        ),
+        "GitHub collection failed",
+        "invalid response or provider failure; check gh access and retry",
+    )
 
 
 if __name__ == "__main__":

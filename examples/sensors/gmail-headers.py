@@ -19,96 +19,25 @@ under `fields:` first:
     path: /attributes/label_refs
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import math
-import os
 import re
-import selectors
-import subprocess
-import sys
-import time
-from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from email.utils import getaddresses
 from urllib.parse import quote
+
+import _sensor
 
 MAX_MESSAGES = 1000
 MAX_PAGES = 10
 MAX_BYTES = 16 << 20
 # One message's metadata: its headers are bounded by Gmail, far below this.
 MAX_MESSAGE_BYTES = 1 << 20
-# BF record bounds: links, aliases and titles are bounded single lines.
-MAX_REF, MAX_TITLE = 8192, 4096
-# A record holds at most 1,000 links, and a mapped `many` field at most 1,000 values.
-MAX_LINKS = 1000
-# C0 and C1 control characters, which BF rejects in ids, titles, URLs and identities.
-CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 HEADERS = ("From", "To", "Cc", "Subject", "Date", "Message-ID")
-
-
-class InvalidError(ValueError):
-    """A content-free diagnostic safe to show on stderr."""
-
-
-def run(argv: list[str], limit: int, timeout: int) -> bytes:
-    """Bound provider output while it runs; inherit Brain Framework's cancellable process group."""
-    # Only literal provider commands reach this helper; no shell interprets argv. It starts them from /, so none depends
-    # on the folder BF runs the sensor from: gws, for one, loads a `.env` file from its working directory or any parent,
-    # and one in the brain could switch its account. A Git hook's repository variables, such as GIT_DIR, would make
-    # git -C read that one repository for every path, so they stay out.
-    local = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
-    local += ("GIT_ALTERNATE_OBJECT_DIRECTORIES",)
-    env = {key: value for key, value in os.environ.items() if key not in local}
-    child = subprocess.Popen(
-        argv, cwd="/", env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    output = bytearray()
-    deadline = time.monotonic() + timeout
-    try:
-        if child.stdout is None:
-            raise ValueError("provider pipe is missing")
-        with selectors.DefaultSelector() as selector:
-            os.set_blocking(child.stdout.fileno(), False)
-            selector.register(child.stdout, selectors.EVENT_READ)
-            while selector.get_map() or child.poll() is None:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("provider exceeded its timeout")
-                if not selector.get_map():
-                    with suppress(subprocess.TimeoutExpired):
-                        child.wait(timeout=0.05)
-                for key, _ in selector.select(0.05):
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                    output.extend(chunk)
-                    if len(output) > limit:
-                        raise InvalidError("a gws response exceeds its byte limit")
-        if code := child.wait():
-            raise subprocess.CalledProcessError(code, argv)
-        return bytes(output)
-    finally:
-        if child.poll() is None:
-            child.kill()
-        child.wait()
-        if child.stdout is not None:
-            child.stdout.close()
-
-
-def line(value: object, fallback: str) -> str:
-    """One bounded title line: control characters become spaces and whitespace collapses."""
-    return " ".join(CONTROL.sub(" ", str(value)).split())[:MAX_TITLE].rstrip() or fallback
-
-
-def reference(value: object) -> str:
-    """A URL or identity BF accepts, or nothing: an over-long or control-character value is dropped."""
-    if isinstance(value, str) and value.strip() and len(value) <= MAX_REF and not CONTROL.search(value):
-        return value
-    return ""
-
-
-def person(address: str) -> str:
-    return reference("person:email/" + quote(address, safe="/:@+").replace("~", "%7E"))
+InvalidError = _sensor.InvalidError
 
 
 def identifier(value: object) -> str:
@@ -118,9 +47,12 @@ def identifier(value: object) -> str:
     return value
 
 
-def gws(method: str, params: dict[str, object], limit: int) -> dict:
+def gws(method: str, params: dict[str, object], limit: int) -> dict[str, object]:
     # https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages
-    payload = json.loads(run(["gws", "gmail", "users", "messages", method, "--params", json.dumps(params)], limit, 60))
+    raw = _sensor.run(
+        ["gws", "gmail", "users", "messages", method, "--params", json.dumps(params)], timeout=60, max_bytes=limit
+    )
+    payload = json.loads(raw)
     if not isinstance(payload, dict):
         raise InvalidError("gws returned an unexpected Gmail response")
     return payload
@@ -204,63 +136,61 @@ def record(message_id: str, start: datetime, end: datetime) -> dict[str, object]
         for key in ("from", "to", "cc")
     }
     everyone = sorted({address for addresses in people.values() for address in addresses})
-    subject = line(values.get("subject", ""), "")
+    subject = _sensor.line(values.get("subject", ""), "")
     lines = [f"Subject: {subject or '(no subject)'}"]
     lines += [f"{key.capitalize()}: {', '.join(people[key])}" for key in ("from", "to", "cc") if people[key]]
     if labels:
         lines.append("Labels: " + ", ".join(sorted(labels)))
     # RFC 2392 names a message by its Message-ID across mail tools: other records can link the same message.
     message_header = values.get("message-id", "").strip().removeprefix("<").removesuffix(">")
-    alias = reference("mid:" + quote(message_header, safe="@!$&'*+.^_`{|}~-")) if message_header else ""
-    linked = [ref for ref in [*map(person, everyone), reference(f"gmail-thread:{thread}")] if ref]
+    alias = _sensor.reference("mid:" + quote(message_header, safe="@!$&'*+.^_`{|}~-")) if message_header else ""
+    thread_ref = f"gmail-thread:{thread}"
     # Label ids, such as INBOX or Label_12, are opaque and case-sensitive: keep their case, encode anything else.
-    label_refs = [
-        ref for ref in (reference("gmail-label:" + quote(label, safe="")) for label in labels if label) if ref
-    ]
-    return {
-        "id": message_id,
-        "title": subject or "(no subject)",
-        "time": when.isoformat(),
-        "text": "\n".join(lines),
-        "url": f"https://mail.google.com/mail/#all/{thread}",
-        "links": sorted(set(linked))[:MAX_LINKS],
-        "aliases": [alias] if alias else [],
-        "attributes": {
+    label_refs = sorted(
+        {ref for label in labels if label and (ref := _sensor.reference("gmail-label:" + quote(label, safe="")))}
+    )
+    return _sensor.record(
+        message_id,
+        subject or "(no subject)",
+        time=when,
+        text="\n".join(lines),
+        url=f"https://mail.google.com/mail/#all/{thread}",
+        links=[thread_ref, *map(_sensor.person, everyone)],
+        aliases=[alias] if alias else (),
+        attributes={
             "thread": thread,
             "labels": sorted(labels),
-            "parent_refs": [f"gmail-thread:{thread}"],
-            "label_refs": sorted(set(label_refs))[:MAX_LINKS],
-            "sender_refs": [ref for ref in map(person, people["from"]) if ref][:MAX_LINKS],
-            "recipient_refs": [ref for ref in map(person, people["to"]) if ref][:MAX_LINKS],
-            "cc_refs": [ref for ref in map(person, people["cc"]) if ref][:MAX_LINKS],
+            "parent_refs": [thread_ref],
+            "label_refs": label_refs,
+            "sender_refs": list(map(_sensor.person, people["from"])),
+            "recipient_refs": list(map(_sensor.person, people["to"])),
+            "cc_refs": list(map(_sensor.person, people["cc"])),
         },
-    }
+    )
 
 
 def collect(start: str, end: str, query: str = "") -> list[dict[str, object]]:
     begin, finish = datetime.fromisoformat(start), datetime.fromisoformat(end)
     if begin.tzinfo is None or finish.tzinfo is None or begin >= finish:
         raise InvalidError("START and END need timezones, with START before END")
-    if CONTROL.search(query) or len(query) > 1024:
+    if _sensor.CONTROL.search(query) or len(query) > 1024:
         raise InvalidError("the query must be one line of at most 1024 characters")
     found = (record(message, begin, finish) for message in listed(begin, finish, query))
     return [item for item in found if item is not None]
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("start")
     parser.add_argument("end")
     parser.add_argument("--query", default="", help="A Gmail search, such as '-category:promotions'.")
     arguments = parser.parse_args()
-    try:
-        payload = json.dumps(collect(arguments.start, arguments.end, arguments.query), ensure_ascii=False)
-        if len(payload.encode()) > MAX_BYTES:
-            raise InvalidError("normalized messages exceed 16 MiB; narrow the window")
-        print(payload)
-    except InvalidError as error:
-        print(f"Gmail collection failed: {error}.", file=sys.stderr)
-        sys.exit(1)
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError, subprocess.SubprocessError, RecursionError):
-        print("Gmail collection failed; check gws authentication and the requested window.", file=sys.stderr)
-        sys.exit(1)
+    _sensor.cli(
+        lambda: _sensor.emit(collect(arguments.start, arguments.end, arguments.query), max_bytes=MAX_BYTES),
+        "Gmail collection failed",
+        "check gws authentication and the requested window",
+    )
+
+
+if __name__ == "__main__":
+    main()

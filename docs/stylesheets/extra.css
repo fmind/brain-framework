@@ -3,22 +3,22 @@
   --md-code-font: "Google Sans Code", ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
-/* Brand colors per scheme: the logo's dark blue and the Fmind palette's purple in light mode, lighter blue and purple
-   shades in dark mode; every text color exceeds 7:1 contrast. */
-[data-md-color-scheme="default"] {
-  --md-primary-fg-color: #174ea6;
-  --md-primary-fg-color--light: #4285f4;
-  --md-primary-fg-color--dark: #174ea6;
-  --md-accent-fg-color: #681da8;
-  --md-typeset-a-color: #174ea6;
-}
-
+/* The light scheme comes from fmind.css, an unchanged copy of themes/zensical/fmind.css from
+   https://github.com/fmind/theme v9.0.0. That theme is light only, so the dark scheme keeps lighter blue and purple
+   shades here; every text color exceeds 7:1 contrast. */
 [data-md-color-scheme="slate"] {
   --md-primary-fg-color: #8fa6e3;
   --md-primary-fg-color--light: #a9b8e8;
   --md-primary-fg-color--dark: #8fa6e3;
+  --md-primary-bg-color: #0b0c0f;
   --md-accent-fg-color: #b39ddb;
+  --md-accent-fg-color--transparent: #b39ddb1a;
+  --md-accent-bg-color: #0b0c0f;
   --md-typeset-a-color: #8fa6e3;
+}
+
+.md-code__button {
+  color: var(--md-default-fg-color--light);
 }
 
 .md-nav__link[data-bf-toggle]:disabled {

@@ -236,6 +236,7 @@ def test_incomplete_provider_snapshot_preserves_saved_records(
 ) -> None:
     script = Path(__file__).parents[1] / "examples/sensors" / adapter
     calendar = adapter == "google-calendar.py"
+    brain.write("sensors/_sensor.py", (script.parent / "_sensor.py").read_bytes())
     brain.write("sensors/demo.py", script.read_bytes())
     command = ["python3", "sensors/demo.py", *(["primary", "{{start}}", "{{end}}"] if calendar else [])]
     brain.write(

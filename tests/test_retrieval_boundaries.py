@@ -92,7 +92,7 @@ def test_search_continues_lexical_and_identity_results(brain: Store, tmp_path: P
 
 def test_authored_folder_continuation(brain: Store) -> None:
     for n in range(215):
-        brain.write(f"concepts/page-{n:03}.md", f"# Page {n:03}\n".encode())
+        brain.write(f"concepts/page-{n:03}.md", f"# Page {n:03}\n".encode(), durable=False)
     first = retrieve.read([brain], "concepts")
     second = retrieve.read([brain], "concepts", offset=cast("int", first["next_offset"]))
     items = cast("list[dict]", first["items"]) + cast("list[dict]", second["items"])

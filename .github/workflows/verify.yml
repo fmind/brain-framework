@@ -23,6 +23,8 @@ jobs:
       - name: Match release version to tag
         if: github.ref_type == 'tag'
         run: test "$GITHUB_REF_NAME" = "v$(uv version --short)"
+      - name: Sync locked Python dependencies
+        run: uv sync --locked
       - name: Run shared checks
         run: mise run check
       - name: List checkout changes

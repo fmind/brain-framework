@@ -20,8 +20,12 @@ IDENTITY = {
     "GIT_COMMITTER_NAME": "Test",
     "GIT_COMMITTER_EMAIL": "test@example.test",
 }
-# A fake uv whose `uv version --quiet X` rewrites pyproject.toml, and a mise that only records its task.
+# A fake uv whose `uv version --quiet X` rewrites pyproject.toml and requires mise trust, as a mise shim does.
 UV = """#!/bin/sh
+case ":$MISE_TRUSTED_CONFIG_PATHS:" in
+  *":$(pwd):"*) ;;
+  *) echo "mise.toml in $(pwd) is not trusted" >&2; exit 1 ;;
+esac
 [ "$1 $2" = "version --quiet" ] || { echo "unexpected uv $*" >&2; exit 64; }
 sed -i.bak "s/^version = .*/version = \\"$3\\"/" pyproject.toml && rm pyproject.toml.bak
 """

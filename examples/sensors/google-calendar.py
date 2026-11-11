@@ -1,116 +1,21 @@
 #!/usr/bin/env python3
 """Collect one Google Calendar (for example `primary`) through the owner's gws CLI."""
 
+from __future__ import annotations
+
 import argparse
 import json
-import os
-import re
-import selectors
-import subprocess
-import sys
-import time
-from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as midnight
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+import _sensor
+
 MAX_EVENTS = 10000
 MAX_PAGES = 20
 MAX_BYTES = 16 << 20
-# BF record bounds: an id fits a BF address once percent-encoded; links and URLs are bounded single lines.
-MAX_ID, MAX_ENCODED, MAX_REF, MAX_TITLE = 4096, 7988, 8192, 4096
-# A record holds at most 1,000 links, and a mapped `many` field at most 1,000 values.
-MAX_LINKS = 1000
-# C0 and C1 control characters, which BF rejects in ids, titles, URLs and identities.
-CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-# The sensor kit's `redact` patterns, copied so this script stays one file (a test keeps them equal). Best effort:
-# these shapes catch common leaks, not every secret. Each quantifier is bounded, so a long or adversarial
-# provider text costs time proportional to its length.
-_KEY = r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|\Z)"
-_PAIR = r"""(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)[a-z0-9_.-]{0,40})"""
-_PAIR += r"""(["']?\s{0,8}[:=]\s{0,8})"""
-_SECRETS = (
-    (re.compile(_KEY, re.DOTALL), "[REDACTED KEY]"),
-    (re.compile(r"(?i)\b(bearer|token|basic)(\s{1,8})[A-Za-z0-9._~+/=-]{16,4096}"), r"\1\2[REDACTED]"),
-    (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,255}|github_pat_[A-Za-z0-9_]{20,255})"), "[REDACTED]"),
-    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED]"),
-    (re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,255}"), "[REDACTED]"),
-    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "[REDACTED]"),
-    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}"), "[REDACTED]"),
-    (re.compile(_PAIR + r"(\"[^\"\n]{0,4096}\"|'[^'\n]{0,4096}'|[^\s,;&\"']{1,4096})"), r"\1\2[REDACTED]"),
-)
-
-
-class InvalidError(ValueError):
-    """A content-free diagnostic safe to show on stderr."""
-
-
-def run(argv: list[str], limit: int, timeout: int) -> bytes:
-    """Bound provider output while it runs; inherit Brain Framework's cancellable process group."""
-    # Only literal provider commands reach this helper; no shell interprets argv. It starts them from /, so none depends
-    # on the folder BF runs the sensor from: gws, for one, loads a `.env` file from its working directory or any parent,
-    # and one in the brain could switch its account. A Git hook's repository variables, such as GIT_DIR, would make
-    # git -C read that one repository for every path, so they stay out.
-    local = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
-    local += ("GIT_ALTERNATE_OBJECT_DIRECTORIES",)
-    env = {key: value for key, value in os.environ.items() if key not in local}
-    child = subprocess.Popen(
-        argv, cwd="/", env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    output = bytearray()
-    deadline = time.monotonic() + timeout
-    try:
-        if child.stdout is None:
-            raise ValueError("provider pipe is missing")
-        with selectors.DefaultSelector() as selector:
-            os.set_blocking(child.stdout.fileno(), False)
-            selector.register(child.stdout, selectors.EVENT_READ)
-            while selector.get_map() or child.poll() is None:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("provider exceeded its timeout")
-                if not selector.get_map():
-                    with suppress(subprocess.TimeoutExpired):
-                        child.wait(timeout=0.05)
-                for key, _ in selector.select(0.05):
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                    output.extend(chunk)
-                    if len(output) > limit:
-                        raise InvalidError("a gws page exceeds its byte limit")
-        if code := child.wait():
-            raise subprocess.CalledProcessError(code, argv)
-        return bytes(output)
-    finally:
-        if child.poll() is None:
-            child.kill()
-        child.wait()
-        if child.stdout is not None:
-            child.stdout.close()
-
-
-def redact(text: str) -> str:
-    """Mask common credential shapes, such as a pasted token or meeting password, before text enters a record."""
-    for pattern, replacement in _SECRETS:
-        text = pattern.sub(replacement, text)
-    return text
-
-
-def line(value: object, fallback: str) -> str:
-    """One bounded title line: control characters become spaces and whitespace collapses."""
-    return " ".join(CONTROL.sub(" ", str(value)).split())[:MAX_TITLE].rstrip() or fallback
-
-
-def reference(value: object) -> str:
-    """A URL or identity BF accepts, or nothing: an over-long or control-character value is dropped."""
-    if isinstance(value, str) and value.strip() and len(value) <= MAX_REF and not CONTROL.search(value):
-        return value
-    return ""
-
-
-def person(address: str) -> str:
-    return reference("person:email/" + quote(address, safe="/:@+").replace("~", "%7E"))
+InvalidError = _sensor.InvalidError
 
 
 def optional_instant(value: object) -> str:
@@ -149,7 +54,9 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
         }
         if token:
             params["pageToken"] = token
-        payload = run(["gws", "calendar", "events", "list", "--params", json.dumps(params)], MAX_BYTES, 60)
+        payload = _sensor.run(
+            ["gws", "calendar", "events", "list", "--params", json.dumps(params)], timeout=60, max_bytes=MAX_BYTES
+        )
         page = json.loads(payload)
         if (
             not isinstance(page, dict)
@@ -165,9 +72,9 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
                 not isinstance(identifier, str)
                 or not identifier.strip()
                 or identifier in identifiers
-                or CONTROL.search(identifier)
-                or len(identifier) > MAX_ID
-                or len(quote(identifier, safe="/@:")) > MAX_ENCODED
+                or _sensor.CONTROL.search(identifier)
+                or len(identifier) > _sensor.MAX_ID
+                or len(quote(identifier, safe="/@:")) > _sensor.MAX_ENCODED_ID
             ):
                 raise InvalidError("gws returned an invalid, duplicate or over-long event id")
             identifiers.add(identifier)
@@ -183,9 +90,9 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
             event_start = event.get("start") or event.get("originalStartTime", {})
             when = event_start.get("dateTime", "")
             status = event.get("status", "unknown")
-            summary = line(event.get("summary") or "", "")
+            summary = _sensor.line(event.get("summary") or "")
             if status == "cancelled":
-                title = line("Cancelled: " + summary, "") if summary else "Cancelled calendar event"
+                title = _sensor.line("Cancelled: " + summary) if summary else "Cancelled calendar event"
             else:
                 title = summary or "Untitled calendar event"
             lines = ["Event: " + title, "Status: " + status]
@@ -208,11 +115,11 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
             if updated:
                 # Modification time describes the observation; event time remains its start.
                 lines.append("Provider updated: " + updated)
-            location = redact(event.get("location") or "")
+            location = _sensor.redact(event.get("location") or "")
             if location:
                 lines.append("Location: " + location)
             if event.get("description"):
-                lines.append("Description:\n" + redact(event["description"]))
+                lines.append("Description:\n" + _sensor.redact(event["description"]))
             references = []
             attendees = event.get("attendees", [])
             if not isinstance(attendees, list):
@@ -223,41 +130,42 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
             emails = sorted({p["email"].strip().lower() for p in people if p.get("email")})
             if any("@" not in address for address in emails):
                 raise InvalidError("gws returned an invalid participant email")
-            participant_refs = [ref for ref in map(person, emails) if ref]
+            participant_refs = [ref for ref in map(_sensor.person, emails) if ref]
             if emails:
                 lines.append("Participants: " + ", ".join(emails))
             source = event.get("source", {})
             if source.get("url"):
-                references.append(reference(source["url"]))
+                references.append(_sensor.reference(source["url"]))
                 lines.append(f"Source: {source.get('title', '')} {source['url']}")
             for attachment in attachments:
                 if attachment.get("fileUrl"):
-                    references.append(reference(attachment["fileUrl"]))
+                    references.append(_sensor.reference(attachment["fileUrl"]))
                     lines.append(f"Attachment: {attachment.get('title', '')} {attachment['fileUrl']}")
             key = quote(calendar, safe="@") + "/" + quote(identifier, safe="")
             organizer = event.get("organizer", {}).get("email", "").strip().lower()
             invited = {p["email"].strip().lower() for p in attendees if p.get("email")}
-            organizer_refs = [ref for ref in map(person, [organizer] if organizer else []) if ref]
-            attendee_refs = sorted(ref for ref in map(person, invited) if ref)
+            organizer_refs = [ref for ref in map(_sensor.person, [organizer] if organizer else []) if ref]
+            attendee_refs = sorted(ref for ref in map(_sensor.person, invited) if ref)
             if agenda_days:
-                references.append(reference("calendar:" + key))
+                references.append(_sensor.reference("calendar:" + key))
             # One invalid record fails the whole run: past 1,000 links, keep the organizer, source, attachments and
             # agenda link, then invitees in email order, and flag the cut. `participants` keeps every address.
             linked = list(dict.fromkeys(filter(None, [*organizer_refs, *references, *participant_refs])))
-            truncated = max(len(linked), len(participant_refs), len(attendee_refs)) > MAX_LINKS
+            truncated = max(len(linked), len(participant_refs), len(attendee_refs)) > _sensor.MAX_LINKS
+            alias = _sensor.reference(("agenda:" if agenda_days else "calendar:") + key)
             records.append(
-                {
-                    "id": identifier,
-                    "title": title,
-                    "time": when,
-                    "text": "\n".join(lines),
-                    "url": reference(event.get("htmlLink", "")),
-                    "links": sorted(linked[:MAX_LINKS]),
-                    "aliases": list(filter(None, [reference(("agenda:" if agenda_days else "calendar:") + key)])),
-                    "attributes": {
+                _sensor.record(
+                    identifier,
+                    title,
+                    time=when,
+                    text="\n".join(lines),
+                    url=str(event.get("htmlLink", "")),
+                    links=linked,
+                    aliases=[alias] if alias else (),
+                    attributes={
                         "organizer_refs": organizer_refs,
-                        "attendee_refs": attendee_refs[:MAX_LINKS],
-                        "participant_refs": participant_refs[:MAX_LINKS],
+                        "attendee_refs": attendee_refs,
+                        "participant_refs": participant_refs,
                         "start": event_start,
                         "end": event_end,
                         # `updated` is BF's reserved provider-modification time: only a valid timestamp maps to it.
@@ -271,7 +179,7 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
                         "participants": emails,
                         **({"participants_truncated": True} if truncated else {}),
                     },
-                }
+                )
             )
         token = page.get("nextPageToken", "")
         if not isinstance(token, str):
@@ -284,22 +192,21 @@ def collect(calendar: str, start: str, end: str, agenda_days: int = 0) -> list[d
     raise InvalidError(f"the window needs more than {MAX_PAGES} pages; narrow it")
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("calendar")
     parser.add_argument("start")
     parser.add_argument("end")
     parser.add_argument("--agenda-days", type=int, default=0)
     arguments = parser.parse_args()
-    try:
-        value = collect(arguments.calendar, arguments.start, arguments.end, arguments.agenda_days)
-        payload = json.dumps(value, ensure_ascii=False, allow_nan=False)
-        if len(payload.encode()) > MAX_BYTES:
-            raise InvalidError("normalized calendar exceeds 16 MiB; narrow the window")
-        print(payload)
-    except InvalidError as error:
-        print(f"Calendar collection failed: {error}.", file=sys.stderr)
-        sys.exit(1)
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError, subprocess.SubprocessError, RecursionError):
-        print("Calendar collection failed; check gws authentication and the requested window.", file=sys.stderr)
-        sys.exit(1)
+    _sensor.cli(
+        lambda: _sensor.emit(
+            collect(arguments.calendar, arguments.start, arguments.end, arguments.agenda_days), max_bytes=MAX_BYTES
+        ),
+        "Calendar collection failed",
+        "check gws authentication and the requested window",
+    )
+
+
+if __name__ == "__main__":
+    main()

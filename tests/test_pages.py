@@ -84,13 +84,13 @@ def test_home_lists_what_needs_attention(brain: Store) -> None:
     # The next step keeps its link, resolved to the ref `bf read` opens.
     assert fresh["next"] == "Ship the [plan](actions/2026-09-24_second/ACTION.md)."
     assert fresh["uri"] == "bf://fixture/projects/fresh.md"
-    # A deprecated note no longer applies: it leaves every section.
-    assert refs(home, "actions") == ["actions/2026-09-24_second/ACTION.md", "actions/2026-09-20_first/ACTION.md"]
+    # Settled and deprecated actions leave the active Home inbox; draft actions remain.
+    assert refs(home, "actions") == ["actions/2026-09-24_second/ACTION.md"]
     # A project lists its own change and signals under projects: changed names the other notes.
     assert refs(home, "changed") == []
     assert home["activity"] == [{"brain": "fixture", "source": "mail", "records": 1, "page": "memories/mail/24h"}]
     assert refs(home, "upcoming") == ["mail:tomorrow"]
-    assert home["attention"] == [{"brain": "fixture", "sensor": "mail", "freshness": "never"}]
+    assert home["attention"] == [{"brain": "fixture", "kind": "sensor", "name": "mail", "freshness": "never"}]
     assert home["pages"] == pages.BROWSE
     assert read([brain])["page"] == ""
     assert read([brain], "bf://fixture/")["pages"] == pages.BROWSE
@@ -112,7 +112,7 @@ def test_home_lists_a_silent_source_in_its_declared_shape(brain: Store) -> None:
         clock=lambda: earlier,
     )
     # The read reply validates against its declaration, which used to reject `silent` here.
-    assert read([brain])["attention"] == [{"sensor": "papers", "freshness": "fresh", "silent": True}]
+    assert read([brain])["attention"] == [{"kind": "sensor", "name": "papers", "freshness": "fresh", "silent": True}]
 
 
 def test_home_keeps_future_notes_out_of_recent_changes(brain: Store) -> None:
@@ -127,7 +127,9 @@ def test_home_keeps_future_notes_out_of_recent_changes(brain: Store) -> None:
 
 def test_home_flags_any_listed_note_past_its_deadline(brain: Store) -> None:
     due = "stale_after: 2026-09-24T00:00:00Z"
-    brain.write("actions/2026-09-20_audit/ACTION.md", f"---\ntype: action\n{due}\n---\n# Audit\n".encode())
+    brain.write(
+        "actions/2026-09-20_audit/ACTION.md", f"---\ntype: action\nstatus: draft\n{due}\n---\n# Audit\n".encode()
+    )
     brain.write("concepts/policy.md", f"---\ntype: concept\nupdated: 2026-09-23\n{due}\n---\n# Policy\n".encode())
     edited = datetime(2026, 9, 23, tzinfo=UTC).timestamp()
     for path in ("actions/2026-09-20_audit/ACTION.md", "concepts/policy.md"):
@@ -1275,3 +1277,210 @@ def test_low_priority_observed_records_stay_in_period_counts(brain: Store) -> No
     assert reply["items"] == []
     assert reply["sources"] == [{"source": "feed", "records": 1, "page": "memories/feed/2026-09-25", "priority": "low"}]
     assert refs(read([brain], "memories/feed/2026-09-25")) == ["feed:entry"]
+
+
+def test_review_page_computes_due_notes_blocked_draft_actions_and_attention(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nfields:\n  depends-on:\n    description: Prerequisite\n    type: identity\n"
+        b"    relation: true\nsensors:\n  mail:\n    command: [mail-cli]\n    refresh: 3600\n",
+    )
+    brain.write("projects/fresh.md", b"---\ntype: project\nstatus: stable\nupdated: 2026-09-24\n---\n# Fresh\n")
+    brain.write("projects/retired.md", b"---\ntype: project\nstatus: deprecated\nupdated: 2020-01-01\n---\n# Retired\n")
+    brain.write(
+        "projects/linked.md",
+        b'---\ntype: project\nstatus: stable\nupdated: 2026-09-20\naliases: ["repo:linked"]\n---\n# Linked\n',
+    )
+    for name, day in (("offline", 1), ("fresh", 24), ("retired", 1), ("linked", 20)):
+        instant = datetime(2026, 9, day, tzinfo=UTC).timestamp()
+        os.utime(brain.root / f"projects/{name}.md", (instant, instant))
+    records_file(
+        brain,
+        "mail",
+        [Record(id="n1", title="New mail", time="2026-09-23T10:00:00Z", links=["repo:linked"])],
+    )
+    brain.write("actions/2026-09-20_settled/ACTION.md", b"---\ntype: action\nstatus: stable\n---\n# Settled\n")
+    brain.write("actions/2026-09-21_blocker/ACTION.md", b"---\ntype: action\nstatus: draft\n---\n# Blocker\n")
+    brain.write(
+        "actions/2026-09-22_dependent/ACTION.md",
+        b"---\ntype: action\nstatus: draft\nlinks:\n"
+        b"  - bf://fixture/actions/2026-09-21_blocker?rel=depends-on\n"
+        b"  - bf://fixture/actions/2026-09-20_settled?rel=depends-on\n"
+        b"---\n# Dependent\n",
+    )
+    reply = pages.local(pages.review_page([brain], NOW, single=True))
+    assert reply["page"] == "review"
+    due_refs = [item["ref"] for item in cast("list[dict[str, object]]", reply["items"])]
+    assert set(due_refs) == {"projects/offline.md", "projects/linked.md"}
+    action_map = {item["ref"]: item for item in cast("list[dict[str, object]]", reply["actions"])}
+    assert set(action_map) == {"actions/2026-09-22_dependent/ACTION.md", "actions/2026-09-21_blocker/ACTION.md"}
+    assert action_map["actions/2026-09-22_dependent/ACTION.md"]["blocked_by"] == [
+        "actions/2026-09-21_blocker/ACTION.md"
+    ]
+    assert "blocked_by" not in action_map["actions/2026-09-21_blocker/ACTION.md"]
+    assert any(
+        item["kind"] == "sensor" and item["name"] == "mail"
+        for item in cast("list[dict[str, object]]", reply["attention"])
+    )
+
+    # CLI/retrieve dispatch and pagination both honor the reserved `review` page and count usage under `review`.
+    via_read = read([brain], "review")
+    assert via_read["page"] == "review"
+    monkeypatch.setattr(pages, "PAGE", 1)
+    paged = read([brain], "review", offset=0)
+    assert (len(cast("list", paged["items"])), paged["next_offset"]) == (1, 1)
+
+
+def test_cap_events_and_evaluate_when_bound_and_filter_signals(brain: Store) -> None:
+    from bf.models import GateReply, When
+
+    # >64 events and >64 KiB payloads both cap cleanly with `when:overflow` within GateReply bounds.
+    many = [{"key": f"k:{idx}", "text": "signal"} for idx in range(80)]
+    capped_many = pages.cap_events(many)
+    assert len(capped_many) == 64
+    assert capped_many[-1] == {"key": "when:overflow", "text": "17 additional matched signal(s) omitted"}
+    GateReply.model_validate({"events": capped_many})
+
+    large = [{"key": f"big:{idx}", "text": "x" * 3900} for idx in range(30)]
+    capped_large = pages.cap_events(large)
+    assert capped_large[-1]["key"] == "when:overflow"
+    assert len(encode({"events": capped_large})) <= 65_536
+    GateReply.model_validate({"events": capped_large})
+
+    # evaluate_when checks sources (> cursor), review, draft actions and attention (excluding caller).
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nsensors:\n  feed:\n    command: [feed-cli]\n    refresh: 3600\n",
+    )
+    brain.write("actions/2026-09-25_open/ACTION.md", b"---\ntype: action\nstatus: draft\n---\n# Open task\n")
+    records_file(
+        brain,
+        "feed",
+        [Record(id="r1", title="Fresh item", attributes={"observed": "2026-09-25T11:00:00Z"})],
+    )
+    matched, events, next_cursor = pages.evaluate_when(
+        brain,
+        When(sources=["feed"], review=True, actions=True, attention=True),
+        NOW,
+        cursor="2026-09-25T00:00:00.000000Z",
+        exclude=("routine", "triage"),
+    )
+    assert matched is True
+    assert next_cursor == "2026-09-25T11:00:00.000000Z"
+    keys = {event["key"] for event in events}
+    assert "source:feed:r1" in keys
+    assert "action:actions/2026-09-25_open/ACTION.md" in keys
+    assert "attention:sensor:feed" in keys
+
+    # Excluding the sensor itself suppresses self-attention; advancing past next_cursor yields no source match.
+    matched_after, _, _ = pages.evaluate_when(
+        brain,
+        When(sources=["feed"]),
+        NOW,
+        cursor=next_cursor,
+        exclude=("sensor", "feed"),
+    )
+    assert matched_after is False
+
+
+def test_action_folder_shorthand_reads_sections_expands_backlinks_and_counts_newer_links(brain: Store) -> None:
+    brain.write(
+        "actions/2026-09-25_rollout/ACTION.md",
+        b"---\ntype: action\nstatus: draft\nupdated: 2026-09-20\nstale_after: 2026-12-01T00:00:00Z\n---\n# Rollout\n\n"
+        b"## Context {#context}\n\nReady.\n",
+    )
+    brain.write(
+        "projects/plan.md",
+        b"---\ntype: project\nstatus: stable\nupdated: 2026-09-25\n---\n# Plan\n\n"
+        b"See [whole](bf://fixture/actions/2026-09-25_rollout).\n",
+    )
+    brain.write(
+        "projects/rel-only.md",
+        b"---\ntype: project\nstatus: stable\nupdated: 2026-09-25\n---\n# Rel Only\n\n"
+        b"See [rollout](../actions/2026-09-25_rollout#context).\n",
+    )
+    instant = datetime(2026, 9, 20, tzinfo=UTC).timestamp()
+    os.utime(brain.root / "actions/2026-09-25_rollout/ACTION.md", (instant, instant))
+
+    section = read([brain], "actions/2026-09-25_rollout#context")
+    assert section["ref"] == "actions/2026-09-25_rollout/ACTION.md#context"
+    assert "Ready." in str(section["text"])
+
+    whole = read([brain], "actions/2026-09-25_rollout")
+    assert whole["ref"] == "actions/2026-09-25_rollout/ACTION.md"
+    backlink_refs = sorted(
+        str(item["ref"])
+        for group in cast("list[dict[str, object]]", whole["backlinks"])
+        for item in cast("list[dict[str, object]]", group["items"])
+    )
+    assert backlink_refs == ["projects/plan.md", "projects/rel-only.md"]
+    review_items = cast("list[dict[str, object]]", pages.local(pages.review_page([brain], NOW, single=True))["items"])
+    rollout_review = next(item for item in review_items if item["ref"] == "actions/2026-09-25_rollout/ACTION.md")
+    assert "newer_evidence" in cast("list[str]", rollout_review["review_reasons"])
+    assert rollout_review["newer"] == ["projects/plan.md", "projects/rel-only.md"]
+
+
+def test_review_page_caps_actions_and_blockers_and_when_gates_interleave_or_wait_on_busy_cache(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bf.models import When
+    from bf.storage import BusyError, writer
+
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nfields:\n  depends-on:\n    description: Blocker\n    type: identity\n"
+        b"    relation: true\n",
+    )
+    blockers = []
+    for idx in range(24):
+        slug = f"2026-09-25_act-{idx:02d}"
+        brain.write(f"actions/{slug}/ACTION.md", f"---\ntype: action\nstatus: draft\n---\n# Act {idx}\n".encode())
+        if idx < 12:
+            blockers.append(f"  - bf://fixture/actions/{slug}?rel=depends-on\n")
+    brain.write(
+        "actions/2026-09-25_top/ACTION.md",
+        ("---\ntype: action\nstatus: draft\nlinks:\n" + "".join(blockers) + "---\n# Top\n").encode(),
+    )
+    future_ts = (NOW + timedelta(days=2)).timestamp()
+    os.utime(brain.root / "projects/offline.md", (future_ts, future_ts))
+
+    review = pages.local(pages.review_page([brain], NOW, single=True))
+    assert review["actions_total"] == 25
+    listed_actions = cast("list[dict[str, object]]", review["actions"])
+    assert len(listed_actions) == pages.SECTION
+    top_action = next(item for item in listed_actions if item["ref"] == "actions/2026-09-25_top/ACTION.md")
+    assert len(cast("list[str]", top_action["blocked_by"])) == 10
+    offline_item = next(
+        item for item in cast("list[dict[str, object]]", review["items"]) if item["ref"] == "projects/offline.md"
+    )
+    assert "future_modified" in cast("list[str]", offline_item["review_reasons"])
+
+    # Fair interleaving and exact overflow count across multiple active signal groups.
+    records_file(
+        brain,
+        "feed",
+        [
+            Record(id=f"r{idx:02d}", title=f"Rec {idx}", attributes={"observed": "2026-09-25T11:00:00Z"})
+            for idx in range(50)
+        ],
+    )
+    matched, events, _ = pages.evaluate_when(
+        brain,
+        When(sources=["feed"], actions=True),
+        NOW,
+        cursor="2026-09-25T00:00:00.000000Z",
+        exclude=("routine", "triage"),
+    )
+    assert matched is True
+    assert len(events) == 64
+    assert events[-1] == {"key": "when:overflow", "text": "12 additional matched signal(s) omitted"}
+    assert any(event["key"].startswith("source:feed:") for event in events[:-1])
+    assert any(event["key"].startswith("action:") for event in events[:-1])
+
+    # A stale or contended cache raises BusyError instead of evaluating against incomplete state.
+    brain.write("concepts/unindexed.md", b"# Pending\n")
+    monkeypatch.setattr("bf.index._CONTENDED", 0.05)
+    with writer(brain), pytest.raises(BusyError, match="search cache is busy"):
+        pages.evaluate_when(brain, When(actions=True), NOW, cursor="", exclude=("routine", "triage"))

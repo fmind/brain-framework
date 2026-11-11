@@ -38,6 +38,13 @@
           "description": "Retry failed or interrupted pre-answer harness attempts automatically with backoff instead of leaving the job uncertain: true for every run, or the run kinds to retry, such as [schedule, wake].",
           "title": "Idempotent"
         },
+        "input_args": {
+          "description": "Extra argv appended after command for channel input runs and their wakes, supporting {{schema}}.",
+          "items": { "type": "string" },
+          "maxItems": 127,
+          "title": "Input Args",
+          "type": "array"
+        },
         "inputs": {
           "description": "Channels whose admitted messages start a run, each answered in its own conversation; each channel appears once.",
           "items": { "$ref": "#/$defs/AssistantInput" },
@@ -77,14 +84,34 @@
           "title": "Prompt",
           "type": "string"
         },
+        "propose": {
+          "default": false,
+          "description": "Allow structured replies to propose up to three status: draft ACTION.md notes.",
+          "title": "Propose",
+          "type": "boolean"
+        },
         "reply": {
           "anyOf": [{ "$ref": "#/$defs/AssistantReplyPath" }, { "type": "null" }],
           "default": null,
-          "description": "Read a structured {say, wake} answer at this JSON Pointer of the harness's JSON stdout; pass {{schema}} to the harness. Omitted, all of stdout is the message."
+          "description": "Read a structured {say, wake, actions} answer at this JSON Pointer of the harness's JSON stdout; pass {{schema}} to the harness. Omitted, all of stdout is the message."
+        },
+        "retries": {
+          "anyOf": [{ "maximum": 20, "minimum": 0, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Automatic retry attempts on pre-answer harness failures (defaults to 3 when idempotent, else 0).",
+          "title": "Retries"
+        },
+        "schedule_args": {
+          "description": "Extra argv appended after command for scheduled runs and their wakes, before schedule.args.",
+          "items": { "type": "string" },
+          "maxItems": 127,
+          "title": "Schedule Args",
+          "type": "array"
         },
         "schedules": {
           "anyOf": [
             {
+              "additionalProperties": false,
               "maxProperties": 32,
               "patternProperties": { "^[a-z][a-z0-9-]{0,63}$": { "$ref": "#/$defs/AssistantSchedule" } },
               "propertyNames": { "not": { "pattern": "[^a-z0-9-]" } },
@@ -92,7 +119,7 @@
             },
             { "type": "null" }
           ],
-          "description": "Named schedules, each an every interval or a daily at time, with optional days, timezone, lookback and gate; none by default.",
+          "description": "Named schedules, each an every interval or a daily at time, with optional days, timezone, lookback, when, gate and args; none by default.",
           "title": "Schedules"
         },
         "timeout": {
@@ -135,7 +162,7 @@
       "description": "Where the harness's JSON stdout holds its structured answer.",
       "properties": {
         "path": {
-          "description": "JSON Pointer to the {say, wake} object in the harness's JSON stdout, such as /structured_output; an empty string means the whole stdout.",
+          "description": "JSON Pointer to the {say, wake, actions} object in the harness's JSON stdout, such as /structured_output; an empty string means the whole stdout.",
           "maxLength": 4096,
           "pattern": "^(?:/(?:[^~\\x00]|~[01])*)*$",
           "title": "Path",
@@ -148,11 +175,22 @@
     },
     "AssistantSchedule": {
       "additionalProperties": false,
+      "oneOf": [
+        { "properties": { "at": { "type": "null" }, "every": { "type": "integer" } }, "required": ["every"] },
+        { "properties": { "at": { "type": "string" }, "every": { "type": "null" } }, "required": ["at"] }
+      ],
       "properties": {
+        "args": {
+          "description": "Extra argv appended after schedule_args for this schedule (and its wakes), supporting {{schema}}.",
+          "items": { "type": "string" },
+          "maxItems": 127,
+          "title": "Args",
+          "type": "array"
+        },
         "at": {
           "anyOf": [{ "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$", "type": "string" }, { "type": "null" }],
           "default": null,
-          "description": "Optional 24-hour wall-clock time (HH:MM) for daily or weekday-filtered runs.",
+          "description": "24-hour wall-clock time (HH:MM) for daily or weekday-filtered runs; mutually exclusive with every.",
           "title": "At"
         },
         "days": {
@@ -171,12 +209,10 @@
           "title": "Days"
         },
         "every": {
-          "default": 86400,
-          "description": "Interval in seconds between runs, filtered by days. With at, it does not repeat runs: it is only the grace after a missed slot before bf status reports the schedule overdue.",
-          "maximum": 31536000,
-          "minimum": 1,
-          "title": "Every",
-          "type": "integer"
+          "anyOf": [{ "maximum": 31536000, "minimum": 1, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Interval in seconds between runs, filtered by days; mutually exclusive with at.",
+          "title": "Every"
         },
         "gate": {
           "anyOf": [{ "$ref": "#/$defs/Gate" }, { "type": "null" }],
@@ -191,11 +227,22 @@
           "title": "Lookback",
           "type": "integer"
         },
+        "retries": {
+          "anyOf": [{ "maximum": 20, "minimum": 0, "type": "integer" }, { "type": "null" }],
+          "default": null,
+          "description": "Automatic retry attempts on pre-answer harness failures for this schedule; overrides assistant.retries.",
+          "title": "Retries"
+        },
         "timezone": {
           "anyOf": [{ "maxLength": 128, "minLength": 1, "type": "string" }, { "type": "null" }],
           "default": null,
           "description": "IANA timezone for at and days, such as Europe/Paris; defaults to local time.",
           "title": "Timezone"
+        },
+        "when": {
+          "anyOf": [{ "$ref": "#/$defs/When" }, { "type": "null" }],
+          "default": null,
+          "description": "Optional offline gate checked against SQLite and health before gate or harness execution."
         }
       },
       "title": "AssistantSchedule",
@@ -407,7 +454,14 @@
     "Routine": {
       "additionalProperties": false,
       "description": "A deterministic brain program: run when due, by a named hook, or now with `bf run`.",
+      "not": { "required": ["refresh", "at"] },
       "properties": {
+        "at": {
+          "anyOf": [{ "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$", "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "Optional 24-hour wall-clock time (HH:MM) for daily or weekday-filtered runs; mutually exclusive with refresh.",
+          "title": "At"
+        },
         "command": {
           "description": "Direct argv without a shell: a bare command name on PATH or a sensors/ or routines/ path, then arguments supporting {{brain}}, {{home}}, {{start}}, {{end}} and {{lines:FILE}}. Optional only with enabled: false.",
           "items": { "type": "string" },
@@ -421,6 +475,21 @@
           ],
           "title": "Command",
           "type": "array"
+        },
+        "days": {
+          "anyOf": [
+            {
+              "items": { "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "type": "string" },
+              "maxItems": 7,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "Optional weekdays when the routine may run; omitted means every day.",
+          "title": "Days"
         },
         "enabled": {
           "default": true,
@@ -484,6 +553,17 @@
           "minimum": 1,
           "title": "Timeout",
           "type": "integer"
+        },
+        "timezone": {
+          "anyOf": [{ "maxLength": 128, "minLength": 1, "type": "string" }, { "type": "null" }],
+          "default": null,
+          "description": "IANA timezone for at and days, such as Europe/Paris; defaults to local time.",
+          "title": "Timezone"
+        },
+        "when": {
+          "anyOf": [{ "$ref": "#/$defs/When" }, { "type": "null" }],
+          "default": null,
+          "description": "Optional offline gate checked against SQLite and health before launching the routine."
         }
       },
       "title": "Routine",
@@ -689,7 +769,7 @@
         "max_text_bytes": {
           "anyOf": [{ "maximum": 4194304, "minimum": 1, "type": "integer" }, { "type": "null" }],
           "default": null,
-          "description": "Maximum UTF-8 bytes of a record's text before truncation; sets truncated: true in attributes.",
+          "description": "Maximum UTF-8 bytes of a record's text before cutting on a codepoint boundary; sets partial: true in attributes, while unset rejects text above 4 MiB.",
           "title": "Max Text Bytes"
         },
         "mode": {
@@ -740,12 +820,6 @@
           "minimum": 1,
           "title": "Timeout",
           "type": "integer"
-        },
-        "truncate_text": {
-          "default": false,
-          "description": "Truncate oversized record text on a UTF-8 codepoint boundary instead of failing the batch.",
-          "title": "Truncate Text",
-          "type": "boolean"
         }
       },
       "then": { "properties": { "mode": { "const": "window" } } },
@@ -922,6 +996,46 @@
         }
       },
       "title": "WatchSettings",
+      "type": "object"
+    },
+    "When": {
+      "additionalProperties": false,
+      "anyOf": [
+        { "properties": { "sources": { "minItems": 1 } }, "required": ["sources"] },
+        { "properties": { "review": { "const": true } }, "required": ["review"] },
+        { "properties": { "actions": { "const": true } }, "required": ["actions"] },
+        { "properties": { "attention": { "const": true } }, "required": ["attention"] }
+      ],
+      "description": "Declarative offline gate evaluated against SQLite and brain health before launching a routine or assistant.",
+      "properties": {
+        "actions": {
+          "default": false,
+          "description": "Trigger when any action note has status: draft.",
+          "title": "Actions",
+          "type": "boolean"
+        },
+        "attention": {
+          "default": false,
+          "description": "Trigger when any other program or channel appears in health attention.",
+          "title": "Attention",
+          "type": "boolean"
+        },
+        "review": {
+          "default": false,
+          "description": "Trigger when any non-deprecated note is due for review or has newer_evidence.",
+          "title": "Review",
+          "type": "boolean"
+        },
+        "sources": {
+          "description": "Sources whose records with observed > cursor trigger the run.",
+          "items": { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+          "maxItems": 32,
+          "title": "Sources",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "title": "When",
       "type": "object"
     }
   },

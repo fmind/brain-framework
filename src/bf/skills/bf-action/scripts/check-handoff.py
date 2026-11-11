@@ -13,7 +13,7 @@ from typing import cast
 # Skills use the host's python3; this helper needs only the Python 3.11 standard library.
 MAX_REPLY = 4 << 20  # Bytes of one bf reply.
 ACTION = re.compile(
-    r"(?:bf://([a-z][a-z0-9-]{0,63})/)?(actions/[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*/ACTION\.md)"
+    r"(?:bf://([a-z][a-z0-9-]{0,63})/)?(actions/[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*(?:/ACTION\.md)?)"
 )
 
 
@@ -52,10 +52,11 @@ def read(action: str, brain: str, section: str) -> tuple[str, str | int]:
         match = ACTION.fullmatch(action)
         assert match is not None  # noqa: S101 - argument validation happens before any read
         owner, path = match.groups()
+        canonical = path if path.endswith("/ACTION.md") else f"{path}/ACTION.md"
         name, text = reply.get("brain"), reply.get("text")
         if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name):
             raise ValueError("expected a named brain")
-        if (owner and owner != name) or reply.get("ref") != f"{path}#{section}":
+        if (owner and owner != name) or reply.get("ref") != f"{canonical}#{section}":
             raise ValueError("read resolved to another action")
         if paged:
             return name, cast("int", size)
@@ -63,7 +64,7 @@ def read(action: str, brain: str, section: str) -> tuple[str, str | int]:
             raise ValueError("expected section text")
     except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, RecursionError) as error:
         raise ValueError(f"{section} is unavailable or incomplete; run bf read {ref} to see why") from error
-    # The read succeeded: a heading without a body, as new-action.py writes it, is unfinished, not unavailable.
+    # The read succeeded: a heading without a body, as `bf action new` writes it, is unfinished, not unavailable.
     if not text.partition("\n")[2].strip():
         raise ValueError(f"{section} is empty; write it before a handoff")
     return name, text
@@ -92,14 +93,17 @@ def check(action: str, brain: str) -> dict[str, object]:
             return {"checked": False, "passed": False, "sections": sections, "error": message}
         okay = "characters" not in counts and all(counts[key] <= limit for key, limit in limits.items())
         path = action.removeprefix(f"bf://{name}/")
-        sections[section] = {"ref": f"bf://{name}/{path}#{section}", **counts, "limits": limits, "passed": okay}
+        canonical = path if path.endswith("/ACTION.md") else f"{path}/ACTION.md"
+        sections[section] = {"ref": f"bf://{name}/{canonical}#{section}", **counts, "limits": limits, "passed": okay}
         passed = passed and okay
     return {"checked": True, "passed": passed, "sections": sections}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", help="actions/YYYY-MM-DD_topic/ACTION.md, optionally brain-qualified")
+    parser.add_argument(
+        "action", help="actions/YYYY-MM-DD_topic or actions/YYYY-MM-DD_topic/ACTION.md, optionally brain-qualified"
+    )
     parser.add_argument("--brain", required=True, help="brain name or path passed to bf read")
     parser.add_argument("--hook", action="store_true", help="emit a non-blocking Claude Code SessionStart reply")
     args = parser.parse_args()

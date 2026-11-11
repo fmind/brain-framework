@@ -34,9 +34,16 @@ MAX_FILES = 100_000
 MAX_OFFSET = 2**53 - 1
 NAME = r"^[a-z][a-z0-9-]{0,63}$"
 SLUG = r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+ACTION_SLUG = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 # JSON Schema regex engines may match `$` before a final newline; Rust's validator does not.
 Name = Annotated[str, Field(pattern=NAME, json_schema_extra={"not": {"pattern": "[^a-z0-9-]"}})]
 Slug = Annotated[str, Field(pattern=SLUG, max_length=64, json_schema_extra={"not": {"pattern": "[^a-z0-9-]"}})]
+ActionSlug = Annotated[
+    str, Field(pattern=ACTION_SLUG, max_length=64, json_schema_extra={"not": {"pattern": "[^a-z0-9-]"}})
+]
+SchemaKind = Literal["brain", "registry", "eval", "search-reply", "read-reply", "status-reply", "assistant-reply"]
+ProgramKind = Literal["sensor", "routine", "assistant"]
+PROGRAM_KINDS: frozenset[ProgramKind] = frozenset({"sensor", "routine", "assistant"})
 # No program, and so no record source, takes this name: a `bf:ID` ref would read as a BF address.
 RESERVED = "bf"
 # An explicit, case-sensitive `scheme:value`; BF addresses are identities of the `bf` scheme.
@@ -233,7 +240,7 @@ def local(value: str) -> str:
 
 
 # Provider data and declared field values: replies return them exactly as the record or note stores them.
-_VERBATIM = frozenset({"attributes", "fields"})
+_VERBATIM = frozenset({"attributes", "fields", "values"})
 # Status maps keyed by program name: a sensor may be named `time` or `fields`, so only the entries are presented.
 _NAMED = frozenset({"assistants", "channels", "schedules", "routines", "sources"})
 
@@ -815,6 +822,122 @@ class Mapping(Model):
         return self
 
 
+def _valid_arguments(values: list[str], placeholders: tuple[str, ...], *, skip_executable: bool = False) -> list[str]:
+    """Check command or extra arguments for NULs, length, normalized whole-argument `{{lines:FILE}}` and placeholders."""
+    for index, value in enumerate(values):
+        if "\x00" in value or len(value) > 16_384:
+            raise ValueError("invalid command argument")
+        if (not skip_executable or index > 0) and (lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", value)):
+            target = lines_match[1]
+            parts = target.split("/")
+            if not target or target.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+                raise ValueError("lines placeholder requires a normalized brain-relative file path")
+            continue
+        stripped = re.sub(r"\{\{(?:" + "|".join(placeholders) + r")\}\}", "", value)
+        # Only an opening {{ starts a placeholder: a lone }} is literal text, such as the end of inline JSON.
+        if "{{" in stripped:
+            raise ValueError(f"unknown placeholder; use {', '.join(placeholders)} or a whole-argument lines:FILE")
+    return values
+
+
+Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _valid_clock(timezone: str | None, days: list[Weekday] | None) -> None:
+    if timezone is not None:
+        clean(timezone)
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, ValueError) as error:
+            raise ValueError("invalid IANA timezone") from error
+    if days is not None and len(days) != len(set(days)):
+        raise ValueError("days must be distinct")
+
+
+def _schedule_due(
+    now: datetime,
+    last_success: str,
+    *,
+    every: int | None,
+    at: str | None,
+    days: list[Weekday] | None,
+    timezone: str | None,
+) -> datetime:
+    """The UTC instant when an interval or wall-clock schedule is next due; `<= now` means it is due now."""
+    zone = ZoneInfo(timezone) if timezone else (datetime.now().astimezone().tzinfo or UTC)
+    allowed = set(days or WEEKDAYS)
+    if at is None:
+        interval = every or 0
+        if last_success:
+            since = datetime.fromisoformat(last_success)
+            due = now if since > now else since + timedelta(seconds=interval)
+        else:
+            due = now
+        if days is not None:
+            local_due = due.astimezone(zone)
+            while WEEKDAYS[local_due.weekday()] not in allowed:
+                next_day = local_due.date() + timedelta(days=1)
+                local_due = datetime(next_day.year, next_day.month, next_day.day, tzinfo=zone)
+            due = local_due.astimezone(UTC)
+        return due
+    hour, minute = map(int, at.split(":"))
+    local_now = now.astimezone(zone)
+    succeeded = datetime.fromisoformat(last_success).astimezone(zone) if last_success else None
+    today = local_now.date()
+    today_slot = datetime(today.year, today.month, today.day, hour, minute, tzinfo=zone)
+    if WEEKDAYS[today.weekday()] in allowed:
+        if local_now >= today_slot and (succeeded is None or succeeded < today_slot):
+            return today_slot.astimezone(UTC)
+        if local_now < today_slot:
+            return today_slot.astimezone(UTC)
+    # days holds at least one weekday, so one of the next seven days is allowed.
+    offset = next(o for o in range(1, 8) if WEEKDAYS[(today + timedelta(days=o)).weekday()] in allowed)
+    candidate = today + timedelta(days=offset)
+    return datetime(candidate.year, candidate.month, candidate.day, hour, minute, tzinfo=zone).astimezone(UTC)
+
+
+class When(Model):
+    """Declarative offline gate evaluated against SQLite and brain health before launching a routine or assistant."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "anyOf": [
+                {"required": ["sources"], "properties": {"sources": {"minItems": 1}}},
+                {"required": ["review"], "properties": {"review": {"const": True}}},
+                {"required": ["actions"], "properties": {"actions": {"const": True}}},
+                {"required": ["attention"], "properties": {"attention": {"const": True}}},
+            ]
+        },
+    )
+
+    sources: Annotated[list[Name], Field(max_length=32, json_schema_extra={"uniqueItems": True})] = Field(
+        default_factory=list,
+        description="Sources whose records with observed > cursor trigger the run.",
+    )
+    review: bool = Field(
+        default=False, description="Trigger when any non-deprecated note is due for review or has newer_evidence."
+    )
+    actions: bool = Field(default=False, description="Trigger when any action note has status: draft.")
+    attention: bool = Field(
+        default=False, description="Trigger when any other program or channel appears in health attention."
+    )
+
+    @field_validator("sources")
+    @classmethod
+    def distinct_sources(cls, values: list[str]) -> list[str]:
+        if len(set(values)) != len(values):
+            raise ValueError("when.sources must be distinct")
+        return values
+
+    @model_validator(mode="after")
+    def active_condition(self) -> When:
+        if not (self.sources or self.review or self.actions or self.attention):
+            raise ValueError("when requires at least one active condition: sources, review, actions or attention")
+        return self
+
+
 class Command(Model):
     """An owner's process interface, without scheduling or provider-specific settings."""
 
@@ -850,21 +973,7 @@ class Command(Model):
         if not values:
             # Only a disabled sensor or routine may omit its command; Program checks that rule.
             return values
-        for index, value in enumerate(values):
-            if "\x00" in value or len(value) > 16_384:
-                raise ValueError("invalid command argument")
-            if index > 0 and (lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", value)):
-                target = lines_match[1]
-                parts = target.split("/")
-                if not target or target.startswith("/") or any(part in {"", ".", ".."} for part in parts):
-                    raise ValueError("lines placeholder requires a normalized brain-relative file path")
-                continue
-            stripped = re.sub(r"\{\{(?:" + "|".join(cls.PLACEHOLDERS) + r")\}\}", "", value)
-            # Only an opening {{ starts a placeholder: a lone }} is literal text, such as the end of inline JSON.
-            if "{{" in stripped:
-                raise ValueError(
-                    f"unknown placeholder; use {', '.join(cls.PLACEHOLDERS)} or a whole-argument lines:FILE"
-                )
+        _valid_arguments(values, cls.PLACEHOLDERS, skip_executable=True)
         executable = values[0]
         parts = executable.split("/")
         if (
@@ -953,13 +1062,10 @@ class Sensor(Program):
         description="Seconds without a new or changed record after which a scheduled source is reported silent in "
         "status and attention; unset never reports silence.",
     )
-    truncate_text: bool = Field(
-        default=False,
-        description="Truncate oversized record text on a UTF-8 codepoint boundary instead of failing the batch.",
-    )
     max_text_bytes: Annotated[int, Field(ge=1, le=4 << 20)] | None = Field(
         default=None,
-        description="Maximum UTF-8 bytes of a record's text before truncation; sets truncated: true in attributes.",
+        description="Maximum UTF-8 bytes of a record's text before cutting on a codepoint boundary; sets partial: true "
+        "in attributes, while unset rejects text above 4 MiB.",
     )
     # Retention, in seconds: evidence older than this leaves the brain at the sensor's next collection.
     expire_after: Annotated[int, Field(ge=3600, le=3_153_600_000)] | None = Field(
@@ -980,11 +1086,31 @@ class Sensor(Program):
 class Routine(Program):
     """A deterministic brain program: run when due, by a named hook, or now with `bf run`."""
 
+    model_config = ConfigDict(
+        frozen=True,
+        json_schema_extra={"not": {"required": ["refresh", "at"]}},
+    )
+
     # An action is an authored note: keep its output within the note read limit.
     max_bytes: Annotated[int, Field(ge=1, le=MAX_NOTE)] = Field(
         default=1 << 20,
         description="Maximum stdout of an action routine in bytes, up to the note read limit; a log routine's log "
         "keeps its last 256 KiB instead.",
+    )
+    at: Annotated[str, Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")] | None = Field(
+        default=None,
+        description="Optional 24-hour wall-clock time (HH:MM) for daily or weekday-filtered runs; mutually exclusive "
+        "with refresh.",
+    )
+    days: (
+        Annotated[list[Weekday], Field(min_length=1, max_length=7, json_schema_extra={"uniqueItems": True})] | None
+    ) = Field(default=None, description="Optional weekdays when the routine may run; omitted means every day.")
+    timezone: Annotated[str, Field(min_length=1, max_length=128)] | None = Field(
+        default=None, description="IANA timezone for at and days, such as Europe/Paris; defaults to local time."
+    )
+    when: When | None = Field(
+        default=None,
+        description="Optional offline gate checked against SQLite and health before launching the routine.",
     )
     hooks: Annotated[list[Slug], Field(max_length=16)] = Field(
         default_factory=list,
@@ -1000,6 +1126,10 @@ class Routine(Program):
         "hold only the ACTION.md this machine wrote. Unset keeps every action.",
     )
 
+    @property
+    def scheduled(self) -> bool:
+        return bool(self.refresh or self.at is not None)
+
     @field_validator("hooks")
     @classmethod
     def distinct(cls, values: list[str]) -> list[str]:
@@ -1011,7 +1141,23 @@ class Routine(Program):
     def kept_actions(self) -> Routine:
         if self.keep is not None and self.output != "action":
             raise ValueError("keep applies to output: action; a log routine's log is already bounded")
+        if (self.refresh or "refresh" in self.model_fields_set) and self.at is not None:
+            raise ValueError("routine accepts either refresh or at, not both")
+        if (self.days is not None or self.timezone is not None) and not self.scheduled:
+            raise ValueError("days and timezone require refresh or at")
+        _valid_clock(self.timezone, self.days)
         return self
+
+    def schedule_due(self, now: datetime, last_success: str = "") -> datetime:
+        """The UTC instant when a scheduled routine (`refresh` or `at`) is next due."""
+        return _schedule_due(
+            now,
+            last_success,
+            every=self.refresh or None,
+            at=self.at,
+            days=self.days,
+            timezone=self.timezone,
+        )
 
 
 class Send(Command):
@@ -1115,11 +1261,19 @@ class Wake(Model):
     reason: Annotated[str, Field(max_length=280)]
 
 
+class ProposedAction(Model):
+    """One draft action note an assistant with `propose: true` asks BF to validate and create."""
+
+    slug: ActionSlug
+    markdown: Annotated[str, Field(min_length=1, max_length=MAX_NOTE)]
+
+
 class AssistantReply(Model):
-    """A structured harness answer: `say` is the message, null to stay silent; `wake` asks for a later run."""
+    """A structured harness answer: `say` is the message, `wake` schedules a follow-up and `actions` proposes notes."""
 
     say: str | None
     wake: Wake | None
+    actions: Annotated[list[ProposedAction], Field(max_length=3)] | None = None
 
 
 class WakeBounds(Model):
@@ -1139,20 +1293,28 @@ class AssistantReplyPath(Model):
     """Where the harness's JSON stdout holds its structured answer."""
 
     path: Annotated[str, Field(max_length=4096, pattern=r"^(?:/(?:[^~\x00]|~[01])*)*$")] = Field(
-        description="JSON Pointer to the {say, wake} object in the harness's JSON stdout, such as "
+        description="JSON Pointer to the {say, wake, actions} object in the harness's JSON stdout, such as "
         "/structured_output; an empty string means the whole stdout."
     )
 
 
-Weekday = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-WEEKDAYS: tuple[Weekday, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_ASSISTANT_PLACEHOLDERS: tuple[str, ...] = ("brain", "home", "start", "end", "prompt", "schema")
 
 
 class AssistantSchedule(Model):
-    every: Annotated[int, Field(ge=1, le=31_536_000)] = Field(
-        default=86_400,
-        description="Interval in seconds between runs, filtered by days. With at, it does not repeat runs: it is only "
-        "the grace after a missed slot before bf status reports the schedule overdue.",
+    model_config = ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "oneOf": [
+                {"required": ["every"], "properties": {"every": {"type": "integer"}, "at": {"type": "null"}}},
+                {"required": ["at"], "properties": {"at": {"type": "string"}, "every": {"type": "null"}}},
+            ]
+        },
+    )
+
+    every: Annotated[int, Field(ge=1, le=31_536_000)] | None = Field(
+        default=None,
+        description="Interval in seconds between runs, filtered by days; mutually exclusive with at.",
     )
     lookback: Annotated[int, Field(ge=1, le=31_536_000)] = Field(
         default=86_400,
@@ -1160,7 +1322,8 @@ class AssistantSchedule(Model):
         "cancelled run ended.",
     )
     at: Annotated[str, Field(pattern=r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")] | None = Field(
-        default=None, description="Optional 24-hour wall-clock time (HH:MM) for daily or weekday-filtered runs."
+        default=None,
+        description="24-hour wall-clock time (HH:MM) for daily or weekday-filtered runs; mutually exclusive with every.",
     )
     timezone: Annotated[str, Field(min_length=1, max_length=128)] | None = Field(
         default=None, description="IANA timezone for at and days, such as Europe/Paris; defaults to local time."
@@ -1168,58 +1331,51 @@ class AssistantSchedule(Model):
     days: (
         Annotated[list[Weekday], Field(min_length=1, max_length=7, json_schema_extra={"uniqueItems": True})] | None
     ) = Field(default=None, description="Optional weekdays when the schedule may run; omitted means every day.")
+    when: When | None = Field(
+        default=None,
+        description="Optional offline gate checked against SQLite and health before gate or harness execution.",
+    )
     gate: Gate | None = Field(
         default=None,
         description='A command that runs before the harness and prints {"events": [...]}; no event skips the model.',
     )
+    args: Annotated[list[str], Field(max_length=127)] = Field(
+        default_factory=list,
+        description="Extra argv appended after schedule_args for this schedule (and its wakes), supporting {{schema}}.",
+    )
+    retries: Annotated[int, Field(ge=0, le=20)] | None = Field(
+        default=None,
+        description="Automatic retry attempts on pre-answer harness failures for this schedule; overrides assistant.retries.",
+    )
+
+    @field_validator("args")
+    @classmethod
+    def valid_args(cls, values: list[str]) -> list[str]:
+        return _valid_arguments(values, _ASSISTANT_PLACEHOLDERS)
 
     @model_validator(mode="after")
     def valid_schedule(self) -> AssistantSchedule:
-        if "every" not in self.model_fields_set and self.at is None:
-            raise ValueError("schedule requires every or at")
-        if self.timezone is not None:
-            clean(self.timezone)
-            try:
-                ZoneInfo(self.timezone)
-            except (ZoneInfoNotFoundError, ValueError) as error:
-                raise ValueError("invalid IANA timezone") from error
-        if self.days is not None and len(self.days) != len(set(self.days)):
-            raise ValueError("days must be distinct")
+        if (self.every is None) == (self.at is None):
+            raise ValueError("schedule requires either every or at, not both")
+        _valid_clock(self.timezone, self.days)
         return self
 
     def next_due(self, now: datetime, last_success: str = "") -> datetime:
         """The UTC instant when this schedule is next due; `<= now` means it is due now."""
-        zone = ZoneInfo(self.timezone) if self.timezone else (datetime.now().astimezone().tzinfo or UTC)
-        allowed = set(self.days or WEEKDAYS)
-        if self.at is None:
-            due = datetime.fromisoformat(last_success) + timedelta(seconds=self.every) if last_success else now
-            if self.days is not None:
-                local = due.astimezone(zone)
-                while WEEKDAYS[local.weekday()] not in allowed:
-                    next_day = local.date() + timedelta(days=1)
-                    local = datetime(next_day.year, next_day.month, next_day.day, tzinfo=zone)
-                due = local.astimezone(UTC)
-            return due
-        hour, minute = map(int, self.at.split(":"))
-        local_now = now.astimezone(zone)
-        succeeded = datetime.fromisoformat(last_success).astimezone(zone) if last_success else None
-        today = local_now.date()
-        today_slot = datetime(today.year, today.month, today.day, hour, minute, tzinfo=zone)
-        if WEEKDAYS[today.weekday()] in allowed:
-            if local_now >= today_slot and (succeeded is None or succeeded < today_slot):
-                return today_slot.astimezone(UTC)
-            if local_now < today_slot:
-                return today_slot.astimezone(UTC)
-        # days holds at least one weekday, so one of the next seven days is allowed.
-        offset = next(o for o in range(1, 8) if WEEKDAYS[(today + timedelta(days=o)).weekday()] in allowed)
-        candidate = today + timedelta(days=offset)
-        return datetime(candidate.year, candidate.month, candidate.day, hour, minute, tzinfo=zone).astimezone(UTC)
+        return _schedule_due(
+            now,
+            last_success,
+            every=self.every,
+            at=self.at,
+            days=self.days,
+            timezone=self.timezone,
+        )
 
 
 class Assistant(Command):
     """One harness with independent acquisition, delivery and schedules."""
 
-    PLACEHOLDERS: ClassVar[tuple[str, ...]] = ("brain", "home", "start", "end", "prompt", "schema")
+    PLACEHOLDERS: ClassVar[tuple[str, ...]] = _ASSISTANT_PLACEHOLDERS
 
     prompt: Annotated[str, Field(min_length=1, max_length=4096)] = Field(
         description="The prompt file: a normalized Markdown path in prompts/, such as prompts/assistant.md.",
@@ -1231,10 +1387,22 @@ class Assistant(Command):
     max_bytes: Annotated[int, Field(ge=1, le=4 << 20)] = Field(
         default=1 << 20, description="Maximum stdout in bytes; exceeding it fails without recording the run."
     )
+    input_args: Annotated[list[str], Field(max_length=127)] = Field(
+        default_factory=list,
+        description="Extra argv appended after command for channel input runs and their wakes, supporting {{schema}}.",
+    )
+    schedule_args: Annotated[list[str], Field(max_length=127)] = Field(
+        default_factory=list,
+        description="Extra argv appended after command for scheduled runs and their wakes, before schedule.args.",
+    )
     reply: AssistantReplyPath | None = Field(
         default=None,
-        description="Read a structured {say, wake} answer at this JSON Pointer of the harness's JSON stdout; pass "
-        "{{schema}} to the harness. Omitted, all of stdout is the message.",
+        description="Read a structured {say, wake, actions} answer at this JSON Pointer of the harness's JSON stdout; "
+        "pass {{schema}} to the harness. Omitted, all of stdout is the message.",
+    )
+    propose: bool = Field(
+        default=False,
+        description="Allow structured replies to propose up to three status: draft ACTION.md notes.",
     )
     keep: Annotated[int, Field(ge=1, le=MAX_FILES // 2)] | None = Field(
         default=None,
@@ -1246,6 +1414,10 @@ class Assistant(Command):
         description="Retry failed or interrupted pre-answer harness attempts automatically with backoff instead of "
         "leaving the job uncertain: true for every run, or the run kinds to retry, such as [schedule, wake].",
     )
+    retries: Annotated[int, Field(ge=0, le=20)] | None = Field(
+        default=None,
+        description="Automatic retry attempts on pre-answer harness failures (defaults to 3 when idempotent, else 0).",
+    )
     inputs: Annotated[list[AssistantInput], Field(max_length=32)] = Field(
         default_factory=list,
         description="Channels whose admitted messages start a run, each answered in its own conversation; each "
@@ -1256,19 +1428,23 @@ class Assistant(Command):
         description="The channel where scheduled, wake and manual runs post; an incoming message is answered in its "
         "own conversation.",
     )
-    # Its released schema left names outside the pattern open: closing them in a minor release would narrow it.
     schedules: dict[Name, AssistantSchedule] = Field(
         default_factory=dict,
         max_length=32,
-        json_schema_extra=lambda schema: _nullable(schema, closed=False),
+        json_schema_extra=_nullable,
         description="Named schedules, each an every interval or a daily at time, with optional days, timezone, "
-        "lookback and gate; none by default.",
+        "lookback, when, gate and args; none by default.",
     )
     wake: WakeBounds | None = Field(
         default=None, description="Let a structured reply schedule one later run, clamped to min and max seconds."
     )
 
     _empty = field_validator("schedules", mode="before")(empty)
+
+    @field_validator("input_args", "schedule_args")
+    @classmethod
+    def valid_extra_args(cls, values: list[str]) -> list[str]:
+        return _valid_arguments(values, cls.PLACEHOLDERS)
 
     @field_validator("prompt")
     @classmethod
@@ -1292,6 +1468,13 @@ class Assistant(Command):
             raise ValueError("each input channel may appear once per assistant")
         if self.wake is not None and self.reply is None:
             raise ValueError("wake requires reply: only a structured reply can ask for a wake")
+        if self.propose and self.reply is None:
+            raise ValueError("propose requires reply: only a structured reply can propose actions")
+        if len(self.command) + len(self.input_args) > 128:
+            raise ValueError("command with input_args exceeds 128 arguments")
+        for schedule_name, spec in self.schedules.items():
+            if len(self.command) + len(self.schedule_args) + len(spec.args) > 128:
+                raise ValueError(f"schedule {schedule_name}: command with schedule_args and args exceeds 128 arguments")
         return self
 
 
@@ -1579,13 +1762,14 @@ class Bounds(Model):
 
     since: str = ""
     until: str = ""
+    observed_since: str = ""
     # Only items without an event time, such as a snapshot source's undated records.
     undated: bool = False
     # A brain-relative folder or file; matches that path and everything below it.
     prefix: Annotated[str, Field(max_length=4096)] = ""
     target: Annotated[str, Field(max_length=8192)] = ""
 
-    @field_validator("since", "until")
+    @field_validator("since", "until", "observed_since")
     @classmethod
     def instant(cls, value: str) -> str:
         try:

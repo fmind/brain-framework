@@ -22,6 +22,7 @@ from bf.models import (
     Invocation,
     Model,
     Name,
+    ProposedAction,
     Record,
     Send,
     decode,
@@ -43,6 +44,7 @@ RETENTION = timedelta(days=35)
 # A failing idempotent delivery retries after 2, 4, ... up to 300 seconds; past this many attempts it waits for
 # an explicit retry or cancellation instead of starting its adapter forever.
 MAX_ATTEMPTS = 20
+MAX_WAKES = 16
 _CREATE = Lock()
 
 
@@ -105,6 +107,30 @@ class Requested(Model):
 class Prepared(Model):
     record: Record
     wake: Requested | None = None
+    actions: list[ProposedAction] = Field(default_factory=list)
+
+
+def wake_slot(work: Work) -> str:
+    """The per-slot wake key suffix for `work`, keeping conversation and schedule wakes independent."""
+    return work.slot if work.slot.startswith(("input:", "schedule:")) else "wake"
+
+
+def job_retry_budget(
+    work: Work,
+    *,
+    gate: bool = False,
+    tempfail: bool = False,
+) -> tuple[int, bool]:
+    """Return `(retry_budget, is_idempotent)` for `work` given how the attempt failed."""
+    spec = (
+        work.settings.schedules.get(work.slot.removeprefix("schedule:")) if work.slot.startswith("schedule:") else None
+    )
+    configured = spec.retries if (spec is not None and spec.retries is not None) else work.settings.retries
+    is_idempotent = retried(work.settings.idempotent, work.kind)
+    default_budget = configured if configured is not None else (3 if is_idempotent else 0)
+    if gate or tempfail:
+        return (0 if configured == 0 else max(default_budget, 3)), is_idempotent
+    return default_budget, is_idempotent
 
 
 _SCHEMA = """
@@ -168,16 +194,20 @@ def answer_space(size: int, payload: int, routes: int) -> int:
     return size * (1 + 6 * (1 + routes)) + (payload + 65_536) * (1 + routes)
 
 
-def retry_policy(idempotent: bool, owned: bool, attempts: int, reason: str) -> tuple[str, str, str]:
+def retry_policy(
+    idempotent: bool, owned: bool, attempts: int, reason: str, *, not_started: bool = False
+) -> tuple[str, str, str]:
     """The state, error and due time of a delivery after a failed or interrupted attempt.
 
-    Only an idempotent assistant delivery retries by itself, with bounded backoff; a standalone send waits for
-    `bf queue ID --retry`, and an unknown non-idempotent outcome for inspection.
+    Idempotent deliveries (both assistant replies and standalone sends) retry with bounded backoff, as do assistant
+    deliveries whose send command never started; a non-idempotent standalone send that never started waits as failed,
+    and an unknown non-idempotent outcome waits as uncertain.
     """
     if not idempotent:
-        return "uncertain", reason, ""
-    if not owned:
-        return "failed", f"{reason}; retry it with bf queue ID --retry", ""
+        if not not_started:
+            return "uncertain", reason, ""
+        if not owned:
+            return "failed", f"{reason}; retry it with bf queue ID --retry", ""
     if attempts >= MAX_ATTEMPTS:
         return "failed", f"{reason}; stopped retrying after {attempts} attempts; retry or cancel it with bf queue", ""
     delay = min(300, 2 ** min(attempts, 9))
@@ -374,13 +404,86 @@ class Queue:
                 )
 
     @staticmethod
-    def put(db: sqlite3.Connection, work: Work, *, error: str = "") -> None:
+    def _enqueue_failure_notice(db: sqlite3.Connection, work: Work, state: str, *, brain: Store | None = None) -> None:
+        """Enqueue one concise deterministic failure notice on the thread when an input job fails terminally."""
+        if work.kind != "input" or work.origin is None or state not in {"failed", "uncertain"}:
+            return
+        route: Route | None = work.routes[0] if work.routes else None
+        if route is None and brain is not None:
+            with suppress(Error, OSError):
+                config = load(brain)
+                target = work.settings.post or work.origin.channel
+                channel = config.channels.get(target)
+                if channel is not None and channel.send is not None:
+                    route = Route(
+                        channel=target,
+                        command=channel.send,
+                        conversation=work.origin.message.conversation,
+                        reply_to=work.origin.message.id if target == work.origin.channel else "",
+                    )
+        if route is None or not route.conversation:
+            return
+        if db.execute(
+            "SELECT 1 FROM deliveries WHERE job=? AND id LIKE 'notice:%' AND state NOT IN ('delivered','cancelled')",
+            (work.id,),
+        ).fetchone():
+            return
+        seq = int(
+            db.execute("SELECT count(*) FROM deliveries WHERE job=? AND id LIKE 'notice:%'", (work.id,)).fetchone()[0]
+        )
+        notice_id = f"notice:{digest(f'{work.id}:{seq}'.encode())[:25]}"
+        message = Outgoing(
+            id=notice_id,
+            text=f"[bf] {work.assistant} did not finish ({state}); run bf queue to inspect.",
+            conversation=route.conversation,
+            reply_to=route.reply_to,
+        )
+        payload, encoded = message.model_dump_json(), route.command.model_dump_json()
+        with suppress(QueueFullError):
+            Queue.reserve(db, 0 if work.routes else 1, 2 * (len(payload.encode()) + len(encoded.encode())))
+            db.execute(
+                "INSERT OR IGNORE INTO deliveries(id,job,channel,state,payload,command,digest,due) "
+                "VALUES (?,?,?,'pending',?,?,?,?)",
+                (
+                    notice_id,
+                    work.id,
+                    route.channel,
+                    payload,
+                    encoded,
+                    _identity(route.channel, payload, encoded),
+                    now(),
+                ),
+            )
+
+    @staticmethod
+    def _supersede_failed_schedule(db: sqlite3.Connection, assistant: str, slot: str, at: str) -> None:
+        superseded = [
+            str(row[0])
+            for row in db.execute(
+                "SELECT id FROM jobs WHERE assistant=? AND slot=? AND state='failed'",
+                (assistant, slot),
+            )
+        ]
+        for old_id in superseded:
+            db.execute("UPDATE jobs SET state='cancelled',updated=? WHERE id=?", (at, old_id))
+            db.execute("DELETE FROM checkpoints WHERE key IN (?,?)", (f"retry:{old_id}", f"gate:{old_id}"))
+            db.execute(
+                "DELETE FROM checkpoints WHERE key LIKE ? AND json_extract(value,'$.job')=?",
+                (f"wake:{assistant}:%", old_id),
+            )
+            db.execute("UPDATE deliveries SET state='cancelled',error='' WHERE job=? AND state='pending'", (old_id,))
+
+    @staticmethod
+    def put(db: sqlite3.Connection, work: Work, *, error: str = "", brain: Store | None = None) -> None:
         """Store one job; its answer space is reserved only when a worker starts it. An `error` stores it failed."""
         if db.execute("SELECT 1 FROM jobs WHERE id=?", (work.id,)).fetchone():
             return
+        at = now()
+        if not error and work.slot.startswith("schedule:"):
+            # Periodic schedules supersede earlier terminal `failed` (never `uncertain`) runs on the next due window.
+            Queue._supersede_failed_schedule(db, work.assistant, work.slot, at)
         payload, slots = work.model_dump_json(), 1 + len(work.routes)
         Queue.reserve(db, slots, 2 * len(payload.encode()))
-        at = now()
         db.execute(
             "INSERT INTO jobs(id,assistant,kind,slot,state,created,updated,payload,error,slots) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -397,10 +500,57 @@ class Queue:
                 slots,
             ),
         )
+        if error:
+            Queue._enqueue_failure_notice(db, work, "failed", brain=brain)
 
-    def enqueue(self, work: Work) -> None:
+    def advance_gated_schedule(
+        self,
+        assistant: str,
+        slot: str,
+        end: str,
+        *,
+        when_key: str = "",
+        when_cursor: str = "",
+    ) -> None:
+        """Supersede any prior failed run on `(assistant, slot)` and advance its schedule/when checkpoints atomically."""
         with self.connect() as db:
-            self.put(db, work)
+            self._supersede_failed_schedule(db, assistant, slot, now())
+            self.checkpoint(db, f"schedule:{assistant}:{slot}", {"end": end, "success": end})
+            if when_key and when_cursor:
+                self.checkpoint(db, when_key, {"cursor": when_cursor})
+
+    def enqueue(
+        self,
+        work: Work,
+        *,
+        events: list[JsonValue] | None = None,
+        when_key: str = "",
+        when_cursor: str = "",
+    ) -> None:
+        with self.connect() as db:
+            self.put(db, work, brain=self.brain)
+            gate_data: dict[str, JsonValue] = {}
+            if events is not None:
+                gate_data["events"] = events
+            if when_key and when_cursor:
+                gate_data["when_key"] = when_key
+                gate_data["when_cursor"] = when_cursor
+            if gate_data:
+                self.checkpoint(db, f"gate:{work.id}", gate_data)
+
+    def wakes(self, assistant: str) -> list[tuple[str, dict[str, JsonValue]]]:
+        """All saved wake checkpoints `(slot, value)` for `assistant`, in key order."""
+        prefix = f"wake:{assistant}:"
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT key,value FROM checkpoints WHERE key LIKE ? ORDER BY key", (f"{prefix}%",)
+            ).fetchall()
+        result: list[tuple[str, dict[str, JsonValue]]] = []
+        for key, raw in rows:
+            value = decode(raw)
+            if isinstance(value, dict):
+                result.append((str(key).removeprefix(prefix), cast(dict[str, JsonValue], value)))
+        return result
 
     def enqueue_wake(self, work: Work, wake: dict[str, JsonValue]) -> bool:
         """Queue a wake run and mark its wake taken in one transaction, so it starts once.
@@ -408,22 +558,29 @@ class Queue:
         Returns False, queueing nothing, when the wake changed since it was read: a run that finished meanwhile
         replaced or took it, and the newer request must keep its own due time.
         """
-        key = f"wake:{work.assistant}"
+        key = f"wake:{work.assistant}:{wake_slot(work)}"
         with self.connect() as db:
             row = db.execute("SELECT value FROM checkpoints WHERE key=?", (key,)).fetchone()
             if row is None or decode(row[0]) != wake or wake.get("job"):
                 return False
-            self.put(db, work)
+            self.put(db, work, brain=self.brain)
             self.checkpoint(db, key, {**wake, "job": work.id})
         return True
 
     def save_gate(self, key: str, events: list[JsonValue]) -> bool:
         """Keep a pending job's gate events for its retries; False when the job was cancelled meanwhile."""
         with self.connect() as db:
+            existing_row = db.execute("SELECT value FROM checkpoints WHERE key=?", (f"gate:{key}",)).fetchone()
+            existing = (
+                existing_val
+                if existing_row is not None and isinstance(existing_val := decode(existing_row[0]), dict)
+                else {}
+            )
+            merged: dict[str, JsonValue] = {**existing, "events": events}
             cursor = db.execute(
                 "INSERT OR REPLACE INTO checkpoints SELECT ?,? WHERE EXISTS "
                 "(SELECT 1 FROM jobs WHERE id=? AND state='pending')",
-                (f"gate:{key}", encode({"events": events}).decode(), key),
+                (f"gate:{key}", encode(merged).decode(), key),
             )
             return cursor.rowcount > 0
 
@@ -470,7 +627,7 @@ class Queue:
                     )
             for work, error in jobs:
                 if work.origin is not None and work.origin.message.id in accepted:
-                    self.put(db, work, error=error)
+                    self.put(db, work, error=error, brain=self.brain)
             if checkpoint:
                 self.checkpoint(db, *checkpoint)
             self.trim(db)
@@ -508,6 +665,79 @@ class Queue:
                 ).fetchone()
                 is not None
             )
+
+    def slot_state(self, assistant: str, slot: str) -> tuple[bool, str]:
+        """Return `(blocking, failed_at)` for a schedule or wake slot.
+
+        On `schedule:<name>`, terminal `failed` jobs do not block the next scheduled window (`failed_at` records when
+        the latest one failed so the schedule waits until the next due window); `uncertain` jobs always block.
+        """
+        if not slot.startswith("schedule:"):
+            return self.active(assistant, slot), ""
+        with self.connect() as db:
+            blocking = (
+                db.execute(
+                    "SELECT 1 FROM jobs WHERE assistant=? AND slot=? "
+                    "AND state NOT IN ('complete','cancelled','failed') LIMIT 1",
+                    (assistant, slot),
+                ).fetchone()
+                is not None
+            )
+            failed_row = db.execute(
+                "SELECT coalesce(max(updated),'') FROM jobs WHERE assistant=? AND slot=? AND state='failed'",
+                (assistant, slot),
+            ).fetchone()
+        return blocking, str(failed_row[0] if failed_row else "")
+
+    def scheduling_state(
+        self, names: set[str]
+    ) -> tuple[
+        dict[str, list[tuple[str, dict[str, JsonValue]]]],
+        dict[str, dict[str, JsonValue]],
+        set[tuple[str, str]],
+        set[tuple[str, str]],
+        dict[tuple[str, str], str],
+    ]:
+        """Read wakes, schedule checkpoints and active/failed slot states for `names` in one transaction."""
+        wakes: dict[str, list[tuple[str, dict[str, JsonValue]]]] = {}
+        schedules: dict[str, dict[str, JsonValue]] = {}
+        active_slots: set[tuple[str, str]] = set()
+        blocking_schedules: set[tuple[str, str]] = set()
+        failed_schedules: dict[tuple[str, str], str] = {}
+        if not names:
+            return wakes, schedules, active_slots, blocking_schedules, failed_schedules
+        with self.connect() as db:
+            for key, raw in db.execute(
+                "SELECT key,value FROM checkpoints WHERE key LIKE 'wake:%' OR key LIKE 'schedule:%' ORDER BY key"
+            ):
+                key_str = str(key)
+                if key_str.startswith("wake:"):
+                    assistant, sep, slot_name = key_str.removeprefix("wake:").partition(":")
+                    if sep and assistant in names and isinstance(val := decode(raw), dict):
+                        wakes.setdefault(assistant, []).append((slot_name, cast(dict[str, JsonValue], val)))
+                else:
+                    assistant = key_str.removeprefix("schedule:").partition(":")[0]
+                    if assistant not in names:
+                        continue
+                    val = decode(raw)
+                    if not isinstance(val, dict):
+                        raise Error("invalid assistant checkpoint; preserve the queue and repair it")
+                    schedules[key_str] = cast(dict[str, JsonValue], val)
+            for assistant, slot, state, updated in db.execute(
+                "SELECT assistant,slot,state,updated FROM jobs WHERE state NOT IN ('complete','cancelled')"
+            ):
+                if assistant not in names:
+                    continue
+                pair = (str(assistant), str(slot))
+                active_slots.add(pair)
+                if str(slot).startswith("schedule:"):
+                    if state != "failed":
+                        blocking_schedules.add(pair)
+                    else:
+                        prev = failed_schedules.get(pair, "")
+                        if str(updated) > prev:
+                            failed_schedules[pair] = str(updated)
+        return wakes, schedules, active_slots, blocking_schedules, failed_schedules
 
     def next(self, reactive: bool, names: set[str], *, excluding: Collection[str] = ()) -> str | None:
         """The oldest runnable job of `names` whose earlier work in its slot is resolved, skipping `excluding`.
@@ -559,8 +789,16 @@ class Queue:
             ).rowcount:
                 raise Error("assistant attempt no longer owns its job")
 
-    def prepare(self, work: Work, record: Record, replies: list[Outgoing], wake: Requested | None = None) -> None:
-        prepared = Prepared(record=record, wake=wake)
+    def prepare(
+        self,
+        work: Work,
+        record: Record,
+        replies: list[Outgoing],
+        wake: Requested | None = None,
+        *,
+        actions: Collection[ProposedAction] = (),
+    ) -> None:
+        prepared = Prepared(record=record, wake=wake, actions=list(actions))
         with self.connect() as db:
             db.execute(
                 "UPDATE jobs SET state='prepared',prepared=?,updated=? WHERE id=?",
@@ -583,57 +821,129 @@ class Queue:
                 )
 
     def finish(self, work: Work, wake: Requested | None = None) -> None:
-        """Complete a job; a wake it asked for replaces the assistant's pending one in the same transaction."""
+        """Complete a job; a wake it asked for replaces the slot's pending wake (capped at MAX_WAKES per assistant)."""
         with self.connect() as db:
             # A job cancelled while its gate ran stays cancelled: the cancellation already advanced its schedule.
             completed = db.execute(
                 "UPDATE jobs SET state='complete',updated=?,error='' WHERE id=? AND state<>'cancelled'",
                 (now(), work.id),
             )
+            gate_row = db.execute("SELECT value FROM checkpoints WHERE key=?", (f"gate:{work.id}",)).fetchone()
             db.execute("DELETE FROM checkpoints WHERE key IN (?,?)", (f"retry:{work.id}", f"gate:{work.id}"))
             if not completed.rowcount:
                 return
+            if gate_row is not None and isinstance(gate_val := decode(gate_row[0]), dict):
+                when_key, when_cursor = gate_val.get("when_key"), gate_val.get("when_cursor")
+                if isinstance(when_key, str) and when_key and isinstance(when_cursor, str) and when_cursor:
+                    existing_row = db.execute("SELECT value FROM checkpoints WHERE key=?", (when_key,)).fetchone()
+                    existing_cursor = (
+                        str(existing_val.get("cursor") or "")
+                        if existing_row is not None and isinstance(existing_val := decode(existing_row[0]), dict)
+                        else ""
+                    )
+                    if when_cursor > existing_cursor:
+                        self.checkpoint(db, when_key, {"cursor": when_cursor})
             if work.kind == "schedule":
                 self.checkpoint(db, f"schedule:{work.assistant}:{work.slot}", {"end": work.end, "success": now()})
             if work.kind == "wake":
                 # Only the wake this job took: a newer one asked for meanwhile stays pending.
                 db.execute(
                     "DELETE FROM checkpoints WHERE key=? AND json_extract(value,'$.job')=?",
-                    (f"wake:{work.assistant}", work.id),
+                    (f"wake:{work.assistant}:{wake_slot(work)}", work.id),
                 )
             if wake is not None:
+                slot_name = wake_slot(work)
+                wake_key = f"wake:{work.assistant}:{slot_name}"
+                active_others: list[tuple[str, str]] = []
+                for existing_key, existing_raw in db.execute(
+                    "SELECT key,value FROM checkpoints WHERE key LIKE ? AND key!=?",
+                    (f"wake:{work.assistant}:%", wake_key),
+                ):
+                    if isinstance(existing_val := decode(existing_raw), dict) and not existing_val.get("job"):
+                        active_others.append((str(existing_val.get("set") or ""), str(existing_key)))
+                if len(active_others) >= MAX_WAKES:
+                    for _, evicted_key in sorted(active_others)[: len(active_others) - MAX_WAKES + 1]:
+                        db.execute("DELETE FROM checkpoints WHERE key=?", (evicted_key,))
                 self.checkpoint(
-                    db, f"wake:{work.assistant}", {"due": wake.due, "reason": wake.reason, "set": work.end, "job": ""}
+                    db,
+                    wake_key,
+                    {
+                        "due": wake.due,
+                        "reason": wake.reason,
+                        "set": work.end,
+                        "job": "",
+                        **({"origin": work.origin.model_dump(mode="json")} if work.origin is not None else {}),
+                    },
                 )
             self.trim(db)
 
-    def _retry_attempt(self, db: sqlite3.Connection, key: str, reason: str) -> tuple[str, str]:
+    def _retry_job(
+        self,
+        db: sqlite3.Connection,
+        key: str,
+        reason: str,
+        *,
+        budget: int,
+        uncertain: bool,
+        idempotent: bool,
+    ) -> tuple[str, str]:
         row = db.execute("SELECT value FROM checkpoints WHERE key=?", (f"retry:{key}",)).fetchone()
         previous = decode(row[0]) if row is not None else {}
         attempts = (int(str(previous.get("attempts", 0))) if isinstance(previous, dict) else 0) + 1
-        outcome, message, due = retry_policy(True, True, attempts, reason)
-        if outcome == "pending":
+        if attempts <= budget:
+            delay = min(300, 2 ** min(attempts, 9))
+            due = timestamp((datetime.now(UTC) + timedelta(seconds=delay)).isoformat())
             self.checkpoint(db, f"retry:{key}", {"attempts": attempts, "due": due})
-        else:
-            db.execute("DELETE FROM checkpoints WHERE key=?", (f"retry:{key}",))
+            return "pending", reason
+        db.execute("DELETE FROM checkpoints WHERE key=?", (f"retry:{key}",))
+        outcome = "uncertain" if (uncertain and not idempotent) else "failed"
+        message = (
+            f"{reason}; stopped retrying after {attempts} attempts; retry or cancel it with bf queue"
+            if budget > 0
+            else reason
+        )
         return outcome, message
 
     def fail(
-        self, key: str, error: str, *, uncertain: bool = False, idempotent: bool = False, retry: bool = False
+        self,
+        key: str,
+        error: str,
+        *,
+        uncertain: bool = False,
+        idempotent: bool | None = None,
+        retry: bool = False,
+        gate: bool = False,
+        tempfail: bool = False,
+        not_started: bool = False,
     ) -> None:
-        """Record a failed attempt; `retry`, or an uncertain attempt of an idempotent assistant, retries with backoff."""
+        """Record a failed attempt, retrying up to the job's retry budget with bounded backoff."""
         with self.connect() as db:
-            if retry or (uncertain and idempotent):
-                outcome, message = self._retry_attempt(db, key, error)
-                db.execute(
-                    "UPDATE jobs SET state=?,error=?,updated=? WHERE id=? AND state NOT IN ('complete','cancelled')",
-                    (outcome, message, now(), key),
-                )
+            job_row = db.execute("SELECT payload,state FROM jobs WHERE id=?", (key,)).fetchone()
+            if job_row is None or job_row[1] in {"complete", "cancelled"}:
                 return
-            db.execute(
-                "UPDATE jobs SET state=?,error=?,updated=? WHERE id=? AND state NOT IN ('complete','cancelled')",
-                ("uncertain" if uncertain else "failed", error, now(), key),
+            work: Work | None = None
+            with suppress(Error):
+                work = self.parse({"payload": job_row[0], "state": job_row[1]})
+            if work is not None:
+                budget, is_idempotent = job_retry_budget(work, gate=gate or retry, tempfail=tempfail)
+                if idempotent is not None:
+                    is_idempotent = idempotent
+            else:
+                is_idempotent = bool(idempotent)
+                budget = (
+                    3
+                    if (retry or gate or tempfail or (not_started and is_idempotent) or (uncertain and is_idempotent))
+                    else 0
+                )
+            outcome, message = self._retry_job(
+                db, key, error, budget=budget, uncertain=uncertain, idempotent=is_idempotent
             )
+            updated = db.execute(
+                "UPDATE jobs SET state=?,error=?,updated=? WHERE id=? AND state NOT IN ('complete','cancelled')",
+                (outcome, message, now(), key),
+            )
+            if updated.rowcount and work is not None and outcome in {"failed", "uncertain"}:
+                self._enqueue_failure_notice(db, work, outcome, brain=self.brain)
 
     def delivery(
         self,
@@ -643,12 +953,15 @@ class Queue:
         names: set[str] | None = None,
         excluding: set[str] | None = None,
         skip: Collection[str] = (),
+        include_standalone: bool = False,
     ) -> dict[str, object] | None:
         """The next due delivery; `excluding` names busy channels and `skip` delivery ids to pass over."""
         with self.connect() as db:
             rows = db.execute(
                 "SELECT deliveries.*,jobs.assistant FROM deliveries LEFT JOIN jobs ON jobs.id=deliveries.job "
-                "WHERE deliveries.state='pending' AND (jobs.state='complete' OR deliveries.job IS NULL) "
+                "WHERE deliveries.state='pending' "
+                "AND (jobs.state='complete' OR deliveries.job IS NULL "
+                "OR (deliveries.id LIKE 'notice:%' AND jobs.state IN ('failed','uncertain'))) "
                 "AND deliveries.due<=? AND (?='' OR deliveries.job=?) AND (?='' OR deliveries.id=?) ORDER BY deliveries.due,id LIMIT 10000",
                 (now(), job, job, key, key),
             ).fetchall()
@@ -657,7 +970,7 @@ class Queue:
             (
                 row
                 for row in rows
-                if (names is None or row["assistant"] in names)
+                if (names is None or row["assistant"] in names or (include_standalone and row["job"] is None))
                 and row["channel"] not in (excluding or set())
                 and row["id"] not in skip
             ),
@@ -680,13 +993,16 @@ class Queue:
                 for row in db.execute("SELECT id,channel,state,error FROM deliveries WHERE job=? ORDER BY id", (job,))
             ]
 
-    def outstanding(self, names: set[str]) -> list[dict[str, object]]:
+    def outstanding(self, names: set[str], *, include_standalone: bool = False) -> list[dict[str, object]]:
         with self.connect() as db:
             rows = db.execute(
-                "SELECT deliveries.id,deliveries.channel,deliveries.error,jobs.assistant FROM deliveries "
-                "JOIN jobs ON jobs.id=deliveries.job WHERE deliveries.state NOT IN ('delivered','cancelled') AND jobs.state='complete'"
+                "SELECT deliveries.id,deliveries.channel,deliveries.error,jobs.assistant,deliveries.job FROM deliveries "
+                "LEFT JOIN jobs ON jobs.id=deliveries.job "
+                "WHERE deliveries.state NOT IN ('delivered','cancelled') "
+                "AND (jobs.state='complete' OR deliveries.job IS NULL "
+                "OR (deliveries.id LIKE 'notice:%' AND jobs.state IN ('failed','uncertain')))"
             ).fetchall()
-        return [dict(row) for row in rows if row["assistant"] in names]
+        return [dict(row) for row in rows if row["assistant"] in names or (include_standalone and row["job"] is None)]
 
     def delivered(self, key: str, name: str, message: Outgoing, receipt: Receipt) -> None:
         with self.connect() as db:
@@ -744,23 +1060,33 @@ class Queue:
             job_row = db.execute("SELECT payload,kind FROM jobs WHERE id=? AND state='running'", (job,)).fetchone()
             if job_row is not None:
                 # A payload BF cannot read retries nothing: the attempt waits for inspection.
-                try:
-                    payload = decode(job_row[0])
-                except Error:
-                    payload = {}
-                settings = payload.get("settings") if isinstance(payload, dict) else None
-                if isinstance(settings, dict) and retried(settings.get("idempotent"), job_row[1]):
-                    outcome, message = self._retry_attempt(db, job, "interrupted harness attempt")
-                    db.execute(
-                        "UPDATE jobs SET state=?,error=?,updated=? WHERE id=? AND state='running'",
-                        (outcome, message, now(), job),
-                    )
+                work: Work | None = None
+                with suppress(Error):
+                    work = self.parse({"payload": job_row[0], "state": "running"})
+                if work is not None:
+                    budget, is_idempotent = job_retry_budget(work)
                 else:
-                    db.execute(
-                        "UPDATE jobs SET state='uncertain',error='interrupted harness attempt; inspect before retrying' "
-                        "WHERE id=? AND state='running'",
-                        (job,),
-                    )
+                    try:
+                        payload = decode(job_row[0])
+                    except Error:
+                        payload = {}
+                    settings = payload.get("settings") if isinstance(payload, dict) else None
+                    is_idempotent = isinstance(settings, dict) and retried(settings.get("idempotent"), job_row[1])
+                    budget = 3 if is_idempotent else 0
+                reason_text = (
+                    "interrupted harness attempt"
+                    if budget > 0 or is_idempotent
+                    else "interrupted harness attempt; inspect before retrying"
+                )
+                outcome, message = self._retry_job(
+                    db, job, reason_text, budget=budget, uncertain=True, idempotent=is_idempotent
+                )
+                updated = db.execute(
+                    "UPDATE jobs SET state=?,error=?,updated=? WHERE id=? AND state='running'",
+                    (outcome, message, now(), job),
+                )
+                if updated.rowcount and work is not None and outcome in {"failed", "uncertain"}:
+                    self._enqueue_failure_notice(db, work, outcome, brain=self.brain)
             row = db.execute(
                 "SELECT job IS NOT NULL,coalesce(json_extract(command,'$.idempotent'),0),attempts "
                 "FROM deliveries WHERE id=? AND state='sending'",
@@ -822,12 +1148,23 @@ class Queue:
                 for key, raw in db.execute("SELECT key,value FROM checkpoints WHERE key LIKE 'health:%'")
                 if isinstance(value := decode(raw), dict) and value.get("error")
             }
-            # When each assistant wakes itself next; the reason is model text, which listings never show.
-            wakes = [
-                {"assistant": key.removeprefix("wake:"), "due": value.get("due"), "job": value.get("job") or None}
-                for key, raw in db.execute("SELECT key,value FROM checkpoints WHERE key LIKE 'wake:%' ORDER BY key")
-                if isinstance(value := decode(raw), dict)
-            ]
+            wakes = []
+            for key, raw in db.execute("SELECT key,value FROM checkpoints WHERE key LIKE 'wake:%' ORDER BY key"):
+                if not isinstance(value := decode(raw), dict):
+                    continue
+                suffix = str(key).removeprefix("wake:")
+                assistant_name, sep, slot_name = suffix.partition(":")
+                if not sep:
+                    continue
+                wakes.append(
+                    {
+                        "assistant": assistant_name,
+                        "slot": slot_name,
+                        "due": value.get("due"),
+                        "reason": str(value.get("reason") or ""),
+                        "job": value.get("job") or None,
+                    }
+                )
         return {
             "jobs": jobs,
             "wakes": wakes,
@@ -935,11 +1272,16 @@ class Queue:
                     )
                 db.execute("UPDATE jobs SET state=?,error='',updated=? WHERE id=?", (state, now(), key))
                 db.execute("DELETE FROM checkpoints WHERE key=?", (f"retry:{key}",))
+                db.execute(
+                    "UPDATE deliveries SET state='cancelled',error='' WHERE job=? AND id LIKE 'notice:%' AND state='pending'",
+                    (key,),
+                )
                 if cancel:
                     db.execute("DELETE FROM checkpoints WHERE key=?", (f"gate:{key}",))
                     # A cancelled wake run drops the wake it took, so `bf queue` lists only live wakes.
                     db.execute(
-                        "DELETE FROM checkpoints WHERE key=? AND json_extract(value,'$.job')=?", (f"wake:{row[4]}", key)
+                        "DELETE FROM checkpoints WHERE key LIKE ? AND json_extract(value,'$.job')=?",
+                        (f"wake:{row[4]}:%", key),
                     )
                     db.execute(
                         "UPDATE deliveries SET state='cancelled',error='' WHERE job=? AND state='pending'", (key,)

@@ -5,151 +5,50 @@ description: Look up size, page and process limits, and the safeguards around ru
 
 # Limits and safeguards
 
-Look up exact limits for a skipped file, a partial reply or a stopped program. For recovery steps, start with [Troubleshooting](troubleshooting.md); for what to review before collecting or sharing, see [Privacy](privacy.md).
+Exact resource, pagination and subprocess bounds enforced by Brain Framework. See [Troubleshooting](troubleshooting.md) for recovery and [Privacy](privacy.md) for trust boundaries.
 
 ## Size bounds
 
-| Resource                                                      | Limit                                                                                                                                                                      |
-| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bf.yaml`, machine registry, eval suite                       | 1 MiB each                                                                                                                                                                 |
-| YAML structure, including frontmatter                         | 32 nesting levels and 20,000 parser events; integers up to 4,300 decimal digits in any base                                                                                |
-| Authored note                                                 | 4 MiB                                                                                                                                                                      |
-| Note or record title                                          | 4,096 characters; listings show 200, then `…`                                                                                                                              |
-| Note `aliases`, `links`, `tags`                               | 1,000 each                                                                                                                                                                 |
-| Note alias, `links` or `sources` entry, `entity`, `resource`  | 8,192 characters each                                                                                                                                                      |
-| Search or page reply                                          | Items end early near 32 KiB and continue at `next_offset`; home lists as many projects as fit the reply as printed, with `projects_total`                                  |
-| Any search or read reply                                      | 4 MiB; a larger one fails with `response exceeds its byte limit; narrow the request`                                                                                       |
-| Exact read                                                    | Text pages near 32 KiB; the first page adds all other fields, such as `attributes`                                                                                         |
-| Paged note divided by headings                                | Opens with 4 KiB of text; its outline lists up to 200 sections                                                                                                             |
-| Backlink previews                                             | 5 newest items per relation, excerpts of 160 characters; 64 relation groups, then `backlinks_omitted`                                                                      |
-| Search or read behind a busy writer                           | Waits 2 seconds, then answers from the current cache with `stale`; an exact record read waits 3 seconds in all; without a cache, waits up to 120 seconds for it            |
-| Source folder settle time                                     | 5 seconds: a `memories/SOURCE` folder changed more recently is listed again at each search or read                                                                         |
-| Claims of a subject                                           | 20 per relation and 50 in all                                                                                                                                              |
-| Record file                                                   | 16 MiB                                                                                                                                                                     |
-| Record fields other than `text`                               | 2 MiB as UTF-8 JSON, so an exact read's first page stays within the reply limit                                                                                            |
-| Record id                                                     | 1–4,096 characters and 7,988 once percent-encoded                                                                                                                          |
-| Record text                                                   | 4,194,304 characters; longer text fails the run unless the sensor sets `truncate_text` or `max_text_bytes`                                                                 |
-| Record links, aliases, field names                            | 1,000 each                                                                                                                                                                 |
-| Record URL, link, field value                                 | 8,192 characters                                                                                                                                                           |
-| Listed field value                                            | 200 characters; longer values stay in the exact read                                                                                                                       |
-| Listed fields of one item                                     | 2 KiB of JSON, in field-name order; later fields stay in the exact read                                                                                                    |
-| Entries per record source or authored folder                  | 100,000                                                                                                                                                                    |
-| Folder depth                                                  | 64 levels below a scanned folder; a deeper folder fails the scan and names it                                                                                              |
-| Note path                                                     | 7,988 characters once percent-encoded                                                                                                                                      |
-| Search query                                                  | 4,096 characters; the first 32 distinct words match; a `word*` prefix of three or more letters adds up to 64 stems ([prefixes](retrieval.md#prefixes-and-other-languages)) |
-| Search results per page                                       | 50                                                                                                                                                                         |
-| Page sizes                                                    | Folders and tags 200; `memories/SOURCE` 20; other pages 50                                                                                                                 |
-| Offsets                                                       | 2^53−1                                                                                                                                                                     |
-| Skipped files per brain                                       | 200 listed in `problems`, each error cut to 1 KiB with `…`, then a count                                                                                                   |
-| Validation problems, warnings, unresolved targets             | 200 each, then a `*_truncated` flag; 20 spellings per warning                                                                                                              |
-| Reasons named by one diagnostic                               | The first 5 distinct reasons, then `and N more`                                                                                                                            |
-| Broken link named by a routine's error                        | The first one, cut to 200 characters with `…`, then `and N more`                                                                                                           |
-| Relation `targets`                                            | 64 prefixes of at most 1,024 characters                                                                                                                                    |
-| Retrieval suites                                              | 100 suites per run, 200 cases per suite                                                                                                                                    |
-| Records changed by one collection                             | 99,999; narrow the window or split the source                                                                                                                              |
-| Reprojection                                                  | 1,000 changed records per transaction; 200 failed records listed, then `"problems_truncated":true`                                                                         |
-| Sensor output                                                 | 64 MiB by default, up to 256 MiB                                                                                                                                           |
-| Sensor `incomplete` counts                                    | Integers from 1 to 2^53−1, with `missed` at most `of`; three incomplete runs in a row make a scheduled source need attention                                               |
-| Action routine output                                         | 1 MiB by default, up to 4 MiB; a log routine's output only feeds its log                                                                                                   |
-| Input from `bf run` or `bf channel send --stdin`              | 1 MiB, ending within 10 seconds when piped                                                                                                                                 |
-| Assistant output                                              | 1 MiB by default, up to 4 MiB                                                                                                                                              |
-| Prompt file, expanded prompt                                  | 120,000 bytes each, as an argument or on standard input; below Linux's 128 KiB bound on one argument                                                                       |
-| Program name                                                  | 64 characters                                                                                                                                                              |
-| Program command                                               | The program and up to 127 arguments of at most 16,384 characters each                                                                                                      |
-| Routine `hooks`                                               | 16 events                                                                                                                                                                  |
-| Program and channel `timeout`                                 | 1–3,600 seconds                                                                                                                                                            |
-| `refresh`, `lookback`, `overlap`, `reconcile`, `silent_after` | up to 365 days                                                                                                                                                             |
-| `expire_after`                                                | 1 hour to 100 years                                                                                                                                                        |
-| `memories/SOURCE/.forgotten`                                  | 8 MiB, about 120,000 forgotten records per source                                                                                                                          |
-| `keep`                                                        | 1–10,000 routine actions; 1–50,000 assistant records                                                                                                                       |
-| Program log                                                   | 1 MiB per `logs/NAME.log`; per run, the last 256 KiB of stderr and of a log routine's stdout                                                                               |
-
-Folder entries:
-
-- Each record takes one folder entry.
-- `bf status` warns above 80,000 entries without failing `--check`.
-- A tree over the limit fails the scan and names the folder.
-- Split a crowded source's sensor or archive its older records.
-- Keep bulky imports in the brain's root `inputs/` or `originals/`, which are not scanned.
-
-A long pasted question matches only its first 32 distinct words after function words are dropped: keep the distinctive terms.
-
-Page sizes bound one reply, not the result: follow `next_offset`. SQLite still ranks every match up to a deep offset, so very deep pages take longer.
+| Resource                                | Limit                                                                                                                                                                                                                              |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bf.yaml`, machine registry, eval suite | 1 MiB each; YAML <= 32 nesting levels, 20,000 events, 4,300-digit integers                                                                                                                                                         |
+| Authored note                           | 4 MiB; path <= 7,988 chars percent-encoded                                                                                                                                                                                         |
+| Note or record title                    | 4,096 characters (listings preview 200 chars + `…`)                                                                                                                                                                                |
+| Note `aliases`, `links`, `tags`         | 1,000 each; `entity`, `resource`, alias, `links` and `sources.resource` <= 8,192 chars; tag label 1–128 chars                                                                                                                      |
+| Search or page reply                    | Soft page cut near 32 KiB (`next_offset`); hard reply ceiling 4 MiB (`response exceeds its byte limit; narrow the request`)                                                                                                        |
+| Paged exact read                        | ~32 KiB text slices (`4 KiB` + up to 200-entry `outline` on page 1 of multi-section notes)                                                                                                                                         |
+| Graph previews                          | Backlinks: 5 items/relation (160-char excerpt), 64 relation groups (`backlinks_omitted`); claims: 20/relation, 50 total (`claims_truncated`)                                                                                       |
+| Busy writer waits & source settle       | 2s cache wait (3s exact record wait) before serving `stale`; up to 120s when no cache exists; 5s `memories/SOURCE` settle rescan                                                                                                   |
+| Record file & metadata                  | 16 MiB file; non-`text` fields <= 2 MiB UTF-8 JSON; `id` 1–4,096 chars (<= 7,988 percent-encoded)                                                                                                                                  |
+| Record `text`                           | 4,194,304 bytes/chars; longer text fails unless sensor sets `max_text_bytes` (1–4,194,304), cutting on UTF-8 boundary with `attributes.partial: true`                                                                              |
+| Record `links`, `aliases`, `fields`     | 1,000 each; URL, link or field value <= 8,192 chars (listings show <= 200 chars and <= 2 KiB of single-value `fields`)                                                                                                             |
+| Directory scan & depth                  | 100,000 entries per source or authored folder (`bf status` warns above 80,000); <= 64 directory levels                                                                                                                             |
+| Search query & page sizes               | 4,096 chars, first 32 content words, up to 64 stems per `word*` prefix; search 1–50; folders/tags 200; `memories/SOURCE` 20; other pages 50                                                                                        |
+| Problem & diagnostic caps               | 200 skipped files, validation problems, warnings or unresolved targets (`*_truncated`); 5 reasons per diagnostic; offsets <= `2^53 - 1`                                                                                            |
+| Relation `targets` & evaluation suites  | 64 prefixes (<= 1,024 chars each); 100 eval suites/run, 200 cases/suite                                                                                                                                                            |
+| Collection & reprojection               | 99,999 changed records/collection; sensor stdout 64 MiB default (up to 256 MiB); reprojection 1,000 records/transaction                                                                                                            |
+| Routine, stdin & assistant output       | Action routine stdout 1 MiB default (up to 4 MiB); piped `--stdin` <= 1 MiB within 10s; assistant stdout 1 MiB default (up to 4 MiB)                                                                                               |
+| Prompts, names & commands               | Prompt file and expanded prompt <= 120,000 bytes; program name <= 64 chars; command + up to 127 args (<= 16,384 chars each); `hooks` <= 16                                                                                         |
+| Cadence, retention & logs               | `timeout` 1–3,600s; `refresh`/`lookback`/`overlap`/`reconcile`/`silent_after` <= 365d; `expire_after` 1h–100y; `.forgotten` <= 8 MiB; `keep` 1–10,000 actions / 1–50,000 assistant records; `logs/NAME.log` <= 1 MiB (256 KiB/run) |
 
 ## Processes and logs
 
-Sensors, routines and assistants run from the brain folder with direct arguments, without a shell.
+Subprocesses run from the brain root without a shell, with `BF_BRAIN` set, stdin `/dev/null` (unless `--stdin`, hook refs or stdin prompt), and loader/startup injection variables stripped (`LD_*`, `DYLD_*`, `GCONV_PATH`, `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `ZDOTDIR`, `PYTHON*`, Java/Node/Ruby/Perl/PHP/.NET/R/Lua startup hooks, and empty/relative `PATH` entries).
 
-- Their standard input is `/dev/null`, with two exceptions: what a hook or `bf run --stdin` pipes to a routine, and the expanded prompt of an assistant command without `{{prompt}}`.
-- They receive `BF_BRAIN` set to that brain, so a nested `bf` call reads the brain running it.
+- **Termination**: BF kills the entire process group when a run ends, times out or exceeds `max_bytes` — sending `SIGTERM`, waiting up to 5 seconds, then sending `SIGKILL` (`bf watch` and service units allow 60 seconds on shutdown for transaction rollback).
+- **Logs (`logs/NAME.log`)**: gitignored, unindexed, bounded to newest whole entries within 1 MiB; never quoted in diagnostics.
+- **Usage (`usage.jsonl`)**: stores aggregate timestamps, operation, kind and result count (plus <= 8 unmatched tokens on empty searches; rolled up daily past 1 MiB, dropped after 30 days) — never queries, refs, paths or identities.
+  - `search` kinds: `none`, `period`, `folder`, `note`, `memories`, `source`, `source-period`, `record`, `identity`, `tag`, `combined`.
+  - `read` kinds: `home`, `review`, `period`, `tasks`, `tags`, `tag`, `memories`, `source`, `source-period`, `record`, `folder`, `note`, `section`, `action`, `identity`, `relation`.
 
-BF removes environment variables that could load code **before your program starts**, such as `BASH_ENV` or `PYTHONPATH`:
+Assistants, channels and durable queue bounds ([channel recovery](channels.md#queue-and-recovery)):
 
-| Removed                                                                                                                                                            | Reason                                                 |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| `LD_*`, `DYLD_*`, `GCONV_PATH`                                                                                                                                     | Can inject loader libraries or conversion modules.     |
-| `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `ZDOTDIR`                                                                                        | Can supply shell startup code, options or functions.   |
-| `PYTHON*`, Java, Node, Ruby, Perl and PHP startup options, `DOTNET_STARTUP_HOOKS`, `CORECLR_*`, `R_PROFILE*`, `R_ENVIRON*`, `LUA_INIT*`, `LUA_PATH*`, `LUA_CPATH*` | Can alter interpreter startup or module loading.       |
-| Relative or empty `PATH` entries                                                                                                                                   | Could run an unexpected program from the brain folder. |
-
-Other variables, including provider credentials and absolute `PATH` entries, remain. The list is best effort, not a sandbox.
-
-- When a program needs dependencies, use an explicit runtime such as `uv run --no-project sensors/example.py`.
-- A program that needs one of these variables sets it in its own command, such as `[env, R_ENVIRON_USER=/path/to/Renviron, Rscript, sensors/example.R]`.
-
-How a run ends:
-
-- A run ends when the program exits and its standard output closes.
-- When a run ends, successful or not, BF stops the program's whole process group. Background helpers end with it unless they leave that group, as daemons that start their own session do.
-- To stop a group, BF sends SIGTERM, waits up to 5 seconds for every process in it to exit, then sends SIGKILL to what remains. A program can trap SIGTERM to remove private temporary files, such as a copied database, within that grace.
-- A timeout, cancellation or closed terminal ends a run early, as does output beyond `max_bytes` from a sensor or action routine. Partial output never replaces stored records.
-- A run therefore lasts at most its `timeout` plus the 5-second grace. BF reads no output during the grace, so a program that keeps writing only fills its pipe until SIGKILL.
-- Programs stopped together, such as parallel sensors on Ctrl-C or the programs of a closing watch, share one grace. A second Ctrl-C while a single program is stopping sends SIGKILL at once.
-- Cancellation during startup waits until BF owns the new process, then stops its group too.
-- A run BF stops fails with its cause, such as `program timed out after 300s`, even when the program exits on SIGTERM.
-- A program that another process kills, such as the out-of-memory killer, or that ends itself with a signal fails naming the signal: `program was killed by SIGKILL` or `program was killed by SIGTERM`.
-- A background helper that keeps standard output open more than a second after the exit fails the run. Redirecting its output, for example to `/dev/null`, avoids that failure, not the stop.
-- A helper holding only stderr never delays or fails the run.
-- Watch, and the service files in [Run watch as a service](schedule.md#run-watch-as-a-service), allow at least 60 seconds after a stop request, so an interrupted record write can roll back.
-
-Each run appends entries to the program's `logs/NAME.log` in the brain:
-
-1. a `== TIME OUTCOME ==` heading when the program exits;
-2. its stderr and a log routine's stdout;
-3. another heading with the run's result, such as the records collected or the failure.
-
-Log rules:
-
-- The log keeps its newest whole entries within 1 MiB.
-- Errors and run history name the log without quoting provider output.
-- `bf init` ignores `logs/` in Git, and search never reads it.
-- A log can still hold provider output: keep it private and never paste it into a public issue.
-
-Search and read keep a local `usage.jsonl`:
-
-- Each event holds the time, operation, kind and result count, plus, on zero-result searches, up to 8 unmatched tokens of at most 64 characters each.
-- A search's kind names its scope: `none`, `period`, `folder`, `note`, `memories`, `source`, `source-period`, `record`, `identity`, `tag`, or `combined` for a period with another scope. A source with a period, written either way, counts as `source-period`.
-- A read's kind names its page: `home`, `period`, `tasks`, `tags`, `tag`, `memories`, `source`, `source-period`, `record`, `folder`, `note`, `section`, `action`, `identity` or `relation`.
-- It never holds query text, refs, paths or identities.
-- Beyond 1 MiB, BF sums each earlier UTC day into one line, with up to 32 unmatched tokens, and drops days older than 30. Today's events stay as they are unless they alone pass 768 KiB.
-- `bf status` [summarizes](commands.md#status-sources-and-routines) today with the 6 or 29 UTC days before it. Events written before kinds existed count in the totals only, and a cut made by an older release still marks the windows it shortened with `since`.
-
-Assistants, channels and the queue:
-
-| Resource                      | Limit                                                                                                                                                             |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Assistant inputs, schedules   | 32 entries each                                                                                                                                                   |
-| Assistants per brain          | 32                                                                                                                                                                |
-| Channels per brain            | 64                                                                                                                                                                |
-| Channel read                  | 1,000 messages; a read input catches up on a longer window in parts, at most 16 admitted parts per poll                                                           |
-| Stream frame                  | 1 MiB by default (1 KiB–1 MiB)                                                                                                                                    |
-| Stream lifetime               | No deadline for a healthy idle stream; each stream run ends with one timed entry in `logs/channel.NAME.stream.log`                                                |
-| Queue database                | 256 MiB                                                                                                                                                           |
-| Queue admission               | New work until the queue holds 96 MiB or 10,000 unfinished obligations                                                                                            |
-| Answer space of a started job | `max_bytes × (7 + 6 × routes)` and a little more, within 96 MiB; a run has at most one route, its message's conversation or the `post` channel                    |
-| Gate                          | 64 events and 64 KiB of encoded events; `timeout` 120 s by default (up to 3,600 s), `max_bytes` 256 KiB by default (up to 1 MiB)                                  |
-| Wake                          | One pending per assistant; `in` from 1 s to 1 year, clamped to `min` (at least 60 s, default 600 s) and `max` (default 604,800 s); `reason` 280 characters        |
-| Completed bodies              | The newest 8 MiB each of finished jobs, finished deliveries, queue events and message history (at most 10,000 messages); older bodies are emptied, their ids kept |
-| Identity tombstones           | 35 days; see [recovery](channels.md#queue-and-recovery)                                                                                                           |
-
-See [channel limits and recovery](channels.md#queue-and-recovery).
+| Resource                      | Limit                                                                                                                                                         |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Assistants, channels, entries | <= 32 assistants/brain (<= 32 `inputs` and <= 32 `schedules` each); <= 64 channels/brain                                                                      |
+| Retries & action proposals    | `retries` `0`–`20` (`3` default when `idempotent`, else `0`; exit `75` retries up to `max(retries, 3)`); `propose: true` accepts <= 3 `draft` actions         |
+| Channel `read` & `stream`     | <= 1,000 messages/batch (up to 16 bisected parts/poll); stream frame 1 KiB–1 MiB (default 1 MiB), unlimited healthy idle lifetime                             |
+| Queue capacity & answer space | 256 MiB DB ceiling; admission stops at 96 MiB or 10,000 unfinished obligations; started job reserves `max_bytes × (7 + 6 × routes) + ...` <= 96 MiB           |
+| Declarative `when` & `gate`   | <= 64 events and <= 64 KiB encoded JSON (`gate` `timeout` 120s default up to 3,600s, `max_bytes` 256 KiB default up to 1 MiB)                                 |
+| Per-slot `wake`               | Up to 16 active wakes (`wake:<assistant>:<slot>`) per assistant; `in` clamped to `min` (>=60s, default 600s)..`max` (default 604,800s); `reason` <= 280 chars |
+| Retention & tombstones        | Newest 8 MiB each of completed jobs, deliveries, events and message history (<= 10,000 messages); identity tombstones kept 35 days                            |

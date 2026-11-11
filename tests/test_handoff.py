@@ -128,7 +128,7 @@ def test_handoff_unavailable_input_never_passes_or_leaks(provider: Provider, con
 
 @pytest.mark.parametrize("text", ["## Context {#context}\n\n", "## Context {#context}", "## Context\n \n\t\n"])
 def test_handoff_names_an_empty_section_instead_of_blaming_the_read(provider: Provider, text: str) -> None:
-    # new-action.py writes headings without bodies: the read succeeds, so `bf read` would show nothing wrong.
+    # bf action new writes headings without bodies: the read succeeds, so `bf read` would show nothing wrong.
     install(provider, reply("context", text))
     result = execute(provider)
     report = json.loads(result.stdout)
@@ -297,3 +297,14 @@ def test_real_handoff_keeps_existing_brain_files_unchanged(brain: Store) -> None
     for section, text in (("context", CONTEXT), ("resume", RESUME)):
         assert retrieve.read([brain], report["sections"][section]["ref"])["text"] == text
     assert brain.read(ACTION) == before
+    # Folder shorthand without /ACTION.md also passes check-handoff.py cleanly.
+    folder_ref = ACTION.removesuffix("/ACTION.md")
+    folder_run = subprocess.run(  # noqa: S603 - local helper and disposable brain only
+        [sys.executable, str(HELPER), folder_ref, "--brain", str(brain.root)],
+        env={**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=45,
+    )
+    assert folder_run.returncode == 0, folder_run.stderr + folder_run.stdout

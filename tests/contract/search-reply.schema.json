@@ -12,6 +12,26 @@
       "required": ["source", "records", "page"],
       "type": "object"
     },
+    "Attention": {
+      "description": "A program or channel that needs action, identified by kind and name.",
+      "properties": {
+        "brain": { "type": "string" },
+        "degraded": {
+          "const": true,
+          "description": "Three or more committed collections in a row reported missing parts; the source's `degraded` coverage gives the counts."
+        },
+        "failed": { "const": true },
+        "freshness": { "type": "string" },
+        "kind": { "enum": ["sensor", "routine", "assistant", "channel"] },
+        "name": { "type": "string" },
+        "silent": {
+          "const": true,
+          "description": "The source gained no new or changed record within its `silent_after`, whatever its freshness."
+        }
+      },
+      "required": ["kind", "name", "freshness"],
+      "type": "object"
+    },
     "Backlinks": {
       "description": "Newest items linking with one relation; `links` groups untyped links.",
       "properties": {
@@ -87,6 +107,16 @@
           "format": "date-time",
           "type": "string"
         },
+        "degraded": {
+          "description": "The source's last committed collection reported that it missed `missed` of the `of` parts it tried, such as feeds or accounts, and `runs` committed collections in a row did: its records may lack what those parts hold. A complete collection clears it.",
+          "properties": {
+            "missed": { "minimum": 1, "type": "integer" },
+            "of": { "minimum": 1, "type": "integer" },
+            "runs": { "minimum": 1, "type": "integer" }
+          },
+          "required": ["runs", "missed", "of"],
+          "type": "object"
+        },
         "failed": { "const": true },
         "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
         "last_collected": {
@@ -137,6 +167,12 @@
           "maxItems": 5,
           "type": "array"
         },
+        "blocked_by": {
+          "description": "Up to ten unresolved draft actions this action depends on; bf:// addresses with several brains.",
+          "items": { "type": "string" },
+          "maxItems": 10,
+          "type": "array"
+        },
         "brain": { "description": "Present when several brains are selected.", "type": "string" },
         "date": { "description": "A note's `updated` date as written.", "format": "date", "type": "string" },
         "excerpt": { "description": "A one-line preview; read the ref for exact text.", "type": "string" },
@@ -144,6 +180,10 @@
           "additionalProperties": { "type": ["string", "number", "boolean"] },
           "description": "Declared single-value fields, such as a status or an assignee, each at most 200 characters.",
           "type": "object"
+        },
+        "generated": {
+          "const": true,
+          "description": "Model output an assistant recorded; read what it cites before relying on it."
         },
         "kind": { "enum": ["note", "record"] },
         "modified": {

@@ -103,7 +103,7 @@
 })();
 
 (() => {
-  // Zensical 0.0.71 renders search in an open shadow root whose class names are minified, so match structure:
+  // Zensical 0.1+ renders search in an open shadow root whose class names are minified, so match structure:
   // a panel holding the combobox and a scrollable results list, plus a filter panel holding a heading.
   const contrast = new CSSStyleSheet();
   // Result breadcrumbs default to 45% opacity text, below the 4.5:1 minimum; the class rule needs !important to lose.

@@ -77,7 +77,7 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
     }
     assert status["routines"]["review"] == {"state": "active", "freshness": "fresh", "last_success": at}
     # Before 17 an unhealthy brain listed no reason: attention names the programs, as the home page does.
-    assert status["attention"] == [{"sensor": "folders", "freshness": "never", "failed": True}]
+    assert status["attention"] == [{"kind": "sensor", "name": "folders", "freshness": "never", "failed": True}]
     assert status["problems"] == []
     assert not cast("dict", health.report([brain], now=now))["healthy"]
     # Every reply instant uses one canonical UTC form, so clients can compare them as strings.
@@ -334,7 +334,7 @@ def test_a_source_that_succeeds_without_new_evidence_falls_silent(brain: Store) 
     # The event time is old, the change is when this brain first saw the record.
     assert (papers["freshness"], papers["silent"], papers["changed"]) == ("fresh", True, "2026-09-20T13:00:00.000000Z")
     assert "silent" not in status["sources"]["quiet"]
-    assert status["attention"] == [{"sensor": "papers", "freshness": "fresh", "silent": True}]
+    assert status["attention"] == [{"kind": "sensor", "name": "papers", "freshness": "fresh", "silent": True}]
     assert full["healthy"] is False
     # A changed record ends the silence.
     two = b'[{"id":"one","title":"One, revised","time":"2026-09-10T00:00:00Z"}]'
@@ -473,8 +473,8 @@ def test_status_names_unresolved_work_and_recovers_once_it_is_resolved(brain: St
     attention = status["brains"][0]["attention"]
     assert not status["healthy"]
     assert attention == [
-        {"assistant": "notes", "freshness": "manual", "failed": True},
-        {"channel": "chat", "freshness": "unknown", "failed": True},
+        {"kind": "assistant", "name": "notes", "freshness": "manual", "failed": True},
+        {"kind": "channel", "name": "chat", "freshness": "unknown", "failed": True},
     ]
     for job in cast("list[dict]", queue.report()["jobs"]):
         if job["state"] in {"failed", "uncertain"}:
@@ -488,7 +488,9 @@ def test_status_names_unresolved_work_and_recovers_once_it_is_resolved(brain: St
     # A running stream's error names its channel until watch clears it.
     queue.set_progress("health:channel:chat", {"error": "stream exited", "at": "2026-10-17T00:00:00.000000Z"})
     status = cast("dict", health.report([brain]))
-    assert status["brains"][0]["attention"] == [{"channel": "chat", "freshness": "unknown", "failed": True}]
+    assert status["brains"][0]["attention"] == [
+        {"kind": "channel", "name": "chat", "freshness": "unknown", "failed": True}
+    ]
     assert not status["healthy"]
 
 
@@ -501,7 +503,9 @@ def test_status_names_an_assistant_whose_work_cannot_start(brain: Store) -> None
     )
     status = cast("dict", health.report([brain]))
     assert not status["healthy"]
-    assert {"assistant": "notes", "freshness": "manual", "failed": True} in status["brains"][0]["attention"]
+    assert {"kind": "assistant", "name": "notes", "freshness": "manual", "failed": True} in status["brains"][0][
+        "attention"
+    ]
     # Once admission succeeds, the dispatcher records an empty error and status recovers.
     queue.set_progress("health:assistant:notes", {"error": "", "at": "2026-10-17T00:01:00.000000Z"})
     status = cast("dict", health.report([brain]))
@@ -526,7 +530,7 @@ def test_a_wall_clock_schedule_is_overdue_once_a_slot_after_its_last_success_pas
 
     # Three missed daily slots, measured from the first slot after the last success rather than the next one.
     assert freshness("daily", datetime(2026, 9, 24, 9, 0, 5, tzinfo=UTC)) == "overdue"
-    assert {"assistant": "notes", "freshness": "overdue"} in attention(brain, now=now)
+    assert {"kind": "assistant", "name": "notes", "freshness": "overdue"} in attention(brain, now=now)
     # A success just after today's slot, or yesterday's while today's runs, stays fresh.
     assert freshness("daily", datetime(2026, 9, 27, 9, 0, 5, tzinfo=UTC)) == "fresh"
     assert freshness("daily", datetime(2026, 9, 26, 9, 0, 5, tzinfo=UTC)) == "fresh"
@@ -548,7 +552,7 @@ def test_a_schedule_without_a_success_needs_attention_only_once_due(brain: Store
     assert (status["brains"][0]["attention"], status["healthy"]) == ([], True)
     assert attention(brain, now=sunday) == []
     # Monday's slot passed without a run: the dispatcher would start it now, so it is late.
-    late = [{"assistant": "notes", "freshness": "never"}]
+    late = [{"kind": "assistant", "name": "notes", "freshness": "never"}]
     status = cast("dict", health.report([brain], now=monday))
     assert (status["brains"][0]["attention"], status["healthy"]) == (late, False)
     assert attention(brain, now=monday) == late
@@ -580,7 +584,9 @@ def test_status_check_passes_before_a_new_schedule_first_falls_due(brain: Store)
     )
     result = CliRunner().invoke(app, command)
     assert result.exit_code == 1
-    assert json.loads(result.stdout)["brains"][0]["attention"] == [{"assistant": "notes", "freshness": "never"}]
+    assert json.loads(result.stdout)["brains"][0]["attention"] == [
+        {"kind": "assistant", "name": "notes", "freshness": "never"}
+    ]
 
 
 def test_coverage_marks_an_assistant_with_unresolved_failed_work_as_failed(brain: Store) -> None:
@@ -743,13 +749,13 @@ def test_a_source_that_keeps_missing_parts_needs_attention_after_three_runs(brai
     entry = full["brains"][0]
     # A manual source shows its gap but, like its failures, needs no attention.
     assert entry["sources"]["manual"]["degraded"] == {"runs": 1, "missed": 1, "of": 3}
-    assert entry["attention"] == [{"sensor": "feeds", "freshness": "fresh", "degraded": True}]
+    assert entry["attention"] == [{"kind": "sensor", "name": "feeds", "freshness": "fresh", "degraded": True}]
     assert full["healthy"] is False
     check = CliRunner().invoke(app, ["status", "--check", "--brain", str(brain.root)])
     assert check.exit_code == 1
     # The home page, search coverage and memories pages share the attention and the source state.
     home = cast("dict", read([brain]))
-    assert {"sensor": "feeds", "freshness": "fresh", "degraded": True} in home["attention"]
+    assert {"kind": "sensor", "name": "feeds", "freshness": "fresh", "degraded": True} in home["attention"]
     found = cast("dict", search([brain], Query(text="one")))
     assert {source["source"]: source.get("degraded") for source in found["sources"]}["feeds"]["runs"] == 3
     memories = cast("dict", read([brain], "memories"))
@@ -769,4 +775,15 @@ def test_hand_edited_incomplete_counts_never_report_a_gap(brain: Store) -> None:
     for counts in ({"incomplete_runs": 3}, {"incomplete_runs": 3, "missed": 2, "of": 1}, {"missed": 1, "of": 2}):
         state_store(brain.root).write("sensors.json", encode({"feeds": counts}))
         assert "degraded" not in source_health(brain)["feeds"]
-        assert attention(brain) == [{"sensor": "feeds", "freshness": "never"}]
+        assert attention(brain) == [{"kind": "sensor", "name": "feeds", "freshness": "never"}]
+
+
+def test_home_and_review_attention_include_failed_assistants_and_channels(brain: Store) -> None:
+    assisted(brain)
+    assert not assistants.manual(brain, "notes", runner=lambda *_: (_ for _ in ()).throw(Error("boom")))["ok"]
+    Queue(brain).set_progress("health:channel:chat", {"error": "transport down", "at": "2026-10-17T00:00:00.000000Z"})
+    expected = cast("dict", health.report([brain]))["brains"][0]["attention"]
+    assert {"kind": "assistant", "name": "notes", "freshness": "manual", "failed": True} in expected
+    assert {"kind": "channel", "name": "chat", "freshness": "unknown", "failed": True} in expected
+    assert read([brain])["attention"] == expected
+    assert read([brain], "review")["attention"] == expected

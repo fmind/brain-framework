@@ -120,6 +120,11 @@ _ITEM: dict[str, object] = {
         "maxItems": 3,
         "description": "Other matching sections of this note, best first; bf:// addresses with several brains.",
     },
+    "blocked_by": {
+        **_REFS,
+        "maxItems": 10,
+        "description": "Up to ten unresolved draft actions this action depends on; bf:// addresses with several brains.",
+    },
     "relations": {"type": "array", "items": {"$ref": "#/$defs/Claim"}},
     "relations_truncated": {"const": True},
     "relation": {
@@ -131,6 +136,24 @@ _ITEM: dict[str, object] = {
         "type": "string",
         "description": "Portable bf:// address; present when several brains are selected.",
     },
+}
+
+# An attention entry's flag for a scheduled source whose collections keep missing parts.
+_LASTING = {
+    "const": True,
+    "description": "Three or more committed collections in a row reported missing parts; the source's `degraded` "
+    "coverage gives the counts.",
+}
+_ATTENTION_PROPERTIES: dict[str, object] = {
+    "kind": {"enum": ["sensor", "routine", "assistant", "channel"]},
+    "name": _STRING,
+    "freshness": _STRING,
+    "failed": {"const": True},
+    "silent": {
+        "const": True,
+        "description": "The source gained no new or changed record within its `silent_after`, whatever its freshness.",
+    },
+    "degraded": _LASTING,
 }
 
 _DEFS: dict[str, object] = {
@@ -249,13 +272,13 @@ _DEFS: dict[str, object] = {
         },
         "additionalProperties": False,
     },
-}
-
-# An attention entry's flag for a scheduled source whose collections keep missing parts.
-_LASTING = {
-    "const": True,
-    "description": "Three or more committed collections in a row reported missing parts; the source's `degraded` "
-    "coverage gives the counts.",
+    "Attention": {
+        "type": "object",
+        "description": "A program or channel that needs action, identified by kind and name.",
+        "required": ["kind", "name", "freshness"],
+        "properties": {**_ATTENTION_PROPERTIES, "brain": _STRING},
+        "additionalProperties": False,
+    },
 }
 
 # Fields every reply may carry.
@@ -368,29 +391,24 @@ READ: dict[str, object] = {
                 "changed": _ITEMS,
                 "activity": {"type": "array", "items": {"$ref": "#/$defs/Activity"}},
                 "upcoming": _ITEMS,
-                "attention": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "required": ["freshness"],
-                        "properties": {
-                            "sensor": _STRING,
-                            "routine": _STRING,
-                            "assistant": _STRING,
-                            "freshness": _STRING,
-                            "failed": {"const": True},
-                            "silent": {
-                                "const": True,
-                                "description": "The source gained no new or changed record within its `silent_after`, "
-                                "whatever its freshness.",
-                            },
-                            "degraded": _LASTING,
-                            "brain": _STRING,
-                        },
-                        "additionalProperties": False,
-                    },
-                },
+                "attention": {"type": "array", "items": {"$ref": "#/$defs/Attention"}},
                 "pages": _REFS,
+            },
+        ),
+        _shape(
+            "Review page",
+            ["page", "items", "total", "actions", "actions_total", "attention"],
+            {
+                "page": {"const": "review"},
+                "items": _ITEMS,
+                **_PAGED,
+                "actions": _ITEMS,
+                "actions_total": {
+                    **_COUNT,
+                    "description": "Every open draft action; when `actions` lists fewer, read the actions page for "
+                    "the rest.",
+                },
+                "attention": {"type": "array", "items": {"$ref": "#/$defs/Attention"}},
             },
         ),
         _shape(
@@ -421,7 +439,7 @@ READ: dict[str, object] = {
             "Source, folder, tag, relation or record-period listing",
             ["page", "items", "total"],
             {
-                "page": {"type": "string", "not": {"enum": ["memories", "tags", "tasks"]}},
+                "page": {"type": "string", "not": {"enum": ["memories", "review", "tags", "tasks"]}},
                 "items": _ITEMS,
                 **_PAGED,
                 "sources": {"type": "array", "items": {"$ref": "#/$defs/Coverage"}},
@@ -613,13 +631,16 @@ _STATUS_DEFS: dict[str, object] = {
             "runs": {**_COUNT, "description": "Successful runs since its history began."},
             "schedules": {
                 "type": "object",
-                "description": "Each named timer: its interval in seconds, next due time, last success and freshness.",
+                "description": "Each named timer: its interval in seconds or wall-clock time, next due time, last "
+                "success and freshness.",
                 "additionalProperties": {
                     "type": "object",
-                    "required": ["freshness", "every"],
+                    "required": ["freshness"],
+                    "oneOf": [{"required": ["every"]}, {"required": ["at"]}],
                     "properties": {
                         "freshness": _HEALTH["freshness"],
                         "every": {"type": "integer", "minimum": 1},
+                        "at": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
                         "next_due": _INSTANT,
                         "last_success": _INSTANT,
                     },
@@ -644,22 +665,9 @@ _STATUS_DEFS: dict[str, object] = {
     },
     "Attention": {
         "type": "object",
-        "description": "A program that needs action, named by its kind.",
-        "required": ["freshness"],
-        "properties": {
-            "sensor": _STRING,
-            "routine": _STRING,
-            "assistant": _STRING,
-            "channel": _STRING,
-            "freshness": _STRING,
-            "failed": {"const": True},
-            "silent": {
-                "const": True,
-                "description": "The source gained no new or changed record within its `silent_after`, whatever its "
-                "freshness.",
-            },
-            "degraded": _LASTING,
-        },
+        "description": "A program or channel that needs action, identified by kind and name.",
+        "required": ["kind", "name", "freshness"],
+        "properties": dict(_ATTENTION_PROPERTIES),
         "additionalProperties": False,
     },
     "Usage": {
@@ -782,7 +790,7 @@ ASSISTANT: dict[str, object] = {
     "title": "AssistantReply",
     "type": "object",
     "additionalProperties": False,
-    "required": ["say", "wake"],
+    "required": ["say", "wake", "actions"],
     "properties": {
         "say": {
             "type": ["string", "null"],
@@ -796,6 +804,30 @@ ASSISTANT: dict[str, object] = {
             "properties": {
                 "in": {"type": "integer", "minimum": 1, "maximum": 31536000, "description": "Seconds from now."},
                 "reason": {"type": "string", "maxLength": 280, "description": "Why, passed back to the next run."},
+            },
+        },
+        "actions": {
+            "type": ["array", "null"],
+            "description": "Up to three status: draft ACTION.md notes to create when propose: true, else [] or null.",
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["slug", "markdown"],
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+                        "description": "Action slug for actions/YYYY-MM-DD_<slug>/ACTION.md.",
+                    },
+                    "markdown": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4194304,
+                        "description": "Full OKF Markdown note with type: action and status: draft.",
+                    },
+                },
             },
         },
     },

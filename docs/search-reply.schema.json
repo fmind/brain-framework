@@ -12,6 +12,26 @@
       "required": ["source", "records", "page"],
       "type": "object"
     },
+    "Attention": {
+      "description": "A program or channel that needs action, identified by kind and name.",
+      "properties": {
+        "brain": { "type": "string" },
+        "degraded": {
+          "const": true,
+          "description": "Three or more committed collections in a row reported missing parts; the source's `degraded` coverage gives the counts."
+        },
+        "failed": { "const": true },
+        "freshness": { "type": "string" },
+        "kind": { "enum": ["sensor", "routine", "assistant", "channel"] },
+        "name": { "type": "string" },
+        "silent": {
+          "const": true,
+          "description": "The source gained no new or changed record within its `silent_after`, whatever its freshness."
+        }
+      },
+      "required": ["kind", "name", "freshness"],
+      "type": "object"
+    },
     "Backlinks": {
       "description": "Newest items linking with one relation; `links` groups untyped links.",
       "properties": {
@@ -145,6 +165,12 @@
           "description": "Other sources' records sharing this record's URL; bf:// addresses with several brains.",
           "items": { "type": "string" },
           "maxItems": 5,
+          "type": "array"
+        },
+        "blocked_by": {
+          "description": "Up to ten unresolved draft actions this action depends on; bf:// addresses with several brains.",
+          "items": { "type": "string" },
+          "maxItems": 10,
           "type": "array"
         },
         "brain": { "description": "Present when several brains are selected.", "type": "string" },

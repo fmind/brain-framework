@@ -1,27 +1,29 @@
-# Track a work session
+# Track and settle a work session
 
-Details for the loop in the [skill](../SKILL.md#start-an-action). Routines with `output: action` also write actions, for review.
+Details for [bf-action](../SKILL.md). Routines (`output: action`) and assistants (`propose: true`) also create `status: draft` actions for review.
 
-## Start a session
+## Start a session {#start-a-session}
 
-The helper creates `actions/YYYY-MM-DD_topic/ACTION.md` with the template's empty sections. When that folder exists, it adds a 12-hex suffix (`actions/2026-09-29_website-review-3f9a1c2e5b7d/`) instead of joining it; routine actions take 8, so a session never counts as a routine's action for the day. `--unique` always adds the suffix, so sessions from other clones never meet in one folder after a merge. It refuses linked `actions/` folders and removes what it created when writing fails. Without the helper, create the folder exclusively, add a suffix from `python3 -c 'import uuid; print(uuid.uuid4().hex[-12:])'` on a collision or in a shared brain, and never reuse or rename an existing action.
+- `bf action new SLUG [--title TITLE] [--summary SUMMARY] [--unique]` creates `actions/YYYY-MM-DD_SLUG/ACTION.md` (`type: action`, `status: draft`) with the canonical OKF sections, validates it and refreshes `.bf/`.
+- In multi-writer Git brains, pass `--unique` to add a 12-hex suffix (`actions/2026-09-29_website-review-3f9a1c2e5b7d/`) distinct from 8-hex routine actions. Never reuse or rename an existing folder.
+- Populate sections from [templates/action.md](../templates/action.md) with observed refs and a relative link to the owning `projects/*.md` note; declare blocking actions with `depends-on` so `bf read review` surfaces `blocked_by`. Put artifacts in `inputs/` and `outputs/` only when needed.
 
-Fill the sections from the [action template](../templates/action.md) with the authorized objective, a relative link to the owning project, constraints, tasks and the next step, from observed decisions and refs, never sample text; omit unused sections. Create `inputs/` and `outputs/` only for approved files, and link the action from the project only when durable next steps change. For consequential choices, intentions and blocking questions, follow the `bf-use` skill's decision guide.
+## Resume a session {#resume-a-session}
 
-## Resume a session
+1. Locate open sessions via `bf read review`, `bf read actions` or `bf search "topic words" --scope actions` and address the exact ref (or `uri` across multiple brains).
+1. Read `#context` and `#resume`, the owning project's `#decision` and only the refs the next step requires ([budget](context.md#read-on-resume)).
+1. If an action is already `stable` or `deprecated`, report its `Outcome` and start a new action linking it rather than reopening it silently.
 
-1. Find the action with `bf read actions`, whose `tasks` counts show open work, or `bf search "topic words" --scope actions`, and resume it by its exact ref, never by topic alone; with several brains, by its `uri` (`bf://NAME/actions/...`).
-1. Read `bf read 'actions/YYYY-MM-DD_topic/ACTION.md#context'` and the same ref's `#resume`; when a section is missing, the error lists the note's sections, so read the whole action once. Then read the owning project's current decision and only what the next step needs, within the [read budget](context.md#read-on-resume).
-1. When the action is done, report its Outcome and ask whether to start a follow-up action that links it; never reopen it silently.
-1. Continue from Resume within the current request's authorization; ask only when the next step is ambiguous or needs authority you do not have.
+## Finish or hand off {#finish-or-hand-off}
 
-## Finish or hand off
-
-1. During the work, tick completed tasks and keep decisions with their reasons and evidence refs. Update Context when its facts change, and Resume with the last verified state, blocker and exact next step.
-1. Before a handoff or a planned compaction, follow the [handoff guide](handoff.md); the action stays open.
-1. To close it, fill Outcome and compare any expectation with the observed evidence. Resolve every open box: tick it, move it to the owning project's next actions or drop it with the reason in Outcome. Move durable changes and unresolved questions into the owning project with the `bf-use` skill's guide to writing knowledge back. The done action leaves `bf read tasks`.
-1. Run `bf validate`, fix what your edit introduced and show the diff. Report the action ref, verified outcome and next step; commit only when authorized.
+1. Keep `Context` and `Resume` current as facts change; before handing off or compacting, run [handoff.md](handoff.md) and leave `status: draft`.
+1. To settle a completed session:
+   - Write `## Outcome` comparing expectations against observed `SOURCE:ID` or check evidence.
+   - Resolve every `- [ ]` checkbox in `ACTION.md`: tick completed items, move remaining tasks to the owning `projects/*.md` note's `## Next actions`, or drop them with a stated reason.
+   - Sync durable changes (`Now`, `Decision`, `Next actions`) into the owning `projects/*.md` note in the same turn (`bf-use`).
+   - Mark the session settled with `bf action status SLUG stable` (or `bf action status SLUG deprecated` when cancelled/retired), removing it from the active Home and `bf read review` queues.
+1. Run `bf validate` and report the action ref, synced project ref and diff; commit only when authorized.
 
 ## Metadata and attachments
 
-An `ACTION.md` uses `type: action` and `status: draft|stable|deprecated`, a maturity level, never progress; only `deprecated` retires an action. Finishing work is not verification: add `verified` events only after actual checks. Files in `inputs/` and `outputs/` are ordinary Markdown: only `title`, `type`, `status`, `updated`, `summary` and `description` apply, their typed links use the file as subject, and `entity`, `aliases`, `tags`, `sources` and `stale_after` are ignored. Action Markdown is searchable: keep private inputs out of shared brains.
+`ACTION.md` uses `type: action` and `status: draft|stable|deprecated`; add `verified` (`by`, `at`) only after real verification. Never declare an `entity` or `alias` pointing to `bf://NAME/actions/SLUG`: link to the action instead. Files under `inputs/` and `outputs/` are ordinary Markdown (`entity`, `aliases`, `tags`, `sources` and `stale_after` are ignored there) and remain searchable, so keep private data out of shared brains.

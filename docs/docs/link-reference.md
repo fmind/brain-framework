@@ -5,236 +5,69 @@ description: Exact rules for BF addresses, section anchors, identities, relation
 
 # Link and tag reference
 
-Start with [Linking knowledge](links.md) for examples you can follow. This page defines exact address, identity, relation and tag rules.
+Start with [Linking knowledge](links.md) for practical examples. This page defines exact BF address, identity, relation and tag contracts.
 
 ## BF links
-
-A BF address names a resource without contacting a network. Read this example from left to right:
 
 ```text
 bf://brain/projects/new-website.md?rel=depends-on#decision
 ```
 
-| Part                       | Meaning                                                |
-| -------------------------- | ------------------------------------------------------ |
-| `bf://`                    | A Brain Framework address; no network request.         |
-| `brain`                    | The stable `name` in `bf.yaml`, shared by every clone. |
-| `/projects/new-website.md` | The target path inside that brain.                     |
-| `?rel=depends-on`          | Optional declared relation of the link.                |
-| `#decision`                | Optional section of the target note.                   |
+| Component                  | Meaning                                                          |
+| -------------------------- | ---------------------------------------------------------------- |
+| `bf://`                    | Offline Brain Framework URI scheme.                              |
+| `brain`                    | Stable `name` in `bf.yaml` (shared across clones).               |
+| `/projects/new-website.md` | Note path, logical entity (`people/alice`), page or `SOURCE:ID`. |
+| `?rel=depends-on`          | Optional declared relation (or `cites`), before `#fragment`.     |
+| `#decision`                | Optional heading anchor on a note or entity target.              |
 
-Other examples:
-
-```text
-bf://brain/projects/new-website.md#decision
-bf://brain/people/alice
-bf://brain/local-documents:website-demo/brief.txt
-```
-
-These name a note section, a declared entity and a record. A path whose first segment holds `:` always names a `SOURCE:ID` record. The brain name is not a hostname: renaming the brain changes its addresses.
-
-Entity paths such as `people/alice` are logical names that create no folder. To give that identity a home, save `concepts/alice.md`:
-
-```markdown
----
-type: person
-status: draft
-entity: bf://brain/people/alice
-aliases: [person:email/alice@example.test]
----
-
-# Alice
-
-## Contact details {#contact}
-
-Reviewed contact information belongs here.
-```
-
-All three addresses then open the same note:
-
-```bash
-bf read bf://brain/people/alice
-bf read person:email/alice@example.test
-bf read bf://brain/concepts/alice.md
-```
-
-- An alias establishes identity, not authorship or ownership.
-- Only OKF notes declare `entity`, `aliases`, `resource` and `tags`: a document copied into an action's `inputs/` cannot.
-- A record's ref, such as `jira:PROJ-1`, is already its identity. Link to it rather than repeating it as a note alias.
-- Spell a record's source exactly: `[Mail](Mail:m1)` never links the record `mail:m1`. `bf validate` names the spelling to use.
-- Other identities, such as `person:`, `repo:`, `mailto:` or HTTPS URLs, are opaque to BF.
+A first path segment containing `:` always addresses a `SOURCE:ID` record (`bf://brain/local-documents:website-demo/brief.txt`). Logical entity paths (`entity: bf://brain/people/alice` with `aliases: [person:email/alice@example.test]` in `concepts/alice.md`) resolve to their owning OKF note without requiring a `people/` folder.
 
 ### Identity rules
 
-`bf validate` checks these rules on note entities, aliases and URI resources, record aliases and the values of `type: identity` fields:
+`bf validate` enforces these rules on OKF `entity`, `aliases` and URI `resource` fields, record `aliases`, and `type: identity` field values:
 
-| Rule          | Requirement                                                                                                                                              |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Own namespace | A BF entity, alias or resource uses its own brain's name, such as `bf://brain/people/alice` in the brain named `brain`.                                  |
-| Whole subject | A BF entity, alias or resource names no `#section`, note file such as `bf://brain/projects/old.md`, page or `SOURCE:ID` record: link to those instead.   |
-| Visible       | No identity holds an invisible Unicode format character (category Cf), such as U+200B, a zero-width joiner, a soft hyphen or a tag character. Remove it. |
-| Bounded       | A note or record holds at most 1,000 aliases.                                                                                                            |
+| Rule          | Requirement                                                                                                                                                                                                                                                                                                       |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Own namespace | A `bf://` entity, alias or resource must use its own brain's `name` (`bf://brain/...`).                                                                                                                                                                                                                           |
+| Whole subject | A `bf://` entity, alias or resource must not carry `#section`, name a `.md` note file, name a computed page, name a `SOURCE:ID` record, or point to an action folder `bf://NAME/actions/SLUG` (`a BF path to an action folder in actions/ names its ACTION.md and no other subject; link to the action instead`). |
+| Visible       | Must not contain Unicode format (`Cf`) characters such as U+200B, soft hyphens or bidi/tag controls (even percent-encoded in `bf://`).                                                                                                                                                                            |
+| Bounded       | At most 1,000 aliases per note or record, each <= 8,192 characters.                                                                                                                                                                                                                                               |
 
-When an identity breaks a rule:
-
-- Search skips the note or record whose entity, aliases or resource break it.
-- A record whose aliases hold an invisible character or exceed 1,000 also no longer loads. One breaking the namespace or whole-subject rule still reads exactly.
-- To repair a record, fix the sensor and collect again: collection replaces its own record.
-- An invisible character fails as `identities must not contain invisible format characters, such as U+200B`. A BF address decodes its percent-encoding first, so `%E2%80%8B` fails too. Another URI, such as an HTTPS URL, may keep it percent-encoded.
-
-Two notes or records claiming one identity are a validation problem, never merged. Both stay searchable, but reading the identity fails as `ambiguous identity` until one claim goes.
+Duplicate identity claims across notes or records fail `bf validate` and fail `bf read IDENTITY` with `ambiguous identity` rather than merging silently.
 
 ### Page addresses
 
-`bf://brain/` opens home, and `bf://brain/projects`, `bf://brain/tags` or `bf://brain/7d` open [pages](retrieval.md#pages).
+`bf://brain/` opens Home, and `bf://brain/review`, `bf://brain/projects`, `bf://brain/tasks`, `bf://brain/tags`, `bf://brain/7d` or `bf://brain/memories/SOURCE` open computed [pages](retrieval.md#pages).
 
-- `bf://brain` without its `/` is invalid, as are a trailing `/` and an empty segment elsewhere, such as `bf://brain/projects/`.
-- A hub note can link to home, `tasks`, `tags` or a used tag, an existing folder under `projects/`, `concepts/` or `actions/`, a period, a known source and its periods, `undated` or record files.
-- `bf validate` reports any other page target, such as `2026-13` or an unknown source.
-- Pages have no sections. `bf validate` reports a link such as `bf://brain/tasks#next` as `page cannot select a section`, and `bf read` rejects it as invalid input.
+- Bare `bf://brain` (no `/`), trailing slashes (`bf://brain/projects/`), empty path segments and `#section` fragments on pages (`page cannot select a section`) are invalid.
+- Linking to an action folder (`bf://brain/actions/2026-09-27_website-review` or `bf read actions/SLUG --rel ...`) resolves to its `ACTION.md`.
 
 ### Sections and encoding
 
-A fragment selects a heading of a note or an entity's note, such as `bf://brain/people/alice#contact`. An explicit anchor survives a heading rename:
-
-```markdown
-## How to contact Alice {#contact}
-```
-
-Anchors:
-
-- An explicit anchor starts with a letter or digit and continues with letters, digits, underscores, hyphens or dots.
-- It counts only when written last in the heading's source, after a space. Inside a code span or escaped, `{#id}` stays part of the title.
-- Other headings take their title's slug. A multi-line title joins its lines with a space, so `Title line one` and `line two` above `---` give `#title-line-one-line-two`.
-- Repeated titles take `-1`, `-2` suffixes that skip explicit anchors.
-- An anchor ending in `.md`, a duplicate explicit anchor, or a title whose slug another heading claims as its anchor makes the note invalid.
-- Records take no fragment.
-
-A BF address ending in a bare `#`, such as `bf://brain/projects/new-website.md#`, names no section. It is invalid input to read and search. A note writing it in a link, frontmatter `links`, `sources` or an identity is invalid: remove the `#` or name the section. A relative file link keeps its Markdown meaning, so `[Plan](new-website.md#)` links the whole file.
-
-Encoding:
-
-- In a BF address, encode URI components separately: a literal `#` or `?` in a record id or file name becomes `%23` or `%3F`.
-- A BF address never holds whitespace or a stray `%`: write `bf://brain/projects/launch%20plan.md`.
-- A relative file link splits at its first `#`, so write a `#` in a file name as `%23` there too.
-- Other link destinations read as written: `[Éric](person:email/éric@example.test)` names that identity, and `[Mail](mail:a#b)` names the record `mail:a#b`.
-- Wrap spaces in angle brackets, as in `[Notes](<local:docs/Meeting notes.txt>)`.
-
-Relative links:
-
-- They start from the containing file.
-- In a project or concept note, a leading `/` starts from that bundle's root, as in [OKF bundle-relative links](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md): `[Customers](/tables/customers.md)` in a concept names `concepts/tables/customers.md`. Actions have no bundle root.
-- Images are links too.
-- Validation compares exact file names, even on a case-insensitive disk.
+- **Explicit anchors**: `## Heading {#contact}` (`[A-Za-z0-9][A-Za-z0-9_.-]*` at the end of the heading line after a space) survives heading renames; otherwise headings use their slug (`-1`, `-2` on duplicates). Anchors ending in `.md`, duplicate anchors or bare trailing `#` on `bf://` addresses are invalid; records take no `#fragment`.
+- **Percent-encoding**: inside `bf://` addresses, encode spaces as `%20`, literal `#` as `%23` and `?` as `%3F` (`%23` also in relative file links). Non-`bf://` targets read verbatim (`[Mail](mail:a#b)` names `mail:a#b`; wrap spaces in `<...>`).
+- **Relative links**: resolve from the containing file; in `projects/` and `concepts/`, leading `/` resolves from that bundle root (`/tables/customers.md` -> `concepts/tables/customers.md`). Case must match exact filenames even on case-insensitive filesystems.
 
 ## Relation links
 
-Declare a relation under `fields:` in `bf.yaml` before writing a typed link. `bf init` already declares `owner` and the rest of the [standard vocabulary](schema.md#standard-vocabulary). A relation you add, such as [`verifies`](links.md#declare-your-own-relation), needs these keys:
+Write typed links as `[Alice](bf://brain/people/alice?rel=owner)` or in OKF frontmatter `fields:` / `sources:`. Each graph claim records `(subject, relation, target, origin)`:
 
-```yaml
-# https://fmind.github.io/brain-framework/docs/schema/
-fields:
-  verifies:
-    description: The subject records a check of the target against stated criteria.
-    type: identity
-    cardinality: many
-    relation: true
-```
-
-If Alice is explicitly responsible for the website project, write in its note:
-
-```markdown
-## Ownership
-
-[Owner: Alice](bf://brain/people/alice?rel=owner)
-```
-
-The claim says the project has Alice as owner, with the Ownership section as origin. Each claim records `subject`, `relation`, `target` and `origin`:
-
-- The subject is the note's `entity`, if declared, otherwise its file; a record's links use the record.
-- A note can make the same claim from its frontmatter [`fields`](links.md#set-typed-fields), with the whole note as origin.
-- A link in an OKF claim footnote, such as `[^1]: [Brief](brief:website-brief)`, takes as origin the section that first cites `[^1]`. This holds wherever the definition sits, even indented in a list item or quote.
-- So do links in the footnote's continuation paragraphs, indented by four spaces or a tab (four more under a definition indented four or more, as in a nested list item).
-- Footnote labels match regardless of case, as on GitHub.
-
-The `rel` query:
-
-- `rel` is the only query key a BF address accepts. It must name a declared relation or `cites`, and precede any fragment.
-- Only `bf://` links take it: `bf validate` reports `?rel=` elsewhere, and a URL such as `https://example.test/?rel=owner` stays one untyped identity.
-- The relation never changes the target: `?rel=owner` and `?rel=author` links point to the same Alice.
-- A link naming no declared relation stays searchable as an untyped link. Validation names where it first occurs, such as `line 12`, and the correction:
-
-| Link                                          | `bf validate` reports                                                                                   |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `?rel=nope`, undeclared                       | `link relation nope is undeclared; declare it in bf.yaml fields with type: identity and relation: true` |
-| `?rel=kind`, a declared field but no relation | `field kind is not a relation; relations need type: identity and relation: true`                        |
-| `?rel=links`                                  | `untyped links need no ?rel=; remove ?rel=links`                                                        |
-| `?rel=tagged-with`                            | `link relation tagged-with is reserved for tag membership; add the tag to the note instead`             |
-
-| Built-in relation | Meaning                                                                        |
-| ----------------- | ------------------------------------------------------------------------------ |
-| `cites`           | Each OKF `sources` entry whose `resource` is a link: the note derives from it. |
-| `tagged-with`     | Each tag of a note; see [tag rules](#tag-rules).                               |
-| `links`           | The backlink group of untyped links.                                           |
-
-- `bf.yaml` cannot declare these three.
-- A `sources` entry's `resource` is a link when written without spaces as a URL or `scheme:value` identity, a path holding `/` or a `.md` file name.
-- Other text, such as `brief.txt`, `Q3 sales` or a path with spaces, describes a population and links nothing. Write `./brief.txt` for a sibling file, and percent-encode spaces in a path.
-- An item that both cites and links to a target is listed once, under `cites`.
-- A relation's [`broader`](schema.md#narrower-relations-and-allowed-targets) adds its links to the broader relation page, and its `targets` restrict the identities it may name.
-
-These links are rejected and make their note invalid, as the [note format](schema.md#note-format) describes:
-
-- A BF link with another query key, an empty or repeated value, an empty fragment, userinfo, a port, traversal or malformed encoding.
-- A BF link, an entry of a note's frontmatter `links` or an OKF `sources` resource longer than 8,192 characters.
-
-Two files asserting one claim stay separately attributable, and removing one removes only its support. BF infers neither reverse nor chained relations: Alice owning the website does not make the website Alice's owner.
+- `subject` is the note's `entity` if declared, else its file URI (or record URI). Links inside OKF footnotes (`[^1]: ...`, including indented continuations) attribute `origin` to the section that first cites `[^1]`.
+- `rel` is the only allowed query parameter on `bf://` links (`?rel=` on non-`bf://` URLs is reported by `bf validate`).
+- Undeclared `?rel=` values keep the note searchable as an untyped link while failing `bf validate` (`link relation X is undeclared...`, `field X is not a relation...`, `remove ?rel=links`, or `tagged-with is reserved`).
+- Built-in relations (reserved, never declared in `bf.yaml`): `cites` (link-shaped `sources[].resource` entries), `tagged-with` (note `tags`) and `links` (untyped backlinks).
 
 ## Across brains
 
-Search and read use the selected brains plus their direct `brains:` references, without recursion.
+Retrieval spans the selected brains and their direct `brains:` references (one hop, never recursive):
 
-- A `bf://` address resolves only in its named brain, while backlinks can come from every selected brain.
-- An address never adds a brain to the selection or grants access.
-- Explicit aliases resolve across the selected brains when one brain owns them. Conflicting owners produce `problems` and stop that resolution; exact refs still work.
-- A record also gathers links to its bare `SOURCE:ID` from other selected brains, in its read, relation pages and identity search. When another brain collected the same record, each brain's links name its own copy.
-- Equal relation names in two brains keep their own declared meanings.
-- Reads return identity resolution, backlinks and claims; they never infer across several hops.
-
-`bf validate` checks targets and sections in its own brain, naming the file that wrote each link. It lists targets in other brains under `unresolved`, without opening them: they never make a brain invalid.
+- `bf://NAME/...` resolves only in brain `NAME` and never grants access to unselected brains; explicit aliases and bare `SOURCE:ID` backlinks gather across selected brains when unambiguous.
+- `bf validate` checks its own brain offline and lists cross-brain targets under `unresolved` without failing validation.
 
 ## Tag rules
 
-Add labels to a note's frontmatter, such as the New website project:
+Declare tags in OKF frontmatter (`tags: [website, product]`) and browse or scope with `bf read tags`, `bf read bf://brain/tags/website` and `bf search "query" --scope bf://brain/tags/website`:
 
-```yaml
-# https://fmind.github.io/brain-framework/docs/link-reference/#tag-rules
-tags: [website, product]
-```
-
-```bash
-bf read tags
-bf read bf://brain/tags/website
-bf search "explanation" --scope bf://brain/tags/website
-```
-
-The directory lists both tags with `tag`, `ref` and `total`, and the `website` page lists the note. The scoped search considers only notes carrying that tag, while a plain search for `website` can also match prose. Reuse labels from `bf read tags`, and prefer a few lowercase, hyphenated words.
-
-| Rule              | Behavior                                                                                                        |
-| ----------------- | --------------------------------------------------------------------------------------------------------------- |
-| Labels            | Exact and case-sensitive; numbers become text.                                                                  |
-| Label characters  | 1–128 characters, without control characters, surrounding spaces, slashes or `.`/`..`.                          |
-| Count             | Up to 1,000 per note; duplicates count once.                                                                    |
-| Members           | Only projects, concepts and `ACTION.md` notes join tag pages.                                                   |
-| Not members       | Prose, record fields and links add no member: `[Website](bf://brain/tags/website)` does not tag a note.         |
-| Ranking           | A note's tags weigh more than body text and less than headings in search.                                       |
-| Directory         | Counts distinct brain and tag pairs.                                                                            |
-| Tag page          | Lists members newest first.                                                                                     |
-| Page size         | The directory and tag pages list 200 entries per page and have no sections.                                     |
-| Labels with `#`   | Read through the `ref` that `bf read tags` returns, such as `bf://brain/tags/C%23`: `tags/C#` is invalid input. |
-| Several brains    | Equal labels in different brains are different identities, combined on the page.                                |
-| Graph             | Each membership is a `tagged-with` claim supported by the whole note.                                           |
-| Addresses         | `bf://NAME/tags/LABEL` belongs to computed pages: it cannot be an entity, alias or resource.                    |
-| Address modifiers | A `#section` on a tag address is invalid input; a search scope also rejects `?rel=`, which a read ignores.      |
-
-Tags need no concept note and imply no dependency. Provider labels stay collected evidence in record fields.
+- Exact, case-sensitive strings of 1–128 characters (no control chars, surrounding spaces, `/` or `.`/`..`; up to 1,000 per note; percent-encode `#` as `bf://brain/tags/C%23`).
+- Only `projects/`, `concepts/` and `ACTION.md` notes join tag pages (200 entries/page, newest first, weighted above body text in search); prose links to `bf://brain/tags/LABEL` do not tag a note, and `bf://NAME/tags/LABEL` cannot be claimed as an `entity`, `alias` or `resource`.

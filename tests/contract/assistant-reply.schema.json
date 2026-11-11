@@ -2,6 +2,30 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "actions": {
+      "description": "Up to three status: draft ACTION.md notes to create when propose: true, else [] or null.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "markdown": {
+            "description": "Full OKF Markdown note with type: action and status: draft.",
+            "maxLength": 4194304,
+            "minLength": 1,
+            "type": "string"
+          },
+          "slug": {
+            "description": "Action slug for actions/YYYY-MM-DD_<slug>/ACTION.md.",
+            "maxLength": 64,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "type": "string"
+          }
+        },
+        "required": ["slug", "markdown"],
+        "type": "object"
+      },
+      "maxItems": 3,
+      "type": ["array", "null"]
+    },
     "say": { "description": "The message for the owner, or null to stay silent.", "type": ["string", "null"] },
     "wake": {
       "additionalProperties": false,
@@ -14,7 +38,7 @@
       "type": ["object", "null"]
     }
   },
-  "required": ["say", "wake"],
+  "required": ["say", "wake", "actions"],
   "title": "AssistantReply",
   "type": "object"
 }

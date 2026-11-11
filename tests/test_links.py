@@ -748,16 +748,17 @@ def test_page_links_follow_the_routing_of_bf_read(brain: Store) -> None:
 @pytest.mark.parametrize(
     "entity",
     [
-        *("bf://fixture/", "bf://fixture/today", "bf://fixture/2026-09-27", "bf://fixture/12h", "bf://fixture/tasks"),
-        *("bf://fixture/projects", "bf://fixture/tags", "bf://fixture/tags/x", "bf://fixture/memories/team"),
+        *("bf://fixture/", "bf://fixture/today", "bf://fixture/2026-09-27", "bf://fixture/12h", "bf://fixture/review"),
+        *("bf://fixture/tasks", "bf://fixture/projects", "bf://fixture/tags", "bf://fixture/tags/x"),
+        "bf://fixture/memories/team",
     ],
 )
 def test_page_addresses_cannot_be_claimed(brain: Store, entity: str) -> None:
     brain.write("concepts/claim.md", f"---\ntype: person\nentity: {entity}\n---\n# Claim\n".encode())
     assert problems(brain) == [
         (
-            "concepts/claim.md: home, folder roots, tasks, periods, tags and memories are computed page addresses "
-            "and name no note or record; link to the page instead"
+            "concepts/claim.md: home, folder roots, review, tasks, periods, tags and memories are computed page "
+            "addresses and name no note or record; link to the page instead"
         )
     ]
     brain.delete("concepts/claim.md")
@@ -898,13 +899,28 @@ def test_note_identities_must_reach_their_note(brain: Store, key: str, value: st
 
 
 @pytest.mark.parametrize("key", ["entity", "aliases"])
-def test_an_identity_at_an_action_folder_address_reads_its_note(brain: Store, key: str) -> None:
-    # Reads route an action folder to its ACTION.md; without one, the address still reaches the note claiming it.
+def test_an_identity_at_an_action_folder_address_is_rejected(brain: Store, key: str) -> None:
+    # An action folder address names its ACTION.md and no other subject; bf read actions/SLUG --rel still resolves it.
     people(brain)
     declared = "[bf://fixture/actions/launch]" if key == "aliases" else "bf://fixture/actions/launch"
     brain.write("concepts/launch.md", f"---\ntype: concept\n{key}: {declared}\n---\n# Launch\n".encode())
-    assert validate(brain)["valid"]
-    assert read([brain], "bf://fixture/actions/launch")["ref"] == "concepts/launch.md"
+    report = validate(brain)
+    assert not report["valid"]
+    assert (
+        "a BF path to an action folder in actions/ names its ACTION.md and no other subject; link to the action instead"
+        in str(report["problems"])
+    )
+    brain.delete("concepts/launch.md")
+    brain.write(
+        "actions/launch/ACTION.md",
+        b"---\ntype: action\nstatus: draft\n---\n# Launch\n\nSee [offline](../../projects/offline.md).\n",
+    )
+    rel_page = read([brain], "actions/launch", rel="links")
+    assert (rel_page["page"], rel_page["ref"], rel_page["relation"]) == (
+        "relation",
+        "actions/launch",
+        "links",
+    )
 
 
 def test_record_aliases_must_reach_their_record(brain: Store) -> None:

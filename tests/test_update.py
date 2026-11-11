@@ -139,3 +139,23 @@ def test_cli_selection_previews_without_executing(selected: Store) -> None:
     result = CliRunner().invoke(app, ["update", "--brain", str(selected.root), "--sensor", "mail", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert len(json.loads(result.stdout)["sensors"]) == 1
+
+
+def test_routine_when_gate_skips_cleanly_when_cache_is_contended(
+    selected: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bf.storage import BusyError
+
+    selected.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nroutines:\n  triage:\n    command: [echo]\n    refresh: 3600\n"
+        b"    when: {actions: true}\n",
+    )
+    monkeypatch.setattr(
+        "bf.pages.evaluate_when",
+        lambda *_, **__: (_ for _ in ()).throw(BusyError("search cache is stale; when gate waits")),
+    )
+    report: dict = update(selected, routines=("triage",), runner=lambda *_: b"")
+    assert report["ok"] is True
+    assert report["routines"][0]["status"] == "skipped"
+    assert "search cache is stale" in report["routines"][0]["skipped"]

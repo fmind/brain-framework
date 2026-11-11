@@ -21,6 +21,8 @@ from typer.testing import CliRunner
 
 from bf.assistants import GATE_EVENT_BYTES
 from bf.cli import app
+from bf.markdown import validate_okf
+from bf.messages import Receipt
 from bf.models import GateReply, encode
 from bf.storage import Store
 from conftest import ROOT, Provider
@@ -293,6 +295,9 @@ def test_a_damaged_state_file_stops_the_gate(provider: Provider, tmp_path: Path)
 
 def load() -> ModuleType:
     """The gate as a module, to drive its export with small bounds."""
+    routines = str(ROOT / "examples/routines")
+    if routines not in sys.path:
+        sys.path.insert(0, routines)
     spec = importlib.util.spec_from_file_location("records_gate", ROOT / "examples/routines" / GATE)
     assert spec is not None
     assert spec.loader is not None
@@ -401,6 +406,7 @@ def test_the_state_file_keeps_the_newest_keys_within_its_bound(
 
 def test_the_gate_reads_records_collected_by_the_same_update(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     # The gate's own `bf export` runs inside `bf update`, which has just collected the source: no lock blocks it.
+    brain.write("routines/_bf.py", (ROOT / "examples/routines/_bf.py").read_bytes())
     brain.write("routines/records-gate.py", (ROOT / "examples/routines" / GATE).read_bytes())
     brain.write("prompts/watcher.md", b"Events: {{context}}\n")
     record = {"id": "m1 #launch", "title": "Launch moved", "time": "2026-09-29T12:00:00Z"}
@@ -445,3 +451,100 @@ def test_the_gate_reads_records_collected_by_the_same_update(brain: Store, monke
     assert second["job"] != first["job"]
     assert "record" not in second
     assert len(list((brain.root / "memories/watcher").glob("*.json"))) == 1
+
+
+def test_bf_kit_helpers_cover_windows_state_pagination_export_and_emitters(
+    provider: Provider,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import io
+    from datetime import UTC, datetime
+
+    spec = importlib.util.spec_from_file_location("_bf_kit", ROOT / "examples/routines/_bf.py")
+    assert spec is not None
+    assert spec.loader is not None
+    kit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kit)
+
+    # window() reads BF_START/BF_END or manual argv and rejects missing/reversed windows.
+    monkeypatch.setenv("BF_START", START)
+    monkeypatch.setenv("BF_END", END)
+    start, end = kit.window()
+    assert (kit.canonical_time(start), kit.canonical_time(end)) == (
+        "2026-09-29T10:00:00.000000Z",
+        "2026-09-29T11:00:00.000000Z",
+    )
+    monkeypatch.delenv("BF_START")
+    assert kit.window([START, END]) == (start, end)
+    with pytest.raises(kit.BfError) as bad_window:
+        kit.window([END, START])
+    assert bad_window.value.status == 2
+
+    # state_dir(), load_state() and save_state() persist atomically and reject damaged state.
+    state_folder = tmp_path / "private-state"
+    monkeypatch.setenv("BF_STATE_DIR", str(state_folder))
+    assert kit.state_dir() == state_folder
+    assert kit.load_state("cursor.json", {"seen": []}) == {"seen": []}
+    kit.save_state("cursor.json", {"seen": ["a", "b"]})
+    assert kit.load_state("cursor.json") == {"seen": ["a", "b"]}
+    (state_folder / "broken.json").write_text("{broken")
+    with pytest.raises(kit.BfError, match=r"cannot read broken\.json"):
+        kit.load_state("broken.json")
+
+    # bf_pages() follows next_offset with --rel and --brain, and bf_export() passes --observed-since.
+    provider.install(
+        "bf",
+        [
+            {"match": ["read", "projects/a.md", "--offset", "2"], "stdout": {"items": [{"ref": "c"}]}},
+            {"match": ["read", "projects/a.md"], "stdout": {"items": [{"ref": "b"}], "next_offset": 2}},
+            {"match": ["export", "--observed-since"], "stdout": lines(item("mail:new", "2026-09-29T10:30:00Z"))},
+        ],
+    )
+    monkeypatch.setenv("PATH", f"{provider.bin}:/usr/bin:/bin")
+    pages_read = list(kit.bf_pages("projects/a.md", rel="depends-on", brain="fixture"))
+    assert [row["items"][0]["ref"] for row in pages_read] == ["b", "c"]
+    exported = list(kit.bf_export("memories/mail", observed_since=datetime(2026, 9, 29, 10, tzinfo=UTC)))
+    assert [row["ref"] for row in exported] == ["mail:new"]
+    assert provider.calls("bf")[-1] == [
+        "export",
+        "--kind",
+        "items",
+        "--scope",
+        "memories/mail",
+        "--observed-since",
+        "2026-09-29T10:00:00.000000Z",
+    ]
+
+    # emit_events() keeps 64 fitting events directly and summarizes a 65th event with default overflow.
+    capsys.readouterr()
+    fitting = kit.emit_events([{"key": f"k{n}", "text": f"Event {n}"} for n in range(64)])
+    assert len(fitting) == 64
+    assert len(GateReply.model_validate_json(capsys.readouterr().out).events) == 64
+    overflowed = kit.emit_events(
+        [{"key": f"k{n}", "text": f"Event {n}"} for n in range(65)],
+        overflow_key="custom:more",
+        overflow_ref="memories/mail",
+    )
+    assert len(overflowed) == 64
+    assert overflowed[-1] == {
+        "key": "custom:more",
+        "text": "2 more events are not listed.",
+        "ref": "memories/mail",
+    }
+    printed = [
+        event.model_dump(exclude_defaults=True)
+        for event in GateReply.model_validate_json(capsys.readouterr().out).events
+    ]
+    assert len(encode(printed)) <= GATE_EVENT_BYTES
+
+    # emit_action() writes valid OKF Markdown, and read_envelope() / emit_receipt() validate channel JSON.
+    kit.emit_action({"updated": "2026-09-29", "summary": "Check the inbox."}, ["# Inbox check", "", "All clear."])
+    action_md = capsys.readouterr().out
+    validate_okf("actions/2026-09-29_inbox/ACTION.md", action_md.encode("utf-8"))
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b'{"id":"m1","text":"Ping","conversation":"t1"}')))
+    envelope = kit.read_envelope()
+    assert envelope == {"id": "m1", "text": "Ping", "conversation": "t1"}
+    kit.emit_receipt("r1", conversation=envelope["conversation"])
+    assert Receipt.model_validate_json(capsys.readouterr().out).id == "r1"

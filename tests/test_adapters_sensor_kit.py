@@ -472,6 +472,11 @@ def test_record_normalizes_what_bf_would_reject() -> None:
         sensor.record("a", "A", attributes={"partial": "yes"})
     with pytest.raises(sensor.SensorError, match="2 MiB"):
         sensor.record("a", "A", attributes={"bulk": "z" * (2 << 20)})
+    # Multi-byte UTF-8 text exceeding 4 MiB in UTF-8 bytes (while < 4M codepoints) is truncated cleanly at codepoint boundary.
+    multibyte = sensor.record("mb", "Multibyte", text="é" * ((2 << 20) + 50))
+    mb_record = Record.model_validate(multibyte)
+    assert len(mb_record.text.encode("utf-8")) <= 4 << 20
+    assert mb_record.attributes["partial"] is True
 
 
 @pytest.mark.parametrize(
@@ -505,3 +510,61 @@ def test_kit_imports_quietly(tmp_path: Path) -> None:
     # Importing the kit prints nothing and needs no environment: a sensor decides when to call a provider.
     result = driver(tmp_path, "")
     assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+
+
+def test_load_and_save_state_are_atomic_bounded_and_refuse_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sensor = kit()
+    state = tmp_path / "state"
+    monkeypatch.setenv("BF_STATE_DIR", str(state))
+    default = {"cursor": None, "seen": []}
+    loaded = sensor.load_state("cursor.json", default)
+    assert loaded == default
+    loaded["seen"].append("a")
+    assert default["seen"] == []
+    sensor.save_state("cursor.json", {"cursor": "tok-1", "seen": ["a", "b"]})
+    assert sensor.load_state("cursor.json", default) == {"cursor": "tok-1", "seen": ["a", "b"]}
+    assert not list(state.glob("*.tmp"))
+    for bad_name in ("", ".", "..", "sub/cursor.json", "a\\b", "bad\x00.json"):
+        with pytest.raises(sensor.InvalidError, match="state file name"):
+            sensor.load_state(bad_name)
+    with pytest.raises(sensor.InvalidError, match="value JSON cannot represent"):
+        sensor.save_state("nan.json", float("nan"))
+    with pytest.raises(sensor.InvalidError, match="exceeds 8 bytes"):
+        sensor.save_state("big.json", {"cursor": "toolong"}, max_bytes=8)
+    (state / "damaged.json").write_text("{broken")
+    with pytest.raises(sensor.InvalidError, match="damaged"):
+        sensor.load_state("damaged.json")
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"secret": "' + SECRET + '"}')
+    (state / "linked.json").symlink_to(outside)
+    with pytest.raises(sensor.InvalidError, match=r"cannot read state file linked\.json"):
+        sensor.load_state("linked.json")
+
+
+def test_cli_handles_known_and_unexpected_failures_without_echoing_payloads(tmp_path: Path) -> None:
+    for body, expected in (
+        (
+            "_sensor.cli(lambda: (_ for _ in ()).throw(_sensor.InvalidError('START must precede END')), 'Demo failed')\n",
+            "Demo failed: START must precede END.\n",
+        ),
+        (
+            "_sensor.cli(lambda: (_ for _ in ()).throw(_sensor.ProviderError('gh failed', status=1)), 'Demo failed')\n",
+            "Demo failed: gh failed.\n",
+        ),
+        (
+            f"_sensor.cli(lambda: (_ for _ in ()).throw(OSError('private {SECRET}')), 'Demo failed', 'check access')\n",
+            "Demo failed; check access.\n",
+        ),
+        (
+            f"_sensor.cli(lambda: (_ for _ in ()).throw(KeyError('private {SECRET}')), 'Demo failed', 'check access')\n",
+            "Demo failed; check access.\n",
+        ),
+    ):
+        result = driver(tmp_path, body)
+        failed(result, SECRET, "private")
+        assert result.stderr == expected
+    # argparse exits 2 via SystemExit: cli() must let SystemExit pass through unchanged.
+    arg_error = driver(tmp_path, "_sensor.cli(lambda: (_ for _ in ()).throw(SystemExit(2)))\n")
+    assert arg_error.returncode == 2

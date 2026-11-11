@@ -241,3 +241,112 @@ def test_a_relative_destination_is_reported_as_an_absolute_path(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     assert run("skills")["destination"] == str(tmp_path / "skills")
+
+
+def test_skills_link_manages_relative_host_symlinks_inside_a_brain(tmp_path: Path) -> None:
+    outside = CliRunner().invoke(app, ["skills", str(tmp_path / "outside"), "--link"])
+    assert outside.exit_code == 1
+    assert "--link requires DIR to be inside a brain directory holding bf.yaml" in str(outside.exception)
+
+    brain_root = tmp_path / "brain"
+    brain_root.mkdir()
+    Store(brain_root).write("bf.yaml", b"version: 8\nname: fixture\n")
+    destination = brain_root / "skills"
+
+    # Pre-seed a stale bf-* link, an outdated bf-* link, and an unrelated user file in host directories.
+    agents_dir = brain_root / ".agents/skills"
+    claude_dir = brain_root / ".claude/skills"
+    agents_dir.mkdir(parents=True)
+    claude_dir.mkdir(parents=True)
+    (agents_dir / "bf-retired").symlink_to("../../skills/bf-retired")
+    (agents_dir / "custom.md").write_text("keep me\n")
+    (claude_dir / "bf-use").symlink_to("../wrong-target")
+
+    preview = run(str(destination), "--link", "--check", code=1)
+    preview_links = {entry["path"]: entry["status"] for entry in preview["links"]}
+    assert preview_links[".agents/skills/bf-retired"] == "stale"
+    assert preview_links[".agents/skills/bf-use"] == "missing"
+    assert preview_links[".claude/skills/bf-use"] == "outdated"
+
+    installed = run(str(destination), "--link")
+    link_map = {entry["path"]: entry for entry in installed["links"]}
+    assert link_map[".agents/skills/bf-retired"]["status"] == "pruned"
+    assert not (agents_dir / "bf-retired").exists()
+    assert not (agents_dir / "bf-retired").is_symlink()
+    assert (agents_dir / "custom.md").read_text() == "keep me\n"
+    assert link_map[".claude/skills/bf-use"]["status"] == "updated"
+    for host in (".agents", ".claude"):
+        for skill in SKILLS:
+            entry = brain_root / host / "skills" / skill
+            assert entry.is_symlink()
+            assert entry.readlink() == Path("../../skills") / skill
+            assert (entry / "SKILL.md").is_file()
+
+    checked = run(str(destination), "--link", "--check")
+    assert all(entry["status"] == "current" for entry in checked["links"])
+
+    # An unmanaged non-symlink bf-* folder in a host directory fails closed without deleting it.
+    (agents_dir / "bf-action").unlink()
+    (agents_dir / "bf-action").mkdir()
+    (agents_dir / "bf-action/local.md").write_text("mine\n")
+    blocked = run(str(destination), "--link", code=1)
+    blocked_map = {entry["path"]: entry["status"] for entry in blocked["links"]}
+    assert blocked_map[".agents/skills/bf-action"] == "unmanaged"
+    assert (agents_dir / "bf-action/local.md").read_text() == "mine\n"
+
+    # Installing into .agents/skills directly creates real folders there and relative symlinks in .claude/skills.
+    brain2 = tmp_path / "brain2"
+    brain2.mkdir()
+    Store(brain2).write("bf.yaml", b"version: 8\nname: second\n")
+    direct_reply = run(str(brain2 / ".agents/skills"), "--link")
+    assert all(entry["path"].startswith(".claude/skills/") for entry in direct_reply["links"])
+    assert (brain2 / ".claude/skills/bf-use").readlink() == Path("../../.agents/skills/bf-use")
+
+
+def test_skills_link_accepts_whole_directory_host_symlinks_to_destination(tmp_path: Path) -> None:
+    brain = tmp_path / "brain"
+    brain.mkdir()
+    Store(brain).write("bf.yaml", b"version: 8\nname: whole-dir\n")
+    (brain / ".agents").mkdir()
+    (brain / ".claude").mkdir()
+    (brain / ".agents/skills").symlink_to("../skills")
+    (brain / ".claude/skills").symlink_to("../.agents/skills")
+
+    # Preview before skills/ exists recognizes both whole-directory links as already pointing at destination.
+    preview = run(str(brain / "skills"), "--check", "--link", code=1)
+    assert preview["links"] == []
+    assert all(entry["status"] == "missing" for entry in preview["skills"])
+
+    # Installing into skills/ keeps custom skills and both whole-directory host symlinks intact.
+    (brain / "skills/custom-skill").mkdir(parents=True)
+    (brain / "skills/custom-skill/SKILL.md").write_text("---\nname: custom-skill\n---\n")
+    installed = run(str(brain / "skills"), "--link")
+    assert installed["ok"] is True
+    assert installed["links"] == []
+    assert (brain / ".agents/skills").is_symlink()
+    assert (brain / ".agents/skills").readlink() == Path("../skills")
+    assert (brain / ".claude/skills").is_symlink()
+    assert (brain / ".claude/skills").readlink() == Path("../.agents/skills")
+    assert (brain / ".claude/skills/custom-skill/SKILL.md").is_file()
+    for skill in SKILLS:
+        assert (brain / ".agents/skills" / skill / "SKILL.md").is_file()
+        assert (brain / ".claude/skills" / skill / "SKILL.md").is_file()
+
+    checked = run(str(brain / "skills"), "--check", "--link")
+    assert checked["ok"] is True
+    assert checked["links"] == []
+
+    # Host symlinks escaping the brain, pointing elsewhere, or looping still fail closed.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    other = brain / "other-skills"
+    other.mkdir()
+    for bad_target in (outside, Path("../other-skills"), Path("skills")):
+        (brain / ".agents/skills").unlink()
+        (brain / ".agents/skills").symlink_to(bad_target)
+        rejected = CliRunner().invoke(app, ["skills", str(brain / "skills"), "--link"])
+        assert rejected.exit_code == 1
+        assert "is not a folder" in str(rejected.exception)
+        rejected_check = CliRunner().invoke(app, ["skills", str(brain / "skills"), "--check", "--link"])
+        assert rejected_check.exit_code == 1
+        assert "is not a folder" in str(rejected_check.exception)

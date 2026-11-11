@@ -1,10 +1,9 @@
 """Offline editor schemas generated from the same models as configuration loading, and reply schemas."""
 
-from typing import Literal, cast
+from typing import cast
 
 from bf.models import Config, UserConfig
-
-Kind = Literal["brain", "registry", "eval", "search-reply", "read-reply", "status-reply", "assistant-reply"]
+from bf.models import SchemaKind as Kind
 
 
 def _open(value: object) -> object:

@@ -633,7 +633,7 @@ def test_initialization_never_replaces_a_brain_created_before_it_took_the_lock(
         with writer(store):
             yield
 
-    monkeypatch.setattr("bf.cli.writer", raced)
+    monkeypatch.setattr("bf.storage.writer", raced)
     result = CliRunner().invoke(app, ["init", str(target), "--name", "mine"])
     assert result.exit_code == 1
     assert "freshly cloned" in str(result.exception)
@@ -1065,7 +1065,7 @@ def test_file_encoding_and_cache_failures_share_one_message_without_paths(
     def failing(*_: object, **__: object) -> dict[str, object]:
         raise failure
 
-    monkeypatch.setattr("bf.cli.read", failing)
+    monkeypatch.setattr("bf.retrieve.read", failing)
     monkeypatch.setattr("bf.mcp.read", failing)
     monkeypatch.setattr(sys, "argv", ["bf", "read", "projects/offline.md", "--brain", str(brain.root)])
     with pytest.raises(SystemExit) as exited:
@@ -1128,3 +1128,16 @@ def test_tag_pages_and_eval_folders_accept_a_trailing_slash(brain: Store) -> Non
         "evals/retrieval.yaml", b"version: 8\ncases:\n- name: d\n  query: retention\n  expect: [projects/offline.md]\n"
     )
     assert invoke("eval", "--path", "evals/", "--brain", "fixture")["score"] == "1/1"
+
+
+def test_boolean_cli_options_expose_only_positive_flags() -> None:
+    def walk(command: object, prefix: str = "bf") -> None:
+        for param in getattr(command, "params", ()):
+            assert not getattr(param, "secondary_opts", ()), (
+                f"{prefix}: {getattr(param, 'opts', ())}/{getattr(param, 'secondary_opts', ())}"
+            )
+        if isinstance(command, TyperGroup):
+            for name, subcommand in command.commands.items():
+                walk(subcommand, f"{prefix} {name}")
+
+    walk(get_command(app))

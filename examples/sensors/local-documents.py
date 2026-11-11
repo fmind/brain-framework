@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Snapshot a selected document folder: text, saved HTML, Office XML and PDF via pdftotext."""
 
+from __future__ import annotations
+
 import argparse
 import errno
 import fnmatch
@@ -9,25 +11,23 @@ import json
 import lzma
 import os
 import re
-import selectors
 import signal
 import stat
-import subprocess
 import sys
 import tempfile
-import time
 
 # UTF-8-only XML is rejected before parsing if it contains a DTD/entity; elements and nesting are bounded below.
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from collections.abc import Iterator
-from contextlib import suppress
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import quote
+
+import _sensor
 
 FILE_BYTES = 16 << 20
 TEXT_BYTES = 64 << 10
@@ -39,14 +39,7 @@ MAX_ELEMENTS, MAX_NESTING = 100_000, 64
 PDF_TIMEOUT = 60
 EXTENSIONS = {".txt", ".md", ".rst", ".org", ".csv", ".tsv", ".html", ".htm", ".docx", ".pptx", ".xlsx", ".pdf"}
 SKIP = {"node_modules", "__pycache__", "venv"}
-# BF record bounds: an id fits a BF address once percent-encoded; aliases and URLs are bounded single lines.
-MAX_ID, MAX_ENCODED, MAX_REF = 4096, 7988, 8192
-# C0 and C1 control characters, which BF rejects in ids and titles.
-CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-
-
-class InvalidError(ValueError):
-    """A content-free diagnostic safe to show on stderr; it may name a root-relative path, never file content."""
+InvalidError = _sensor.InvalidError
 
 
 class Page(HTMLParser):
@@ -184,44 +177,18 @@ def office(data: bytes, suffix: str) -> tuple[str, bool]:
 def pdf(path: Path) -> bytes:
     """Bound converter output while it runs; inherit the collector group so Brain Framework can cancel the whole tree."""
     try:
-        child = subprocess.Popen(
-            ["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+        return _sensor.run(
+            ["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"], timeout=PDF_TIMEOUT, max_bytes=FILE_BYTES
         )
-    except FileNotFoundError:
-        raise InvalidError("pdftotext is not installed; install Poppler or exclude PDFs") from None
-    output = bytearray()
-    deadline = time.monotonic() + PDF_TIMEOUT
-    try:
-        if child.stdout is None:
-            raise ValueError("PDF converter pipe is missing")
-        with selectors.DefaultSelector() as selector:
-            os.set_blocking(child.stdout.fileno(), False)
-            selector.register(child.stdout, selectors.EVENT_READ)
-            while selector.get_map() or child.poll() is None:
-                if time.monotonic() >= deadline:
-                    raise InvalidError("PDF conversion timed out")
-                if not selector.get_map():
-                    with suppress(subprocess.TimeoutExpired):
-                        child.wait(timeout=0.05)
-                for key, _ in selector.select(0.05):
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                    output.extend(chunk)
-                    if len(output) > FILE_BYTES:
-                        raise InvalidError("PDF text exceeds its limit")
-        if child.wait():
-            raise InvalidError("PDF conversion failed")
-        return bytes(output)
-    finally:
-        if child.poll() is None:
-            child.kill()
-        child.wait()
-        if child.stdout is not None:
-            child.stdout.close()
+    except _sensor.InvalidError:
+        raise InvalidError("PDF text exceeds its limit") from None
+    except _sensor.ProviderError as error:
+        message = str(error)
+        if message.startswith("cannot start"):
+            raise InvalidError("pdftotext is not installed; install Poppler or exclude PDFs") from None
+        if "timeout" in message:
+            raise InvalidError("PDF conversion timed out") from None
+        raise InvalidError("PDF conversion failed") from None
 
 
 def extract(data: bytes, suffix: str) -> tuple[str, bool]:
@@ -258,7 +225,7 @@ def nameable(relative: str) -> bool:
         relative.encode()
     except UnicodeEncodeError:
         return False
-    return not CONTROL.search(relative)
+    return not _sensor.CONTROL.search(relative)
 
 
 def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str, object]], int]:
@@ -315,7 +282,11 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
                     continue
                 identifier = label + "/" + relative
                 alias = "file:" + quote(identifier, safe="/")
-                if len(identifier) > MAX_ID or len(quote(identifier, safe="/@:")) > MAX_ENCODED or len(alias) > MAX_REF:
+                if (
+                    len(identifier) > _sensor.MAX_ID
+                    or len(quote(identifier, safe="/@:")) > _sensor.MAX_ENCODED_ID
+                    or len(alias) > _sensor.MAX_REF
+                ):
                     skipped += 1
                     continue
                 try:
@@ -364,7 +335,7 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
                     "title": " ".join(relative.split()),
                     "text": content[:TEXT_BYTES].decode(errors="ignore"),
                     "time": when,
-                    **({"url": url} if len(url) <= MAX_REF else {}),
+                    **({"url": url} if len(url) <= _sensor.MAX_REF else {}),
                     "aliases": [alias],
                     "attributes": {
                         "updated": when,
@@ -404,9 +375,7 @@ def collect(label: str, root: Path, excluded: list[str]) -> tuple[list[dict[str,
     return records, skipped
 
 
-if __name__ == "__main__":
-    # BF sends SIGTERM before it kills a stopped run: exiting runs the cleanup that removes the private PDF copy.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("label", help="stable personal/team scope name")
     parser.add_argument("root", type=Path, help="explicit allowlisted directory; use snapshot mode")
@@ -414,21 +383,17 @@ if __name__ == "__main__":
         "--exclude", action="append", default=[], help="selected-root-relative glob to skip (repeatable)"
     )
     args = parser.parse_args()
-    try:
-        result, skipped = collect(args.label, args.root, args.exclude)
-        payload = json.dumps(result, ensure_ascii=False, allow_nan=False)
-        if len(payload.encode()) > TOTAL_BYTES:
-            raise InvalidError("normalized document snapshot exceeds 64 MiB; narrow the root")
-        if skipped:
-            print(
-                f"Local documents skipped {skipped} entries whose names are not UTF-8, contain control characters "
-                "or exceed the record id limit.",
-                file=sys.stderr,
-            )
-        print(payload)
-    except InvalidError as error:
-        print(f"Local document collection failed: {error}.", file=sys.stderr)
-        sys.exit(1)
-    except (OSError, ValueError, KeyError, IndexError, UnicodeError, subprocess.SubprocessError):
-        print("Local document collection failed; check the selected root and its permissions.", file=sys.stderr)
-        sys.exit(1)
+    result, skipped = collect(args.label, args.root, args.exclude)
+    _sensor.emit(result, max_bytes=TOTAL_BYTES)
+    if skipped:
+        print(
+            f"Local documents skipped {skipped} entries whose names are not UTF-8, contain control characters "
+            "or exceed the record id limit.",
+            file=sys.stderr,
+        )
+
+
+if __name__ == "__main__":
+    # BF sends SIGTERM before it kills a stopped run: exiting runs the cleanup that removes the private PDF copy.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    _sensor.cli(main, "Local document collection failed", "check the selected root and its permissions")

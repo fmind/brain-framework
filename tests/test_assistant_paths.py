@@ -137,17 +137,19 @@ def test_changed_assistant_fails_attempted_work_until_each_job_is_retried(store:
     store.write("bf.yaml", reviewed.replace(b"command: [harness]", b"command: [cat]"))
     calls: list[str] = []
     results = assistants.cycle(store, NAMES, at=at, runner=fake(calls))
-    assert calls == []
+    # Neither harness nor the swapped cat command runs; only the input job's failure notice is sent on send-chat.
+    assert calls == ["send-chat"]
     failed = [item for item in results if item.get("status") == "failed"]
     assert len(failed) == 2
     assert all("configuration changed" in str(item.get("error")) for item in failed)
     assert queue.report()["counts"] == {"failed": 2, "pending": 1}
     store.write("bf.yaml", reviewed)
     assistants.cycle(store, NAMES, at=datetime.now(UTC), runner=fake(calls))
-    # The failed input job blocks the conversation's later message, and the failed review blocks its schedule.
-    assert calls == []
+    # The failed input job blocks the conversation's later message, and the failed review waits until its next window.
+    assert calls == ["send-chat"]
     assert queue.report()["counts"] == {"failed": 2, "pending": 1}
-    assert assistants.due_schedules(store, NAMES, at + timedelta(hours=2)) == []
+    assert assistants.due_schedules(store, NAMES, at + timedelta(minutes=10)) == []
+    assert len(assistants.due_schedules(store, NAMES, at + timedelta(hours=2))) == 1
     jobs = cast("list[dict[str, object]]", queue.report()["jobs"])
     for job in jobs:
         if job["state"] == "failed":
@@ -168,7 +170,7 @@ def test_failed_schedule_blocks_its_window_until_cancelled_and_shows_in_attentio
     assert queue.get(key)["state"] == "uncertain"
     assert assistants.due_schedules(store, NAMES, at + timedelta(hours=2)) == []
     # The copied session hook and weekly review read this entry.
-    assert {"assistant": "personal", "freshness": "never", "failed": True} in health.attention(store)
+    assert {"kind": "assistant", "name": "personal", "freshness": "never", "failed": True} in health.attention(store)
     end = queue.work(key).end
     queue.retry(key, cancel=True)
     assert queue.progress("schedule:personal:schedule:review")["end"] == end

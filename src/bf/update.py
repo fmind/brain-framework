@@ -5,24 +5,23 @@ from __future__ import annotations
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager, nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from threading import Event
-from typing import Literal
 
 from bf import assistants as assistant_runtime
-from bf import index
+from bf import index, pages
 from bf.collect import Runner, collect, due, due_routines, enabled, hooked, routine, run, window
 from bf.config import load
-from bf.models import Config, Error, reason, suggest
-from bf.storage import BusyError, Store, collecting
+from bf.history import ROUTINES, remember, state
+from bf.models import PROGRAM_KINDS as KINDS
+from bf.models import Config, Error, ProgramKind, Routine, reason, suggest, timestamp
+from bf.storage import BusyError, Store, collecting, recording
 
 # Seconds a cycle waits for another update of the same brain before failing visibly.
 WAIT = 600
 # Concurrent due sensors one update cycle runs in parallel.
 WORKERS = 4
-ProgramKind = Literal["sensor", "routine", "assistant"]
-KINDS: frozenset[ProgramKind] = frozenset({"sensor", "routine", "assistant"})
 
 
 _INACCESSIBLE = "inaccessible files; check permissions and free space"
@@ -66,7 +65,7 @@ def scheduled(
     for name in selected_assistants:
         assistant = config.assistants[name]
         if assistant.enabled:
-            intervals.extend((schedule.every, name) for schedule in assistant.schedules.values())
+            intervals.extend((schedule.every, name) for schedule in assistant.schedules.values() if schedule.every)
             intervals.extend((item.channel.every, name) for item in assistant.inputs if item.channel.mode == "read")
     return sorted(intervals)
 
@@ -150,7 +149,16 @@ def update(
                 return {**result, "status": "due"}, False
             try:
                 result.update(
-                    collect(store, sensor, start=start, end=end, reconcile=reconcile, runner=runner, clock=lambda: now)
+                    collect(
+                        store,
+                        sensor,
+                        start=start,
+                        end=end,
+                        reconcile=reconcile,
+                        runner=runner,
+                        clock=lambda: now,
+                        live=given is None,
+                    )
                 )
                 result["status"] = "collected"
                 return result, False
@@ -181,32 +189,83 @@ def update(
             failed |= item_failed
         for program, start, end in routine_windows:
             result = {"routine": program, "start": start, "end": end}
-            if dry_run:
-                ran.append({**result, "status": "due"})
-                continue
+            routine_cfg = config.routines[program]
+            next_cursor = ""
             try:
-                result.update(routine(store, program, start=start, end=end, runner=runner, clock=lambda: now))
+                if routine_cfg.when is not None:
+                    with collecting(store, program) if not dry_run else nullcontext():
+                        routine_state = state(store, ROUTINES).get(program, {})
+                        saved_cursor = str(routine_state.get("when_cursor") or "")
+                        cursor = saved_cursor or timestamp(
+                            (now - timedelta(seconds=routine_cfg.refresh or 86_400)).isoformat()
+                        )
+                        matched, _, next_cursor = pages.evaluate_when(
+                            store, routine_cfg.when, now, cursor=cursor, exclude=("routine", program)
+                        )
+                        if not matched:
+                            if not dry_run:
+                                at_ts = timestamp(now.isoformat())
+                                with recording(store):
+                                    remember(
+                                        store,
+                                        program,
+                                        ROUTINES,
+                                        run=at_ts,
+                                        success=at_ts,
+                                        error="",
+                                        failures=0,
+                                        **({"when_cursor": next_cursor} if next_cursor else {}),
+                                    )
+                            ran.append({**result, "status": "gated"})
+                            continue
+                if dry_run:
+                    ran.append({**result, "status": "due"})
+                    continue
+                result.update(
+                    routine(
+                        store,
+                        program,
+                        start=start,
+                        end=end,
+                        when_cursor=next_cursor,
+                        runner=runner,
+                        clock=lambda: now,
+                    )
+                )
                 result["status"] = "skipped" if "skipped" in result else "ran"
-            except BusyError:
-                result.update(status="skipped", skipped="another run of this routine is still active")
+            except BusyError as error:
+                skipped_msg = (
+                    str(error)
+                    if str(error).startswith("search cache is ")
+                    else "another run of this routine is still active"
+                )
+                result.update(status="skipped", skipped=skipped_msg)
             except (Error, OSError, UnicodeError) as error:
                 result.update(status="failed", error=reason(error, _INACCESSIBLE))
                 failed = True
             ran.append(result)
+    unscoped = not (sensors or routines or assistants) and "assistant" in kinds
     asked = assistant_runtime.cycle(
-        store, selected_assistants, at=given or datetime.now(UTC), dry_run=dry_run, runner=runner
+        store,
+        selected_assistants,
+        at=given or datetime.now(UTC),
+        dry_run=dry_run,
+        runner=runner,
+        include_standalone=unscoped,
     )
     failed |= any(item["status"] == "failed" for item in asked)
     report: dict[str, object] = {"brain": config.name, "sensors": results, "routines": ran}
-    if config.assistants:
+    if config.assistants or asked:
         report["assistants"] = asked
     # Enabled programs that never run here are named, so an empty cycle is not mistaken for current evidence: sensors and
-    # routines with refresh: 0, and assistants without schedules or inputs, which only bf run starts.
+    # unscheduled routines, and assistants without schedules or inputs, which only bf run starts.
     manual = sorted(
         [
             name
             for name, program in (*config.sensors.items(), *config.routines.items())
-            if program.enabled and not program.refresh and name in selected_sensors | selected_routines
+            if program.enabled
+            and not (program.scheduled if isinstance(program, Routine) else program.refresh)
+            and name in selected_sensors | selected_routines
         ]
         + [
             name

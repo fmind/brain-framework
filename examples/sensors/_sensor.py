@@ -1,4 +1,4 @@
-"""A copy-in kit for Brain Framework sensors: bounded provider calls and records BF accepts.
+"""A copy-in kit for Brain Framework sensors: bounded provider calls, state cursors and records BF accepts.
 
 Copy this file next to your sensors (`sensors/_sensor.py`) and `import _sensor` from a sensor in the same folder:
 Python finds it beside the script it runs. It is not an importable `bf` module, and it must stay standard-library
@@ -18,6 +18,7 @@ temporary copy can turn SIGTERM into an exit, `signal.signal(signal.SIGTERM, lam
 
 from __future__ import annotations
 
+import copy
 import http.client
 import json
 import os
@@ -27,6 +28,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -43,6 +45,7 @@ MAX_REF, MAX_LINKS = 8192, 1000  # One URL, link, alias or field value; links, a
 MAX_FIELDS = 2 << 20  # Every record field other than `text`, as UTF-8 JSON.
 MAX_OUTPUT = 16 << 20  # One sensor run's JSON array; BF's `max_bytes` defaults to 64 MiB.
 MAX_SECRET = 64 << 10  # One credential file read by `secret`.
+MAX_STATE = 64 << 20  # One state file in `BF_STATE_DIR`.
 MAX_COUNT = 2**53 - 1  # The parts a run may report missing or tried, as `emit`'s `missed` and `of`.
 # C0 and C1 control characters, which BF rejects in ids, titles, URLs and identities.
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -55,6 +58,13 @@ INVISIBLE = re.compile(
     r"\U0001d173-\U0001d17a\U000e0001\U000e0020-\U000e007f]"
 )
 IDENTITY = re.compile(r"[a-z][a-z0-9+.-]*:\S+")
+# Only `https://HOST/OWNER/NAME`, `ssh://git@HOST/OWNER/NAME` and `git@HOST:OWNER/NAME` on a dotted host ending in
+# letters: credentials, other users, ports, nested groups and bare ssh aliases give no repository identity.
+_REMOTE_HOST = r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}"
+_REMOTE_URL = re.compile(
+    rf"(?:https://({_REMOTE_HOST})/|ssh://git@({_REMOTE_HOST})/|git@({_REMOTE_HOST}):)"
+    r"([A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)(?:\.git)?"
+)
 # Variables that would make a provider or `git` read another repository or load code: a Git hook's GIT_DIR, for one.
 LOCAL = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
 LOCAL += ("GIT_ALTERNATE_OBJECT_DIRECTORIES",)
@@ -62,6 +72,18 @@ LOCAL += ("GIT_ALTERNATE_OBJECT_DIRECTORIES",)
 
 class SensorError(Exception):
     """A content-free failure, safe to print on stderr: never put provider output or secrets in its message."""
+
+
+class ProviderError(SensorError):
+    """A content-free provider or CLI failure, carrying `status` when the child exited nonzero."""
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class InvalidError(SensorError, ValueError):
+    """A content-free input, state or response validation failure safe to print on stderr."""
 
 
 def fail(message: str) -> NoReturn:
@@ -83,6 +105,27 @@ def main(collect: Callable[[], Iterable[Mapping[str, Any]]], failure: str) -> No
         fail(f"{failure} ({type(error).__name__})")
 
 
+def cli(
+    fn: Callable[[], None],
+    prefix: str = "Collection failed",
+    hint: str = "check provider access and arguments",
+) -> None:
+    """Run `fn()`; handle `(ProviderError, InvalidError, OSError, UnicodeError)` and unexpected failures safely.
+
+    `SystemExit` (such as `argparse` exiting 2 on invalid CLI arguments) passes through unchanged.
+    """
+    try:
+        fn()
+    except SensorError as error:
+        detail = str(error).rstrip(".")
+        fail(f"{prefix}: {detail}." if detail else f"{prefix}; {hint}.")
+    except (OSError, UnicodeError) as error:
+        del error
+        fail(f"{prefix}; {hint}.")
+    except Exception:  # noqa: BLE001 - never echo provider payloads, paths or parser slices
+        fail(f"{prefix}; {hint}.")
+
+
 def _instant(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
@@ -99,13 +142,13 @@ def window(argv: Sequence[str] | None = None) -> tuple[datetime, datetime]:
     env = (os.environ.get("BF_START", ""), os.environ.get("BF_END", ""))
     values = env if all(env) else tuple(argv or ())
     if len(values) != 2:
-        raise SensorError("no window: run through bf, or pass START and END")
+        raise InvalidError("no window: run through bf, or pass START and END")
     try:
         start, end = _instant(values[0]), _instant(values[1])
     except ValueError:
-        raise SensorError("START and END must be ISO 8601 timestamps with timezones") from None
+        raise InvalidError("START and END must be ISO 8601 timestamps with timezones") from None
     if start >= end:
-        raise SensorError("START must precede END")
+        raise InvalidError("START must precede END")
     return start, end
 
 
@@ -117,10 +160,77 @@ def state_dir() -> Path:
     """
     value = os.environ.get("BF_STATE_DIR", "")
     if not value or not Path(value).is_absolute():
-        raise SensorError("BF_STATE_DIR is unset: run through bf, or set it to a private absolute folder")
+        raise InvalidError("BF_STATE_DIR is unset: run through bf, or set it to a private absolute folder")
     path = Path(value)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     return path
+
+
+def _state_file(name: str) -> Path:
+    if (
+        not isinstance(name, str)
+        or not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or CONTROL.search(name)
+    ):
+        raise InvalidError("state file name must be a single filename without path separators")
+    return state_dir() / name
+
+
+def _no_constant(_value: str) -> NoReturn:
+    raise ValueError("non-JSON number")
+
+
+def load_state(name: str, default: Any = None, *, max_bytes: int = MAX_STATE) -> Any:
+    """Read JSON state `name` from `state_dir()`; return a copy of `default` when absent, or fail on damage."""
+    path = _state_file(name)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return copy.deepcopy(default)
+    except OSError:
+        raise InvalidError(f"cannot read state file {name} in BF_STATE_DIR; delete it to reset state") from None
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+                raise InvalidError(f"state file {name} must be a regular file within {max_bytes} bytes")
+            data = stream.read(max_bytes + 1)
+    except OSError:
+        raise InvalidError(f"cannot read state file {name} in BF_STATE_DIR; delete it to reset state") from None
+    if len(data) > max_bytes:
+        raise InvalidError(f"state file {name} exceeds {max_bytes} bytes")
+    try:
+        return json.loads(data.decode("utf-8"), parse_constant=_no_constant)
+    except (UnicodeError, ValueError, RecursionError):
+        raise InvalidError(f"state file {name} is damaged; delete it to reset state") from None
+
+
+def save_state(name: str, data: Any, *, max_bytes: int = MAX_STATE) -> None:
+    """Atomically write JSON `data` to `name` inside `state_dir()`, replacing any previous state whole."""
+    path = _state_file(name)
+    try:
+        payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8") + b"\n"
+    except (TypeError, ValueError, UnicodeError):
+        raise InvalidError(f"state {name} holds a value JSON cannot represent") from None
+    if len(payload) > max_bytes:
+        raise InvalidError(f"state file {name} exceeds {max_bytes} bytes")
+    temporary: Path | None = None
+    try:
+        descriptor, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{name}.", suffix=".tmp")
+        temporary = Path(temp_name)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    except OSError:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink()
+        raise InvalidError(f"cannot write state file {name} in BF_STATE_DIR") from None
 
 
 def secret(path: str | os.PathLike[str]) -> str:
@@ -135,43 +245,43 @@ def secret(path: str | os.PathLike[str]) -> str:
     try:
         file = Path(path).expanduser()
     except RuntimeError:
-        raise SensorError(f"secret file {name} names an unknown home folder; pass an absolute path") from None
+        raise InvalidError(f"secret file {name} names an unknown home folder; pass an absolute path") from None
     if not file.is_absolute():
-        raise SensorError(f"secret file {name} needs an absolute path outside the brain")
+        raise InvalidError(f"secret file {name} needs an absolute path outside the brain")
     brain = os.environ.get("BF_BRAIN", "")
     try:
         root = Path(brain).stat() if brain else None
     except OSError:
-        raise SensorError("cannot find the brain in BF_BRAIN; run the sensor through bf, which sets it") from None
+        raise InvalidError("cannot find the brain in BF_BRAIN; run the sensor through bf, which sets it") from None
     try:
         info = file.lstat()
         if not stat.S_ISREG(info.st_mode):
-            raise SensorError(f"secret file {name} must be a regular file, not a link or special file")
+            raise InvalidError(f"secret file {name} must be a regular file, not a link or special file")
         if info.st_uid != os.getuid():
-            raise SensorError(f"secret file {name} must be owned by you")
+            raise InvalidError(f"secret file {name} must be owned by you")
         if info.st_mode & 0o077:
-            raise SensorError(f"secret file {name} is open to your group or others; run chmod 600 on it")
+            raise InvalidError(f"secret file {name} is open to your group or others; run chmod 600 on it")
         if info.st_size > MAX_SECRET:
-            raise SensorError(f"secret file {name} exceeds {MAX_SECRET} bytes")
+            raise InvalidError(f"secret file {name} exceeds {MAX_SECRET} bytes")
         # Folder identities, unlike spellings, also find the brain through a case-insensitive or bind-mounted path.
         parents = file.resolve(strict=True).parents
         if root is not None and any(os.path.samestat(root, parent.stat()) for parent in parents):
-            raise SensorError(f"secret file {name} is inside the brain; move it to a private folder outside it")
+            raise InvalidError(f"secret file {name} is inside the brain; move it to a private folder outside it")
         # Opening without following a link, then comparing inodes, reads the very file checked above.
         with os.fdopen(os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
             opened = os.fstat(handle.fileno())
             data = handle.read(MAX_SECRET + 1)
     except OSError:
-        raise SensorError(f"cannot read secret file {name}; check that it exists and is readable") from None
+        raise InvalidError(f"cannot read secret file {name}; check that it exists and is readable") from None
     if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino) or len(data) > MAX_SECRET:
-        raise SensorError(f"secret file {name} changed while it was read; retry")
+        raise InvalidError(f"secret file {name} changed while it was read; retry")
     try:
         value = data.decode("utf-8")
     except UnicodeError:
-        raise SensorError(f"secret file {name} is not UTF-8 text") from None
+        raise InvalidError(f"secret file {name} is not UTF-8 text") from None
     value = value[:-2] if value.endswith("\r\n") else value.removesuffix("\n")
     if not value:
-        raise SensorError(f"secret file {name} is empty")
+        raise InvalidError(f"secret file {name} is empty")
     return value
 
 
@@ -190,18 +300,18 @@ def run(argv: Sequence[str], *, timeout: float, max_bytes: int) -> bytes:
             list(argv), cwd="/", env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
         )
     except OSError:
-        raise SensorError(f"cannot start {name}; check that it is installed on PATH") from None
+        raise ProviderError(f"cannot start {name}; check that it is installed on PATH") from None
     output = bytearray()
     deadline = time.monotonic() + timeout
     try:
         if child.stdout is None:
-            raise SensorError(f"{name} has no output pipe")
+            raise ProviderError(f"{name} has no output pipe")
         with selectors.DefaultSelector() as selector:
             os.set_blocking(child.stdout.fileno(), False)
             selector.register(child.stdout, selectors.EVENT_READ)
             while selector.get_map() or child.poll() is None:
                 if time.monotonic() >= deadline:
-                    raise SensorError(f"{name} exceeded its {timeout:g}s timeout")
+                    raise ProviderError(f"{name} exceeded its {timeout:g}s timeout")
                 if not selector.get_map():
                     with suppress(subprocess.TimeoutExpired):
                         child.wait(timeout=0.05)
@@ -211,9 +321,11 @@ def run(argv: Sequence[str], *, timeout: float, max_bytes: int) -> bytes:
                         selector.unregister(key.fileobj)
                     output.extend(chunk)
                     if len(output) > max_bytes:
-                        raise SensorError(f"{name} output exceeds {max_bytes} bytes")
+                        raise InvalidError(f"{name} output exceeds {max_bytes} bytes")
         if code := child.wait():
-            raise SensorError(f"{name} failed with status {code}; check its authentication and arguments")
+            raise ProviderError(
+                f"{name} failed with status {code}; check its authentication and arguments", status=code
+            )
         return bytes(output)
     finally:
         if child.poll() is None:
@@ -229,7 +341,7 @@ class _SameHostHttps(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         old, new = urlsplit(req.full_url), urlsplit(newurl)
         if new.scheme != "https" or (new.hostname, new.port) != (old.hostname, old.port) or new.username:
-            raise SensorError("the provider redirected outside its HTTPS host")
+            raise ProviderError("the provider redirected outside its HTTPS host")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -242,7 +354,7 @@ def fetch(url: str, *, timeout: float, max_bytes: int, headers: Mapping[str, str
     """
     parts = urlsplit(url)
     if parts.scheme != "https" or not parts.hostname or parts.username or CONTROL.search(url):
-        raise SensorError("fetch needs an HTTPS URL without credentials")
+        raise InvalidError("fetch needs an HTTPS URL without credentials")
     host = parts.hostname
     opener = urllib.request.build_opener(
         _SameHostHttps(), urllib.request.HTTPSHandler(context=ssl.create_default_context())
@@ -256,15 +368,15 @@ def fetch(url: str, *, timeout: float, max_bytes: int, headers: Mapping[str, str
             while chunk := response.read1(65536):
                 body.extend(chunk)
                 if len(body) > max_bytes:
-                    raise SensorError(f"{host} answered more than {max_bytes} bytes")
+                    raise InvalidError(f"{host} answered more than {max_bytes} bytes")
                 if time.monotonic() >= deadline:
-                    raise SensorError(f"{host} exceeded the {timeout:g}s timeout")
+                    raise ProviderError(f"{host} exceeded the {timeout:g}s timeout")
             return bytes(body)
     except urllib.error.HTTPError as error:
         error.close()
-        raise SensorError(f"{host} answered HTTP {error.code}; check the token and URL") from None
+        raise ProviderError(f"{host} answered HTTP {error.code}; check the token and URL", status=error.code) from None
     except (urllib.error.URLError, http.client.HTTPException, OSError):
-        raise SensorError(f"cannot reach {host}; check the network and URL") from None
+        raise ProviderError(f"cannot reach {host}; check the network and URL") from None
 
 
 def fetch_json(url: str, *, timeout: float, max_bytes: int, headers: Mapping[str, str] | None = None) -> Any:
@@ -273,7 +385,7 @@ def fetch_json(url: str, *, timeout: float, max_bytes: int, headers: Mapping[str
     try:
         return json.loads(body)
     except (UnicodeError, ValueError):
-        raise SensorError(f"{urlsplit(url).hostname} answered invalid JSON") from None
+        raise InvalidError(f"{urlsplit(url).hostname} answered invalid JSON") from None
 
 
 def _identity(value: str) -> str:
@@ -285,6 +397,18 @@ def _identity(value: str) -> str:
         and not SURROGATE.search(value)
     )
     return value if ok and not INVISIBLE.search(value) else ""
+
+
+def line(value: object, fallback: str = "") -> str:
+    """One bounded title line: control characters become spaces and whitespace collapses."""
+    return " ".join(CONTROL.sub(" ", str(_text(value))).split())[:MAX_TITLE].rstrip() or fallback
+
+
+def reference(value: object) -> str:
+    """A URL or identity within BF's single-line bound, or "" when empty, over-long or holding controls."""
+    if isinstance(value, str) and value.strip() and len(value) <= MAX_REF and not CONTROL.search(value):
+        return value if not SURROGATE.search(value) else ""
+    return ""
 
 
 def person(email: str) -> str:
@@ -314,9 +438,20 @@ def repo(host: str, owner: str, name: str) -> str:
     return _identity("repo:" + "/".join(quote(part, safe="") for part in parts))
 
 
+def git_remote_identity(url: str) -> str:
+    """`repo:HOST/OWNER/NAME` for an HTTPS or `git@` SSH remote without credentials; "" for any other remote."""
+    if not isinstance(url, str):
+        return ""
+    match = _REMOTE_URL.fullmatch(url.strip())
+    if not match:
+        return ""
+    host = next(group for group in match.groups()[:3] if group)
+    return _identity(f"repo:{host}/{match[4]}".lower())
+
+
 def _identities(values: Iterable[object], name: str) -> list[str]:
     if isinstance(values, (str, bytes)) or not isinstance(values, Iterable):
-        raise SensorError(f"{name} must be a list of identities")
+        raise InvalidError(f"{name} must be a list of identities")
     kept = [value for value in values if isinstance(value, str) and _identity(value)]
     return list(dict.fromkeys(kept))[:MAX_LINKS]  # The caller's order sets which values a cut keeps.
 
@@ -370,7 +505,7 @@ def record(
         or SURROGATE.search(id)
         or len(quote(id, safe="/@:")) > MAX_ENCODED_ID
     ):
-        raise SensorError("a record id is empty, too long or holds control characters or a lone surrogate")
+        raise InvalidError("a record id is empty, too long or holds control characters or a lone surrogate")
     extra = _text(dict(attributes or {}))
     for key in [key for key in extra if key.endswith("_refs")]:
         extra[key] = _identities(extra[key], f"attributes.{key}")
@@ -385,15 +520,16 @@ def record(
         if not isinstance(value, str) or not value.strip() or len(value) > MAX_REF or CONTROL.search(value):
             del extra[key]
     if "partial" in extra and not isinstance(extra["partial"], bool):
-        raise SensorError("attributes.partial must be a boolean")
+        raise InvalidError("attributes.partial must be a boolean")
     text = _text(text)
-    if len(text) > MAX_TEXT:
-        text, extra["partial"] = text[:MAX_TEXT], True
+    encoded_text = text.encode("utf-8")
+    if len(encoded_text) > MAX_TEXT:
+        text, extra["partial"] = encoded_text[:MAX_TEXT].decode("utf-8", errors="ignore"), True
     valid = isinstance(url, str) and len(url) <= MAX_REF and not CONTROL.search(url) and not SURROGATE.search(url)
     parts = urlsplit(url) if valid else None
     item = {
         "id": id,
-        "title": " ".join(CONTROL.sub(" ", str(_text(title))).split())[:MAX_TITLE].rstrip() or "(untitled)",
+        "title": line(title, "(untitled)"),
         "text": text,
         "time": _timestamp(time),
         "url": url if parts and parts.scheme in ("http", "https") and parts.hostname else "",
@@ -403,7 +539,7 @@ def record(
     }
     others = {key: value for key, value in item.items() if key != "text"}
     if len(json.dumps(others, ensure_ascii=False).encode("utf-8", "surrogatepass")) > MAX_FIELDS:
-        raise SensorError("a record's fields other than text exceed 2 MiB; keep bulky content in text")
+        raise InvalidError("a record's fields other than text exceed 2 MiB; keep bulky content in text")
     return item
 
 
@@ -418,23 +554,23 @@ def emit(records: Iterable[Mapping[str, Any]], *, missed: int = 0, of: int = 0, 
     Refuses duplicate ids, which would hide one item, and `fields`, which BF computes itself.
     """
     if type(missed) is not int or type(of) is not int or not 0 <= missed <= of <= MAX_COUNT:
-        raise SensorError(f"missed and of must be integers with 0 <= missed <= of <= {MAX_COUNT}")
+        raise InvalidError(f"missed and of must be integers with 0 <= missed <= of <= {MAX_COUNT}")
     items, seen = [], set()
     for item in records:
         identifier = item.get("id")
         if identifier in seen:
-            raise SensorError("two records share one id")
+            raise InvalidError("two records share one id")
         if "fields" in item:
-            raise SensorError("a sensor never prints fields; BF computes them from bf.yaml mappings")
+            raise InvalidError("a sensor never prints fields; BF computes them from bf.yaml mappings")
         seen.add(identifier)
         items.append(item)
     document = {"records": items, "incomplete": {"missed": missed, "of": of}} if missed else items
     try:
         payload = json.dumps(document, ensure_ascii=False, allow_nan=False).encode()
     except (TypeError, ValueError, UnicodeError):
-        raise SensorError("a record holds a value JSON cannot represent") from None
+        raise InvalidError("a record holds a value JSON cannot represent") from None
     if len(payload) > max_bytes:
-        raise SensorError(f"records exceed {max_bytes} bytes; narrow the window")
+        raise InvalidError(f"records exceed {max_bytes} bytes; narrow the window")
     sys.stdout.buffer.write(payload + b"\n")
     sys.stdout.flush()
 

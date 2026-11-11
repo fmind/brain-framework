@@ -5,106 +5,48 @@ description: Set up a private team brain, share reviewed evidence, coordinate co
 
 # Team setup
 
-A team brain is a **private Git repository**, with one local clone per teammate. BF needs no server or hosted account: Git shares the files, and your repository permissions decide who reads them.
+A team brain is a **private Git repository** with one local clone per teammate. Git handles sharing and access control; personal mail, chats and machine history stay in separate personal brains.
 
-## Agree on the basics
+## Create and join
 
-| Decision         | Recommended starting point                                                                                        |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Audience         | Only information every repository member may read and retain.                                                     |
-| Brain name       | One stable name, such as `team-brain`, in every clone.                                                            |
-| Knowledge owner  | A maintainer for each project's decisions and next tasks.                                                         |
-| Collection owner | One laptop per shared source, with reviewed programs and local credentials.                                       |
-| Contributions    | Focused changes reviewed through your usual Git process.                                                          |
-| Runtime          | The same BF release on every clone and collecting laptop, [pinned](upgrades.md#pin-a-brains-runtime) if you like. |
-
-Keep personal mail, chat and laptop history in personal brains. A private repository does not lift your organization's rules on retention or sharing.
-
-## Create it
-
-Create an empty **private** repository, without a README, license or `.gitignore`: `bf init` accepts a folder holding only `.git`. Clone and initialize it, replacing `example-org`:
+Create an empty **private** repository (no README or `.gitignore`), initialize it with a stable shared `--name`, add initial notes and [retrieval cases](checks.md#retrieval-cases), and push:
 
 ```bash
 git clone git@github.com:example-org/team-brain.git ~/team-brain
 bf init ~/team-brain --name team-brain
 cd ~/team-brain
-```
-
-Save a first decision as in [Getting started](getting-started.md#save-a-decision), and add the team's questions as [retrieval cases](checks.md#retrieval-cases). Then review and share the files:
-
-```bash
-bf validate
-bf eval
+bf validate && bf eval
 git add AGENTS.md bf.yaml .gitignore projects concepts actions evals
-git diff --cached
 git commit -m "feat: create the team brain"
 git push
 ```
 
-Validation returns `"valid":true` and `bf eval` returns `"passed":true`.
-
-## Join it
-
-[Install BF](getting-started.md#install-and-create-a-brain), then:
-
-```bash
-git clone git@github.com:example-org/team-brain.git ~/team-brain
-cd ~/team-brain
-bf read projects
-bf validate
-bf eval
-```
-
-BF refreshes its search cache on its own after you receive changes. Review reminders follow each file's modification time on your machine, so a pull that rewrites a note restarts them. Set `stale_after` for a deadline the team shares.
-
-To search the team brain from anywhere, register it with `bf register ~/team-brain`, then pass `--brain team-brain`. Registration and reading never run the brain's programs.
-
-Running programs inside the clone runs pulled code with your permissions. For example, `bf update --brain ~/team-brain` runs the harness command of every enabled assistant with a due schedule or read input, and the channel commands it uses. Review the clone first, as [Running code](privacy.md#running-code) lists: its programs, any [runtime pin](upgrades.md#pin-a-brains-runtime) and the agent configuration the harness loads, such as `.claude/`, `.mcp.json` and changes to `AGENTS.md` or `CLAUDE.md`.
-
-Register agent host hooks, such as `hooks/`, and install a shared brain's `skills/` only from a reviewed copy outside the clone. The host runs hooks at every session and follows skills as instructions, so a pulled change would apply unreviewed.
+Teammates clone `~/team-brain`, run `bf validate && bf eval`, and optionally `bf register ~/team-brain` (or reference it under `brains:` in their personal `bf.yaml` so personal searches include team knowledge while collection stays isolated). Set explicit `stale_after` dates on shared notes because Git checkouts update local file mtimes.
 
 ### Review before you merge
 
-`git pull` merges before you can look. In a clone that runs programs, or where you start an agent, fetch first, note the commit you review and list its changes:
+Running `bf update`, `bf watch` or an agent inside a shared clone executes pulled configurations and scripts with your permissions ([running code](privacy.md#running-code)). Fetch and inspect executable, config and instruction changes before merging:
 
 ```bash
 git fetch
 reviewed=$(git rev-parse '@{u}')
 git diff --name-status "HEAD...$reviewed" -- . ':!projects/*.md' ':!concepts/*.md' ':!actions/*.md' ':!memories/*.json'
 git diff --name-status "HEAD...$reviewed" -- '*AGENTS*.md' '*CLAUDE*.md' '*SKILL.md' '*.claude/*' '*.agents/*'
-```
-
-`@{u}` is the branch your clone tracks, such as `origin/main`. Each line gives a file's full path and whether it was added, modified, deleted or renamed:
-
-- **The first list** shows every change except Markdown under `projects/`, `concepts/` and `actions/` and JSON under `memories/`. It covers programs, `bf.yaml`, prompts, hooks, `.env` files and the runtime pin.
-- **The second list** shows the `AGENTS.md`, `CLAUDE.md`, `SKILL.md`, `.claude/` and `.agents/` files of every folder, with variants such as `AGENTS.override.md` and `CLAUDE.local.md`. Agents load them as instructions or configuration, even from a folder of notes the first list hides.
-
-Read each listed file's change with `git diff "HEAD...$reviewed" -- FILE`. A script that a `bf.yaml` command names is a program, even outside `sensors/`. Then, in the same shell, merge exactly the commit you reviewed:
-
-```bash
 git merge --ff-only "$reviewed"
 ```
 
-Nothing changes in the clone until the merge, so a running `bf watch` never runs unreviewed code. Commits a later fetch brings, such as an editor's automatic fetch, stay out of the merge. When your clone has unpushed commits of its own, such as collected records, `git rebase "$reviewed"` replaces the merge.
+Review every file in both lists (`bf.yaml`, `sensors/`, `routines/`, `prompts/`, `channels/`, `.env`, `pyproject.toml`/`uv.lock`, `.mcp.json`, `.claude/` and instruction/skill files) with `git diff "HEAD...$reviewed" -- FILE` before `git merge --ff-only "$reviewed"` (or `git rebase "$reviewed"`). Install hooks and skills only from reviewed copies outside the shared clone — never via `--link` inside a multi-writer repo.
 
 ## Collect on a laptop
 
-Keep provider credentials and scheduled collection on the designated owner's laptop. Use CI only for offline `bf validate` and `bf eval`.
+Keep provider credentials and scheduled collection on one designated laptop per shared source, and restrict CI to offline `bf validate` and `bf eval`.
 
-1. Add a reviewed [sensor](sensors.md) for information the whole team may retain.
-1. Test it locally, then set its `refresh` if regular updates help.
-1. Run `bf watch` on that laptop, or [run it as a service](schedule.md#run-watch-as-a-service) whose file stays outside the brain's Git history.
-1. Receive teammates' changes only as [Review before you merge](#review-before-you-merge) shows: watch runs what a merge brings at its next tick.
-1. Inspect the collected files before sharing them.
-
-New brains ignore `memories/` in Git. To share only a reviewed `github-issues` source, replace the `/memories/` line in `.gitignore` with:
+To share a reviewed source such as `github-issues` in Git while keeping other sources and `memories/.pending/` ignored, replace `/memories/` in `.gitignore`:
 
 ```gitignore
 /memories/*
 !/memories/github-issues/
 ```
-
-Other sources and `memories/.pending/` stay ignored, like `logs/`. Collect, check and stage only that source:
 
 ```bash
 bf collect github-issues
@@ -113,62 +55,24 @@ git add .gitignore memories/github-issues
 git diff --cached
 ```
 
-Commit after review; Git history keeps committed evidence. A sleeping laptop does not collect, so set freshness expectations accordingly.
+Check `bf status --check` on the collecting laptop: run history is local, so teammates' clones show `never` for scheduled sources they do not collect themselves.
 
-Check health on the collecting laptop: `bf status` reports only this machine's run history. On a teammate's clone, a scheduled source it did not collect shows `never` under `attention`, so `bf status --check` fails there. A manual one shows `manual`. The records are still shared.
+## Collaborate cleanly
 
-## Contribute without overwriting each other
-
-- **Notes:** make focused edits; keep one current decision and next step in the owning note.
-- **Actions:** give each session its own folder with a 12-character suffix, as in `actions/2026-09-27_review-3f9a1c2e5b7d/`, so teammates picking the same topic on the same day never collide. The `bf-action` [new-action helper](agents.md#resume-an-action) adds one with `--unique`.
-- **Records:** different ids live in different files. Competing revisions of one id need review.
-- **Sources:** use different source names for different permission scopes. A snapshot replaces its whole source, so never let a partial view replace a shared one.
-- **Conflicts:** keep both sides, reconcile them from evidence, then validate and evaluate. Never resolve evidence by last writer wins.
-- **Local files:** keep `.bf/`, `logs/` and recovery journals out of Git. Local locks do not coordinate teammates' editors or Git.
-
-Try the [two-contributor example](https://github.com/fmind/brain-framework/tree/main/examples/team), and follow the [conflict guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-maintain/references/conflicts.md) when a merge conflicts.
-
-## Connect agents and personal brains
-
-Launch a terminal agent in the team brain, or configure [MCP](mcp.md) with its absolute path. A shared brain should not reference a personal one: its `brains:` references are readable too.
-
-To include team notes in your personal searches, add a [direct reference](configuration.md#related-brains) from the personal brain to the team clone. Collection still acts on the selected brain only.
-
-Every clone keeps `name: team-brain`, so a link such as `[Product-page decision](bf://team-brain/projects/new-website.md#decision)` works wherever the clone lives. The target brain must be selected or referenced; a link never grants access.
-
-To move knowledge from a personal brain, the `bf-use` skill's [sharing guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/references/share.md) prepares a copy holding only what the team may read. Validation checks structure, not privacy.
-
-## Agents on cloud computers
-
-A cloud agent works in its vendor's virtual machine, on a fresh clone of a repository. Give it only a team brain whose every file the vendor may process:
-
-- **Never clone a personal brain into a vendor's machine.** Do not start a cloud session from one either: `claude --cloud` [uploads a local repository](https://code.claude.com/docs/en/claude-code-on-the-web#send-local-repositories-without-github) that has no GitHub remote it can clone.
-- **Collect nothing there.** Provider credentials stay on the collecting laptop. Records reach the clone only through the reviewed sources the team commits, as [Collect on a laptop](#collect-on-a-laptop) shows.
-- **Review the branch it clones.** The session runs the clone's [agent configuration](https://code.claude.com/docs/en/cloud-environments#what-carries-over-from-your-setup), such as `.claude/settings.json` hooks and `.mcp.json` servers, so review changes as [Review before you merge](#review-before-you-merge) lists.
-
-Anthropic-hosted Claude Code sessions [clone repositories only from GitHub](https://code.claude.com/docs/en/claude-code-on-the-web#limitations). Install BF and its skills in the environment's [setup script](https://code.claude.com/docs/en/cloud-environments#setup-scripts), replacing `X.Y.Z` with the release your clones use:
+- **Avoid collisions**: keep one current decision per owning project note, create shared actions with `bf action new SLUG --unique` so folders never collide, and use separate sensor names for distinct permission scopes.
+- **Reconcile conflicts from evidence**: preserve competing claims until verified ([two-contributor example](https://github.com/fmind/brain-framework/tree/main/examples/team), [conflict guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-maintain/references/conflicts.md)).
+- **Curate personal-to-team transfers**: strip private passages and internal refs before copying notes to a team repo ([evidence and sharing guide](https://github.com/fmind/brain-framework/blob/main/src/bf/skills/bf-use/references/evidence.md)).
+- **Cloud agent VMs**: give cloud sessions (such as [Claude Code on the web](https://code.claude.com/docs/en/claude-code-on-the-web#limitations)) only team brains whose entire history the vendor may process — never upload a personal brain or store provider credentials there. Install BF in the VM [setup script](https://code.claude.com/docs/en/cloud-environments#setup-scripts):
 
 ```bash
 UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python 3.14 brain-framework==X.Y.Z
 bf skills ~/.claude/skills
 ```
 
-The script runs as root before the agent starts. `UV_TOOL_BIN_DIR` puts `bf` in a folder already on `PATH`, where the agent and the skills find it.
-
 ## Evaluate a pilot
 
-Test whether shared context helps before expanding it. Start with one project, three to five volunteers and four weeks:
+Run a bounded four-week pilot on one active project with three to five teammates before expanding:
 
-1. **Choose.** Ask each participant which recent question needed several tools, then pick five recurring ones, such as “What blocks this launch?”. Name the tool that owns each fact and the person who maintains each note and sensor.
-1. **Measure a baseline.** Before the introduction, time comparable questions with the usual tools and note correctness, sources consulted and upkeep.
-1. **Use it.** In week 1, follow the [four-tool walkthrough](context-hub.md), then answer a real question from a fresh session. In weeks 2 and 3, use BF during ordinary work without reminders.
-1. **Compare fairly.** On matched questions, compare three ways: the usual tools, the same curated files read directly, and BF retrieval. This judges organizing the files and BF's retrieval separately. Count failures and abandoned attempts.
-1. **Decide.** In week 4, compare the time to a correct, cited answer and the upkeep cost. Continue, change or stop.
-
-Agree on decision rules before starting. For example:
-
-- Four of five people reach a cited answer without help.
-- Three return without reminders.
-- Someone other than the author can retrieve and update the notes.
-
-Keep a short weekly note instead of telemetry, and share only aggregates, with permission. The fictional demo proves the mechanism, not a saving.
+1. **Baseline**: pick five recurring cross-tool questions (such as “What blocks this launch?”) and time how long teammates take to answer them with citations today.
+2. **Operate**: run the [four-tool walkthrough](context-hub.md) in week 1, then use the team brain during normal work in weeks 2–3 without reminders.
+3. **Compare**: measure time to a cited, accurate answer and weekly upkeep cost across existing tools, raw files and BF retrieval, and agree up front on keep/stop criteria (for example, at least four of five teammates reach cited answers independently and non-authors update notes cleanly).

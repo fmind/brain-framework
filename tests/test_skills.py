@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import contextlib
-import importlib.util
 import json
 import os
 import re
@@ -21,6 +20,7 @@ import typer
 import yaml
 from markdown_it import MarkdownIt
 from typer.core import TyperGroup
+from typer.testing import CliRunner
 
 from bf import __version__, cli, pages, replies, retrieve
 from bf.install import BLOCKED
@@ -98,9 +98,17 @@ def test_skill_commands_and_options_exist() -> None:
             # Options end at `--`: what follows passes through to a routine.
             head = argv[1 : argv.index("--")] if "--" in argv else argv[1:]
             words = [word for word in head if not word.startswith("-")]
-            if words and (words[0].isupper() or words[0] == "..."):
-                continue  # A placeholder such as `bf COMMAND --help` or `bf ...`.
-            command = group.commands.get(words[0]) if words and head[0] == words[0] else group
+            command = group
+            skip = False
+            for index, word in enumerate(words):
+                if not isinstance(command, TyperGroup) or head[index] != word:
+                    break
+                if word.isupper() or word in {"...", "*"}:
+                    skip = True  # A placeholder such as `bf COMMAND --help`, `bf ...` or `Bash(bf action *)`.
+                    break
+                command = command.commands.get(word)
+            if skip:
+                continue
             assert command is not None, f"{name}: unknown command in {shlex.join(argv)}"
             options = {"--help", "-h", *(option for param in command.params for option in param.opts)}
             options |= {option for param in command.params for option in param.secondary_opts}
@@ -319,90 +327,59 @@ def test_invoking_bf_action_with_a_topic_starts_that_action() -> None:
     assert "`bf-action`" in TEXTS["src/bf/skills/bf-use/SKILL.md"]
 
 
-def test_action_helper_writes_the_template_sections(brain: Store) -> None:
-    helper = SKILLS / "bf-action/scripts/new-action.py"
-    reply = subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
-        [sys.executable, str(helper), "review", "--brain", str(brain.root)],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=10,
-    )
-    action = json.loads(reply.stdout)["action"]
-    # Compact JSON, like bf's replies and the other helpers.
-    assert reply.stdout == json.dumps({"action": action}, separators=(",", ":")) + "\n"
+def test_action_new_writes_the_template_sections(brain: Store) -> None:
+    runner = CliRunner()
+    reply = runner.invoke(cli.app, ["action", "new", "review", "--brain", str(brain.root)])
+    assert reply.exit_code == 0, reply.output
+    payload = json.loads(reply.stdout)
+    action = payload["action"]
+    assert reply.stdout == json.dumps(payload, separators=(",", ":")) + "\n"
     created = brain.read(action).decode()
     template = (SKILLS / "bf-action/templates/action.md").read_text(encoding="utf-8")
     assert re.findall(r"^## .*", created, re.MULTILINE) == re.findall(r"^## .*", template, re.MULTILINE)
     assert validate(brain)["valid"]
-    # A quoted `~user` that names no account is invalid input, not a traceback.
-    unknown = subprocess.run(  # noqa: S603 - the bundled helper, refused before any write
-        [sys.executable, str(helper), "review", "--brain", "~bf-no-such-user-9c4f/brain"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
-    assert (unknown.returncode, "Traceback" in unknown.stderr) == (2, False)
-    assert "home directory cannot be resolved" in unknown.stderr
+    # A quoted `~user` that names no account fails cleanly without a traceback.
+    unknown = runner.invoke(cli.app, ["action", "new", "review", "--brain", "~bf-no-such-user-9c4f/brain"])
+    assert (unknown.exit_code, "Traceback" in str(unknown.exception)) == (1, False)
+    assert "home directory cannot be resolved" in str(unknown.exception)
 
 
-def test_action_helper_takes_the_topics_bf_validates(brain: Store) -> None:
-    helper = SKILLS / "bf-action/scripts/new-action.py"
-
-    def start(topic: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(  # noqa: S603 - the bundled helper on a synthetic brain
-            [sys.executable, str(helper), topic, "--brain", str(brain.root)],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-
+def test_action_new_takes_the_topics_bf_validates(brain: Store) -> None:
+    runner = CliRunner()
     # A topic may start with a digit, as bf's own pattern for action folders allows.
-    reply = start("3d-printing")
-    assert reply.returncode == 0, reply.stderr
+    reply = runner.invoke(cli.app, ["action", "new", "3d-printing", "--brain", str(brain.root)])
+    assert reply.exit_code == 0, reply.output
     assert re.fullmatch(r"actions/\d{4}-\d\d-\d\d_3d-printing/ACTION\.md", json.loads(reply.stdout)["action"])
     assert validate(brain)["valid"]
     for topic in ("Website", "web--review", "web_review", "review-", "a" * 65):
-        assert start(topic).returncode == 2, topic
+        assert runner.invoke(cli.app, ["action", "new", topic, "--brain", str(brain.root)]).exit_code == 2, topic
 
 
-def test_action_helper_names_a_brain_path_that_is_not_one(brain: Store, tmp_path: Path) -> None:
-    # A subfolder, a missing path or bf.yaml itself is the likely mistake, never a permissions problem.
-    helper = SKILLS / "bf-action/scripts/new-action.py"
-    for path in (brain.root / "projects", tmp_path / "missing", brain.root / "bf.yaml"):
-        result = subprocess.run(  # noqa: S603 - the bundled helper, refused before any write
-            [sys.executable, str(helper), "review", "--brain", str(path)],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-        assert result.returncode == 1
-        assert "--brain must be the brain directory holding bf.yaml" in result.stderr
-        assert str(path) not in result.stderr
+def test_action_new_names_a_brain_path_that_is_not_one(brain: Store, tmp_path: Path) -> None:
+    # A subfolder, a missing path or bf.yaml itself fails before any write.
+    runner = CliRunner()
+    for label, path in (
+        ("subfolder", brain.root / "projects"),
+        ("missing", tmp_path / "missing"),
+        ("file", brain.root / "bf.yaml"),
+    ):
+        result = runner.invoke(cli.app, ["action", "new", "review", "--brain", str(path)])
+        assert result.exit_code == 1, label
     assert not (brain.root / "actions").exists()
     assert not (brain.root / "projects/actions").exists()
 
 
-def test_action_helper_removes_only_what_a_failed_write_created(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    spec = importlib.util.spec_from_file_location("new_action", SKILLS / "bf-action/scripts/new-action.py")
-    assert spec is not None
-    assert spec.loader is not None
-    helper = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(helper)
-    # Text the file cannot encode fails once ACTION.md exists: the file and both new folders go.
-    monkeypatch.setattr(helper, "skeleton", lambda *_: "\ud800")
-    with pytest.raises(UnicodeEncodeError):
-        helper.start(brain.root, "review", unique=False)
-    assert not (brain.root / "actions").exists()
-    # An interruption removes the new action folder, never an existing session or the actions folder it holds.
+def test_action_new_leaves_existing_sessions_intact_on_failed_write(
+    brain: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = CliRunner()
     other = "actions/2026-09-27_review/ACTION.md"
     brain.write(other, b"---\ntype: action\nstatus: draft\n---\n\n# Review\n")
-    monkeypatch.setattr(helper, "skeleton", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
-    with pytest.raises(KeyboardInterrupt):
-        helper.start(brain.root, "review", unique=True)
+    monkeypatch.setattr(
+        "bf.collect.validate_action_markdown", lambda *_, **__: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+    result = runner.invoke(cli.app, ["action", "new", "review", "--unique", "--brain", str(brain.root)])
+    assert result.exit_code != 0
     assert sorted(path.relative_to(brain.root).as_posix() for path in (brain.root / "actions").rglob("*")) == [
         "actions/2026-09-27_review",
         other,

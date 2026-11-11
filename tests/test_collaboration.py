@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
-import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
 
 import pytest
+from typer.testing import CliRunner
 
-from bf import records
+from bf import cli, records
 from bf.collect import routine
 from bf.models import Error, Query, Record
 from bf.retrieve import search
@@ -121,21 +120,16 @@ def test_same_routine_on_two_clones_creates_distinct_actions(tmp_path: Path) -> 
     assert all(str(path).startswith("actions/2026-09-27_review-") for path in actions)
 
 
-def test_action_helper_creates_two_sessions_without_replacing_work(brain: Store) -> None:
-    script = Path(__file__).parents[1] / "src/bf/skills/bf-action/scripts/new-action.py"
+def test_action_new_creates_two_sessions_without_replacing_work(brain: Store) -> None:
+    runner = CliRunner()
     created = []
     today = date.today().isoformat()
     for options in ((), (), ("--unique",)):
-        reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
-            [sys.executable, str(script), "review", "--brain", str(brain.root), *options],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=120,
-        )
+        reply = runner.invoke(cli.app, ["action", "new", "review", "--brain", str(brain.root), *options])
+        assert reply.exit_code == 0, reply.output
         created.append(json.loads(reply.stdout)["action"])
     if date.today().isoformat() != today:
-        pytest.skip("the helpers ran across midnight, so their sessions belong to different days")
+        pytest.skip("action new ran across midnight, so the sessions belong to different days")
     # The first session takes the plain name; a later one on the same day, or --unique, adds a suffix.
     assert created[0] == f"actions/{today}_review/ACTION.md"
     for path in created[1:]:
@@ -150,14 +144,8 @@ def test_a_session_named_after_a_routine_never_counts_as_its_action(brain: Store
     brain.write(
         "bf.yaml", b"version: 8\nname: fixture\nroutines:\n  review:\n    command: [fake]\n    output: action\n"
     )
-    script = Path(__file__).parents[1] / "src/bf/skills/bf-action/scripts/new-action.py"
-    reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
-        [sys.executable, str(script), "review", "--brain", str(brain.root), "--unique"],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=120,
-    )
+    reply = CliRunner().invoke(cli.app, ["action", "new", "review", "--brain", str(brain.root), "--unique"])
+    assert reply.exit_code == 0, reply.output
     session = json.loads(reply.stdout)["action"]
     before = brain.read(session)
     day = date.fromisoformat(session.removeprefix("actions/")[:10])
@@ -175,34 +163,20 @@ def test_a_session_named_after_a_routine_never_counts_as_its_action(brain: Store
     assert brain.read(session) == before
 
 
-def test_action_helper_refuses_redirected_actions(brain: Store, tmp_path: Path) -> None:
+def test_action_new_refuses_redirected_actions(brain: Store, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (brain.root / "actions").symlink_to(outside, target_is_directory=True)
-    script = Path(__file__).parents[1] / "src/bf/skills/bf-action/scripts/new-action.py"
-    reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
-        [sys.executable, str(script), "review", "--brain", str(brain.root)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    assert reply.returncode == 1
+    reply = CliRunner().invoke(cli.app, ["action", "new", "review", "--brain", str(brain.root)])
+    assert reply.exit_code == 1
     assert not list(outside.iterdir())
 
 
-def test_action_helper_follows_a_linked_brain_root_only(brain: Store, tmp_path: Path) -> None:
+def test_action_new_follows_a_linked_brain_root_only(brain: Store, tmp_path: Path) -> None:
     # bf itself accepts a linked root, such as ~/brain pointing at a synced folder; links below it stay refused.
     linked = tmp_path / "linked-brain"
     linked.symlink_to(brain.root, target_is_directory=True)
-    script = Path(__file__).parents[1] / "src/bf/skills/bf-action/scripts/new-action.py"
-    reply = subprocess.run(  # noqa: S603 - execute only the bundled helper on a synthetic brain
-        [sys.executable, str(script), "review", "--brain", str(linked)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=120,
-    )
-    assert reply.returncode == 0, reply.stderr
+    reply = CliRunner().invoke(cli.app, ["action", "new", "review", "--brain", str(linked)])
+    assert reply.exit_code == 0, reply.output
     action = json.loads(reply.stdout)["action"]
     assert (brain.root / action).is_file()

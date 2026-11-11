@@ -18,6 +18,7 @@ from bf.models import (
     IDENTITY,
     MAX_NOTE,
     MAX_PROMPT,
+    Assistant,
     Config,
     Error,
     Knowledge,
@@ -64,10 +65,11 @@ def broken_links(store: Store, item: Note) -> list[str]:
         if scheme(item.path, target) or target == "#":
             continue
         name, fragment = resolve(item.path, target)
-        if fragment and authored(name) and name not in slugs and kind(name) == stat.S_IFREG:
+        entry = name + "/ACTION.md" if re.fullmatch(r"actions/[^/#]+", name) else name
+        if fragment and authored(entry) and entry not in slugs and kind(entry) == stat.S_IFREG:
             # An unreadable or invalid target is its own file's problem, not a broken link.
             with suppress(Error, OSError, UnicodeError):
-                slugs[name] = note(name, store.read(name, MAX_NOTE)).slugs
+                slugs[entry] = note(entry, store.read(entry, MAX_NOTE)).slugs
     return broken(item, lambda name: name == item.path or kind(name) in {stat.S_IFREG, stat.S_IFDIR}, slugs)
 
 
@@ -202,22 +204,49 @@ def _programs(store: Store, config: Config) -> list[dict[str, str]]:
                 if not usable:
                     required = "an executable regular file" if direct else "a regular file or folder"
                     problems.append(_problem("bf.yaml", f"{kind}.{name}.command: {path} is not {required}"))
-            total_args = 1
-            for argument in program.command[1:]:
-                if lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", argument):
-                    try:
-                        total_args += len(expand_lines(store, lines_match[1]))
-                    except Error as error:
-                        problems.append(_problem("bf.yaml", f"{kind}.{name}.command: {error}"))
-                else:
-                    total_args += 1
-            if total_args > 128:
+
+            def _expanded_count(
+                label: str, extra: list[str], base: tuple[str, ...] = tuple(program.command[1:])
+            ) -> int:
+                count = 1
+                for argument in [*base, *extra]:
+                    if lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", argument):
+                        try:
+                            count += len(expand_lines(store, lines_match[1]))
+                        except Error as error:
+                            problems.append(_problem("bf.yaml", f"{label}: {error}"))
+                    else:
+                        count += 1
+                return count
+
+            if _expanded_count(f"{kind}.{name}.command", []) > 128:
                 problems.append(
                     _problem(
                         "bf.yaml",
                         f"{kind}.{name}.command: command arguments exceed 128 items after expanding line files",
                     )
                 )
+            if isinstance(program, Assistant):
+                if program.input_args and _expanded_count(f"assistants.{name}.input_args", program.input_args) > 128:
+                    problems.append(
+                        _problem(
+                            "bf.yaml",
+                            f"assistants.{name}.input_args: command arguments exceed 128 items after expanding line files",
+                        )
+                    )
+                for schedule_name, spec in sorted(program.schedules.items()):
+                    combined = [*program.schedule_args, *spec.args]
+                    if (
+                        combined
+                        and _expanded_count(f"assistants.{name}.schedules.{schedule_name}.args", combined) > 128
+                    ):
+                        problems.append(
+                            _problem(
+                                "bf.yaml",
+                                f"assistants.{name}.schedules.{schedule_name}.args: command arguments exceed 128 "
+                                "items after expanding line files",
+                            )
+                        )
     return problems
 
 
@@ -451,13 +480,24 @@ class _Validation:
         return self.kind(name) in {stat.S_IFREG, stat.S_IFDIR}
 
     def _folder(self, path: str) -> bool:
+        if re.fullmatch(r"actions/[^/#]+", path):
+            return False
         return path.split("/")[0] in AUTHORED and self.kind(path) == stat.S_IFDIR
+
+    def _canonical(self, target: str) -> str:
+        if (
+            (parsed := links.parse(target))
+            and parsed.brain == self.config.name
+            and re.fullmatch(r"actions/[^/#]+", parsed.path)
+        ):
+            return links.address(parsed.brain, f"{parsed.path}/ACTION.md")
+        return target
 
     def _page(self, path: str) -> bool:
         """Whether `bf read` opens this same-brain path as a page with evidence, following pages.route."""
         parts = path.split("/")
         try:
-            if path in {"", "tasks", "tags", "memories", *AUTHORED} or pages.period(path):
+            if path in {"", "review", "tasks", "tags", "memories", *AUTHORED} or pages.period(path):
                 return True
             if parts[0] == "tags":
                 # A label no note declares opens an empty page: most likely a typo.
@@ -526,7 +566,12 @@ class _Validation:
                 names.setdefault(owner, set()).add(alias)
         for file, claim in self.targeted:
             definition = config.ontology[claim.relation]
-            if not any(definition.allows(alias) for owner in owners.get(claim.target, {}) for alias in names[owner]):
+            canonical = self._canonical(claim.target)
+            if not any(
+                definition.allows(alias)
+                for owner in owners.get(canonical, {})
+                for alias in {claim.target, *names[owner]}
+            ):
                 # Search keeps such a claim: the note states it, and only its author can correct it.
                 self.problems.append(
                     _problem(file, f"{claim.relation} link outside the declared targets: {claim.target}")
@@ -555,7 +600,8 @@ class _Validation:
                     )
                 continue
             errors = set()
-            for path in self.owners.get(links.address(parsed.brain, parsed.path), {}) or {parsed.path}:
+            resolved = f"{parsed.path}/ACTION.md" if re.fullmatch(r"actions/[^/#]+", parsed.path) else parsed.path
+            for path in self.owners.get(links.address(parsed.brain, resolved), {}) or {resolved}:
                 source, separator, record_id = path.partition(":")
                 if path in self.invalid:
                     continue

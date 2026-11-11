@@ -165,6 +165,7 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
     brain: Store, selected: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"])
+    brain.write("sensors/_sensor.py", (ROOT / "examples/sensors/_sensor.py").read_bytes())
     brain.write("sensors/highlights.py", (ROOT / "examples/sensors/highlights.py").read_bytes())
     brain.write("inputs/highlights.json", b"{}")
     path = brain.root / "inputs/highlights.json"

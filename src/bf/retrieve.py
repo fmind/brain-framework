@@ -281,7 +281,7 @@ _IDENTITIES = f"""SELECT i.ref,i.kind,i.type,i.source,i.status,json_group_array(
 # Every indexed note and record, for retrievers outside BF such as embedding or multilingual search.
 # Each carries its file's cached fingerprint, so a file changed since the cache refreshed is not paired with it.
 _ITEMS = f"""SELECT i.ref,i.path,i.kind,i.source,i.title,i.time,i.type,i.status,i.url,i.updated,i.observed,i.partial,
-  i.fields,f.size,f.mtime,f.ctime,f.inode FROM items i LEFT JOIN files f ON f.path=i.path WHERE {index.FILTERS}
+  i.fields,i.field_values,f.size,f.mtime,f.ctime,f.inode FROM items i LEFT JOIN files f ON f.path=i.path WHERE {index.FILTERS}
   ORDER BY i.ref"""  # noqa: S608 - fixed SQL
 
 # One brain's export rows, given index.FILTERS' parameters for the scope in that brain.
@@ -349,13 +349,17 @@ def _item(store: Store, brain: str, row: sqlite3.Row, omitted: list[dict[str, ob
         value["partial"] = True
     if row["fields"] and (fields := json.loads(row["fields"])):
         value["fields"] = fields
+    if row["field_values"] and (field_values := json.loads(row["field_values"])):
+        value["values"] = field_values
     path = str(row["path"])
     with suppress(Error, OSError, UnicodeError):
-        record = row["kind"] == "record"
-        text = records.load(store, path).text if record else store.read(path, MAX_NOTE).decode("utf-8")
+        loaded_record = records.load(store, path) if row["kind"] == "record" else None
+        text = loaded_record.text if loaded_record is not None else store.read(path, MAX_NOTE).decode("utf-8")
         # Stated after the read: a file edited or replaced before or during it no longer has the cached fingerprint.
         if store.fingerprint(path) == (row["size"], row["mtime"], row["ctime"], row["inode"]):
             value["text"] = text
+            if loaded_record is not None and loaded_record.attributes:
+                value["attributes"] = loaded_record.attributes
     if "text" not in value:
         omitted.append({"brain": brain, "file": path})
     return value
@@ -483,7 +487,6 @@ def _lookup(
     if parsed:
         selected = _brain(selected, parsed.brain, problems)
     path = parsed.path if parsed else ref
-    original = ref
     if not (parsed and parsed.fragment):
         try:
             view = pages.page(selected, path, offset=offset, counted=counted, single=single)
@@ -493,12 +496,8 @@ def _lookup(
             raise
         if view is not None:
             return {**view, "notice": NOTICE, **_problems(problems, view)}
-        ref = _action(ref, parsed, path)
+    ref = _action(ref, parsed, path)
     found = _holders(selected, ref, problems)
-    if not found and ref != original:
-        # Without an ACTION.md, an action folder's address can still be a note's entity or alias.
-        found = _holders(selected, original, problems)
-        ref = original if found else ref
     if not found:
         # An identity with no owner reads as its links; a typed link reads as its target identity.
         view = pages.identity(stores, parsed.identity if parsed else ref, counted=counted)
@@ -562,7 +561,7 @@ def _holders(
 def _action(ref: str, parsed: links.Address | None, path: str) -> str:
     """An action folder reads as its ACTION.md with the action's files and linked projects."""
     if (target := pages.route(path)).kind == "action":
-        return links.address(parsed.brain, target.name) if parsed else target.name
+        return links.address(parsed.brain, target.name, parsed.fragment) if parsed else target.name
     return ref
 
 

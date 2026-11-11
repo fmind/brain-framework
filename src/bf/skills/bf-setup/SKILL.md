@@ -2,63 +2,54 @@
 name: bf-setup
 description: Install Brain Framework (bf), create a brain, connect an agent, install the skills, choose sources worth connecting and import documents or notes. Use for "set up my brain", "install bf", "which sources should I connect", "import this vault or folder", or when bf or a brain is missing.
 license: MIT
-compatibility: Requires Brain Framework 21 (the bf command) on Linux or macOS.
+compatibility: Requires Brain Framework 22 (the bf command) on Linux or macOS.
 ---
 
 # bf-setup
 
-Start from one project and a few questions the user keeps reconstructing across tools: a useful first result answers one of them from the brain with its ref, and a notes-only brain is a valid outcome. Reuse the directory, audience, sources and authorization the user already gave; ask only for what is missing.
+Start from one real project and the recurring questions the user reconstructs across tools: a notes-only brain answering one question with its ref is already complete. Ask only for missing scope or consent.
 
 ## Install and create the brain
 
-1. Check `bf --version` against this skill's `compatibility`. Install a missing `bf` only with the user's consent: `uv tool install --python 3.14 brain-framework`, then `uv tool update-shell` when `bf` is not on PATH. Upgrade an older one only with consent, through the `bf-maintain` skill; for a newer one, update the skills (below).
-1. Inspect an existing brain's `bf.yaml`, `AGENTS.md` and notes before changing anything, and keep its name and customizations. Check it with the installed `bf`, never its pinned runtime: when `bf status --brain PATH` shows a `runtime.pinned` whose major version differs from `runtime.installed`, report it and ask.
-1. For a new personal brain, run `bf init ~/brain` unless the user chose another path. It refuses a folder with content and returns the brain name `bf://` addresses use, derived from the directory; pass `--name NAME` when a letter has no plain form, such as `ø`. `bf register PATH` optionally lets search and read find the brain by name; rerun it after a move.
-1. Save one project note from what the user said, following the `bf-use` skill: `type: project`, `status: draft`, the decision and its reason under `## Decision {#decision}`, and a next task. Never invent a decision.
-1. Verify inside the brain directory (or with `--brain PATH` everywhere):
+1. Check `bf --version` against `compatibility`. With user consent, install missing `bf` via `uv tool install --python 3.14 brain-framework` (`uv tool update-shell` if needed), upgrade older versions via `bf-maintain`, or update skills below.
+1. Inspect an existing brain's `bf.yaml`, `AGENTS.md` and notes with the installed `bf` (never its pinned runtime; ask if `bf status --brain PATH` shows a `runtime.pinned` major mismatch).
+1. Create a new brain with `bf init ~/brain` (`--name NAME` when directory letters lack ASCII forms; `bf register PATH` for optional name lookup).
+1. Save one real `projects/*.md` note (`type: project`, `status: draft`, `## Decision {#decision}` and one `- [ ]` next task — never invented) and verify:
 
-   ```bash
-   bf read
-   bf search "words from the decision's reason"
-   bf read 'projects/PROJECT.md#decision'
-   bf validate
-   bf eval
-   ```
+```bash
+bf read
+bf search "words from the decision's reason"
+bf read 'projects/PROJECT.md#decision'
+bf validate
+bf eval
+```
 
-   Expect the saved reason at its ref, `"valid":true` and `"score":"3/3"` for the starter cases, which prove nothing about the user's questions: add those as [retrieval cases](https://fmind.github.io/brain-framework/docs/checks/), plus one query that must stay empty.
+Add the user's real questions (plus one negative case) to `evals/` ([checks](https://fmind.github.io/brain-framework/docs/checks/)).
 
 ## Connect the agent
 
-1. A terminal agent can use the CLI directly: "Use `bf search` to find why we chose X, then `bf read` the ref and cite it." Hosts, including Claude Code 2.1.277+, load the brain's `AGENTS.md`; add no `CLAUDE.md` here or in a parent folder, where it would replace `AGENTS.md`, except one holding only `@AGENTS.md` for an older host.
-1. Install the skills where the host discovers them, such as `~/.agents/skills` or `~/.claude/skills`, then start a fresh host session:
+1. Terminal hosts load the brain's `AGENTS.md` directly (avoid adding a competing `CLAUDE.md` unless an older host needs `@AGENTS.md`). Install skills globally or inside the brain, then start a fresh session:
 
    ```bash
    bf skills ~/.agents/skills
+   bf skills skills --link # inside a brain: installs ./skills and links host skill folders
    ```
 
-   A folder reported `modified` (the user edited it), `unmanaged` (BF did not install it) or `newer` (a newer `bf` installed it) stays unchanged and the command exits 1. Pass `--force` only when the user accepts replacing the first two; for `newer`, upgrade this `bf` instead ([statuses](https://fmind.github.io/brain-framework/docs/agents/#install-the-skills)).
-1. For a host that prefers tools, `bf mcp --brain PATH` serves only `search` and `read`; configure absolute paths ([MCP guide](https://fmind.github.io/brain-framework/docs/mcp/)). It needs the optional MCP SDK: with the user's consent, run `uv tool install --python 3.14 'brain-framework[mcp]'` when `bf mcp` reports `needs the mcp extra`.
-1. Optional [hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) add the repository's project at session start and matching refs to each prompt.
+   `modified` (edited), `unmanaged` (foreign or symlink) and `newer` (installed by a newer `bf`) leave folders untouched and exit 1: use `--force` only with consent on the first two, and upgrade `bf` for `newer` ([skills](https://fmind.github.io/brain-framework/docs/agents/#install-the-skills)).
+1. For MCP hosts, configure `bf mcp --brain PATH` with absolute paths (`uv tool install --python 3.14 'brain-framework[mcp]'` with consent when needed; [MCP guide](https://fmind.github.io/brain-framework/docs/mcp/)). Optional [hooks](https://github.com/fmind/brain-framework/tree/main/examples/hooks) surface project context at session start.
+1. Note before connecting cloud hosts that retrieved passages reach the model provider, and verify in a fresh session that the host searched, read and cited the intended brain.
 
-Before connecting a cloud agent, explain that its provider receives the notes and records it reads, although retrieval is offline, and that a related brain widens what it can read.
+## Discover, import and hand off
 
-From a fresh host session, ask a real question and check in the tool history that the agent searched the intended brain, read the source and cited its ref: installation proves configuration only. When the session cannot be observed, report verification as pending with the question to try.
-
-## Discover, connect and import sources
-
-Skip discovery when the user already named the sources. Otherwise follow [scoped discovery](references/scan.md) and its [methods](references/discovery.md): agree on an inspection scope, inspect bounded evidence and return a ranked recommendation, without authenticating, collecting or scheduling. Hand each selected source to the `bf-maintain` skill with its question, scope, fields, exclusions, needed freshness and a retrieval case.
-
-To bring in an identified document, website, repository, export, note vault or other brain, follow [imports](references/import.md).
-
-## Finish with evidence
-
-Report the brain location, the questions answered with their refs, check results and the host access you observed. Separate proposed, configured, collected and scheduled sources, and name access or evidence gaps. Keep setup decisions in the owning project, never raw discovery inventories. For a team pilot, follow the [pilot guide](https://fmind.github.io/brain-framework/docs/team/#evaluate-a-pilot).
+- When sources are unchosen, run [scoped discovery](references/scan.md) ([methods](references/discovery.md)) without authenticating, collecting or scheduling, then hand approved sources to `bf-maintain`.
+- To import documents, exports, vaults or another brain into OKF notes, follow [import.md](references/import.md). For team rollouts, see [evaluate a pilot](https://fmind.github.io/brain-framework/docs/team/#evaluate-a-pilot).
+- Report brain path, verified refs, checks, observed host access and separate proposed/configured/collected/scheduled states.
 
 ## References and helpers
 
-Run a helper as `python3 SKILL_DIR/scripts/NAME.py`, replacing `SKILL_DIR` with the absolute path of the folder holding this `SKILL.md`. Write commands literally, without shell variables, `$'…'` quoting or `cd … &&` chains, which hosts with strict permissions refuse, and pass multi-line text through files. It needs Python 3.11+: with an older `python3`, use `"$(uv python find --system --no-config --no-project 3.14)"` instead, never uv's run command, which adopts a `.venv` the brain may supply. For a contract this skill does not give, read the [documentation](https://fmind.github.io/brain-framework/llms.txt) as Markdown; `bf COMMAND --help` wins where they differ.
+Run helpers literally as `python3 SKILL_DIR/scripts/NAME.py` (Python 3.11+, or `"$(uv python find --system --no-config --no-project 3.14)"`, never uv's run command). Contracts live in [llms.txt](https://fmind.github.io/brain-framework/llms.txt) and `bf COMMAND --help`.
 
-- [references/scan.md](references/scan.md): agree on a scope, recommend sources, hand them off.
-- [references/discovery.md](references/discovery.md): bounded methods for tools, bookmarks and folders.
-- [references/import.md](references/import.md): turn a selected source into OKF notes or retained evidence.
-- [scripts/inventory.py](scripts/inventory.py): check named tools without running them, or count a bookmark export's hosts.
+- [references/scan.md](references/scan.md): agree on discovery scope, rank candidates and hand off.
+- [references/discovery.md](references/discovery.md): bounded local checks for tools, bookmarks and folders.
+- [references/import.md](references/import.md): convert external material or vaults into OKF notes.
+- [scripts/inventory.py](scripts/inventory.py): check `PATH` tools without running them or count bookmark hosts.

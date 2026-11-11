@@ -52,6 +52,7 @@ def test_github_main_commits_respect_half_open_window(provider: Provider) -> Non
     provider.install("gh", [{"match": ["commits"], "stdout": response([COMMIT, later])}])
     [record] = provider.records("github-history.py", "Example/Project", "commits", START, END)
     assert record.id == "example/project/commits/" + "a" * 40
+    assert record.attributes["kind"] == "commit"
     assert "Keep the rationale searchable." in record.text
     assert record.links == ["repo:github.com/example/project"]
     [call] = provider.calls("gh")
@@ -69,7 +70,10 @@ def pull(number: int, state: str, merged: str | None) -> dict[str, Any]:
 
 
 def test_github_old_closed_issues_and_merged_pulls_are_separate(provider: Provider) -> None:
-    for kind, expected in (("issues", "closed"), ("pulls", "merged")):
+    for kind, expected, expected_kind, label in (
+        ("issues", "closed", "issue", "Issue: #1"),
+        ("pulls", "merged", "pull-request", "Pull request: #2"),
+    ):
         provider.install(
             "gh",
             [
@@ -78,7 +82,10 @@ def test_github_old_closed_issues_and_merged_pulls_are_separate(provider: Provid
             ],
         )
         [record] = provider.records("github-history.py", "example/project", kind, START, END)
+        assert record.id.startswith(f"example/project/{kind}/")
         assert record.attributes["status"] == expected
+        assert record.attributes["kind"] == expected_kind
+        assert label in record.text
         assert record.time.startswith("2015-01-01")
         assert record.updated.startswith("2026-09-01")
         assert "inspect the evidence" in record.text
@@ -302,6 +309,7 @@ def test_github_empty_collection_and_invalid_scope(provider: Provider) -> None:
 def test_github_limits_reject_incomplete_collection(monkeypatch: pytest.MonkeyPatch) -> None:
     import runpy
 
+    monkeypatch.syspath_prepend(ROOT / "examples/sensors")
     module = runpy.run_path(str(ROOT / "examples/sensors/github-history.py"))
     collect = module["collect"]
     namespace = collect.__globals__

@@ -1,39 +1,26 @@
 # Complete reads and graph context
 
-Use when a reply is paged, a graph claim matters or an answer must be complete; the [retrieval reference](https://fmind.github.io/brain-framework/docs/retrieval/) owns the exact fields and limits.
+Use when a reply is paged, a graph claim matters or an answer must be complete; the [retrieval reference](https://fmind.github.io/brain-framework/docs/retrieval/) owns exact fields and limits.
 
 ## Continue a result
 
-Keep the query or ref, scope, limit and brain selection unchanged and pass each `next_offset` to `--offset` until it is absent; restart when evidence or the selected brains change meanwhile. A page or preview is never the complete result.
+Pass each `next_offset` to `--offset` with the query/ref, scope, limit and brain selection unchanged until `next_offset` is absent; restart if files or selected brains change. Exact reads above 32 KiB page their text: the first page carries `backlinks`, `claims` and any section `outline`. Read a listed `#section` when it suffices, or assemble all pages with `python3 SKILL_DIR/scripts/evidence.py read 'REF' --brain PATH` (verifies matching `sha256` across pages; [capture](evidence.md#retain-a-revision) huge outputs to a file).
 
-An exact read above 32 KiB returns its text in pages; the first carries the backlinks, claims and, when headings divide the read, an `outline`: read a section it lists when that answers the question. To assemble the whole text, run `python3 SKILL_DIR/scripts/evidence.py read 'REF' --brain PATH`: it follows every page, checks that each names the same file `sha256` and keeps every page's `problems` and `stale`. It prints the whole reply at once, past the 32 KiB page budget: to keep it, [capture it](evidence.md#retain-a-revision) to an owner-only file instead.
+## Refs and search rules
 
-## Write refs exactly
+- Quote refs in shell commands. Record refs keep `#` or `?` literally (`bf read 'mail:thread#2'`); percent-encode them (`%23`, `%3F`) only inside `bf://` URIs. `--scope` takes a whole note, folder, period, identity or combined period scope (`--scope "7d repo:github.com/owner/name"`), never a `#section`.
+- Only the first 32 distinct words count. English/French function words drop unless quoted (`"son"`) or ALL-CAPS (`AI`, `EU`); `AND` and `OR` always drop. CJK matches whole unspaced runs; combining-mark scripts split at marks.
+- `priority: low` sources and assistant `generated` records rank at half weight; `"identity":"unknown"` falls back to word search.
 
-- Quote refs in shell commands and read them as returned. A section ref uses the heading slug or explicit `{#id}`; pages have no sections.
-- A record ref keeps a `#` or `?` of its id as written (`bf read 'mail:thread#2'`); only a `bf://` address percent-encodes them as `%23` and `%3F`.
-- A `--scope` takes a whole note, never its `#section` or a result's section `uri`: search the note, then read the section.
+## Coverage and graph
 
-## Search gotchas
+- Check `problems`, `stale` and `sources` ([source coverage](https://fmind.github.io/brain-framework/docs/retrieval/#source-coverage)); retry `stale` caches. Search and read refresh `.bf/` and need write access to the brain (or a writable copy).
+- Whole reads group `backlinks` by `relation` (`cites`, declared relations, `links`). `--rel RELATION` pages one relation (including `broader` children) on a note, action folder, record or identity. `claims` lists outgoing typed claims with `origin`; `bf search 'IDENTITY'` returns every linking item's `relations`.
+- `bf export` streams graph edges as JSONL, `--kind identities` multi-name subjects, and `--kind items` every note and record (`fields`, multi-value `values`, stored `attributes`, `text`), filterable by `--scope` (such as `memories/SOURCE`) and `--observed-since 7d`.
 
-- English and French function words are ignored unless quoted (`"son"`) or written as a capitalized acronym (`AI`, `EU`); `AND` and `OR` always drop. Only the first 32 distinct words count.
-- Unspaced Chinese and Japanese match only as a whole run; Thai, Devanagari and vocalized Arabic match by fragments, so a query can miss a word.
-- Records of a `priority: low` source, and every assistant's records, rank at half weight; on period and home pages they appear only as a count with the `page` that lists them.
-- `"identity":"unknown"` means nothing in the cache names that identity.
+## Key pages
 
-## Check coverage
-
-Inspect `problems`, `stale` and `sources` before interpreting a result, and retry shortly after a `stale` reply. Search lists the sources of returned records plus any that failed, are `overdue` or `never` collected, fell `silent` or are `degraded`; an empty reply or a `memories` scope lists every searched source. A backfill extends a source's `window` without making it fresh, and a fresh cache never proves fresh provider evidence ([source coverage](https://fmind.github.io/brain-framework/docs/retrieval/#source-coverage)). Search and read refresh the `.bf/` cache, so a read-only brain fails with a write-access error: grant access or use a copy.
-
-## Follow the graph
-
-- A whole note, record or identity read groups `backlinks` by `relation`: `links` for untyped links, `cites` for OKF sources. `--rel RELATION` takes a whole note, record or identity, never a page or section, and `--rel PARENT` includes relations declared `broader: PARENT`.
-- `claims` lists the item's typed claims with their `target` and `origin`, the section or record making each; `claims_truncated` marks a capped list. `bf search 'IDENTITY'` gives every linking item's `relations` at once.
-- Section reads omit graph context: read the parent note for a dependency review.
-- For analysis outside BF, `bf export` streams one JSON line per edge, `--kind identities` every item with several names and `--kind items` every note and record with its text; `--scope` takes a search scope, such as `memories/SOURCE`, and returns every match without pages. Each exits 1 when evidence was skipped.
-
-## Pages worth knowing
-
-- Home shows as many projects as fit, those needing review first, and `attention` for programs that failed, are `overdue` or are due but `never` succeeded and for silent or lastingly degraded sources; `bf read projects` lists every project, and the [review guide](review.md) interprets their signals.
-- `bf read tasks` lists open checkboxes in projects, concepts and `ACTION.md` notes; only `deprecated` closes a note's tasks.
-- Period pages place records by event `time`, else by `observed`; `memories/SOURCE/undated` lists records without event time.
+- `bf read` (home): projects needing review first, up to 10 open `draft` `actions`, `changed`, `activity`, `upcoming` and uniform `attention` (`{kind, name, freshness, failed, ...}`).
+- `bf read review`: paginated non-deprecated notes needing review (`due` or `newer_evidence`), open `draft` `actions` (with `blocked_by` naming unresolved `draft` `depends-on` actions) and `attention`.
+- `bf read tasks` and `bf read actions`: open checkboxes across non-deprecated notes, and all actions newest first.
+- Period pages (`7d`, `2026-09-27`): place records by event `time`, else `observed`; `memories/SOURCE/undated` lists timeless records.

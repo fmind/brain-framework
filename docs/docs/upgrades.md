@@ -7,68 +7,41 @@ description: Install or update Brain Framework, match documentation to your vers
 
 ## Install
 
-Brain Framework supports Linux and macOS and requires Python 3.14 or newer. Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then let it manage BF's isolated environment:
+Brain Framework runs on Linux and macOS with Python 3.14+. Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then install BF in an isolated tool environment:
 
 ```bash
 uv tool install --python 3.14 brain-framework
 bf --version
 ```
 
-If your shell cannot find `bf`, run `uv tool update-shell` and open a new shell. Then follow [Getting started](getting-started.md). To serve an agent host over [MCP](mcp.md), install `'brain-framework[mcp]'` instead; upgrades keep the extra.
+Run `uv tool update-shell` if `bf` is not yet on `PATH`, then follow [Getting started](getting-started.md). For [MCP](mcp.md) support, install `'brain-framework[mcp]'`.
 
-`--python 3.14` selects the tested Python, which uv downloads if needed and remembers for later upgrades. Without it, uv may pick a newer Python for which some dependencies publish no prebuilt packages yet.
-
-<details markdown="1">
-<summary>If a command asks you to reinstall BF</summary>
-
-Three installation problems stop commands with a message naming the fix:
-
-- **PyYAML without libyaml.** BF reads YAML only through libyaml. When PyYAML was built without it, as from source on a newer Python, every command reading `bf.yaml` stops. Fix: `uv tool install --reinstall --python 3.14 brain-framework`.
-- **SQLite too old.** The search cache needs SQLite 3.35.0 or newer with FTS5 and JSON functions, which uv's managed Pythons include. When a system Python lacks them, search, read, status and build stop. Fix: `uv tool install --reinstall --managed-python --python 3.14 brain-framework`.
-
-- **Missing `mcp` extra.** `bf mcp needs the mcp extra`. Fix: `uv tool install --python 3.14 'brain-framework[mcp]'`, then restart the agent host.
-
-With MCP, reinstall `'brain-framework[mcp]'` in the first two fixes too: a reinstall without the extra drops it.
-
-</details>
+- **PyYAML without libyaml**: `uv tool install --reinstall --python 3.14 brain-framework` (include `[mcp]` if used).
+- **SQLite older than 3.35.0**: `uv tool install --reinstall --managed-python --python 3.14 brain-framework`.
 
 ## Match the docs to your version
 
-This site follows the repository's current code, which can be newer than your installation. `bf --version` names your runtime; `bf COMMAND --help` lists its options. Copy example sensors, routines and demos from the release tag matching `bf --version`, as the guides' commands do. The brain format, declared as `version:` in `bf.yaml` and each `evals/*.yaml`, is separate from the package version; [versioning and stability](#versioning-and-stability) says what it covers.
+This documentation tracks `main`. Check `bf --version` and `bf COMMAND --help` for your installed CLI, and copy example scripts (`_sensor.py`, `_bf.py`, sensors, routines, channels, hooks) from the matching `v$(bf --version)` tag.
 
 ## Versioning and stability
 
-A release number reads MAJOR.MINOR.PATCH. Within one major release:
+Releases follow `MAJOR.MINOR.PATCH` ([contract rules](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md#keep-the-contract)):
 
-- `search`, `read` and `status` [replies](retrieval.md#reply-schemas) only gain optional fields or narrow what they return, such as leaving out an optional field or tightening a value: validate them with their schemas and never rely on an optional field.
-- `bf.yaml`, evaluation suites and the machine registry only widen: a file that loads keeps loading.
-- The brain format `version` stays the same.
-
-Minor releases add features; patch releases fix bugs, including input BF misread. A major release ships whenever the design needs it and batches related breaks where practical. It adds no compatibility layer; its manual upgrade steps are in the [changelog](../changelog.md). Breaks held for the next major release are listed in [governance](https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md#next-major).
-
-A new brain format `version` means stored files need converting: record files, the `memories/` layout, notes, evaluation suites or the fields `bf.yaml` declares. Other breaks keep `version`, with manual upgrade steps: changed program settings, such as sensors, routines, assistants, channels and watch, or a stricter rule that rejects input which loaded before. [Contributing](https://github.com/fmind/brain-framework/blob/main/CONTRIBUTING.md#keep-the-contract) says how contributors check the contract.
+- **Within a major**: `search`, `read` and `status` [reply schemas](retrieval.md#reply-schemas) only gain optional fields or narrow values; `bf.yaml` and `evals/*.yaml` only widen accepted inputs; brain format `version` (currently `8`) stays constant.
+- **Across majors**: breaking CLI, configuration, queue or reply changes batch cleanly without legacy shims and list manual upgrade steps in the [changelog](../changelog.md) ([queued breaks](https://github.com/fmind/brain-framework/blob/main/GOVERNANCE.md#next-major)). Format `version` increments only when stored brain files require conversion.
 
 ## Update
 
-Before upgrading:
-
-1. Stop watchers and scheduled collection.
-1. Read the [changelog](../changelog.md). Run the steps that need the previous release first, such as draining its assistant queue.
-1. Back up the idle brain and its durable assistant queue. The queue lives outside the brain, under `$XDG_STATE_HOME/bf/runtime/` (normally `~/.local/state/bf/runtime/`). A copy of its `queue.sqlite3` taken while no BF process runs is complete; see [queue recovery](channels.md#queue-and-recovery).
-
-Then upgrade and confirm the new version:
+1. **Before upgrading**: stop `bf watch` / timers, read the [changelog](../changelog.md), drain `bf queue` on the current release if assistant/channel schemas or settings change, and back up both the brain and `$XDG_STATE_HOME/bf/runtime/*/queue.sqlite3` while idle.
+2. **Upgrade the package**:
 
 ```bash
 uv tool upgrade brain-framework
 bf --version
 ```
 
-Apply the upgrade steps of each release newer than your previous version, oldest first. Finish a major release's steps before collecting again.
-
-- **Assistant or channel changes:** resolve the work `bf queue` lists first. A queued job keeps the settings it was queued with and fails once they change.
-- **Updated examples:** when a release asks you to copy updated example sensors, routines or hooks, copy them from the tag matching `bf --version` and keep your adaptations.
-
-Then check the brain and update the agent skills:
+3. **Apply release steps**: update `bf.yaml` settings, refresh copied examples (including sibling `_sensor.py` and `_bf.py` helpers) from `v$(bf --version)`, and refresh `AGENTS.md` ([refresh brain instructions](agents.md#refresh-brain-instructions)) and `# yaml-language-server: $schema=...` headers if desired.
+4. **Verify and refresh skills**:
 
 ```bash
 cd ~/brain
@@ -78,29 +51,11 @@ bf status --check
 bf skills ~/.agents/skills
 ```
 
-Expect `"valid":true` from validation, `"passed":true` from your retrieval cases and exit 0 from the status check. Otherwise fix the reported problem first, with [Troubleshooting](troubleshooting.md).
-
-`bf skills` updates the skills it installed in that folder. Repeat it for each folder you installed them into, such as `~/.claude/skills` for Claude Code. It leaves a folder unchanged and exits 1 when the folder reports:
-
-- `modified`: you edited it.
-- `unmanaged`: it has no BF manifest.
-- `newer`: a newer `bf` installed a different copy.
-
-See [skill installation](agents.md#install-the-skills) before passing `--force`.
-
-`bf init` writes a brain's files once, so a release's new defaults never reach an existing brain by themselves:
-
-- Refresh `AGENTS.md`: replace the text above `## Your rules` with a scratch copy's and keep your rules below it, as [Refresh brain instructions](agents.md#refresh-brain-instructions) shows.
-- Add new [standard vocabulary](schema.md#standard-vocabulary) fields, such as `part-of` and `label`, to use the sensors that print them.
-- Add or update the [editor schema](schema.md#editor-schemas) line of `bf.yaml` and `evals/*.yaml`, so its version matches `bf --version`.
-
-Edit a [watch service](schedule.md#run-watch-as-a-service) or timer when the changelog asks or the `bf` executable moved.
-
-Use the same release on every clone and collecting machine of a team brain. Restart agent hosts and watchers after updating, then check collection health with `bf status --check` on the collecting machine.
+Repeat `bf skills` for each installed host directory (`~/.claude/skills`, or `bf skills skills --link` inside a personal brain; pass `--force` only after backing up local skill edits). Restart watchers and MCP hosts afterwards.
 
 ## Pin a brain's runtime
 
-A brain can pin its own BF release as a uv project, so every clone runs the same version. This pins the version your installed `bf` reports:
+Pin an exact BF version inside a brain with `uv` so execution commands and team clones run identical releases:
 
 ```bash
 cd ~/brain
@@ -110,31 +65,4 @@ echo /.venv/ >> .gitignore
 uv run --locked bf --version
 ```
 
-Commit `pyproject.toml` and `uv.lock`. Run commands that execute programs, such as `bf update`, through the pin:
-
-- Inside the brain: `uv run --locked bf update`.
-- Elsewhere: `uv run --project ~/brain --locked bf update --brain ~/brain`.
-
-Search, read and checks need no pin. The agent skills run them with your installed `bf` in every brain, and stop to ask when a pin names another major version. Upgrade your installed `bf` and the pin together; upgrade the pin with `uv add "brain-framework==X.Y.Z"`.
-
-Run a [watch service](schedule.md#run-watch-as-a-service) through the pin too, with absolute paths and the folder of `uv` in its `PATH`:
-
-```bash
-uv run --project ~/brain --locked bf watch --json --brain ~/brain
-```
-
-`uv run` puts the pinned `bf` first on the `PATH` of the programs it starts, so routines that call `bf` use the same release. Write Git hooks the same way, such as `exec uv run --locked bf run --hook pre-commit` or `exec uv run --locked bf run --hook pre-push -- "$@"`.
-
-Run a pin only in a brain you created or reviewed: it runs with your permissions. `uv run` trusts the brain's files:
-
-- It installs and runs whatever its `uv.lock` names.
-- It uses the interpreter its `.python-version` names and the settings of its `uv.toml`.
-- It runs an existing `.venv/` as is.
-
-Before running or upgrading a downloaded or shared brain's pin:
-
-- Review those files and `pyproject.toml`, like `sensors/` and `routines/`.
-- Delete a `.venv/` it ships before the first pinned run.
-- Never run the pin of a brain whose Git tracks a `.venv/` (`git ls-files .venv` prints files): every checkout restores it.
-
-Search or read a downloaded or shared brain with your installed `bf` ([privacy](privacy.md#running-code)).
+Commit `pyproject.toml` and `uv.lock` (never `.venv/`). Run execution commands through `uv run --locked bf update` (or `uv run --project ~/brain --locked bf watch --json --brain ~/brain` in services and `.git/hooks`), while keeping interactive retrieval and skills on your globally installed `bf` ([running code](privacy.md#running-code)). Always audit `pyproject.toml`, `uv.lock`, `.python-version` and `uv.toml` and delete any shipped `.venv/` before running a shared brain's pin.

@@ -84,6 +84,7 @@ def test_record_observation_does_not_retrigger_but_revision_and_fields_do() -> N
         {"collection": {"state": "active", "freshness": "never"}},
         {"collection": {"state": "active", "freshness": "unknown"}},
         {"collection": {"state": "active", "freshness": "fresh", "failed": True}},
+        {"collection": {"state": "active", "freshness": "fresh", "degraded": {"runs": 1, "missed": 1, "of": 3}}},
         {"collection": {"state": "historical", "freshness": "fresh"}},
         {"record": {**RECORD["record"], "attributes": {"partial": True}}},
     ],

@@ -9,7 +9,7 @@ docs_dir = "docs"
 # Mirror the public URL path so offline link checks need no temporary symlinks.
 site_dir = "site/brain-framework"
 strict = true
-extra_css = ["stylesheets/extra.css"]
+extra_css = ["stylesheets/fmind.css", "stylesheets/extra.css"]
 extra_javascript = ["javascripts/accessibility.js"]
 repo_url = "https://github.com/fmind/brain-framework"
 repo_name = "fmind/brain-framework"
@@ -108,6 +108,8 @@ view = "lucide/eye"
 # Follow the system preference until the reader picks light or dark.
 [[project.theme.palette]]
 media = "(prefers-color-scheme)"
+primary = "custom"
+accent = "custom"
 toggle.icon = "lucide/sun-moon"
 toggle.name = "Switch to light mode"
 

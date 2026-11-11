@@ -43,7 +43,7 @@ from bf.models import (
 )
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, unread, writer
 
-SCHEMA = 39
+SCHEMA = 41
 CACHE = ".bf/index.sqlite"
 # A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
@@ -97,7 +97,7 @@ CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT N
                    updated TEXT NOT NULL, observed TEXT NOT NULL, partial INTEGER NOT NULL,
                    tasks_open INTEGER NOT NULL, tasks_done INTEGER NOT NULL, next TEXT NOT NULL,
                    weight INTEGER NOT NULL, stale_after TEXT NOT NULL,
-                   fields TEXT NOT NULL);
+                   fields TEXT NOT NULL, field_values TEXT NOT NULL);
 CREATE TABLE tasks(item INTEGER NOT NULL, line INTEGER NOT NULL, fragment TEXT NOT NULL,
                    text TEXT NOT NULL, done INTEGER NOT NULL, PRIMARY KEY(item,line)) WITHOUT ROWID;
 -- `search` holds folded words; `original` keeps a passage's text only when folding changed it, for excerpts.
@@ -127,6 +127,7 @@ _INDEXES = (
     "CREATE INDEX items_kind_time ON items(kind,time)",
     # Its (kind,source,time) prefix orders a source's page; `observed` lets source totals read this index alone.
     "CREATE INDEX items_kind_source_time ON items(kind,source,time,observed)",
+    "CREATE INDEX items_kind_source_observed ON items(kind,source,observed)",
     # The expression must stay identical to the record branch of MODIFIED for SQLite to use it.
     "CREATE INDEX items_kind_modified ON items(kind,coalesce(nullif(updated,''),time))",
     "CREATE INDEX passages_item ON passages(item)",
@@ -544,11 +545,19 @@ def _insert(
 ) -> int:
     """Insert one file's item with its passages, names, links and claims; SQLite numbers the item and each passage
     after the existing ones. Returns the item's number."""
-    defaults: dict[str, str | int] = {"tasks_open": 0, "tasks_done": 0, "next": "", "weight": 1, "stale_after": ""}
+    defaults: dict[str, str | int] = {
+        "tasks_open": 0,
+        "tasks_done": 0,
+        "next": "",
+        "weight": 1,
+        "stale_after": "",
+        "field_values": "",
+    }
     item = connection.execute(
         "INSERT INTO items(ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,tasks_open,"
-        "tasks_done,next,weight,stale_after,fields) VALUES(:ref,:path,:kind,:source,:title,:time,:type,:status,:lead,"
-        ":url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,:stale_after,:fields)",
+        "tasks_done,next,weight,stale_after,fields,field_values) VALUES(:ref,:path,:kind,:source,:title,:time,:type,"
+        ":status,:lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,:stale_after,:fields,"
+        ":field_values)",
         {**defaults, **values},
     ).lastrowid
     # `heading` is what ranks; `title` is what readers see, such as "Note — Section".
@@ -644,6 +653,20 @@ def _spellings(words: Sequence[str]) -> list[list[tuple[str, str]]]:
         return spelled
 
 
+def _values(values: Mapping[str, JsonValue], config: Config) -> str:
+    """Declared multi-value fields serialized as string lists for `bf export --kind items`."""
+    multi: dict[str, list[str]] = {}
+    for name, value in sorted(values.items()):
+        definition = config.ontology.get(name)
+        if definition is None or definition.cardinality != "many":
+            continue
+        with suppress(ValueError):
+            normalized = definition.normalize(value)
+            if isinstance(normalized, list) and normalized:
+                multi[name] = [v if isinstance(v, str) else json.dumps(v, ensure_ascii=False) for v in normalized]
+    return json.dumps(multi, ensure_ascii=False, sort_keys=True) if multi else ""
+
+
 def _facts(values: Mapping[str, JsonValue], config: Config) -> str:
     """Declared single-value fields, such as a status or an assignee, each at most FACT characters.
 
@@ -716,6 +739,7 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
                 "next": next((task.text for task in projection.tasks if not task.done), ""),
                 "stale_after": knowledge.stale_after,
                 "fields": _facts(knowledge.fields, config),
+                "field_values": _values(knowledge.fields, config),
             },
             # The whole note ranks under its tags and each section under its stem, aliases and parents (see _lexical).
             [
@@ -783,6 +807,7 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
             "observed": record.observed,
             "partial": int(record.attributes.get("partial") is True),
             "fields": _facts(record.fields, config),
+            "field_values": _values(record.fields, config),
         },
         [("", record.title, record.title, record.text, identity, "")],
         sorted({ontology.qualify(config, ref), *(bf_links.target(v) for v in record.aliases)}),
@@ -1291,6 +1316,7 @@ _LINKING = f"""SELECT l.item FROM links l WHERE l.target IN (SELECT value FROM j
 # Fixed SQL: whether item `i` lies within a scope's bounds, with the parameters `scoped` gives.
 FILTERS = f"""((:since='' AND :until='') OR ({PERIOD_TIME})!='')
   AND (:since='' OR ({PERIOD_TIME})>=:since) AND (:until='' OR ({PERIOD_TIME})<:until)
+  AND (:observed_since='' OR (i.observed!='' AND i.observed>=:observed_since))
   AND (NOT :undated OR i.time='') AND (:prefix='' OR i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')
   AND (:target='' OR (:tag_scope AND i.id IN (SELECT item FROM tags WHERE target=:target))
        OR (NOT :tag_scope AND (i.ref IN (SELECT value FROM json_each(:targets)) OR i.id IN ({_LINKING}))))"""  # noqa: S608
@@ -1306,7 +1332,7 @@ def sections(targets: set[str]) -> list[str]:
     for value in targets:
         with suppress(Error):
             parsed = bf_links.parse(value)
-            if not parsed.fragment if parsed else authored(value):
+            if not parsed.fragment if parsed else (authored(value) or bool(re.fullmatch(r"actions/[^/#]+", value))):
                 result.append(value)
     return sorted(result)
 
@@ -1674,22 +1700,30 @@ def listing(
     order: str,
     limit: int = -1,
     offset: int = 0,
+    *,
+    counted: bool = True,
 ) -> tuple[Iterator[dict[str, object]], int]:
     """Stream items matching fixed SQL written by the page builders from `offset` on, at most `limit` of them, with
     the total before both."""
     values = {
         "since": "",
         "until": "",
+        "observed_since": "",
         "undated": False,
         "prefix": "",
         "target": "",
+        "tag_scope": False,
         **_parameters(set()),
         **params,
         "limit": limit,
         "offset": offset,
     }
     # `where` and `order` are fixed SQL written by the page builders; values stay bound parameters.
-    total = connection.execute(f"SELECT count(*) FROM items i WHERE {where}", values).fetchone()[0]  # noqa: S608
+    total = (
+        connection.execute(f"SELECT count(*) FROM items i WHERE {where}", values).fetchone()[0]  # noqa: S608
+        if counted
+        else 0
+    )
     rows = connection.execute(
         f"SELECT {_ROW} FROM items i WHERE {where} ORDER BY {order} LIMIT :limit OFFSET :offset",  # noqa: S608
         values,
@@ -1821,6 +1855,11 @@ def newer_links(
         {"ids": json.dumps(sorted(edits))},
     ):
         found.setdefault(item, set()).add(name)
+        if re.fullmatch(r"actions/[^/#]+/ACTION\.md", name):
+            found[item].add(name.removesuffix("/ACTION.md"))
+        with suppress(Error):
+            if (parsed := bf_links.parse(name)) and re.fullmatch(r"actions/[^/#]+/ACTION\.md", parsed.path):
+                found[item].add(bf_links.address(parsed.brain, parsed.path.removesuffix("/ACTION.md")))
     names = []
     for item, known in found.items():
         taking = set(sections(known))

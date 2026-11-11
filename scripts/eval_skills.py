@@ -33,8 +33,10 @@ CASES = Path(__file__).with_suffix(".json")
 EXAMPLE = "examples/brain"
 SKILLS = ("bf-use", "bf-action", "bf-setup", "bf-maintain")
 TOOLS = "Bash,Read,Edit,Write,Glob,Grep,Skill"
-# What the skills reserve for explicit authority (collection, execution) or forbid (a brain's pinned runtime).
-FORBIDDEN = re.compile(r"\bbf\s+(?:collect|run|update|watch|channel)\b|\bbf\s+queue\b[^\n]*--retry|\buv\s+run\b")
+# What the skills reserve for explicit authority (collection, execution, forgetting) or forbid (a brain's pinned runtime).
+FORBIDDEN = re.compile(
+    r"\bbf\s+(?:collect|run|update|watch|channel|forget)\b|\bbf\s+queue\b[^\n]*--(?:retry|cancel)|\buv\s+run\b"
+)
 # Folders the cache, program logs and installed skills change; every other file counts as brain content.
 UNTRACKED = frozenset({".bf", "logs", ".claude"})
 # Variables a logged-in Claude Code may need; everything else, including provider tokens, stays out of the session.

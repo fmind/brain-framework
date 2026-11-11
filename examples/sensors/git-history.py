@@ -9,106 +9,39 @@ with --skip (such as an autonomous agent loop), commits by bots or reserved test
 such as stashes and notes.
 """
 
-import json
+from __future__ import annotations
+
 import os
 import re
-import selectors
 import stat
-import subprocess
 import sys
-import time
-from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
+
+import _sensor
 
 # `git log --since-as-filter` first shipped in Git 2.37.
 MIN_GIT = (2, 37)
 MAX_REPOSITORIES = 200
 MAX_COMMITS = 10000
 MAX_BYTES = 16 << 20
-# BF record bounds: titles and links are bounded single lines.
-MAX_TITLE, MAX_REF = 4096, 8192
-# C0 and C1 control characters, which BF rejects in ids, titles, URLs and identities.
-CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-
-
-class InvalidError(ValueError):
-    """A content-free diagnostic safe to show on stderr."""
-
-
-def run(argv: list[str], limit: int, timeout: int) -> bytes:
-    """Bound provider output while it runs; inherit Brain Framework's cancellable process group."""
-    # Only literal provider commands reach this helper; no shell interprets argv. It starts them from /, so none depends
-    # on the folder BF runs the sensor from: gws, for one, loads a `.env` file from its working directory or any parent,
-    # and one in the brain could switch its account. A Git hook's repository variables, such as GIT_DIR, would make
-    # git -C read that one repository for every path, so they stay out.
-    local = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
-    local += ("GIT_ALTERNATE_OBJECT_DIRECTORIES",)
-    env = {key: value for key, value in os.environ.items() if key not in local}
-    child = subprocess.Popen(
-        argv, cwd="/", env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    output = bytearray()
-    deadline = time.monotonic() + timeout
-    try:
-        if child.stdout is None:
-            raise ValueError("provider pipe is missing")
-        with selectors.DefaultSelector() as selector:
-            os.set_blocking(child.stdout.fileno(), False)
-            selector.register(child.stdout, selectors.EVENT_READ)
-            while selector.get_map() or child.poll() is None:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("provider exceeded its timeout")
-                if not selector.get_map():
-                    with suppress(subprocess.TimeoutExpired):
-                        child.wait(timeout=0.05)
-                for key, _ in selector.select(0.05):
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                    output.extend(chunk)
-                    if len(output) > limit:
-                        raise InvalidError("Git output exceeds its byte limit; narrow the window")
-        if code := child.wait():
-            raise subprocess.CalledProcessError(code, argv)
-        return bytes(output)
-    finally:
-        if child.poll() is None:
-            child.kill()
-        child.wait()
-        if child.stdout is not None:
-            child.stdout.close()
-
-
-# A remote's identity, the same in each example that reads one: only `https://HOST/OWNER/NAME`,
-# `ssh://git@HOST/OWNER/NAME` and `git@HOST:OWNER/NAME`, with or without `.git`, on a host whose name ends in a
-# letters-only label. Any other user, a password or token, a port, a nested group or an ssh alias without a dot,
-# such as `git@work:team/site.git`, gives no identity. A dotted alias, such as `gh.work`, passes as its host.
-HOST = r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}"
-REMOTE = re.compile(
-    rf"(?:https://({HOST})/|ssh://git@({HOST})/|git@({HOST}):)([A-Za-z0-9._-]+/[A-Za-z0-9._-]+?)(?:\.git)?"
-)
-
-
-def repository_identity(url: str) -> str:
-    """`repo:HOST/OWNER/NAME`, lowercase as the sensor kit's repo() writes it; "" for any other remote."""
-    match = REMOTE.fullmatch(url.strip())
-    if not match:
-        return ""
-    host = next(group for group in match.groups()[:3] if group)
-    return f"repo:{host}/{match[4]}".lower()
+AUTOMATED = re.compile(r"(\[bot\]@users\.noreply\.github\.com|@([a-z0-9-]+\.)*(invalid|test|example|localhost))$")
+InvalidError = _sensor.InvalidError
+repository_identity = _sensor.git_remote_identity
 
 
 def remote(repository: Path) -> str:
     """The origin remote's repository identity, never its raw URL or credentials; "" when there is none."""
     try:
-        raw = run(["git", "-C", str(repository), "remote", "get-url", "origin"], 8192, 10)
-    except (subprocess.CalledProcessError, ValueError):
+        raw = _sensor.run(["git", "-C", str(repository), "remote", "get-url", "origin"], timeout=10, max_bytes=8192)
+    except _sensor.ProviderError as error:
+        if error.status is None:
+            raise
         return ""
-    identity = repository_identity(raw.decode(errors="replace"))
-    # An over-long link would fail the whole collection, like an over-long author email.
-    return identity if len(identity) <= MAX_REF else ""
+    except _sensor.InvalidError:
+        return ""
+    return repository_identity(raw.decode(errors="replace"))
 
 
 def nameable(relative: str) -> bool:
@@ -117,15 +50,7 @@ def nameable(relative: str) -> bool:
         relative.encode()
     except UnicodeEncodeError:
         return False
-    return not CONTROL.search(relative)
-
-
-def line(value: str, fallback: str) -> str:
-    """One bounded title line: control characters become spaces and whitespace collapses."""
-    return " ".join(CONTROL.sub(" ", value).split())[:MAX_TITLE].rstrip() or fallback
-
-
-AUTOMATED = re.compile(r"(\[bot\]@users\.noreply\.github\.com|@([a-z0-9-]+\.)*(invalid|test|example|localhost))$")
+    return not _sensor.CONTROL.search(relative)
 
 
 def shared(marker: Path) -> tuple[str, bool] | None:
@@ -145,10 +70,10 @@ def shared(marker: Path) -> tuple[str, bool] | None:
     if not stat.S_ISREG(info.st_mode):
         return os.path.realpath(marker), True
     with marker.open("rb") as stream:
-        line = os.fsdecode(stream.read(4096)).strip()
-    if not line.startswith("gitdir: "):
+        header = os.fsdecode(stream.read(4096)).strip()
+    if not header.startswith("gitdir: "):
         return os.path.realpath(marker), True
-    folder = marker.parent / line.removeprefix("gitdir: ")
+    folder = marker.parent / header.removeprefix("gitdir: ")
     try:
         with (folder / "commondir").open("rb") as stream:
             common = os.fsdecode(stream.read(4096)).strip()
@@ -220,8 +145,8 @@ def repositories(root: Path, skip: frozenset[str]) -> tuple[list[tuple[str, Path
 def supported() -> None:
     """Check Git once: an older Git rejects `--since-as-filter`, which would fail every repository by name."""
     try:
-        reply = run(["git", "version"], 1024, 10).decode(errors="replace")
-    except (OSError, ValueError, TimeoutError, subprocess.CalledProcessError):
+        reply = _sensor.run(["git", "version"], timeout=10, max_bytes=1024).decode(errors="replace")
+    except _sensor.SensorError:
         reply = ""
     found = re.match(r"git version (\d+)\.(\d+)", reply)
     if not found or (int(found[1]), int(found[2])) < MIN_GIT:
@@ -230,7 +155,7 @@ def supported() -> None:
 
 def history(repository: Path, start: str, end: str) -> list[str]:
     """One repository's commits in the window, as hash, committer time, author email and message fields."""
-    payload = run(
+    payload = _sensor.run(
         [
             "git",
             "-C",
@@ -254,8 +179,8 @@ def history(repository: Path, start: str, end: str) -> list[str]:
             "HEAD",
             "--",
         ],
-        MAX_BYTES,
-        30,
+        timeout=30,
+        max_bytes=MAX_BYTES,
     )
     # A legacy commit without an encoding header keeps its message, with replacement characters.
     fields = payload.decode(errors="replace").split("\0")
@@ -285,7 +210,7 @@ def collect(
             fields = history(repository, start, end)
         except InvalidError as error:
             raise InvalidError(f"{relative}: {error}") from None
-        except (subprocess.CalledProcessError, TimeoutError, ValueError):
+        except (_sensor.ProviderError, ValueError):
             # A stale worktree, damaged objects, another owner's repository or a stalled mount: name it so it can
             # be repaired or skipped. Its window is retried, never passed over.
             raise InvalidError(
@@ -303,52 +228,44 @@ def collect(
             if AUTOMATED.search(author):
                 continue
             repository_ref = "repo:local/" + quote(relative, safe="/")
-            links = [repository_ref, *([origin] if origin else [])]
-            person = "person:email/" + quote(author, safe="/:@+").replace("~", "%7E")
-            if "@" in author and len(person) <= MAX_REF:
-                # An over-long author email is dropped: one invalid link would fail the whole collection.
-                links.append(person)
+            repo_refs = [repository_ref, *([origin] if origin else [])]
+            author_person = _sensor.person(author)
+            author_refs = [author_person] if author_person else []
             message = message.strip()
             subject = message.partition("\n")[0]
             key = relative + "@" + commit
             records.append(
-                {
-                    "id": key,
-                    "title": line(f"{relative}: {subject}", relative),
-                    "time": when,
-                    "text": f"Repository: {relative}\nCommit: {commit}\nAuthor: {author}\nCommitted: {when}\n\n{message}",
-                    "links": sorted(links),
-                    "aliases": ["commit:local/" + quote(key, safe="/@")],
-                    "attributes": {
+                _sensor.record(
+                    key,
+                    _sensor.line(f"{relative}: {subject}", relative),
+                    time=when,
+                    text=f"Repository: {relative}\nCommit: {commit}\nAuthor: {author}\nCommitted: {when}\n\n{message}",
+                    links=[*repo_refs, *author_refs],
+                    aliases=["commit:local/" + quote(key, safe="/@")],
+                    attributes={
                         "repository": relative,
                         "commit": commit,
                         "author_email": author,
-                        "author_refs": [link for link in links if link.startswith("person:")],
-                        "repository_refs": [link for link in links if link.startswith("repo:")],
+                        "author_refs": author_refs,
+                        "repository_refs": repo_refs,
                     },
-                }
+                )
             )
         if len(records) > MAX_COMMITS:
             raise InvalidError(f"the window has more than {MAX_COMMITS} commits; narrow it")
     return records, skipped
 
 
+def main() -> None:
+    options = sys.argv[4:]
+    if len(sys.argv) < 4 or len(options) % 2 or any(flag != "--skip" for flag in options[::2]):
+        raise InvalidError("expected ROOT START END [--skip RELATIVE_REPO]...")
+    # Git starts from /: a relative ROOT names a folder below the brain, where BF runs this sensor.
+    result, skipped = collect(Path(sys.argv[1]).absolute(), sys.argv[2], sys.argv[3], frozenset(options[1::2]))
+    _sensor.emit(result, max_bytes=MAX_BYTES)
+    if skipped:
+        print(f"Git history skipped {skipped} unreadable, non-UTF-8 or control-character folders.", file=sys.stderr)
+
+
 if __name__ == "__main__":
-    try:
-        options = sys.argv[4:]
-        if len(sys.argv) < 4 or len(options) % 2 or any(flag != "--skip" for flag in options[::2]):
-            raise InvalidError("expected ROOT START END [--skip RELATIVE_REPO]...")
-        # Git starts from /: a relative ROOT names a folder below the brain, where BF runs this sensor.
-        result, skipped = collect(Path(sys.argv[1]).absolute(), sys.argv[2], sys.argv[3], frozenset(options[1::2]))
-        payload = json.dumps(result, ensure_ascii=False, allow_nan=False)
-        if len(payload.encode()) > MAX_BYTES:
-            raise InvalidError("normalized history exceeds 16 MiB; narrow the window")
-        if skipped:
-            print(f"Git history skipped {skipped} unreadable, non-UTF-8 or control-character folders.", file=sys.stderr)
-        print(payload)
-    except InvalidError as error:
-        print(f"Git history collection failed: {error}.", file=sys.stderr)
-        sys.exit(1)
-    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
-        print("Git history collection failed; check repository access and the requested window.", file=sys.stderr)
-        sys.exit(1)
+    _sensor.cli(main, "Git history collection failed", "check repository access and the requested window")

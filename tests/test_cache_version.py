@@ -13,7 +13,7 @@ from bf.models import digest, encode
 from bf.storage import Store
 
 # The digest of the layout and rows a full build of BRAIN stores, recorded with the index.SCHEMA that stores them.
-PROJECTION = (39, "9b0471e409181f18e6c6b766dba2bdf74a703b11f3e8a4b91ca259305b0a4e23")
+PROJECTION = (41, "97f6360e5fd04092b36848ab855ff28eb1bd41a29901a3f6e6d9abc0625c7b73")
 # Fixed input covering what indexing projects: notes, sections, tasks, links, claims, facts, records and problems.
 BRAIN = {
     "bf.yaml": """version: 8

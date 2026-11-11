@@ -89,8 +89,10 @@ class _Run(Model):
     record: str = ""
     # An action routine with `keep`: the SHA-256 of each action it wrote that may still be removed unchanged.
     reports: dict[str, str] = Field(default_factory=dict)
+    # High-water mark of `observed` timestamps already seen by a routine's `when.sources` check.
+    when_cursor: str = ""
 
-    @field_validator("run", "success", "start", "end", "requested_start", "requested_end", "reconciled")
+    @field_validator("run", "success", "start", "end", "requested_start", "requested_end", "reconciled", "when_cursor")
     @classmethod
     def instant(cls, value: str) -> str:
         return timestamp(value) if value else value

@@ -5,65 +5,50 @@ description: Connect an agent through local MCP search and read tools, then veri
 
 # Connect an agent with MCP
 
-[MCP (Model Context Protocol)](https://modelcontextprotocol.io/) lets an agent host call BF's **`search` and `read`** tools. The host starts `bf mcp` as a local process over stdio; no network port or account is involved. A terminal agent can use the CLI directly instead; see [Agent workflows](agents.md).
+[Model Context Protocol (MCP)](https://modelcontextprotocol.io/) exposes BF's read-only **`search` and `read`** tools over local stdio (`bf mcp`) with no network port or hosted account. Terminal agents can also call the CLI directly ([Agent workflows](agents.md)).
 
 ## Before connecting
 
-Complete [Getting started](getting-started.md), then add MCP support. It is an optional extra, because only `bf mcp` needs the MCP SDK and its dependencies:
+Complete [Getting started](getting-started.md), install the optional `mcp` extra and verify terminal retrieval with absolute paths:
 
 ```bash
 uv tool install --python 3.14 'brain-framework[mcp]'
 uv tool list --show-extras
-```
-
-uv replaces your installation with one that includes the extra, and the list shows `brain-framework` with `[extras: mcp]`. `uv tool upgrade brain-framework` keeps the extra; a reinstall without `[mcp]` drops it. Without the extra, `bf mcp` exits 1 with `bf: bf mcp needs the mcp extra; install it with uv tool install --python 3.14 'brain-framework[mcp]'`.
-
-Then check the same decision from your terminal:
-
-```bash
-cd ~/brain
 command -v bf
-bf read projects/new-website.md#decision
+bf read projects/new-website.md#decision --brain "$HOME/brain"
 ```
 
-Give the host absolute paths to `bf` and to the brain. Hosts may start the server from another folder, so `--brain` is useful here. An empty `--brain` is invalid input.
+Pass absolute paths for both `bf` and `--brain` so hosts launched outside `~/brain` select the intended brain (`bf mcp` re-validates selection on each call).
 
-The server checks its brain at startup and selects it again for each call, so registering or restoring a brain needs no restart.
+## Host configuration
 
-## Claude Code
-
-If a server named `brain` exists, inspect it with `claude mcp get brain` or choose another name.
+### Claude Code
 
 ```bash
 claude mcp add --transport stdio --scope user brain -- "$(command -v bf)" mcp --brain "$HOME/brain"
 claude mcp get brain
 ```
 
-Restart Claude Code, run `/mcp` and confirm that `brain` connects. See [Claude Code MCP setup](https://code.claude.com/docs/en/mcp). Remove it with `claude mcp remove brain --scope user`.
+Restart Claude Code and check `/mcp` ([Claude Code MCP setup](https://code.claude.com/docs/en/mcp); remove with `claude mcp remove brain --scope user`).
 
-## Codex
-
-If a server named `brain` exists, inspect it with `codex mcp get brain` or choose another name.
+### Codex
 
 ```bash
 codex mcp add brain -- "$(command -v bf)" mcp --brain "$HOME/brain"
 codex mcp get brain
 ```
 
-The equivalent entry in `~/.codex/config.toml`, with your absolute paths:
+Equivalent `~/.codex/config.toml` ([Codex MCP setup](https://developers.openai.com/codex/mcp); remove with `codex mcp remove brain`):
 
 ```toml
-# https://developers.openai.com/codex/mcp
 [mcp_servers.brain]
 command = "/home/me/.local/bin/bf"
 args = ["mcp", "--brain", "/home/me/brain"]
 ```
 
-Restart Codex and run `/mcp`. See [Codex MCP setup](https://developers.openai.com/codex/mcp). Remove it with `codex mcp remove brain`.
+### goose
 
-## goose
-
-goose runs a local MCP server as a stdio extension. Add this entry under `extensions:` in `~/.config/goose/config.yaml`, with your absolute paths, or enter the same values as a command-line extension in `goose configure`:
+Add under `extensions:` in `~/.config/goose/config.yaml` (or via `goose configure`; [Using extensions](https://goose-docs.ai/docs/getting-started/using-extensions)):
 
 ```yaml
 # https://goose-docs.ai/docs/getting-started/using-extensions#config-entry
@@ -77,75 +62,33 @@ extensions:
     timeout: 300
 ```
 
-Start a new goose session, since extension changes apply to future sessions. See [Using extensions](https://goose-docs.ai/docs/getting-started/using-extensions). Remove it by deleting the entry.
+### Other stdio hosts
 
-## Other agent hosts
+Configure a local stdio server named `brain` running `/home/me/.local/bin/bf` with `["mcp", "--brain", "/home/me/brain"]`:
 
-Use the host's **local stdio** configuration with these values, replacing the paths:
+- **VS Code Copilot**: [Add and manage MCP servers](https://code.visualstudio.com/docs/agent-customization/mcp-servers)
+- **Cursor**: [MCP configuration](https://cursor.com/docs/mcp)
+- **OpenCode**: [Local MCP servers](https://opencode.ai/docs/mcp-servers/)
 
-| Field       | Value                                  |
-| ----------- | -------------------------------------- |
-| Server name | `brain`                                |
-| Executable  | `/home/me/.local/bin/bf`               |
-| Arguments   | `["mcp", "--brain", "/home/me/brain"]` |
-| Tools       | `search`, `read`                       |
-
-| Host               | Official setup                                                                                                       |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| Copilot in VS Code | [Add and manage MCP servers](https://code.visualstudio.com/docs/agent-customization/mcp-servers), as a stdio server. |
-| Cursor             | [MCP configuration](https://cursor.com/docs/mcp).                                                                    |
-| OpenCode           | [Local MCP servers](https://opencode.ai/docs/mcp-servers/): the executable and arguments form its command array.     |
-
-Any host that loads `AGENTS.md`, [Agent Skills](https://agentskills.io/specification) and local stdio MCP servers can use BF. A host that accepts only remote MCP URLs cannot start `bf mcp`: see [why BF serves local stdio only](#why-local-stdio-and-two-tools).
-
-## Verify the connection
-
-Ask: **“Use the brain MCP tools to find why we chose a single product page. Read the matching source and cite its ref.”** Then check the host's tool history:
-
-| Tool     | Arguments                                                   | Expected result                                                        |
-| -------- | ----------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `search` | `{"query":"visitors clear explanation","scope":"projects"}` | `projects/new-website.md#decision` among its items.                    |
-| `read`   | `{"ref":"projects/new-website.md#decision"}`                | The saved reason: visitors need a clear explanation before signing up. |
-
-The answer should cite the ref. A configured entry does not prove the server runs, and an answer without the exact read does not prove retrieval.
+Ask your agent: **“Use the brain MCP tools to find why we chose a single product page. Read the matching source and cite its ref.”** Confirm in tool history that `search` (`{"query":"visitors clear explanation","scope":"projects"}`) and `read` (`{"ref":"projects/new-website.md#decision"}`) ran.
 
 ## If the connection fails
 
-| Symptom                      | Check                                                                                     |
-| ---------------------------- | ----------------------------------------------------------------------------------------- |
-| Executable not found         | Use the absolute `bf` path, and confirm the host's account can run it.                    |
-| `bf mcp needs the mcp extra` | Install it as [Before connecting](#before-connecting) shows, then restart the host.       |
-| Brain unavailable            | Read the decision in your terminal with the same absolute brain path.                     |
-| No tools, or old behavior    | Restart the host after changing its configuration or updating BF.                         |
-| Empty or incomplete results  | Inspect `problems`, `stale` and [source coverage](retrieval.md#source-coverage).          |
-| Cache write access error     | Make the brain's `.bf/` folder writable for the host's account, or serve a writable copy. |
+| Symptom                      | Fix                                                                              |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| Executable not found         | Pass the absolute `bf` path from `command -v bf`.                                |
+| `bf mcp needs the mcp extra` | Run `uv tool install --python 3.14 'brain-framework[mcp]'` and restart the host. |
+| Brain unavailable            | Test `bf read --brain /abs/path/to/brain` in a terminal.                         |
+| Empty or incomplete results  | Inspect `problems`, `stale` and [source coverage](retrieval.md#source-coverage). |
+| Cache write access error     | Ensure `.bf/` is writable by the host's user account.                            |
 
 ## What the host can read
 
-- **The selected brain and its direct `brains:` references:** review their audience first.
-- **Every registered brain** when the server starts outside any brain without `--brain` or `BF_BRAIN`, including one registered while it runs.
-- **Nothing else:** BF's server exposes no collection, program, write or network tool. Retrieval only refreshes the disposable `.bf/` cache and private usage counts.
-
-The host may have other tools and may send what it reads to a cloud model; see [privacy](privacy.md#your-agent-has-its-own-privacy-rules).
-
-Arguments match the CLI:
-
-- To read from one brain when a ref exists in several, pass its `bf://NAME/...` address.
-- To list every item linking to a note through one relation, pass it as `rel`, as `bf read REF --rel RELATION` does: `{"ref":"projects/new-website.md","rel":"cites"}`.
-
-Hosts show the tools as **Search the brain** and **Read a brain page, note or record**, both annotated read-only.
-
-At connection, the server sends instructions with the loop the generated `AGENTS.md` teaches: orient, search a few words, read each ref relied on, follow `next_offset` and inspect `problems` and `stale`. Whether the model sees them depends on the host. The [MCP tool contract](retrieval.md#mcp-tool-contract) lists parameters, reply schemas and errors.
+- **Selected brain and direct `brains:` references** (or all registered brains when started outside any brain without `--brain` / `BF_BRAIN`).
+- **Read-only access**: `search` and `read` refresh only the disposable `.bf/` cache and private usage counts, and accept `bf://NAME/...` addresses plus `rel` (`{"ref":"projects/new-website.md","rel":"cites"}`; [MCP tool contract](retrieval.md#mcp-tool-contract)). Review your host's model data policy ([privacy](privacy.md#your-agent-has-its-own-privacy-rules)).
 
 ## Why local stdio and two tools
 
-BF serves MCP over local stdio only, with `search` and `read`, by design:
-
-- **No remote endpoint:** it would expose a private brain beyond the computer that holds it. BF has no hosted service or account, and each computer runs its own brain.
-- **No resources or prompts:** they would duplicate `read`, whose pages already browse the brain, and the [skills](agents.md#install-the-skills), which carry the workflows.
-- **No other tools:** collection, programs and writes run only from commands you start, so a model connected over MCP cannot start them.
-
-Without local MCP, use these instead:
-
-- **The CLI:** run the agent in a clone of the brain, as [Agent workflows](agents.md) shows.
-- **A channel [`stream` adapter](channels.md#stream):** it brings events from a remote service to the brain's assistants. It runs its own listener, so review it like any program.
+- **No remote endpoint**: keeps private brains on the local machine without network listeners or accounts.
+- **No MCP resources or prompts**: `read` pages (`review`, `projects`, `7d`) already browse the brain, and [Agent Skills](agents.md#install-the-skills) carry portable workflows.
+- **No execution or write tools**: collection, routines and assistants run only from explicit CLI commands or user services, never from an MCP tool call.

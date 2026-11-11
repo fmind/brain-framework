@@ -13,7 +13,7 @@ from typing import cast
 from bf import __version__, index, usage
 from bf.config import Selection, brain_name, load, related
 from bf.history import ASSISTANTS, ROUTINES, log_path, state
-from bf.models import CACHE, Assistant, Config, Error, Program, Sensor, decode, reason, timestamp
+from bf.models import CACHE, Assistant, Config, Error, Program, Routine, Sensor, decode, reason, timestamp
 from bf.runtime import Queue, check_schema, check_version
 from bf.storage import QUEUE, Store
 
@@ -39,13 +39,25 @@ DEGRADED = 3
 
 
 def _freshness(program: Program | None, success: str, now: datetime) -> str:
-    """Scheduled programs are fresh within twice their refresh, based on local run history.
+    """Scheduled programs are fresh within twice their refresh or one day after a wall-clock slot.
 
     A disabled or undeclared program, such as a historical source, is unknown.
     """
     if program is None or not program.enabled:
         return "unknown"
-    if not program.refresh:
+    if isinstance(program, Routine):
+        if not program.scheduled:
+            return "manual"
+        if not success:
+            return "never"
+        if program.at is not None or program.days is not None:
+            grace = program.refresh or 86_400
+            return (
+                "fresh"
+                if now <= program.schedule_due(datetime.fromisoformat(success), success) + timedelta(seconds=grace)
+                else "overdue"
+            )
+    elif not program.refresh:
         return "manual"
     if not success:
         return "never"
@@ -278,27 +290,29 @@ def assistant_health(
         entry = history.get(name, {})
         schedules: dict[str, dict[str, object]] = {}
         for schedule, spec in settings.schedules.items():
+            cadence: dict[str, object] = {"every": spec.every} if spec.every is not None else {"at": spec.at}
             if unavailable:
-                schedules[schedule] = {"freshness": "unknown", "every": spec.every}
+                schedules[schedule] = {"freshness": "unknown", **cadence}
                 continue
             progress = checkpoints.get(f"schedule:{name}:schedule:{schedule}")
             success = str(progress.get("success", "")) if isinstance(progress, dict) else ""
             due = spec.next_due(now, success)
+            grace = spec.every if spec.every is not None else 86_400
             freshness = (
                 "never"
                 if not success
                 else "fresh"
                 # Measured from the first slot after the last success: the next slot after now is never late.
                 if (
-                    now <= spec.next_due(datetime.fromisoformat(success), success) + timedelta(seconds=spec.every)
+                    now <= spec.next_due(datetime.fromisoformat(success), success) + timedelta(seconds=grace)
                     if spec.at is not None or spec.days is not None
-                    else timedelta(0) <= now - datetime.fromisoformat(success) <= timedelta(seconds=2 * spec.every)
+                    else timedelta(0) <= now - datetime.fromisoformat(success) <= timedelta(seconds=2 * grace)
                 )
                 else "overdue"
             )
             schedules[schedule] = {
                 "freshness": freshness,
-                "every": spec.every,
+                **cadence,
                 # The canonical instant replies present with the local offset, like every other time.
                 "next_due": timestamp(due.isoformat()),
                 **({"last_success": success} if success else {}),
@@ -330,12 +344,17 @@ def assistant_health(
 def is_late(settings: Program | Assistant, health: Mapping[str, object], now: datetime) -> bool:
     """Whether a scheduled program is `overdue`, or has `never` succeeded and is due now by the dispatcher's rule.
 
-    A scheduled sensor or routine without a success is due at once. An assistant is late once one of its `never`
-    schedules falls due: a weekday `at` schedule declared on Sunday waits for Monday's slot. No grace period applies,
-    so a schedule that does not run shows from its slot.
+    A scheduled sensor or interval routine without a success is due at once. Wall-clock routines and assistants are
+    late once a `never` schedule falls due: a weekday `at` schedule declared on Sunday waits for Monday's slot.
     """
-    if health["freshness"] != "never" or not isinstance(settings, Assistant):
-        return health["freshness"] in {"overdue", "never"}
+    if health["freshness"] == "overdue":
+        return True
+    if health["freshness"] != "never":
+        return False
+    if isinstance(settings, Routine):
+        return settings.scheduled and settings.schedule_due(now) <= now
+    if not isinstance(settings, Assistant):
+        return True
     schedules = health.get("schedules")
     return isinstance(schedules, Mapping) and any(
         isinstance(item := schedules.get(name), Mapping)
@@ -370,13 +389,16 @@ def _attention(
                     # An assistant's failed work stays queued until retried or cancelled, however it was asked.
                     (failed or bool(settings.schedules or settings.inputs))
                     if isinstance(settings, Assistant)
-                    else settings.refresh
+                    else settings.scheduled
+                    if isinstance(settings, Routine)
+                    else bool(settings.refresh)
                 )
                 and (failed or silent or degraded or is_late(settings, health, now))
             ):
                 result.append(
                     {
-                        kind: name,
+                        "kind": kind,
+                        "name": name,
                         "freshness": health["freshness"],
                         **({"failed": True} if failed else {}),
                         **({"silent": True} if silent else {}),
@@ -386,11 +408,33 @@ def _attention(
     return result
 
 
+def _with_messaging(
+    alerts: list[dict[str, object]],
+    assistants: Mapping[str, Mapping[str, object]],
+    jobs: list[str],
+    channels: list[str],
+) -> list[dict[str, object]]:
+    named = {entry["name"] for entry in alerts if entry["kind"] == "assistant"}
+    result: list[dict[str, object]] = list(alerts)
+    result.extend(
+        {
+            "kind": "assistant",
+            "name": name,
+            "freshness": str(assistants.get(name, {}).get("freshness", "unknown")),
+            "failed": True,
+        }
+        for name in jobs
+        if name not in named
+    )
+    result.extend({"kind": "channel", "name": name, "freshness": "unknown", "failed": True} for name in channels)
+    return result
+
+
 def attention(
     store: Store, now: datetime | None = None, counts: Mapping[str, Mapping[str, object]] | None = None
 ) -> list[dict[str, object]]:
     """Scheduled sensors, routines and assistants this machine runs that failed, are late, fell silent or keep
-    reporting missing items, and assistants with failed work.
+    reporting missing items, assistants with failed work and failing channels.
 
     `counts` are the indexed counts per source, as `index.sources` gives them, from a caller holding the cache open:
     opening it again would wait behind a publish that waits for that caller.
@@ -404,13 +448,16 @@ def attention(
             # Silence needs the cache; failures and lateness come from run history alone.
             counts = {}
     config = load(store)
-    return _attention(
+    assistants = assistant_health(store, now=now, config=config)
+    alerts = _attention(
         config,
         source_health(store, counts, now=now, config=config),
         routine_health(store, now=now, config=config),
-        assistant_health(store, now=now, config=config),
+        assistants,
         now,
     )
+    _, jobs, channels = _messaging(store, config)
+    return _with_messaging(alerts, assistants, jobs, channels)
 
 
 def _messaging(store: Store, config: Config) -> tuple[dict[str, object] | None, list[str], list[str]]:
@@ -514,14 +561,7 @@ def report(stores: list[Store], now: datetime | None = None) -> dict[str, object
             )
         # The reasons a brain is unhealthy, beside its problems: the home page's late or failed programs, then
         # unresolved assistant work and failing channels.
-        alerts = _attention(config, coverage, routines, assistants, now)
-        named = {entry.get("assistant") for entry in alerts}
-        alerts += [
-            {"assistant": name, "freshness": str(assistants.get(name, {}).get("freshness", "unknown")), "failed": True}
-            for name in jobs
-            if name not in named
-        ]
-        alerts += [{"channel": name, "freshness": "unknown", "failed": True} for name in channels]
+        alerts = _with_messaging(_attention(config, coverage, routines, assistants, now), assistants, jobs, channels)
         # A busy cache still serves its last generation, marked stale in replies, while a live writer finishes.
         healthy &= not alerts and not problems and summary["cache"] in {"ready", "busy"}
         brains.append(

@@ -684,8 +684,8 @@ def plant(store: Store, *statements: str) -> None:
     with closing(sqlite3.connect(store.root / index.CACHE)) as connection, connection:
         connection.execute(
             "INSERT INTO items(id,ref,path,kind,source,title,time,type,status,lead,url,updated,observed,partial,"
-            "tasks_open,tasks_done,next,weight,stale_after,fields) VALUES(999,'projects/roadmap.md',"
-            "'projects/roadmap.md','note','','Roadmap','','project','','planted','','','',0,0,0,'',1,'','')"
+            "tasks_open,tasks_done,next,weight,stale_after,fields,field_values) VALUES(999,'projects/roadmap.md',"
+            "'projects/roadmap.md','note','','Roadmap','','project','','planted','','','',0,0,0,'',1,'','','')"
         )
         connection.execute("INSERT INTO passages(id,item,fragment,title,original) VALUES(999,999,'','Roadmap','')")
         connection.execute("INSERT INTO search(rowid,title,text,names) VALUES(999,'roadmap','zanzibar planted','')")

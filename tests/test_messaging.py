@@ -1278,19 +1278,30 @@ def test_misrouted_receipt_waits_for_inspection_even_on_an_idempotent_channel(me
     assert queue.next(True, {"personal"}) is None
 
 
-def test_failed_standalone_send_waits_for_an_explicit_retry(messaging: Store) -> None:
-    command = Send(command=["send-chat"], idempotent=True)
-    configure(messaging, lambda config: config["channels"]["chat"].update(send=command.model_dump()))
+def test_failed_standalone_send_retries_when_idempotent_else_waits_for_retry(messaging: Store) -> None:
+    idempotent_cmd = Send(command=["send-chat"], idempotent=True)
+    configure(messaging, lambda config: config["channels"]["chat"].update(send=idempotent_cmd.model_dump()))
     queue = Queue(messaging)
-    queue.send("chat", command, Outgoing(id="manual", text="Review ready"))
+    queue.send("chat", idempotent_cmd, Outgoing(id="auto", text="Review ready"))
 
     def unavailable(*_):
         raise Error("provider unavailable")
 
+    assert assistants.deliver(messaging, runner=unavailable, key="auto")
+    auto_saved = queue.inspect("auto")
+    assert auto_saved["state"] == "pending"
+    assert auto_saved["attempts"] == 1
+    due(queue, "auto")
+    assert assistants.deliver(messaging, runner=answers, key="auto")
+    assert queue.inspect("auto")["state"] == "delivered"
+
+    non_idempotent = Send(command=["send-chat"])
+    configure(messaging, lambda config: config["channels"]["chat"].update(send=non_idempotent.model_dump()))
+    queue.send("chat", non_idempotent, Outgoing(id="manual", text="Non-idempotent"))
     assert assistants.deliver(messaging, runner=unavailable, key="manual")
     saved = queue.inspect("manual")
-    assert saved["state"] == "failed"
-    assert "bf queue ID --retry" in str(saved["error"])
+    assert saved["state"] == "uncertain"
+    assert "provider unavailable" in str(saved["error"])
     queue.retry("manual")
     assert assistants.deliver(messaging, runner=answers, key="manual")
     assert queue.inspect("manual")["state"] == "delivered"
@@ -1742,3 +1753,65 @@ def test_a_job_an_earlier_release_queued_stays_cancellable(messaging: Store) -> 
     queue.retry(key, cancel=True)
     assert queue.get(key)["state"] == "cancelled"
     assert queue.progress("schedule:personal:schedule:review")["end"] == end
+
+
+def test_terminal_input_failure_enqueues_thread_notice_and_retry_cancels_it(messaging: Store) -> None:
+    incoming = message("msg-fail")
+    assistants.accept(messaging, "chat", [incoming], {"personal"})
+    queue = Queue(messaging)
+    key = queue.next(True, {"personal"})
+    assert key is not None
+
+    def broken(*_args: object) -> bytes:
+        raise Error("harness crashed")
+
+    with pytest.raises(Error, match="harness crashed"):
+        assistants.execute(messaging, key, runner=broken)
+    assert queue.get(key)["state"] == "uncertain"
+
+    # A concise deterministic notice is queued on the reply thread, tied to the failed job so scoped updates deliver it.
+    notice = queue.delivery(names={"personal"})
+    assert notice is not None
+    assert notice["job"] == key
+    payload = json.loads(str(notice["payload"]))
+    assert payload["conversation"] == "thread-1"
+    assert payload["text"] == "[bf] personal did not finish (uncertain); run bf queue to inspect."
+
+    # Explicitly retrying the job cancels any still-pending failure notice so a recovered answer does not follow it.
+    queue.retry(key)
+    assert queue.inspect(str(notice["id"]))["state"] == "cancelled"
+
+    # Oversized messages admitted directly as `failed` also enqueue the deterministic failure notice, and unscoped
+    # cycles deliver standalone notices/sends.
+    sent_texts: list[str] = []
+
+    def ok_runner(_argv: object, program: object, _store: object, _name: object, stdin: bytes) -> bytes:
+        if isinstance(program, Send):
+            sent_texts.append(json.loads(stdin)["text"])
+            return b'{"id":"sent-1","conversation":"thread-2"}'
+        return b"Recovered answer."
+
+    assistants.cycle(messaging, {"personal"}, at=datetime.now(UTC), runner=ok_runner, include_standalone=True)
+    assert "Recovered answer." in sent_texts
+
+    messaging.write("prompts/personal.md", b"P" * 105_000 + b"\n{{input}}\n")
+    huge = Message(
+        id="msg-huge",
+        sender="owner",
+        conversation="thread-2",
+        time=timestamp((datetime.now(UTC) - timedelta(seconds=1)).isoformat()),
+        text="x" * 20_000,
+        own=False,
+    )
+    assistants.accept(messaging, "chat", [huge], {"personal"})
+    assistants.cycle(messaging, {"personal"}, at=datetime.now(UTC), runner=ok_runner, include_standalone=True)
+    assert "[bf] personal did not finish (failed); run bf queue to inspect." in sent_texts
+
+    # A terminal `failed` (never `uncertain`) scheduled job is superseded on the next due window.
+    t0 = datetime.now(UTC) + timedelta(seconds=1801)
+    [sched_id], _ = assistants.schedule(messaging, {"personal"}, t0)
+    queue.fail(sched_id, "missing binary", not_started=True)
+    assert queue.get(sched_id)["state"] == "failed"
+    [next_sched_id], _ = assistants.schedule(messaging, {"personal"}, t0 + timedelta(seconds=1801))
+    assert next_sched_id != sched_id
+    assert queue.get(sched_id)["state"] == "cancelled"

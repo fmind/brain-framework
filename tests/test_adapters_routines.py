@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
@@ -271,6 +272,9 @@ def test_weekly_review_lists_overdue_projects_first(provider: Provider) -> None:
 
 def weekly_review() -> ModuleType:
     """The routine as a module: its rendering is a pure function of the pages it read."""
+    routines = str(ROOT / "examples/routines")
+    if routines not in sys.path:
+        sys.path.insert(0, routines)
     spec = importlib.util.spec_from_file_location("weekly_review", ROOT / "examples/routines/weekly-review.py")
     assert spec
     assert spec.loader
@@ -282,9 +286,10 @@ def weekly_review() -> ModuleType:
 def test_weekly_review_qualifies_empty_sections_while_a_sensor_needs_attention() -> None:
     # A calendar that never collected leaves the coming week empty: "Nothing is scheduled" would be a false claim.
     attention = [
-        {"sensor": "calendar", "freshness": "never", "failed": True},
-        {"routine": "backup", "freshness": "overdue"},
-        {"brain": "team", "assistant": "assistant", "freshness": "fresh", "failed": True},
+        {"kind": "sensor", "name": "calendar", "freshness": "never", "failed": True},
+        {"kind": "routine", "name": "backup", "freshness": "overdue"},
+        {"brain": "team", "kind": "assistant", "name": "assistant", "freshness": "fresh", "failed": True},
+        {"kind": "channel", "name": "telegram", "freshness": "fresh", "failed": True},
     ]
     home = {"projects": [], "tasks": EMPTY_TASKS, "upcoming": [], "attention": attention}
     text = "\n".join(weekly_review().render("2026-09-25", home, {"total": 0}))
@@ -293,6 +298,7 @@ def test_weekly_review_qualifies_empty_sections_while_a_sensor_needs_attention()
     assert "- Sensor `calendar`: never succeeded on this machine; last attempt failed." in lines
     assert "- Routine `backup`: overdue." in lines
     assert "- Assistant `assistant` in brain `team`: last attempt failed." in lines
+    assert "- Channel `telegram`: last attempt failed." in lines
     assert "- 0 items in the period, and a sensor needing attention may have missed some." in lines
     assert "No upcoming item was collected, and a sensor needing attention may have missed some." in lines
     assert lines[-1].startswith("Repair the programs needing attention first.")
@@ -302,9 +308,9 @@ def test_weekly_review_qualifies_empty_sections_while_a_sensor_needs_attention()
 def test_weekly_review_says_why_a_silent_source_needs_attention() -> None:
     # A silent source still succeeds, so its freshness alone left "needs attention" unexplained.
     attention = [
-        {"sensor": "mail", "freshness": "fresh", "silent": True},
-        {"sensor": "feed", "freshness": "overdue", "silent": True},
-        {"sensor": "rss", "freshness": "fresh", "degraded": True},
+        {"kind": "sensor", "name": "mail", "freshness": "fresh", "silent": True},
+        {"kind": "sensor", "name": "feed", "freshness": "overdue", "silent": True},
+        {"kind": "sensor", "name": "rss", "freshness": "fresh", "degraded": True},
     ]
     home = {"projects": [], "tasks": EMPTY_TASKS, "upcoming": [], "attention": attention}
     text = "\n".join(weekly_review().render("2026-09-25", home, {"total": 0}))
@@ -317,16 +323,24 @@ def test_weekly_review_says_why_a_silent_source_needs_attention() -> None:
 
 
 def test_weekly_review_states_empty_sections_plainly_when_every_sensor_is_current() -> None:
-    # A late routine collects no evidence: the empty sections need no qualification.
-    home = {"projects": [], "tasks": EMPTY_TASKS, "attention": [{"routine": "backup", "freshness": "overdue"}]}
+    # A late routine or failing channel collects no evidence: the empty sections need no qualification.
+    home = {
+        "projects": [],
+        "tasks": EMPTY_TASKS,
+        "attention": [
+            {"kind": "routine", "name": "backup", "freshness": "overdue"},
+            {"kind": "channel", "name": "telegram", "freshness": "fresh", "failed": True},
+        ],
+    }
     lines = list(weekly_review().render("2026-09-25", home, {"total": 0}))
+    assert "- Channel `telegram`: last attempt failed." in lines
     assert "- 0 items in the period." in lines
     assert "No upcoming item was collected." in lines
 
 
 def test_weekly_review_reports_programs_needing_attention_alone(provider: Provider) -> None:
     # Nothing else to review is no reason to stay silent about a failing sensor.
-    home = {"page": "", "projects": [], "attention": [{"sensor": "mail", "freshness": "overdue"}]}
+    home = {"page": "", "projects": [], "attention": [{"kind": "sensor", "name": "mail", "freshness": "overdue"}]}
     pages(provider, home, {"page": "7d", "total": 0})
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
@@ -337,12 +351,12 @@ def test_weekly_review_reports_programs_needing_attention_alone(provider: Provid
 def test_weekly_review_leaves_its_own_run_out_of_attention(provider: Provider) -> None:
     # BF records a routine's run only after it exits: on its first run, after its own failure or after a pause, the
     # home page lists the running review itself. 18.5.0 wrote an action about only that on an otherwise empty brain.
-    alone = [{"routine": "weekly-review", "freshness": "never"}]
+    alone = [{"kind": "routine", "name": "weekly-review", "freshness": "never"}]
     pages(provider, {"page": "", "projects": [], "attention": alone}, {"page": "7d", "total": 0})
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert (result.returncode, result.stdout) == (0, "")
-    others = [*alone, {"routine": "weekly-review", "freshness": "overdue", "failed": True}]
-    others.append({"routine": "backup", "freshness": "overdue"})
+    others = [*alone, {"kind": "routine", "name": "weekly-review", "freshness": "overdue", "failed": True}]
+    others.append({"kind": "routine", "name": "backup", "freshness": "overdue"})
     pages(provider, {"page": "", "projects": [], "attention": others}, {"page": "7d", "total": 0})
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
     assert result.returncode == 0, result.stderr
@@ -353,8 +367,8 @@ def test_weekly_review_leaves_its_own_run_out_of_attention(provider: Provider) -
 def test_weekly_review_keeps_another_brains_routine_of_its_name(provider: Provider) -> None:
     # A brain declaring another under `brains:` lists that brain's programs too: the review once dropped every
     # `weekly-review` entry, hiding a failure in the other brain, and wrote nothing when that was all to review.
-    own = {"brain": "main", "routine": "weekly-review", "freshness": "never"}
-    other = {"brain": "team", "routine": "weekly-review", "freshness": "never", "failed": True}
+    own = {"brain": "main", "kind": "routine", "name": "weekly-review", "freshness": "never"}
+    other = {"brain": "team", "kind": "routine", "name": "weekly-review", "freshness": "never", "failed": True}
     named = {"brains": [{"brain": "main", "path": "/brains/main"}], "healthy": True}
     pages(provider, {"page": "", "projects": [], "attention": [own, other]}, {"page": "7d", "total": 0}, status=named)
     result = provider.run("weekly-review.py", "/brains/main", END, folder="routines")
@@ -451,3 +465,38 @@ def test_weekly_review_counts_one_in_the_singular() -> None:
     assert "(draft, edited 2026-09-01, 1 newer linked item). Next:" in text
     # The action names every page it was generated from.
     assert "from `bf read`, `bf read projects`, `bf read tasks` and `bf read 7d`." in text
+
+
+def test_bf_helper_formats_safe_yaml_frontmatter_and_rejects_symlinked_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    _bf = weekly_review()._bf  # noqa: SLF001
+
+    rendered = _bf.format_action(
+        {
+            "status": "draft",
+            "updated": "2026-09-25",
+            "summary": "true",
+            "tags": ["alpha, beta", "123", "- item"],
+            "fields": {"kind": "yes", "count": 3, "active": True},
+        },
+        ["# Safe YAML", "", "Body."],
+    )
+    validate_okf("actions/2026-09-25_safe/ACTION.md", rendered.encode())
+    front = yaml.safe_load(rendered.split("---\n")[1])
+    assert front["summary"] == "true"
+    assert front["tags"] == ["alpha, beta", "123", "- item"]
+    assert front["fields"] == {"kind": "yes", "count": 3, "active": True}
+    with pytest.raises(_bf.BfError, match="non-JSON"):
+        _bf.format_action({"status": "draft", "fields": {"bad": float("nan")}}, ["# Bad"])
+
+    state = tmp_path / "state"
+    state.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    (state / "linked.json").symlink_to(outside)
+    monkeypatch.setenv("BF_STATE_DIR", str(state))
+    with pytest.raises(_bf.BfError, match="symlink"):
+        _bf.save_state("linked.json", {"ok": True})

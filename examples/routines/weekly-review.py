@@ -1,103 +1,84 @@
 #!/usr/bin/env python3
 """Weekly review: render the brain's home page and last seven days as a review action; no model involved."""
 
-import json
+from __future__ import annotations
+
 import re
-import subprocess
 import sys
-import unicodedata
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
-REPLY_BYTES = 4 << 20
+import _bf
+
+REPLY_BYTES = _bf.MAX_REPLY
 TIMEOUT = 120
-MAX_PROJECT_PAGES = 100
+MAX_PROJECT_PAGES = _bf.MAX_PAGES
 TASK_PREVIEW = 10
 # The home page previews at most 20 changed notes and 20 upcoming items, without a total.
 HOME_PREVIEW = 20
-# It previews the 10 newest action folders, of any date, without a total.
+# It previews the 10 newest open (`status: draft`) action folders, without a total.
 ACTION_PREVIEW = 10
 # How the home page's attention entries describe a scheduled program's freshness on this machine.
 STATES = {"never": "never succeeded on this machine", "overdue": "overdue"}
+ATTENTION_KINDS = frozenset({"sensor", "routine", "assistant", "channel"})
+visible = _bf.visible
+code = _bf.code
 
 
-def page(brain: str, ref: str = "", offset: int = 0) -> dict:
+def plain(value: object) -> str:
+    """Titles become link labels: one line, a Markdown link reduced to its label, without link delimiters."""
+    return _bf.plain(value, fallback="untitled")
+
+
+def page(brain: str, ref: str = "", offset: int = 0) -> dict[str, Any]:
     """One `bf read` page; an incomplete or unreadable page stops the review before any output."""
     name = ref or "home"
+    args = ["read", *([ref] if ref else []), "--brain", brain, *(["--offset", str(offset)] if offset else [])]
     try:
-        result = subprocess.run(  # noqa: S603 - literal argv; bf is the brain's own offline reader
-            ["bf", "read", *([ref] if ref else []), "--brain", brain, *(["--offset", str(offset)] if offset else [])],  # noqa: S607 - bf from the owner's PATH
-            capture_output=True,
-            timeout=TIMEOUT,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        return _bf.bf_json(*args, timeout=TIMEOUT, max_bytes=REPLY_BYTES)
+    except _bf.BfError as error:
+        message = str(error)
+        if "incomplete" in message:
+            raise SystemExit(f"weekly-review: the {name} page is incomplete; run bf status") from None
+        if "not valid JSON" in message:
+            raise SystemExit(f"weekly-review: the {name} page is not JSON") from None
         raise SystemExit(f"weekly-review: could not read the {name} page") from None
-    if result.returncode or len(result.stdout) > REPLY_BYTES:
-        raise SystemExit(f"weekly-review: could not read the {name} page")
-    try:
-        reply = json.loads(result.stdout)
-    except ValueError:
-        raise SystemExit(f"weekly-review: the {name} page is not JSON") from None
-    if not isinstance(reply, dict) or reply.get("problems") or reply.get("stale"):
-        # A partial page could hide a project due for review: report nothing rather than too little.
-        raise SystemExit(f"weekly-review: the {name} page is incomplete; run bf status")
-    return reply
 
 
 def named(brain: str) -> str:
     """This brain's configured name, which `bf status --brain` lists alone; any failure stops the review."""
     try:
-        result = subprocess.run(  # noqa: S603 - literal argv; bf is the brain's own offline reader
-            ["bf", "status", "--brain", brain],  # noqa: S607 - bf from the owner's PATH
-            capture_output=True,
-            timeout=TIMEOUT,
-            check=False,
-        )
-        listed = (
-            json.loads(result.stdout)["brains"] if not result.returncode and len(result.stdout) <= REPLY_BYTES else []
-        )
-        names = [entry["brain"] for entry in listed if isinstance(entry, dict) and isinstance(entry.get("brain"), str)]
-    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+        reply = _bf.bf_json("status", "--brain", brain, timeout=TIMEOUT, allow_stale=True, max_bytes=REPLY_BYTES)
+        listed = reply.get("brains", [])
+        names = [
+            entry["brain"]
+            for entry in (listed if isinstance(listed, list) else [])
+            if isinstance(entry, dict) and isinstance(entry.get("brain"), str)
+        ]
+    except _bf.BfError:
         names = []
     if len(names) != 1:
         raise SystemExit("weekly-review: could not name this brain; run bf status")
     return names[0]
 
 
-def projects(brain: str) -> list[dict]:
+def projects(brain: str) -> list[dict[str, Any]]:
     """The home page is a preview; enumerate projects before claiming none needs review."""
-    result = []
-    offset = 0
-    for _ in range(MAX_PROJECT_PAGES):
-        reply = page(brain, "projects", offset)
-        items = reply.get("items", [])
-        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
-            raise SystemExit("weekly-review: the projects page is malformed; run bf status")
-        result.extend(item for item in items if item.get("review"))
-        if "next_offset" not in reply:
-            return result
-        following = reply["next_offset"]
-        if type(following) is not int or following <= offset:
-            break
-        offset = following
-    raise SystemExit("weekly-review: the projects listing is incomplete; narrow the selected brain")
-
-
-def visible(text: str) -> str:
-    """Escape controls, line and paragraph separators and invisible format characters, which bf replies escape and
-    JSON decoding restored."""
-    return "".join(
-        char.encode("unicode_escape").decode() if unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} else char
-        for char in text
-    )
-
-
-def plain(value: object) -> str:
-    """Titles become link labels: one line, a Markdown link reduced to its label, without link delimiters."""
-    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", str(value))
-    return visible(re.sub(r"\s+", " ", re.sub(r"[\[\]()<>`]", "", text)).strip()) or "untitled"
+    result: list[dict[str, Any]] = []
+    try:
+        for reply in _bf.bf_pages("projects", brain=brain, timeout=TIMEOUT, max_pages=MAX_PROJECT_PAGES):
+            items = reply.get("items", [])
+            if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+                raise SystemExit("weekly-review: the projects page is malformed; run bf status")
+            result.extend(item for item in items if item.get("review"))
+    except _bf.BfError as error:
+        message = str(error)
+        if "incomplete" in message:
+            raise SystemExit("weekly-review: the projects page is incomplete; run bf status") from None
+        raise SystemExit("weekly-review: the projects listing is incomplete; narrow the selected brain") from None
+    return result
 
 
 def local(value: object) -> str:
@@ -108,7 +89,7 @@ def local(value: object) -> str:
         return ""
 
 
-def when(item: dict) -> str:
+def when(item: dict[str, Any]) -> str:
     """An item's day or local time as the reply states it: a dated note has no time, a time keeps its offset."""
     if item.get("date"):
         return plain(item["date"])
@@ -118,26 +99,18 @@ def when(item: dict) -> str:
         return "undated"
 
 
-def code(value: object) -> str:
-    """A code span no backtick inside a record id can close, so a ref never becomes Markdown or a link."""
-    text = visible(str(value))
-    fence = "`" * (max(map(len, re.findall(r"`+", text)), default=0) + 1)
-    pad = " " if text.startswith("`") or text.endswith("`") else ""
-    return f"{fence}{pad}{text}{pad}{fence}"
-
-
 def counted(number: object, noun: str) -> str:
     """A count with its noun, singular for one."""
     return f"{number} {noun}{'' if number == 1 else 's'}"
 
 
-def began(item: dict) -> str:
+def began(item: dict[str, Any]) -> str:
     """The day an action's folder names, as bf validate requires `actions/YYYY-MM-DD_slug`; empty otherwise."""
     found = re.match(r"actions/(\d{4}-\d{2}-\d{2})_", str(item.get("ref", "")))
     return found[1] if found else ""
 
 
-def mention(item: dict) -> str:
+def mention(item: dict[str, Any]) -> str:
     """Name an item without linking it: a link from this dated action would count as newer evidence.
 
     Collected text (an invite's title, a mail subject) never enters the action: only its ref does. With several
@@ -149,42 +122,36 @@ def mention(item: dict) -> str:
     return f"{plain(item.get('title', item['ref']))} ({code(ref)})"
 
 
-def attention(home: dict) -> list[str]:
-    """One line per scheduled program the home page says failed, is late on this machine or, for a source, fell silent or keeps missing parts.
+def attention(home: dict[str, Any]) -> list[str]:
+    """One line per program the home page says failed, is late, fell silent or keeps missing parts.
 
     Program names come from bf.yaml; code spans keep them inert.
     """
     lines = []
     for entry in home.get("attention", []):
-        kind = next((kind for kind in ("sensor", "routine", "assistant") if entry.get(kind)), "")
-        if not kind:
+        if not isinstance(entry, dict):
+            continue
+        kind, name = entry.get("kind"), entry.get("name")
+        if kind not in ATTENTION_KINDS or not isinstance(name, str) or not name:
             continue
         where = f" in brain {code(entry['brain'])}" if entry.get("brain") else ""
         state = [STATES[entry["freshness"]]] if entry.get("freshness") in STATES else []
         state += ["last attempt failed"] if entry.get("failed") else []
         state += ["no new or changed record within its `silent_after`"] if entry.get("silent") else []
         state += ["recent runs missed parts; its log names them"] if entry.get("degraded") else []
-        lines.append(f"- {kind.capitalize()} {code(entry[kind])}{where}: {'; '.join(state) or 'needs attention'}.")
+        lines.append(f"- {kind.capitalize()} {code(name)}{where}: {'; '.join(state) or 'needs attention'}.")
     return lines
 
 
-def render(day: str, home: dict, week: dict) -> Iterator[str]:
-    """The review action: an empty section says so when a late, failing or silent sensor may explain it."""
+def _body(day: str, home: dict[str, Any], week: dict[str, Any]) -> Iterator[str]:
     late = attention(home)
     # Only sensors collect the evidence that the period and the coming week count.
-    gap = any(entry.get("sensor") for entry in home.get("attention", []))
+    gap = any(isinstance(entry, dict) and entry.get("kind") == "sensor" for entry in home.get("attention", []))
     qualifier = ", and a sensor needing attention may have missed some" if gap else ""
     review = sorted(
         (project for project in home.get("projects", []) if project.get("review")),
         key=lambda project: ("due" not in project.get("review_reasons", []), project.get("review_due", "")),
     )
-    yield "---"
-    yield "type: action"
-    yield "status: draft"
-    yield f"updated: {day}"
-    yield "summary: Weekly review of projects, actions and evidence from the last seven days."
-    yield "---"
-    yield ""
     yield f"# Weekly review {day}"
     yield ""
     # One line per paragraph keeps the action stable under Markdown formatters.
@@ -250,7 +217,7 @@ def render(day: str, home: dict, week: dict) -> Iterator[str]:
         yield (
             f"- Showing the newest {HOME_PREVIEW} changed notes; use `bf read {since}..{day}` and follow `next_offset`."
         )
-    # The home page lists the newest action folders, past or planned: keep those begun within the period.
+    # The home page lists the newest open (`status: draft`) action folders: keep those begun within the period.
     actions = home.get("actions", [])
     recent = [item for item in actions if since <= began(item) <= day]
     if recent:
@@ -281,6 +248,19 @@ def render(day: str, home: dict, week: dict) -> Iterator[str]:
     yield f"Repair the programs needing attention first. {resume}" if late else resume
 
 
+def _frontmatter(day: str) -> dict[str, str]:
+    return {
+        "status": "draft",
+        "updated": day,
+        "summary": "Weekly review of projects, actions and evidence from the last seven days.",
+    }
+
+
+def render(day: str, home: dict[str, Any], week: dict[str, Any]) -> Iterator[str]:
+    """The review action: an empty section says so when a late, failing or silent sensor may explain it."""
+    yield from _bf.format_action(_frontmatter(day), _body(day, home, week)).splitlines()
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 3 or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T.*", argv[2]):
         sys.stderr.write("usage: weekly-review.py BRAIN END\n")
@@ -297,9 +277,17 @@ def main(argv: list[str]) -> int:
     # name the routine after its file. With brains declared under `brains:`, entries name their brain, and another
     # brain's routine of this name stays listed.
     entries = home.get("attention", [])
-    own = named(brain) if any("brain" in entry for entry in entries) else ""
+    own = named(brain) if any(isinstance(entry, dict) and "brain" in entry for entry in entries) else ""
+    self_name = Path(argv[0]).stem
     home["attention"] = [
-        entry for entry in entries if entry.get("routine") != Path(argv[0]).stem or entry.get("brain", own) != own
+        entry
+        for entry in entries
+        if not (
+            isinstance(entry, dict)
+            and entry.get("kind") == "routine"
+            and entry.get("name") == self_name
+            and entry.get("brain", own) == own
+        )
     ]
     home["projects"] = projects(brain)
     home["tasks"] = page(brain, "tasks")
@@ -310,7 +298,7 @@ def main(argv: list[str]) -> int:
         and not attention(home)
     ):
         return 0  # Nothing to review: no output, so no action is written.
-    sys.stdout.write("\n".join(render(day, home, week)) + "\n")
+    _bf.emit_action(_frontmatter(day), _body(day, home, week))
     return 0
 
 

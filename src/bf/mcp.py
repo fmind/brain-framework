@@ -23,7 +23,7 @@ from bf.storage import Store
 # The loop the generated AGENTS.md teaches, for hosts that load only MCP server instructions.
 INSTRUCTIONS = (
     "Offline retrieval over a Brain Framework brain: authored notes (projects, concepts, actions) and "
-    "collected records. Orient with read() for the home page, or read projects, tasks or 7d. Find with search: "
+    "collected records. Orient with read() for the home page, or read review, projects, tasks or 7d. Find with search: "
     "a few subject words or an exact identity, optionally within one scope. Any word matches and fuller matches "
     "rank first, so put variants in one query (inflections, synonyms, English and French); quote a phrase, end "
     "a word with * for its prefixes, and respell the words listed in unmatched, using any suggestions. Verify by reading each ref you "
@@ -154,9 +154,9 @@ def server(stores: list[Store] | Callable[[], list[Store]]) -> MCPServer:
             str,
             Field(
                 max_length=8192,
-                description="Empty for the home page; a page (projects, concepts, actions, tasks, memories, memories/SOURCE, "
-                "tags, tags/LABEL, today, 7d, 2026-09, 2026-09-21..2026-09-25); a note path, path#section, source:id "
-                "record, identity, or a bf://NAME/... address to choose one brain.",
+                description="Empty for the home page; a page (review, projects, concepts, actions, tasks, memories, "
+                "memories/SOURCE, tags, tags/LABEL, today, 7d, 2026-09, 2026-09-21..2026-09-25); a note path, "
+                "path#section, source:id record, identity, or a bf://NAME/... address to choose one brain.",
             ),
         ] = "",
         rel: Annotated[

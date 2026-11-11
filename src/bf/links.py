@@ -117,12 +117,12 @@ def tag(value: str) -> str | None:
 
 
 def reserved(path: str) -> bool:
-    """Whether a brain path belongs to computed pages: home, folder roots, tasks, periods, tags and memories.
+    """Whether a brain path belongs to computed pages: home, folder roots, review, tasks, periods, tags and memories.
 
     Reserving the whole page namespace keeps an entity from being shadowed by a page, now or in a later release.
     """
     return (
-        path in {"", "tasks", *AUTHORED}
+        path in {"", "review", "tasks", *AUTHORED}
         or path.partition("/")[0] in {"tags", "memories"}
         or PERIOD.fullmatch(path) is not None
     )

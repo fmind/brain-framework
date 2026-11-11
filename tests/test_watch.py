@@ -1281,7 +1281,7 @@ def test_a_sensor_that_keeps_missing_parts_needs_attention_after_three_runs(brai
     history(3)
     dashboard.replace_rows(snapshot(brain))
     rows = {row.name: row for row in dashboard.rows}
-    assert {"sensor": "calendar", "freshness": "fresh", "degraded": True} in attention(brain)
+    assert {"kind": "sensor", "name": "calendar", "freshness": "fresh", "degraded": True} in attention(brain)
     assert [name for name in ("calendar", "manual", "disabled") if watching.needs_attention(rows[name])] == ["calendar"]
     dashboard.key("\t")
     assert rows["calendar"] in dashboard.visible()
@@ -1310,7 +1310,7 @@ def test_a_new_assistant_schedule_needs_attention_only_once_due(brain: Store) ->
     dashboard.replace_rows(snapshot(brain))
     [helper] = dashboard.rows
     assert (helper.status, helper.early) == (State.NEVER, False)
-    assert attention(brain) == [{"assistant": "helper", "freshness": "never"}]
+    assert attention(brain) == [{"kind": "assistant", "name": "helper", "freshness": "never"}]
     assert dashboard.visible() == [helper]
     assert "1 needs attention" in screen(dashboard, 120, 30)
 

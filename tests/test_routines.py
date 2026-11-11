@@ -405,9 +405,9 @@ def test_status_and_home_report_failing_routines(configured: Store) -> None:
     }
     assert health["manual"] == {"state": "active", "freshness": "manual"}
     assert health["paused"] == {"state": "disabled", "freshness": "unknown"}
-    assert attention(configured, NOW) == [{"routine": "digest", "freshness": "never", "failed": True}]
+    assert attention(configured, NOW) == [{"kind": "routine", "name": "digest", "freshness": "never", "failed": True}]
     assert pages.home([configured], NOW)["attention"] == [
-        {"brain": "fixture", "routine": "digest", "freshness": "never", "failed": True}
+        {"brain": "fixture", "kind": "routine", "name": "digest", "freshness": "never", "failed": True}
     ]
     result = CliRunner().invoke(app, ["status", "--check", "--brain", str(configured.root)])
     assert result.exit_code == 1
@@ -715,3 +715,49 @@ def test_keep_puts_a_report_back_when_its_folder_gains_an_entry(brain: Store, mo
     second = routine(brain, "review", start=START, end=END, runner=printing(report), clock=lambda: later)
     assert second["removed"] == 0
     assert brain.read(first) == report
+
+
+def test_routines_support_wall_clock_schedules_and_declarative_when_gates(brain: Store) -> None:
+    from bf.models import Record
+    from conftest import records_file
+
+    with pytest.raises(ValidationError, match="routine accepts either refresh or at, not both"):
+        Routine(command=["echo"], refresh=60, at="08:00")
+    clock_routine = Routine(command=["echo"], at="08:00", days=["fri"], timezone="UTC")
+    assert clock_routine.scheduled is True
+
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nsensors:\n  feed:\n    command: [echo]\n"
+        b"routines:\n  digest:\n    command: [routines/digest.py]\n    at: '08:00'\n    timezone: UTC\n"
+        b"    output: action\n    when:\n      sources: [feed]\n",
+    )
+    assert routine_health(brain, now=NOW)["digest"]["freshness"] == "never"
+    assert len(due_routines(brain, now=NOW)) == 1
+
+    # Unmatched `when:` skips as `gated` in both dry_run and live update, recording the checked window.
+    dry_gated = update(brain, kinds=frozenset({"routine"}), dry_run=True, now=NOW)
+    assert cast("list[dict]", dry_gated["routines"])[0]["status"] == "gated"
+    live_gated = update(brain, kinds=frozenset({"routine"}), now=NOW)
+    assert cast("list[dict]", live_gated["routines"])[0]["status"] == "gated"
+    assert routine_health(brain, now=NOW)["digest"]["freshness"] == "fresh"
+
+    # New evidence in `feed` after the cursor opens the gate on the next day's window and advances `when_cursor`.
+    records_file(
+        brain,
+        "feed",
+        [Record(id="item-1", title="Fresh signal", attributes={"observed": "2026-09-26T07:30:00Z"})],
+    )
+    day2 = NOW + timedelta(days=1)
+    dry_due = update(brain, kinds=frozenset({"routine"}), dry_run=True, now=day2)
+    assert cast("list[dict]", dry_due["routines"])[0]["status"] == "due"
+
+    ran = update(brain, kinds=frozenset({"routine"}), runner=printing(ACTION), now=day2)
+    routine_row = cast("list[dict]", ran["routines"])[0]
+    assert "action" in routine_row
+    assert state(brain, ROUTINES)["digest"]["when_cursor"] == "2026-09-26T07:30:00.000000Z"
+
+    # Without newer evidence, the following day's window gates again.
+    day3 = NOW + timedelta(days=2)
+    gated_again = update(brain, kinds=frozenset({"routine"}), now=day3)
+    assert cast("list[dict]", gated_again["routines"])[0]["status"] == "gated"

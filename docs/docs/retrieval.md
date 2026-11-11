@@ -5,357 +5,113 @@ description: Reply fields and rules for search, read, pages, relation pages, con
 
 # Retrieval reference
 
-Exact reply fields and rules for CLI and MCP clients. For everyday use, start with [Search and read](search.md). Examples use the `brain` from [Getting started](getting-started.md). [Time values](#time-values) state how replies write dates and instants.
-
-With several selected brains:
-
-- List entries also name their `brain` and portable `uri`.
-- `newer`, `also`, `sections`, an `outline`'s refs and a claim's `target_ref` name items by `bf://` address.
+Exact reply contracts shared by the CLI and MCP (`bf schema --kind search-reply|read-reply`). When multiple brains are selected, list entries include `brain` and portable `uri`, and cross-item refs (`newer`, `also`, `sections`, `outline`, `target_ref`) use `bf://` addresses.
 
 ## Pages
 
-Pages are computed views, not files. They combine the selected brains; `bf read bf://brain/projects` selects one brain's page.
+Computed views across selected brains (`bf read bf://brain/projects` restricts to one brain):
 
-| Ref for `bf read`                                                       | Result                                                                                                                      |
-| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| none                                                                    | Home: projects, recent actions and notes, activity, upcoming items, failing programs and `pages`, the browsable page names. |
-| `projects`, `concepts`, `actions` or a subfolder                        | Notes with their tasks; one `ACTION.md` per action.                                                                         |
-| `tasks`                                                                 | Open checkboxes and counts.                                                                                                 |
-| `12h`, `7d`, `2w`                                                       | Items placed by date or observation, records changed upstream in the period (`changed`) and source counts.                  |
-| `today`, `yesterday`, `2026-09-27`, `2026-09`, `2026-09-21..2026-09-25` | The same for a local day, month or inclusive range of days; `previous` and `next` name the adjacent periods.                |
-| `memories`                                                              | Sources with counts, freshness and collected windows.                                                                       |
-| `memories/SOURCE`, `memories/SOURCE/PERIOD`                             | One source's coverage and records; `undated` selects records without a time.                                                |
-| `memories/SOURCE/FILE`                                                  | Maps a SHA-256-named record file to its `SOURCE:ID` ref, beside the source's coverage.                                      |
-| `tags`, `tags/LABEL`                                                    | Tag directory and members; see [tag rules](link-reference.md#tag-rules).                                                    |
-| `actions/YYYY-MM-DD_topic`                                              | The action's `ACTION.md`, up to 200 files, 20 linked projects and backlinks.                                                |
-
-- Listed items show declared single-value `fields`, such as a status, when the note or record sets them.
-- A folder ref may end with `/`, as shell completion adds: `tags/website/` reads like `tags/website`.
+| Ref for `bf read`                                                        | Returns                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| _(omitted)_                                                              | Home: `projects`, up to 10 open (`draft`) `actions`, `changed` notes, 24h `activity`, 7d `upcoming`, `attention` and `pages`.                                                                                                                                                                                             |
+| `review`                                                                 | Review page (`page: "review"`): paginated non-deprecated notes needing review (`due`, `newer_evidence`, `future_modified` or `unknown_modified`), up to 20 open `draft` `actions` (`actions_total` counts all open drafts; `blocked_by` lists up to 10 unresolved `draft` `depends-on` targets), and uniform `attention`. |
+| `projects`, `concepts`, `actions` or subfolder                           | Folder notes with task counts (`ACTION.md` per action folder).                                                                                                                                                                                                                                                            |
+| `tasks`                                                                  | Open checkboxes across non-deprecated OKF notes (50/page) plus `summary` totals.                                                                                                                                                                                                                                          |
+| `12h`, `7d`, `2w`, `today`, `yesterday`, `YYYY-MM-DD`, `YYYY-MM`, `A..B` | Period items, upstream `changed` records (up to 20) and `sources` counts (`previous`/`next` on calendar periods).                                                                                                                                                                                                         |
+| `memories`, `memories/SOURCE`, `memories/SOURCE/PERIOD\|undated\|FILE`   | Source overview, per-source records/coverage, undated records or SHA-256 file -> `SOURCE:ID` lookup.                                                                                                                                                                                                                      |
+| `tags`, `tags/LABEL`                                                     | Tag directory and members (200/page; [tag rules](link-reference.md#tag-rules)).                                                                                                                                                                                                                                           |
+| `actions/YYYY-MM-DD_SLUG`                                                | The action's `ACTION.md`, up to 200 folder `files`, 20 linked `projects` and `backlinks`.                                                                                                                                                                                                                                 |
 
 ### Ordering and review signals
 
-| View                  | Order or preview                                                                                                                                                                                      |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Projects              | Newest `updated` first, deprecated notes last; task counts and the first open task as `next`.                                                                                                         |
-| Concepts              | Title order.                                                                                                                                                                                          |
-| Actions               | Newest first.                                                                                                                                                                                         |
-| Home `projects`       | Those needing review first, each group newest first.                                                                                                                                                  |
-| Home `projects` size  | As many as fit the 32 KiB page beside the other sections, measured as the reply prints.                                                                                                               |
-| Home `projects_total` | Counts every project that is not deprecated; `bf read projects` lists them all.                                                                                                                       |
-| Home `actions`        | The 10 latest actions.                                                                                                                                                                                |
-| Home `changed`        | Other notes dated in the last 7 days, since projects list their own in `projects`.                                                                                                                    |
-| Home `changed` fields | Only `ref`, `kind`, `title`, `date`, `modified` and `review`.                                                                                                                                         |
-| Home `activity`       | Record counts of the last 24 hours.                                                                                                                                                                   |
-| Home `upcoming`       | Items in the next 7 days.                                                                                                                                                                             |
-| Home size             | `changed` and `upcoming` hold at most 20 items, without excerpts.                                                                                                                                     |
-| Period `changed`      | Up to 20 records changed upstream in the period but placed outside it, on every page; only `ref`, `kind`, `title`, `time` and `updated`.                                                              |
-| Home `attention`      | Scheduled programs that failed, are `overdue` or are due but `never` succeeded on this machine, sources that fell [`silent`](schedule.md#silent-sources), and sources `degraded` three runs in a row. |
+- **Home**: `projects` orders notes needing review first (each group newest `updated` first, fitting within 32 KiB alongside `projects_total` of non-deprecated projects); `actions` lists up to 10 newest **`status: draft`** actions (`stable` and `deprecated` actions clear from Home while staying in `bf read actions` and search); `changed` and `upcoming` list up to 20 items; `attention` uses uniform `{kind, name, freshness, failed}` entries ([attention entries](commands.md#attention-entries)).
+- **`priority: low` sources**: omitted from period `items`/`changed` and Home `upcoming`, while counted in `sources`/`activity` with `"priority": "low"`.
+- **`deprecated` notes**: excluded from Home, `review`, reminders and `tasks`, and ranked last in listings and search.
 
-- Records of a [`priority: low`](sensors.md#quiet-a-high-volume-source) source leave period `items`, `changed` and home `upcoming`. Period `sources` and home `activity` keep their counts with `"priority":"low"`.
-- Only `deprecated` closes a note: it ranks last and leaves every home section, reminders and the task list.
+Review fields on projects and notes with `stale_after`:
 
-These carry review signals: folder listings, home `projects`, `actions` and `upcoming`, and the whole read of a note that gets reminders. Home `changed` keeps only `modified` and `review: true`.
+| Field          | Meaning                                                                                                                     |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `review: true` | Needs review; `review_reasons` holds `due`, `newer_evidence`, `future_modified` and/or `unknown_modified`.                  |
+| `review_due`   | Local due date from `stale_after` (`review_source: "stale_after"`) or 14 days after project file `modified` (`"modified"`). |
+| `new_links`    | Count of linked items whose `time` or `attributes.updated` is newer than the note's `modified` (`newer` previews up to 5).  |
 
-| Field           | Rule                                                                                                                                                             |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `review_due`    | The local day a review falls due: the note's `stale_after`, or 14 days after a project's last edit.                                                              |
-| `review_source` | `stale_after` or `modified`.                                                                                                                                     |
-| `modified`      | The file's modification time.                                                                                                                                    |
-| `review: true`  | Attention needed; `review_reasons` says why.                                                                                                                     |
-| `new_links`     | Linked items that happened, or changed upstream (`attributes.updated`), between the note's last edit and now: items linking to the note and records it links to. |
-| `newer`         | Up to 5 of those items, newest first, to read before relying on the note.                                                                                        |
-
-| `review_reasons` value | Meaning                                                                            |
-| ---------------------- | ---------------------------------------------------------------------------------- |
-| `due`                  | The deadline has passed.                                                           |
-| `newer_evidence`       | Linked evidence happened or changed upstream after the note's last edit (`newer`). |
-| `future_modified`      | The file's time is ahead of the clock; review now.                                 |
-| `unknown_modified`     | The modification time cannot be represented.                                       |
-
-- Only projects, and notes that set `stale_after`, get reminders; `index.md`, `log.md` and action attachments never do.
-- A future event counts once it happens.
-- Editing the note clears `newer_evidence` until newer evidence arrives.
-- `observed` never counts: an upstream change made before the edit but collected after it raises no signal.
-- As in backlinks, a link through a name several items claim counts for none in `new_links`, unless it is a record's own ref.
-- Reads never change files.
+`attributes.observed` never triggers `newer_evidence`; editing the note after reviewing clears `newer_evidence`.
 
 ### Time meanings
 
-| Input or value        | Meaning                                                                               |
-| --------------------- | ------------------------------------------------------------------------------------- |
-| `today`, `2026-09-27` | A local calendar day, including daylight-saving changes.                              |
-| `7d`, `12h`, `2w`     | A trailing window ending now.                                                         |
-| Record `time`         | Event time.                                                                           |
-| Note `date`           | Its `updated` day, placed at local midnight.                                          |
-| Period `changed`      | Upstream modification time (`attributes.updated`), when present.                      |
-| Review signals        | A linked item's event time or upstream `updated`, against the note file's `modified`. |
-
-A message sent last week and edited today keeps last week's event time and appears in today's `changed` list.
-
-How periods place records:
-
-- Period pages, their source counts, home `activity` and period search scopes use a record's `time`. They fall back to `attributes.observed` only when `time` is absent.
-- Period items sort by that placement time, newest first.
-- Replies keep `observed` separate and never invent an event `time`.
-- Records with neither timestamp stay out of periods. `memories/SOURCE/undated` still lists every record without event time, even one placed by observation.
-- Observation alone never creates an upcoming event or a newer-evidence review signal.
-
-Try the [fictional feed example](https://github.com/fmind/brain-framework/tree/main/examples/retrieval#browse-a-feed-without-publication-dates).
+- Calendar days (`today`, `2026-09-27`) use local midnight boundaries (DST-aware); `7d`/`12h`/`2w` trail from now.
+- Periods place records by `time`, falling back to `attributes.observed` only when `time` is absent (`memories/SOURCE/undated` still lists all timeless records).
 
 ### Time values
 
-| Value                                                      | How replies state it                                                        |
-| ---------------------------------------------------------- | --------------------------------------------------------------------------- |
-| A note's `updated` day                                     | As `date`, such as `2026-09-27`.                                            |
-| Other instants                                             | With your local offset, to the second, such as `2026-09-29T09:00:00+02:00`. |
-| An instant from before your timezone adopted standard time | In UTC (`+00:00`), since its local offset has seconds.                      |
-| Values under `attributes` and `fields`                     | As stored.                                                                  |
-| A record's `timestamp` fields                              | In UTC, as collection stores them, such as `2026-10-05T07:00:00.000000Z`.   |
-| A note's `timestamp` fields                                | In UTC in listings; the note's exact read keeps them as written.            |
+Note `updated` days appear as `YYYY-MM-DD` (`date`); instants use local second-precision offsets (`2026-09-29T09:00:00+02:00`, or `+00:00` for pre-standard-time historical offsets); record/listing `timestamp` fields use UTC (`Z`), while `attributes` and exact-read note frontmatter stay as stored.
 
 ## Tasks
 
-| Rule        | Contract                                                                                                                 |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Included    | Unchecked list items in `projects/`, `concepts/` and canonical `ACTION.md` notes, whatever the note type.                |
-| Excluded    | Deprecated notes, `index.md` and `log.md`, other files in an action's folder, code, blockquotes and checkbox-like prose. |
-| Item fields | Owning `note` and `title`, section `ref`, one-based `line` and `text` (up to 320 characters).                            |
-| Task links  | Keep their targets as `[label](ref)` with brain-relative refs.                                                           |
-| Task text   | Refs and code spans keep every character; other words lose emphasis markers.                                             |
-| Counts      | `total` and `summary.open`: unchecked; `summary.done`: checked; `summary.notes`: notes with any checkbox.                |
-| Order       | Note path, line and brain.                                                                                               |
-| Pages       | 50 items per page; counts cover the whole selection.                                                                     |
-
-Tasks can share a section ref; their `line` tells them apart within one snapshot.
+Indexes unchecked `- [ ]` items in non-deprecated `projects/`, `concepts/` and `ACTION.md` notes (ignoring `index.md`, `log.md`, action attachments, code blocks and blockquotes), returning `note`, `title`, section `ref`, 1-based `line` and `text` (<= 320 chars, preserving `[label](ref)` links), 50 per page, with `total` and `summary` (`open`, `done`, `notes`).
 
 ## Search
 
-Queries hold up to 4,096 characters. `--limit` is 1–50 (default 10).
+Queries accept up to 4,096 characters and `--limit` 1–50 (default 10; invalid symbol-only queries such as `!!!` exit 2):
 
-| Rule                   | Behavior                                                                                                                                                                                             |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Terms                  | The first 32 distinct words, `"quoted phrases"` and `word*` prefixes.                                                                                                                                |
-| Folding                | Case, Latin-accent and compatibility insensitive (`ß`, `ﬁ`, full-width letters); English stemming.                                                                                                   |
-| Function words         | English and French function words, and words stemming to one such as `having`, drop unless they are the whole query, quoted, such as `"son"`, or written as an acronym, such as `EU AI Act` or `IT`. |
-| `AND`, `OR`            | Drop even in capitals.                                                                                                                                                                               |
-| Greek, Cyrillic        | `ή` and `ё` stay distinct from `η` and `е`.                                                                                                                                                          |
-| Chinese, Japanese      | Unspaced text matches only as a whole run between punctuation.                                                                                                                                       |
-| Combining-mark scripts | Scripts written with combining marks, such as Devanagari, Thai or vocalized Arabic, split at those marks and match by whole fragments, so a query can miss a word or match unrelated text.           |
-| Ranking                | BM25 word frequency.                                                                                                                                                                                 |
-| Weights                | Note titles, headings and tags weigh more than body text; a section ranks under its parent headings, note filename stem and declared aliases.                                                        |
-| Several terms          | A passage matching all of several terms gains 20%, one matching some of them a proportional part.                                                                                                    |
-| Kinds                  | Project, concept and `ACTION.md` notes rank higher, deprecated notes last and `priority: low` records at half weight.                                                                                |
-| Ties                   | Equal scores list the newest first.                                                                                                                                                                  |
-| Notes                  | A note appears once, through its best section; `sections` lists up to three others.                                                                                                                  |
-| Shared URLs            | Records of several sources sharing a URL appear once, from the best-ranked source; `also` lists up to five other refs.                                                                               |
-| `unmatched`            | Query words and phrases found nowhere in the selected brains, whatever the scope.                                                                                                                    |
-| `suggestions`          | For each unmatched word, up to three close words the selected brains hold, lowercased and with Latin accents folded as search indexes them, such as `{"retension":["retention"]}`.                   |
-| No suggestions         | Phrases, prefixes and words shorter than four letters get none. Search a suggestion to confirm it.                                                                                                   |
-| Several brains         | Results alternate by each brain's own rank; positions are not comparable across brains.                                                                                                              |
-| Invalid input          | A query without any word or identity, such as `!!!`, exits 2.                                                                                                                                        |
-
-| Item fields                       | Carried by                                                                                                      |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `ref`, `kind`, `title`, `excerpt` | Every item.                                                                                                     |
-| `date`, `type`, `status`          | Notes.                                                                                                          |
-| `time`, `source`, `url`           | Records.                                                                                                        |
-| `updated`, `observed`             | Records: the provider's `updated` time and BF's `observed` time.                                                |
-| `"partial":true`                  | Records whose sensor or text bound kept only part of the text.                                                  |
-| `"generated":true`                | Model output of an [assistant](prompts.md#what-a-run-records) the brain's `bf.yaml` declares; listings omit it. |
-
-- Titles are previews of at most 200 characters ending in `…`; exact reads keep the whole title.
-- A section's title reads `Note — Parent — Child`.
-- Never cite a `generated` record as the source of a fact; read what it cites.
-- An `excerpt` shows the query's words in context. Otherwise, like listings and relation pages, it shows up to 320 characters of the note's summary or opening text or of the record's text. `…` marks a cut.
+- **Matching**: first 32 distinct words, `"quoted phrases"` and `word*` prefixes; case-, Latin-accent- and compatibility-folded with English stemming; drops unquoted lowercase English/French function words (`AND`/`OR` always drop; uppercase acronyms such as `IT` stay); CJK matches unspaced runs between punctuation.
+- **Ranking**: BM25 weighted toward titles, headings, filename stems, aliases and tags, +20% multi-term coverage bonus, OKF notes boosted, `deprecated` last, `priority: low` and `"generated": true` assistant records at half weight, ties newest first.
+- **Deduplication & diagnostics**: one best section per note (up to 3 others in `sections`), one best source per shared `url` (up to 5 others in `also`), `unmatched` query tokens and up to 3 folded `suggestions` per unmatched word >= 4 letters.
+- **Item fields**: `ref`, `kind`, `title` (<= 200 chars), `excerpt` (<= 320 chars); notes add `date`, `type`, `status`; records add `time`, `source`, `url`, `updated`, `observed`, optional `"partial": true` and `"generated": true`.
 
 ### Prefixes and other languages
 
-A `word*` prefix matches the words it begins, even when English stemming shortens or respells them: `organi*` finds `organization`, stored as `organ`, and `pay*` finds `payment`. A prefix of three or more letters adds up to 64 such stems, in alphabetical order.
-
-- Accents fold and elisions split, so `evaluat*` finds `évaluation` and `organisation` finds `l'organisation`.
-- English stemming also matches regular `-s` plurals in other languages, such as `organisations`.
-- For irregular forms, such as `cheval` and `chevaux`, search `cheva*` or put both words in one query. An unmatched word's `suggestions` name close words the brain holds.
+`word*` prefixes of >= 3 letters expand up to 64 matching stems in alphabetical order (`organi*` matches `organization` and `évaluation`/`organisations` via accent folding and `-s` stemming).
 
 ### Scopes
 
-A search takes one scope, and [`bf export --scope`](commands.md#export-the-graph) exports the items it would search:
+`--scope` (shared by `bf search` and `bf export`) accepts one scope, optionally prefixed by a period and a space (`7d repo:github.com/example/new-website`, `2026-09 projects`):
 
-| Scope                                                           | Searches                                                                   |
-| --------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `projects`, `projects/new-website.md`                           | A folder or a whole note.                                                  |
-| `memories/brief`, `memories/brief/7d`, `memories/brief/undated` | One source, optionally within a period or among its records without time.  |
-| `memories/brief/FILE`                                           | One record file, as its source page maps it.                               |
-| `today`, `7d`, `2026-09`, `2026-09-21..2026-09-25`              | A period of local time; a range spans its first through its last day.      |
-| `repo:github.com/example/new-website`                           | The identity's owner and the items linking to it.                          |
-| `bf://brain/tags/website`                                       | Notes carrying that tag; see [tag rules](link-reference.md#tag-rules).     |
-| `7d repo:github.com/example/new-website`, `2026-09 projects`    | A period, a space, then one other scope: only its items within the period. |
-
-A combined scope narrows a folder, note, source, identity or tag to a period, such as the records naming a repository this week. Items fall in the period by the same times as on period pages; see [time meanings](#time-meanings).
-
-These scopes are invalid (exit 2):
-
-- A period combined with another period, such as `7d memories/brief/7d`, or with `memories/SOURCE/undated`.
-- Other segments below `memories/SOURCE`.
-- A fragment on a source, such as `memories/brief#x`.
-- A section, whether its path, such as `projects/new-website.md#decision`, or its `bf://` address: scope the whole note, then read the section.
-- A page's address, such as `bf://brain/projects` or `bf://brain/7d`: use its brain-relative form, `projects` or `7d`.
-- A tag's page path, such as `tags/website`: a tag is the exception and needs its address, `bf://brain/tags/website`.
-
-A source that no selected brain configures or indexes fails like its page, naming close sources such as `did you mean memories/brief?`. A folder or identity that names nothing returns no items.
-
-### Identity matching
-
-| Query                                          | Result                                                                       |
-| ---------------------------------------------- | ---------------------------------------------------------------------------- |
-| A known identity                               | Its owner first, then linking items newest first, each with its `relations`. |
-| An unknown identity-shaped query (`re:invent`) | A word search with `"identity":"unknown"`.                                   |
-| A tag address                                  | Exact membership, even when empty.                                           |
-
-Identities are case-sensitive and resolve only through explicit aliases, entities and `resource` URIs.
+- Authored folder or whole note (`projects`, `projects/new-website.md`) — never a `#section` or `bf://` page URI.
+- Source (`memories/brief`, `memories/brief/7d`, `memories/brief/undated`, `memories/brief/FILE`).
+- Period (`today`, `7d`, `2026-09`, `2026-09-21..2026-09-25`).
+- Identity (`repo:github.com/example/new-website` — owner plus linking items; direct identity queries in `search` return owner first + linking items with `relations`, or fall back to word search with `"identity": "unknown"`).
+- Tag URI (`bf://brain/tags/website` — full `bf://` URI required).
 
 ### Source coverage
 
-- Search lists in `sources` the sources of returned records, and those whose evidence may be missing because they `failed`, are `overdue` or `never` collected, fell `silent` or are `degraded`. `sources_omitted` counts the others.
-- A reply without items, or a search scoped to `memories` or `memories/SOURCE`, lists every searched source: coverage is then the answer.
-- Authored-folder and tag scopes, and tag searches without a `memories` scope, search notes alone and omit both fields.
-
-| Coverage field             | Meaning                                                                                                                                           |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `state`                    | `active`, `disabled` or `historical` (records remain but `bf.yaml` no longer declares the sensor).                                                |
-| `freshness`                | `fresh`, `overdue`, `never`, `manual` (no `refresh`) or `unknown` (disabled or historical).                                                       |
-| `last_collected`, `window` | This machine's last collection that brought the source up to date, and the contiguous interval collected.                                         |
-| `failed`                   | The last attempt failed or, for an assistant, one of its jobs is failed or uncertain and not yet retried or cancelled, even while it is disabled. |
-| `mode`                     | `window` or `snapshot`.                                                                                                                           |
-| `records`, `latest`        | On `memories` pages: the indexed records and the newest event time.                                                                               |
-| `page`                     | On the `memories` overview: the source's page.                                                                                                    |
-| `changed`                  | On `memories` pages: when this brain last gained a new or changed record of the source.                                                           |
-| `silent`                   | `true` when `changed` is older than the source's [`silent_after`](schedule.md#silent-sources); a record read's `collection` omits it.             |
-| `degraded`                 | `{runs, missed, of}` when the last committed run [reported missing parts](sensors.md#report-partial-coverage): its records may lack them.         |
+Search replies include `sources` (sources of returned records plus any `failed`, `overdue`, `never`, `silent` or `degraded` sources) and `sources_omitted` whenever records were eligible; empty results and `memories` scopes list every searched source.
 
 ## Notes, records and identities
 
-| Exact read               | Reply fields                                                                                                                                                                                             |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Note                     | `brain`, `ref`, `text` (the whole file), `sha256`, `modified`, `backlinks`, `claims` when it makes any; `uri` for a BF address.                                                                          |
-| `ACTION.md`              | Adds `files` and linked `projects`.                                                                                                                                                                      |
-| Note that gets reminders | Adds `tasks`, `next` and its [review signals](#ordering-and-review-signals).                                                                                                                             |
-| Section                  | `brain`, `ref` with its `#section`, that section's `text`, the whole file's `sha256` and `modified`, and the note's `title` and `type`, with its `status` and `date` when set.                           |
-| Record                   | `brain`, `ref`, `path`, `record` (`id`, `title` and any `text`, `time`, `url`, `links`, `aliases`, `attributes`, `fields`), `collection`, `sha256`, `modified`, `backlinks`, `claims` when it makes any. |
-| Identity                 | The owning note or record; without an owner, a page of the backlinks naming it.                                                                                                                          |
-| Ambiguous alias          | Fails: read an exact ref.                                                                                                                                                                                |
-| Any                      | `notice`, and `problems` or `stale` when evidence was skipped or the brain was busy.                                                                                                                     |
+| Exact read | Returned fields                                                                                                                                                                                                |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Note       | `brain`, `ref`, `text`, `sha256`, `modified`, `backlinks`, optional `claims`, `tasks`/`next`/review signals, and `files`/`projects` on `ACTION.md`.                                                            |
+| Section    | `brain`, `ref#section`, section `text`, whole-file `sha256` & `modified`, note `title`, `type`, optional `status` & `date`.                                                                                    |
+| Record     | `brain`, `ref`, `path`, `record` (`id`, `title`, `text`, `time`, `url`, `links`, `aliases`, `attributes`, `fields`), `collection`, `sha256`, `modified`, `backlinks`, optional `claims` & `"generated": true`. |
+| Identity   | Owning note/record, or backlinks page when unowned (`ambiguous identity` fails).                                                                                                                               |
 
-- `sha256` covers the file's bytes, also on a section read: compare it before replacing a file you read.
-- A record's text is `record.text`, never a top-level `text`.
-- An assistant's record also carries `"generated":true`, as in search results.
-- Record refs are `SOURCE:ID`. Read a returned ref exactly as written, even when its id holds `#` or `?`. Percent-encode those as `%23` and `%3F` only inside a `bf://` address.
-- A ref ending in a bare `#`, such as `projects/new-website.md#` or `bf://brain/projects/new-website.md#`, names no section and is invalid input (exit 2): read the whole note or name a section.
-
-| Graph field                  | Contents and limits                                                                                                                               |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `backlinks`                  | Groups of `relation`, `total` and `items`: `cites` and declared relations by name, then `links` for untyped links.                                |
-| Backlink previews            | Each group previews its 5 newest items with `ref`, `title`, `date` or `time`, `kind`, `excerpt` (up to 160 characters) and single-value `fields`. |
-| `backlinks_omitted`          | A read previews 64 relation groups, untyped `links` last; this counts the others, which `--rel` lists.                                            |
-| `claims`                     | Typed claims the subject makes (declared relations, `cites`, `tagged-with`), each with the `date` or `time` of its origin.                        |
-| `target_ref`, `target_title` | On a claim, when exactly one item of that brain owns the target: what to read next, with its title (at most 200 characters).                      |
-| `claims_truncated`           | Marks omissions beyond 20 claims per relation and 50 in all.                                                                                      |
-| Untyped links                | Not claims: they stay in the text, in each target's `links` backlinks and in `bf export`.                                                         |
-| `relations`                  | On identity search results: subject, relation, target and origin of each link; `relations_truncated` marks omissions.                             |
-| Repeated links               | In `relations`, an untyped link repeating a typed one from the same origin to the same target is listed once, under its relation.                 |
-
-Read a preview's ref for the evidence, or list the whole group with a relation page.
+Every reply carries `notice` (untrusted-evidence reminder) plus optional `problems` and `stale`. `backlinks` previews up to 64 relation groups (5 newest items each; `backlinks_omitted` counts extra groups); `claims` lists up to 20 per relation and 50 total (`claims_truncated`).
 
 ## Relation pages
 
-A relation page lists every item linking to a note, record or identity through one relation, newest first:
-
-```bash
-bf read projects/new-website.md --rel cites
-bf read repo:github.com/example/new-website --rel depends-on --offset 50
-```
-
-After [Connect two notes](links.md#connect-two-notes), the first returns `"page":"relation"`, `"relation":"cites"` and the concept as an item with its `excerpt`.
-
-| Rule               | Behavior                                                                                                                                                       |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `REF`              | A whole note, a `SOURCE:ID` record, an identity or a `bf://` address; an action folder reads its `ACTION.md`.                                                  |
-| Invalid `REF`      | A page or `#section` is invalid input (exit 2).                                                                                                                |
-| `RELATION`         | `links` for untyped links, `cites`, or a relation a selected brain declares.                                                                                   |
-| Invalid `RELATION` | Another value exits 2 and names the valid ones.                                                                                                                |
-| Narrower           | The page adds the links of relations declaring this one [`broader`](schema.md#narrower-relations-and-allowed-targets); their items carry their own `relation`. |
-| Items              | Like search results, with an `excerpt`, from every selected brain.                                                                                             |
-| `total`            | Counts the backlink group's claims plus those of its narrower relations.                                                                                       |
-| Pages              | 50 items, fewer above 32 KiB; follow `next_offset`.                                                                                                            |
-| MCP                | `read` takes the relation as `rel`.                                                                                                                            |
+`bf read REF --rel RELATION [--offset N]` (or MCP `read` with `rel`) lists incoming items for `links`, `cites` or a declared relation (including narrower relations declaring `broader: RELATION`), newest first, 50 per page (<= 32 KiB). `REF` must be a whole note, action folder, record or identity (pages and `#sections` exit 2).
 
 ## Continuations
 
-| Rule                  | Action                                                                                                          |
-| --------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `next_offset` present | Repeat the same request with that offset until it is absent; listings also report `total`.                      |
-| Same request          | Keep the query or ref, scope, limit and brain selection unchanged.                                              |
-| Changed files         | Restart after edits, or when a moving period such as `7d` reorders items.                                       |
-| Offsets               | Zero-based, combined across brains, at most 2^53−1.                                                             |
-| Invalid offsets       | A larger offset is invalid input (exit 2), as is an offset on the never-paged home page or `memories` overview. |
-| Page sizes            | Each page's item count is in [limits](limits.md#size-bounds).                                                   |
-| Large items           | A page ends early when its items would exceed 32 KiB; `next_offset` continues after the last one.               |
-
-The last page still needs the [completeness checks](#incomplete-answers-and-freshness).
+Follow `next_offset` (`0`..`2^53-1`) with identical parameters until absent (Home and `memories` overview take no offset).
 
 ### Large exact reads
 
-An exact read whose reply would exceed 32 KiB returns its text in pages.
-
-- A note's first page carries an `outline` when headings inside the read divide it and, for a whole note, its backlinks and claims.
-- The outline lists the headings inside the read: never the H1 title spanning the whole note, nor the section being read.
-- When such headings divide the text, the first page holds only its first 4 KiB. Otherwise, as for a note with only a title or a section without subsections, it holds as much as fits.
-- A record's first page carries every other field.
-- Later pages carry `brain`, `ref`, any `uri`, their slice, the paging fields, `sha256`, `modified`, `notice`, any `generated` and any `problems` or `stale` of the read itself. Problems with backlinks and claims stay on the first page.
-
-| Field                                       | Meaning                                                                                     |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `text`, or `record.text`                    | This page's slice; a page ends at a line break when one falls in its second half.           |
-| `offset`, `next_offset`, `total_characters` | Positions and length in Unicode characters of the text.                                     |
-| `sha256`, `modified`                        | The whole file's digest and modification time, identical on every page.                     |
-| `outline`                                   | Each section with its `ref`, `title` and `characters`; up to 200, then `outline_truncated`. |
-
-1. Read a section from the `outline` when it answers the question.
-1. Otherwise repeat the read with each `next_offset` and concatenate the slices in order.
-1. Check that every page names the same `sha256`; restart at offset 0 if it changes.
-
-A reply that fits returns whole and rejects a non-zero offset.
+Exact reads exceeding 32 KiB paginate `text` (or `record.text`) by character offsets (`offset`, `next_offset`, `total_characters`, identical whole-file `sha256` on every page). A multi-section note's first page returns its first 4 KiB plus `outline` (up to 200 child sections with `ref`, `title`, `characters`).
 
 ## Incomplete answers and freshness
 
-| Signal                       | Meaning                                                                                                                                                      | Action                                                                                                                                   |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `problems`                   | Objects with `error` and, when known, `brain` and `file`: skipped files (up to a [listed limit](limits.md#size-bounds), then a count), identities or brains. | Repair and repeat.                                                                                                                       |
-| `stale`                      | Brains answered from a cache or record that a writer kept changing past a [short wait](limits.md#size-bounds).                                               | Retry after it finishes.                                                                                                                 |
-| `sources`, `sources_omitted` | [Source coverage](#source-coverage).                                                                                                                         | Check that the sources you need collected the period you ask about and did not fail; `bf read memories` and `bf status` show it offline. |
-| `next_offset`                | More items follow.                                                                                                                                           | Repeat the same request with that offset, as [continuations](#continuations) describe.                                                   |
-| Damaged cache                | BF discards and rebuilds it once.                                                                                                                            | Run `bf build` if the problem persists.                                                                                                  |
-| Cache freshness              | Some file changes go unseen; see [cache freshness](#cache-freshness).                                                                                        | Run `bf build`.                                                                                                                          |
-| Cache write access           | Search and read refresh `.bf/`; a read-only brain fails naming it.                                                                                           | Grant write access or use a copy.                                                                                                        |
-
-- Malformed files, links and special files are skipped and reported while healthy brains still answer.
-- While a selected brain is unavailable, an exact read returns what the others hold with a `problems` entry naming it. A ref they do not hold fails as incomplete instead of not found, since it could exist there.
-- To recover, read a brain-qualified address, such as a search result's `uri` (`bf://NAME/...`), or repair that brain, for example with `bf build`.
-
-[What BF does not do](concepts.md#what-bf-does-not-do) states what an incomplete reply cannot prove.
+Always inspect `problems` (skipped files/brains), `stale` (writer held lock past 2s cache / 3s record wait) and `sources` coverage: an empty reply with `problems`, `stale` or unhealthy sources never proves absence.
 
 ### Cache freshness
 
-Each search and read lists the authored folders and `memories/` itself. It lists a source folder only when its fingerprint changed, it changed in the last 5 seconds or it holds a subfolder. Collection renames records into place, which always changes their folder. This assumes a POSIX file system that updates a folder's modification time when an entry is added, renamed or removed.
-
-These changes go unseen until `bf build`:
-
-- A record file edited in place, or made unreadable.
-- A change on a filesystem with coarse timestamps whose clock runs more than 5 seconds behind this machine's, such as a lagging network share.
-- A note saved in place twice at the same size within one file system timestamp tick, with a search or read indexing it in between. It also shows once it changes again. A coarse clock, such as FAT's 2 seconds, widens that window.
+Search and read automatically rescan authored folders and changed `memories/SOURCE` directories (including a 5s settle window). Run `bf build` after editing JSON files in `memories/` in place or on coarse/lagging network filesystems.
 
 ## Reply schemas
 
-`bf search` and `bf read` replies follow published JSON Schemas (draft 2020-12), shared by the CLI and MCP: [search](../search-reply.schema.json) and [read](../read-reply.schema.json). `bf status` replies follow the [status](../status-reply.schema.json) schema. Validate a saved reply against the installed version's schema:
+Validate replies against draft 2020-12 JSON Schemas ([`search`](../search-reply.schema.json), [`read`](../read-reply.schema.json), [`status`](../status-reply.schema.json)):
 
 ```bash
 bf schema --kind search-reply > search-reply.schema.json
@@ -363,33 +119,11 @@ bf search "visitors clear explanation" > reply.json
 uvx check-jsonschema --schemafile search-reply.schema.json reply.json
 ```
 
-The validator prints `ok -- validation done`. The schemas describe every reply shape and accept added fields: a minor release may add optional fields, and only a major release changes or removes one. Clients should ignore fields they do not know.
-
 ## MCP tool contract
 
-Transport: **stdio**. [Set up your host](mcp.md).
+Local **stdio** server (`bf mcp`; [setup](mcp.md)) publishing `outputSchema` on two read-only tools:
 
-| Tool     | Arguments and defaults                                      | Returns                                                         |
-| -------- | ----------------------------------------------------------- | --------------------------------------------------------------- |
-| `search` | Required `query`; `scope=""`, `limit=10` (1–50), `offset=0` | Ranked matches with exact refs.                                 |
-| `read`   | `ref=""`, `rel=""`, `offset=0`                              | Home, a page, note, section, record, identity or relation page. |
+- **`search`**: required `query`; optional `scope=""`, `limit=10` (1–50), `offset=0`.
+- **`read`**: optional `ref=""`, `rel=""`, `offset=0`.
 
-- Each tool publishes its [reply schema](#reply-schemas) as `outputSchema`.
-- Text and structured results carry the same JSON value as the CLI.
-- Integral numbers such as `5.0` count as integers.
-- Arguments outside the tool's input schema, such as `limit: 0`, return an error result with the MCP SDK's message.
-- Values the tool rejects after that return `invalid input: ARGUMENT: reason`, naming `query`, `scope`, `ref`, `rel` or `offset`, such as `invalid input: ref: invalid period: 2026-13`. An unknown scope or relation names the valid choices.
-- Other errors carry the CLI's message, naming the `search` and `read` tools where the CLI names commands.
-- Error text escapes control and format characters like CLI diagnostics. It shows a path that starts with a selected brain root, the registry file or the home directory as `<brain>`, `<registry>` or `~`.
-
-| Concern          | Contract                                                                                                                                                          |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Selection        | Checked at startup, then resolved again for each call: `--brain`, `BF_BRAIN`, the enclosing brain of the server's working directory, then every registered brain. |
-| Live changes     | Registry changes and newly available brains need no restart; direct `brains:` references are reread too.                                                          |
-| Offsets          | A selection change during a `next_offset` walk invalidates its offsets.                                                                                           |
-| Stable selection | Pass an absolute `--brain`, and restart to change it or the BF version.                                                                                           |
-| Disambiguation   | A `bf://NAME/...` ref chooses one selected brain; it grants no access.                                                                                            |
-| Continuation     | Follow `next_offset` and assemble [text pages](#large-exact-reads).                                                                                               |
-| Completeness     | Inspect `problems`, `stale` and source coverage.                                                                                                                  |
-| Execution        | Neither tool collects, runs programs or follows links onto the network.                                                                                           |
-| Guidance         | Tool titles and server instructions describe the search, read and verify loop; they grant no authority.                                                           |
+Selection resolves at startup and on every call (`--brain`, `BF_BRAIN`, enclosing brain, else all registered brains). Errors escape control/format characters and redact brain/registry/home prefixes as `<brain>`, `<registry>` and `~`.

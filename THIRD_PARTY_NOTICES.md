@@ -4,15 +4,15 @@ Brain Framework depends on the following non-development Python distributions on
 
 License expressions come from the installed distribution metadata. Legal text is copied from the corresponding installed wheel files and formatted only as Markdown text blocks. The Brain Framework project itself is licensed separately in `LICENSE`.
 
-## annotated-doc 0.0.5
+## annotated-doc 0.0.6
 
 Source: <https://github.com/fastapi/annotated-doc>
 
 License: `MIT`
 
-Evidence: `annotated_doc-0.0.5.dist-info/licenses/LICENSE`
+Evidence: `annotated_doc-0.0.6.dist-info/licenses/LICENSE`
 
-### annotated_doc-0.0.5.dist-info/licenses/LICENSE
+### annotated_doc-0.0.6.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -682,15 +682,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## markdown-it-py 4.2.0
+## markdown-it-py 4.3.0
 
 Source: <https://github.com/executablebooks/markdown-it-py>
 
 License: `MIT`
 
-Evidence: `markdown_it_py-4.2.0.dist-info/licenses/LICENSE`
+Evidence: `markdown_it_py-4.3.0.dist-info/licenses/LICENSE`
 
-### markdown_it_py-4.2.0.dist-info/licenses/LICENSE
+### markdown_it_py-4.3.0.dist-info/licenses/LICENSE
 
 ```text
 MIT License
@@ -716,9 +716,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-Evidence: `markdown_it_py-4.2.0.dist-info/licenses/LICENSE.markdown-it`
+Evidence: `markdown_it_py-4.3.0.dist-info/licenses/LICENSE.markdown-it`
 
-### markdown_it_py-4.2.0.dist-info/licenses/LICENSE.markdown-it
+### markdown_it_py-4.3.0.dist-info/licenses/LICENSE.markdown-it
 
 ```text
 Copyright (c) 2014 Vitaly Puzrin, Alex Kocharin.
@@ -1749,7 +1749,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## typer 0.28.0
+## typer 0.29.0
 
 Source: <https://github.com/fastapi/typer>
 
@@ -1757,9 +1757,9 @@ License: `MIT`
 
 The distribution vendors code adapted from Click in `typer/_click/`; its bundled `BSD-3-Clause` license is included below.
 
-Evidence: `typer-0.28.0.dist-info/licenses/LICENSE`
+Evidence: `typer-0.29.0.dist-info/licenses/LICENSE`
 
-### typer-0.28.0.dist-info/licenses/LICENSE
+### typer-0.29.0.dist-info/licenses/LICENSE
 
 ```text
 The MIT License (MIT)

@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """Print the brain notes matching a submitted prompt, from the host's hook input on stdin; silent otherwise."""
 
+from __future__ import annotations
+
 import json
 import re
-import subprocess
 import sys
 import unicodedata
+from typing import Any
+
+import _bf
 
 INPUT_BYTES = 4 << 20
 REPLY_BYTES = 1 << 20
 # The prompt waits for this hook: a slow search (such as a large cache refresh) means no context, not a delay.
 SEARCH_SECONDS = 5
 LIMIT = 3
-STALE_CACHE = "identity resolution used a stale cache"
 # Any query word matches, so a whole prompt would match nearly everything: keep its first few content words.
 WORDS = 8
 # bf search's English and French function words (src/bf/index.py _STOP): the words a prompt adds to its subject.
@@ -33,6 +36,12 @@ OPERATORS = frozenset({"AND", "OR"})
 NOTE = re.compile(
     r"(?:bf://[a-z][a-z0-9-]{0,63}/)?(?:projects|concepts|actions)/[^\x00-\x1f\x7f-\x9f]+?\.md(?:#[^\x00-\x1f\x7f-\x9f]*)?"
 )
+visible = _bf.visible
+code = _bf.code
+
+
+def plain(value: object, limit: int = 120) -> str:
+    return _bf.plain(value, limit)
 
 
 def query(prompt: str) -> str:
@@ -45,56 +54,16 @@ def query(prompt: str) -> str:
     return " ".join(list(found.values())[:WORDS])
 
 
-def search(words: str, brain: str) -> dict | None:
+def search(words: str, brain: str) -> dict[str, Any] | None:
     """Literal argv after `--`, so the words stay a query; bounded time and output."""
-    argv = ["bf", "search", "--limit", str(LIMIT), *(["--brain", brain] if brain else []), "--", words]
+    args = ["search", "--limit", str(LIMIT), *(["--brain", brain] if brain else []), "--", words]
     try:
-        result = subprocess.run(argv, capture_output=True, timeout=SEARCH_SECONDS, check=False)  # noqa: S603
-    except (OSError, subprocess.TimeoutExpired):
+        return _bf.bf_json(*args, timeout=SEARCH_SECONDS, allow_stale=True, max_bytes=REPLY_BYTES)
+    except _bf.BfError:
         return None
-    if result.returncode or len(result.stdout) > REPLY_BYTES:
-        return None
-    try:
-        reply = json.loads(result.stdout)
-    except ValueError:
-        return None
-    if not isinstance(reply, dict):
-        return None
-    problems, stale = reply.get("problems", []), reply.get("stale", [])
-    if (
-        not isinstance(problems, list)
-        or not isinstance(stale, list)
-        or any(not isinstance(name, str) for name in stale)
-        or any(not isinstance(problem, dict) or problem.get("error") != STALE_CACHE for problem in problems)
-        or (problems and not stale)
-    ):
-        return None
-    return reply
 
 
-def visible(text: str) -> str:
-    """Escape controls, line and paragraph separators and invisible format characters, which bf replies escape and
-    JSON decoding restored."""
-    return "".join(
-        char.encode("unicode_escape").decode() if unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} else char
-        for char in text
-    )
-
-
-def plain(value: object, limit: int = 120) -> str:
-    text = visible(re.sub(r"\s+", " ", re.sub(r"[`\[\]<>]", "", str(value))).strip())
-    return text[: limit - 1] + "…" if len(text) > limit else text
-
-
-def code(value: str) -> str:
-    """A code span that no backtick inside the value can close."""
-    value = visible(value)
-    fence = "`" * (max(map(len, re.findall(r"`+", value)), default=0) + 1)
-    pad = " " if value.startswith("`") or value.endswith("`") else ""
-    return f"{fence}{pad}{value}{pad}{fence}"
-
-
-def render(items: list, more: bool, stale: bool = False) -> list[str]:
+def render(items: list[Any], more: bool, stale: bool = False) -> list[str]:
     """Up to LIMIT results; with `more`, further results may hold more records, so their count is a minimum."""
     notes, records = [], 0
     for item in items:
@@ -141,5 +110,5 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv))
-    except Exception:  # A malformed event or reply must never block a prompt: print nothing and succeed.
+    except Exception:  # A malformed event or reply must never block a prompt: print nothing and succeed
         sys.exit(0)

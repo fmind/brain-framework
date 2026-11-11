@@ -5,67 +5,33 @@ description: Create a brain, save your first project decision, search its reason
 
 # Getting started
 
-Save a decision, find its reason and check that it stays findable. You need Linux or macOS, a terminal and a text editor. Native Windows is not supported, because BF relies on POSIX file locks and process groups: on Windows, use a Linux distribution in WSL2. No provider account or model is needed; an agent can help with the same steps.
-
-The example is a fictional New website project. BF prints compact JSON on one line; the examples below show selected fields.
+Save a decision, find its reason and check that it stays findable on Linux or macOS (use WSL2 on Windows). No provider account or model is required; BF prints compact JSON on one line.
 
 ## Install and create a brain
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then install Brain Framework. `--python 3.14` selects the tested Python version, which uv downloads if needed.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then install Brain Framework:
 
 ```bash
 uv tool install --python 3.14 brain-framework
 bf --version
 ```
 
-If `bf` is not on PATH, run `uv tool update-shell` and open a new shell. [Install and update](upgrades.md#install) explains the Python choice and later updates.
+If `bf` is not on `PATH`, run `uv tool update-shell` and open a new shell ([install and update](upgrades.md#install)).
 
 ### Choose a location
 
-Create your brain in `~/brain`, the recommended location. `bf init` refuses a folder that already has content, so choose now if you prefer another folder or name.
-
-<details markdown="1">
-<summary>Use another folder or brain name (optional)</summary>
-
-These are alternatives, not additional brains:
-
-| Create it with                          | Folder             | Brain name   |
-| --------------------------------------- | ------------------ | ------------ |
-| `bf init ~/brain`                       | `~/brain`          | `brain`      |
-| `bf init ~/team-brain`                  | `~/team-brain`     | `team-brain` |
-| `bf init ~/brains/default --name brain` | `~/brains/default` | `brain`      |
-
-The name defaults to the folder name: lowercased, accents removed and each run of other characters turned into one hyphen, trimmed at both ends. `Équipe produit` becomes `equipe-produit`. Pass `--name` when this gives no name starting with a letter within 64 characters, or would drop a letter such as `ø`. The name is stored in `bf.yaml` and identifies the brain in links, so keep it stable. The rest of this guide runs inside `~/brain`.
-
-</details>
-
-Create the brain and work inside it:
+Create your brain in `~/brain` (`bf init` refuses a non-empty folder; pass `--name NAME` when the folder name has no ASCII letter slug, as [commands](commands.md) details):
 
 ```bash
 bf init ~/brain
 cd ~/brain
 ```
 
-The new folder holds:
-
-- `bf.yaml`: the brain's configuration, linked to its [schema](schema.md#editor-schemas) so editors check it as you type.
-- `AGENTS.md`: instructions for agents.
-- `projects/`, `concepts/` (with a welcome note) and `actions/`: your notes.
-- `evals/retrieval.yaml`: saved questions that `bf eval` checks.
-- `.gitignore`: keeps the search cache, logs and private evidence (`memories/`, `inputs/`, `originals/`) out of Git.
-
-Commands act on the brain around your working directory, so no global configuration is needed. Run `git init` here if you want Git history.
-
-<details markdown="1">
-<summary>If commands act on another brain</summary>
-
-An exported `BF_BRAIN` takes precedence over the working directory. Check it with `echo "$BF_BRAIN"`, and run `unset BF_BRAIN` if it names another brain. [Select a brain](configuration.md#select-a-brain) gives the full order.
-
-</details>
+`bf init` writes `bf.yaml` (with an [editor schema](schema.md#editor-schemas) modeline), `AGENTS.md`, `projects/`, `concepts/`, `actions/`, `evals/retrieval.yaml` and `.gitignore`. Commands act on the enclosing brain unless `BF_BRAIN` or `--brain` overrides it ([selection](configuration.md#select-a-brain)).
 
 ## Save a decision
 
-Create `projects/new-website.md` in your editor, or ask your agent to save this content. Replace `updated` with today's date:
+Create `projects/new-website.md` in your editor (replace `updated` with today's date):
 
 ```markdown
 ---
@@ -86,7 +52,7 @@ Start with a single product page because visitors need a clear explanation befor
 - [ ] Draft the product page.
 ```
 
-The lines between `---` are the note's metadata. `type: project` says what the note is; `status: draft` marks its content as not yet reviewed. Work progress goes in the task list. [Write notes and actions](brain.md#notes) explains every field.
+`type: project` names the note kind and `status: draft` marks its review maturity; task progress lives in checkboxes ([notes](brain.md#notes)).
 
 ## Find its reason
 
@@ -94,7 +60,7 @@ The lines between `---` are the note's metadata. `type: project` says what the n
 bf search "visitors clear explanation"
 ```
 
-Search returns JSON. Its `items` include the Decision section:
+Search returns JSON whose `items` include the section:
 
 ```json
 {
@@ -103,13 +69,11 @@ Search returns JSON. Its `items` include the Decision section:
 }
 ```
 
-A `ref` is an exact address. Pass it to `read`:
+Pass the exact `ref` to `read`:
 
 ```bash
 bf read projects/new-website.md#decision
 ```
-
-The reply's `text` holds the original section:
 
 ```json
 {
@@ -118,7 +82,7 @@ The reply's `text` holds the original section:
 }
 ```
 
-Read the evidence before relying on a search excerpt. A reply with `problems` or `stale` is incomplete; see [incomplete answers](retrieval.md#incomplete-answers-and-freshness).
+Always read the exact ref before relying on an excerpt, and inspect `problems` or `stale` ([incomplete answers](retrieval.md#incomplete-answers-and-freshness)).
 
 ## Check the brain
 
@@ -128,26 +92,18 @@ bf validate
 bf eval
 ```
 
-The projects page lists the note with its first open task, `"next":"Draft the product page."`. On this fresh brain, validation returns:
+`bf read projects` lists the note with `"next":"Draft the product page."`. Validation reports:
 
 ```json
 { "notes": 3, "problems": [], "records": 0, "valid": true }
 ```
 
-A problem names the `file` to repair and its `error`; see [Check your brain](checks.md).
-
-`bf eval` runs three starter checks and returns `"score":"3/3"` and `"passed":true`. Two ask about the welcome note; one checks that an absent topic finds nothing. Neither command runs a model. Add [three New website questions](checks.md#retrieval-cases) to check your own decision.
-
-Edit the project as work changes. Search notices edits automatically; update `updated` when the note's meaning changes.
-
-**You now have a working brain.** Save real decisions the same way, or choose a [next step](#choose-your-next-step). Collection is optional.
+`bf eval` runs the starter checks and returns `"score":"3/3"` and `"passed":true` ([add your own cases](checks.md#retrieval-cases)).
 
 ## Collect your first source
 
 <details markdown="1">
 <summary>Optional exercise: collect a local brief, link it to your decision and notice when it changes</summary>
-
-A sensor is a small program that prints JSON records; BF saves each record as evidence. This one reads a fictional local brief and dates it by the file's modification time. uv supplies Python 3.14; once it is installed, the exercise needs no network access.
 
 ```bash
 mkdir -p inputs sensors
@@ -171,13 +127,12 @@ record = {
     "id": "website-brief",
     "title": "Product brief",
     "text": brief.read_text(encoding="utf-8"),
-    # When the brief last changed: a later change flags the project linking to it.
     "attributes": {"updated": datetime.fromtimestamp(brief.stat().st_mtime, UTC).isoformat()},
 }
 print(json.dumps([record]))
 ```
 
-A new brain has no `sensors:` key. Add this one at the top level of `bf.yaml`, keeping the other settings:
+A new brain has no `sensors:` key. Add this one at the top level of `bf.yaml`:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
@@ -190,11 +145,7 @@ sensors:
       kind: { value: document }
 ```
 
-- **`command`** runs the sensor from the brain folder, without a shell.
-- **`fields:` in `bf.yaml`** already declares `kind`, one of the [standard fields](schema.md#standard-vocabulary) `bf init` writes, as one string value.
-- **The sensor's `fields`** set `kind: document` on each record it prints.
-- **`mode: snapshot`** says the output is the complete list, so a record the sensor stops printing is removed.
-- **`refresh: 0`** keeps the sensor manual: it runs only when you collect it.
+`mode: snapshot` treats stdout as the full catalog, `refresh: 0` keeps runs manual, and `fields` sets the [standard `kind` field](schema.md#standard-vocabulary):
 
 ```bash
 bf collect brief
@@ -202,7 +153,7 @@ bf search "product explanation" --scope memories/brief
 bf read brief:website-brief
 ```
 
-Collection reports `"records":1`. Search returns `brief:website-brief`: a record ref made of the sensor name and the record's id. Its exact read holds the saved item under `record`:
+Collection reports `"records":1`, and the exact read returns:
 
 ```json
 {
@@ -226,9 +177,7 @@ bf validate
 bf eval
 ```
 
-Validation now reports `"records":1` and `"valid":true`; the starter questions still pass.
-
-Now change the evidence. Save `inputs/brief.txt` again with a revised brief:
+Validation reports `"records":1` and `"valid":true`. Now revise `inputs/brief.txt` — Save `inputs/brief.txt`:
 
 ```text
 Visitors need a clear product explanation and pricing before signing up.
@@ -239,7 +188,7 @@ bf collect brief
 bf read projects
 ```
 
-Collection reports `"updated":1`: the record keeps its ref and holds the new text. The brief changed after the project's last edit, so the projects page flags the project, and `newer` names the record to read:
+Collection reports `"updated":1`, and `bf read projects` flags the project because linked evidence changed after its last edit (`bf read review` surfaces the same queue across the brain):
 
 ```json
 {
@@ -250,21 +199,17 @@ Collection reports `"updated":1`: the record keeps its ref and holds the new tex
 }
 ```
 
-Read it with `bf read brief:website-brief`, then revise the decision or keep it: your next edit of the project clears the flag. [Add a sensor](sensors.md#your-first-sensor) replaces this tutorial sensor with a reviewed one.
+Read `brief:website-brief` and update the project to clear the flag. [Add a sensor](sensors.md#your-first-sensor) replaces this tutorial script with a reviewed sensor.
 
 </details>
 
 ## Choose your next step
 
-Before adding more data, choose a recurring question, the sources that answer it and the person who keeps its project note current.
-
-| You want to…                         | Continue with…                                                                                |
-| ------------------------------------ | --------------------------------------------------------------------------------------------- |
-| Understand the model                 | [Core concepts](concepts.md).                                                                 |
-| Write useful notes                   | [Write notes and actions](brain.md).                                                          |
-| Keep answers findable                | [Check your brain](checks.md).                                                                |
-| Use an agent                         | Install the skills with `bf skills ~/.agents/skills`, then read [Agent workflows](agents.md). |
-| Add external evidence                | [Add a sensor](sensors.md), then keep it fresh with [Watch and schedule](schedule.md).        |
-| Run your agent harness on a schedule | [Assistants](prompts.md).                                                                     |
-| Share with a team                    | [Team setup](team.md).                                                                        |
-| Fix a failed step                    | [Troubleshooting](troubleshooting.md).                                                        |
+| Goal                                 | Guide                                                                |
+| ------------------------------------ | -------------------------------------------------------------------- |
+| Understand the model                 | [Core concepts](concepts.md)                                         |
+| Author notes and track work sessions | [Write notes and actions](brain.md)                                  |
+| Connect an agent and install skills  | `bf skills ~/.agents/skills`, then [Agent workflows](agents.md)      |
+| Collect sources and watch schedules  | [Add a sensor](sensors.md) and [Watch and schedule](schedule.md)     |
+| Wake your harness on new evidence    | [Assistants](prompts.md) and [Four-tool walkthrough](context-hub.md) |
+| Collaborate or troubleshoot          | [Team setup](team.md) and [Troubleshooting](troubleshooting.md)      |

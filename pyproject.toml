@@ -1,8 +1,8 @@
 # https://packaging.python.org/en/latest/specifications/pyproject-toml/
 [project]
 name = "brain-framework"
-version = "21.4.1"
-description = "Brain Framework is a local-first brain for you and your AI agents. It gathers evidence from your tools into plain files you own, connects it through an ontology you declare, lets any agent harness search it offline and can wake that harness when a gate you review finds an event."
+version = "22.0.0"
+description = "Brain Framework is a local-first brain for you and your AI agents. It collects evidence from your tools into plain files you own, connects them through an ontology you declare, lets any agent harness search and read offline, and wakes your harness when declarative when: rules or reviewed gates spot new evidence."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
@@ -42,9 +42,7 @@ dependencies = [
   "pydantic>=2.13.5,<3",
   "pyyaml>=6.0.3,<7",
   "rich>=15.0.0,<16",
-  # cli.py passes the Click context to Parameter.get_error_hint(), which typer 0.29 no longer accepts:
-  # raise the cap together with that call.
-  "typer>=0.27.2,<0.29",
+  "typer>=0.27.2",
 ]
 
 [project.optional-dependencies]

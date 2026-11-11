@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import os
-import re
 import runpy
 from pathlib import Path
 
@@ -12,24 +11,30 @@ import pytest
 
 from conftest import ROOT, Provider
 
-ADAPTERS = ["google-calendar.py", "google-drive-folders.py", "gmail-headers.py", "git-history.py", "github-history.py"]
+SENSORS = [
+    "git-history.py",
+    "github-history.py",
+    "github-issues.py",
+    "gmail-headers.py",
+    "google-calendar.py",
+    "google-drive-folders.py",
+    "highlights.py",
+    "local-documents.py",
+]
 
 
-def test_provider_run_copies_stay_identical() -> None:
-    # Each sensor carries its own `run` so an owner can copy one file; only the overflow sentence differs.
-    copies = set()
-    for adapter in ADAPTERS:
-        source = (ROOT / "examples/sensors" / adapter).read_text()
-        [node] = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "run"]
-        segment = ast.get_source_segment(source, node) or ""
-        copies.add(re.sub(r'raise InvalidError\("[^"]*"\)', "raise InvalidError(MESSAGE)", segment))
-    assert len(copies) == 1
+def test_example_sensors_import_the_kit_without_local_run_copies() -> None:
+    for sensor in SENSORS:
+        tree = ast.parse((ROOT / "examples/sensors" / sensor).read_text())
+        imports = {alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names}
+        assert "_sensor" in imports, sensor
+        assert not [node.name for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run"], sensor
 
 
-@pytest.mark.parametrize("adapter", ADAPTERS)
 @pytest.mark.parametrize("mode", ["overflow", "timeout"])
-def test_provider_output_is_bounded_and_child_is_reaped(adapter: str, mode: str, tmp_path: Path) -> None:
-    run = runpy.run_path(str(ROOT / "examples/sensors" / adapter))["run"]
+def test_provider_output_is_bounded_and_child_is_reaped(mode: str, tmp_path: Path) -> None:
+    kit = runpy.run_path(str(ROOT / "examples/sensors/_sensor.py"))
+    run = kit["run"]
     pid = tmp_path / "pid"
     # A shell starts within the one-second timeout even on a loaded runner, where a Python producer once did not
     # write its pid in time; `exec` keeps that pid for the sleep the adapter must kill. Overflow ends at the byte
@@ -40,22 +45,21 @@ def test_provider_output_is_bounded_and_child_is_reaped(adapter: str, mode: str,
         + ("head -c 8192 /dev/zero\n" if mode == "overflow" else "exec 1>&-\n")
         + "exec sleep 60\n"
     )
-    expected = ValueError if mode == "overflow" else TimeoutError
+    expected = kit["InvalidError"] if mode == "overflow" else kit["ProviderError"]
     with pytest.raises(expected):
-        run(["/bin/sh", str(producer)], limit=1024, timeout=30 if mode == "overflow" else 1)
+        run(["/bin/sh", str(producer)], max_bytes=1024, timeout=30 if mode == "overflow" else 1)
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid.read_text()), 0)
 
 
-@pytest.mark.parametrize("adapter", ADAPTERS)
-def test_providers_start_outside_the_brain(adapter: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_providers_start_outside_the_brain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # BF runs a sensor from the brain folder, and gws loads a `.env` file from its working directory or any parent:
     # one in the brain, or above it, could switch the account the sensor collects from.
     brain = tmp_path / "brain"
     brain.mkdir()
     monkeypatch.chdir(brain)
-    run = runpy.run_path(str(ROOT / "examples/sensors" / adapter))["run"]
-    assert run(["/bin/pwd"], limit=1024, timeout=30) == b"/\n"
+    run = runpy.run_path(str(ROOT / "examples/sensors/_sensor.py"))["run"]
+    assert run(["/bin/pwd"], max_bytes=1024, timeout=30) == b"/\n"
 
 
 # A JSON reply nested deeper than Python's recursion limit makes json.loads raise RecursionError, not ValueError.

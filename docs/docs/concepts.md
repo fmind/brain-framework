@@ -5,127 +5,53 @@ description: Understand projects, records, concepts and actions, the flow from e
 
 # Core concepts
 
-A **brain** is a folder of notes and collected evidence that you own. People and agents use it to remember why decisions were made, find current work and carry context into the next session.
+A **brain** is a plain folder of notes and collected evidence that you own. It runs one loop — **gather → normalize → organize and connect → act → learn** — across four knowledge layers and four reviewed program kinds:
 
-## Four kinds of knowledge
-
-| Kind    | What belongs here                                                | Example                              | Location    |
-| ------- | ---------------------------------------------------------------- | ------------------------------------ | ----------- |
-| Project | Goals, current state, decisions and next tasks.                  | “Build one page; draft it next.”     | `projects/` |
-| Record  | What a selected source said, with its identity and provenance.   | A collected product brief.           | `memories/` |
-| Concept | Knowledge reusable beyond one project, with evidence and limits. | “Explain before asking for signup.”  | `concepts/` |
-| Action  | One work session's objective, results and next step.             | A website review to resume tomorrow. | `actions/`  |
-
-Projects, concepts and action `ACTION.md` notes are Markdown with YAML metadata in the [OKF](brain.md#notes) format. Records are JSON files, one per collected item; a record shows what a source said, not that it is true.
-
-## From source to decision
-
-**Gather → normalize → organize and connect → act → learn.**
-
-| Step                 | What happens                                                                                             | Who does it                                   |
-| -------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| Gather               | A sensor reads a selected brief and prints a record.                                                     | A small program you configure.                |
-| Normalize            | A field mapping adds a shared field such as `kind: document`.                                            | BF, during collection.                        |
-| Organize and connect | A project links its decision to the brief.                                                               | You or your agent; BF indexes explicit links. |
-| Act                  | Review the page and record the result in an action.                                                      | You or your agent, with authorized tools.     |
-| Learn                | Update the project's conclusion, also when BF flags newer evidence; keep a reusable lesson as a concept. | You or your agent, after the outcome.         |
-
-[Getting started](getting-started.md) runs the first three steps with one local file, then shows BF flagging the project when that file changes.
-
-## Programs
-
-A brain can hold four kinds of programs, all declared in `bf.yaml` and reviewed by you:
-
-| Program   | Purpose                                                                         | Runs when                                               |
-| --------- | ------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| Sensor    | Print selected evidence as records; its records form a **source**.              | `bf collect`, or `bf update` and `bf watch` when due.   |
-| Routine   | Any other deterministic brain program, such as a weekly review or a validation. | `bf run`, a hook such as Git's pre-commit, or when due. |
-| Assistant | Your agent harness run over a Markdown prompt; each run becomes a record.       | `bf run`, or `bf update` and `bf watch` when due.       |
-| Channel   | Send, read or stream messages for assistants, such as a chat thread.            | When an assistant answers or reads, or `bf channel`.    |
-
-Each program keeps its recent output and errors in `logs/NAME.log`. Assistant work and deliveries wait in a local queue that `bf queue` inspects. [Sensors](sensors.md), [routines](routines.md), [assistants](prompts.md) and [channels](channels.md) explain their setup; [timing and health](schedule.md#timing-and-health) says when they run.
-
-## Retrieval and connections
-
-| Concept          | Plain meaning                                                   | Example                                             |
-| ---------------- | --------------------------------------------------------------- | --------------------------------------------------- |
-| Ref              | An exact address to read.                                       | `projects/new-website.md#decision`                  |
-| Page             | A computed view of saved files.                                 | `bf read tasks` lists open checkboxes.              |
-| Scope            | Where a search looks.                                           | `bf search "explanation" --scope projects`          |
-| Identity         | An exact name for a subject, such as a declared alias.          | `repo:github.com/example/new-website`               |
-| Link / backlink  | An outgoing reference and the incoming view at its destination. | A concept cites a project decision.                 |
-| Relation / claim | A link's declared meaning, and the note or record asserting it. | An action `depends-on` a decision.                  |
-| Knowledge graph  | All these explicit connections together.                        | Read a person to see records naming them as author. |
-
-[Linking knowledge](links.md) shows how to add connections.
+| Layer or program | Role                                                                                                     | Location / config |
+| ---------------- | -------------------------------------------------------------------------------------------------------- | ----------------- |
+| **Project**      | Goals, live state (`Now`), decisions (`Decision`) and open tasks (`Next actions`).                       | `projects/`       |
+| **Concept**      | Reusable patterns and syntheses promoted once outcomes confirm them.                                     | `concepts/`       |
+| **Action**       | One tracked work session (`draft` open, `stable` settled, `deprecated` retired).                         | `actions/`        |
+| **Record**       | Collected evidence (`SOURCE:ID`) with event `time`, `updated`, `observed` and mapped `fields`.           | `memories/`       |
+| **Sensor**       | Stdlib script printing JSON/JSONL records from a tool (`bf collect`, `bf update`, `bf watch`).           | `sensors:`        |
+| **Routine**      | Deterministic script run on `refresh`, wall-clock `at`, `when:` or Git `hooks` (`bf run`).               | `routines:`       |
+| **Assistant**    | Agent harness invoked over `prompts/NAME.md` on channel `inputs`, `schedules` (`when:`/`gate`) or wakes. | `assistants:`     |
+| **Channel**      | Adapter sending, batch-reading or streaming conversation envelopes for assistants (`bf channel`).        | `channels:`       |
 
 ## What stays authoritative
 
-- **Files** are the source of truth: notes you write and records sensors collect.
-- **The cache** in `.bf/` is disposable SQLite data, rebuilt from the files.
-- **Provider tools** stay authoritative for their own items; records keep what was collected and when.
-- **Retrieval cases** in `evals/` check that useful answers stay findable.
-- **Skills** are procedures an agent follows; **MCP** lets an agent host call BF's `search` and `read`.
-- **Related brains** are local folders declared under `brains:`; retrieval includes them, and nothing downloads or runs them.
+- **Files** are the source of truth: OKF Markdown notes ([notes](brain.md#notes)) and SHA-256-keyed JSON records ([records](brain.md#records)).
+- **`.bf/`** is a disposable SQLite search and graph cache rebuilt automatically from the files.
+- **Provider tools** own live state; records preserve what was collected and when.
+- **`evals/`** suites verify recurring questions still retrieve expected refs ([checks](checks.md)).
+- **Skills and MCP** connect agents: skills teach procedures, and `bf mcp` exposes read-only `search` and `read` ([agents](agents.md), [MCP](mcp.md)).
+- **`brains:`** adds one-hop local folders to retrieval without downloading or executing anything ([configuration](configuration.md#related-brains)).
 
 ## What BF does not do
 
-These boundaries hold everywhere; other pages link here instead of repeating them.
-
-- **It never runs a model itself.** Search matches words and exact identities, without embeddings, translation or generated answers; [assistants](prompts.md) start your agent harness, which does the reasoning.
-- **It infers nothing.** Similar names never establish an identity, and prose never creates a relation. Links, aliases and field mappings are explicit.
-- **It does not verify truth.** Validation checks structure and links; a passing retrieval case checks the chosen evidence. A record shows what its source said.
-- **Retrieval never collects.** `bf search` and `bf read` never contact providers or run programs. A fresh cache can still hold old evidence: check source coverage before calling evidence current.
-- **An incomplete result proves no absence.** A reply with `problems` or `stale`, a failed source or a missing period cannot show that something does not exist. One page of results is not the whole result.
-- **Reminders are not reviews.** A `review` flag comes from dates, file edits and linked evidence. It never marks a note as checked.
-- **Programs run only when you ask.** Sensors, routines, assistants and channels run in one selected brain, through `bf collect`, `bf run`, `bf channel`, a delivery's `bf queue ID --retry`, `bf update`, `bf watch` or a schedule you install. Registration and references never grant execution.
-- **It is not a sandbox or a backup.** Programs run with your account's permissions; keep backups of your brain.
-
-## If you come from another assistant
-
-Other assistants use other words for similar ideas. Each row gives the nearest BF term and the page that defines it:
-
-| Elsewhere                  | In BF                                                                                                                                                                                  |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Connector or integration   | A [sensor](sensors.md): a program you review that prints selected evidence as records.                                                                                                 |
-| Memory or knowledge graph  | Your notes, collected [records](brain.md#records) and the explicit [relations](links.md) between them; `memories/` holds collected records, not facts learned about you.               |
-| Trigger or scheduled agent | An assistant [schedule](prompts.md#schedule-and-overlap), optionally with a [gate](prompts.md#gates) that starts the model only when something happened.                               |
-| Proactive message          | The answer of a scheduled, wake or manual run, sent to the assistant's [`post`](prompts.md#full-configuration) channel.                                                                |
-| Notes to self              | The assistant's own run records in `memories/NAME/`, and the reason of the [wake](prompts.md#wakes) it asked for.                                                                      |
-| Ask before acting          | No built-in approval step: one option is a harness whose permissions only let it propose, while you or a second assistant act, as in [propose, then act](prompts.md#propose-then-act). |
+- **Never runs a model.** Search uses BM25 word and exact-identity matching without embeddings (`bf export --kind items` feeds external retrievers); [assistants](prompts.md) launch your harness.
+- **Never infers links or identities.** Similar names or prose never merge subjects; aliases, links and `fields:` mappings are explicit ([links](links.md)).
+- **Never verifies truth or collects during retrieval.** `bf search` and `bf read` stay offline; check source coverage before treating cached records as current.
+- **Never proves absence from incomplete replies.** `problems`, `stale`, unfollowed `next_offset` pages or `overdue`/`failed`/`silent`/`degraded` sources leave absence unproven ([incomplete answers](retrieval.md#incomplete-answers-and-freshness)).
+- **Never executes unasked or sandboxes code.** Only explicit execution commands (`bf collect`, `bf run`, `bf channel`, delivery `bf queue ID --retry`, `bf update`, `bf watch`) run configured programs, on one brain, with your user permissions. Keep backups of your brain and runtime queue.
 
 ## Glossary
 
-| Term             | Meaning                                                                                                                                                                              | Read more                                                              |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
-| Action           | One session of work in `actions/YYYY-MM-DD_topic/ACTION.md`, with its inputs, outcome and next step.                                                                                 | [Actions](brain.md#actions)                                            |
-| Alias            | Another exact identity declared for the same subject, such as `repo:github.com/example/new-website`.                                                                                 | [Identities](links.md#give-a-subject-a-stable-identity)                |
-| Backlink         | An incoming link, grouped by relation at its destination.                                                                                                                            | [Connect two notes](links.md#connect-two-notes)                        |
-| Broader relation | A relation whose relation page also lists narrower ones, such as `participant` for `organizer`.                                                                                      | [Narrower relations](schema.md#narrower-relations-and-allowed-targets) |
-| Cites            | The built-in relation of OKF `sources`: the note derives from its target.                                                                                                            | [Relation links](link-reference.md#relation-links)                     |
-| Claim            | A relation plus the note or record asserting it, such as a commit crediting Alice as `author`.                                                                                       | [Relation links](link-reference.md#relation-links)                     |
-| Coverage         | The collection windows this machine's run history retains for a source.                                                                                                              | [Backfills and coverage](sensors.md#backfills-and-coverage)            |
-| Entity           | The subject a note explicitly represents, with its own identity, usually a `bf://` address.                                                                                          | [Identities](links.md#give-a-subject-a-stable-identity)                |
-| Field            | A shared value declared under `fields:` in `bf.yaml`, set by sensor mappings or a note's `fields:`.                                                                                  | [Fields](schema.md#shared-fields-and-sensor-mappings)                  |
-| Freshness        | Whether a program succeeded recently on this machine: `fresh`, `overdue`, `never`, `manual` or `unknown`.                                                                            | [Timing and health](schedule.md#timing-and-health)                     |
-| Gate             | A deterministic program that runs before an assistant's scheduled run and starts the harness only when it reports events.                                                            | [Gates](prompts.md#gates)                                              |
-| Harness          | Your agent's command-line program, which an assistant starts with reviewed arguments; it reasons and acts within its own permissions.                                                | [Harness](prompts.md#how-the-harness-receives-the-prompt)              |
-| Hook             | An event, such as Git's `pre-commit`, that runs the routines listing it through `bf run --hook`.                                                                                     | [Hooks](routines.md#run-routines-from-hooks)                           |
-| Mode             | How an assistant takes messages from an input channel: `stream`, a long-lived adapter that watch runs, or `read`, a batch every `every` seconds.                                     | [Assistant settings](prompts.md#assistant-settings)                    |
-| OKF              | Open Knowledge Format v0.2: Markdown and metadata conventions for projects, concepts and `ACTION.md`.                                                                                | [Notes](brain.md#notes)                                                |
-| Ontology         | The fields and typed relations declared under `fields:` in `bf.yaml`; BF learns and infers none.                                                                                     | [Ontology](schema.md#shared-fields-and-sensor-mappings)                |
-| Overdue          | A scheduled program whose last success on this machine is too old; see Freshness.                                                                                                    | [Timing and health](schedule.md#timing-and-health)                     |
-| Post             | The channel where an assistant's scheduled, wake and manual runs send their answer; a message is answered in its own channel.                                                        | [Full configuration](prompts.md#full-configuration)                    |
-| Queue            | The durable local store of assistant jobs and channel deliveries, kept outside the brain and inspected with `bf queue`.                                                              | [Queue and recovery](channels.md#queue-and-recovery)                   |
-| Relation         | The declared meaning of a link or field, such as `depends-on` or `author`.                                                                                                           | [Name a relation](links.md#name-a-relation)                            |
-| Relation page    | Every item linking to a note, record or identity through one relation: `bf read REF --rel RELATION`.                                                                                 | [Relation pages](retrieval.md#relation-pages)                          |
-| Reprojection     | Applying a sensor's current mappings to the records it already collected, without running it.                                                                                        | [Reproject](schema.md#reproject-stored-records)                        |
-| Retrieval case   | A saved question and the evidence that search or read must return.                                                                                                                   | [Retrieval cases](checks.md#retrieval-cases)                           |
-| Review flag      | `"review":true` on a project, or a note with `stale_after`: its review is due, or linked evidence is newer than its last edit; `newer` names that evidence.                          | [Review reminders](brain.md#review-reminders)                          |
-| Routine          | A deterministic brain program, such as a weekly review; unlike a routine in some agent products, it never runs a model.                                                              | [Routines](routines.md)                                                |
-| Schedule         | A named `every` interval or `at` time that runs an assistant; sensors and routines use `refresh` instead.                                                                            | [Schedule and overlap](prompts.md#schedule-and-overlap)                |
-| Source           | The records of one sensor or assistant, stored in `memories/NAME/`. Not to be confused with a note's OKF `sources` (see Cites).                                                      | [Records](brain.md#records)                                            |
-| Stale            | A search or read reply served after a short wait for any busy writer; retry for newer results. In `bf status`, `"cache":"stale"` instead means an interrupted write awaits recovery. | [Incomplete answers](retrieval.md#incomplete-answers-and-freshness)    |
-| Tag              | An exact topic label in a note's `tags`; never an identity or a dependency.                                                                                                          | [Tag rules](link-reference.md#tag-rules)                               |
-| Wake             | One later run that an assistant asks for in its structured reply, with the reason it then receives.                                                                                  | [Wakes](prompts.md#wakes)                                              |
-| Watch            | `bf watch`, which runs due programs, streams, schedules and deliveries while it runs; `bf status --watch` only observes.                                                             | [Watch collection](schedule.md#watch-collection)                       |
+| Term             | Meaning                                                                                                                                      | Reference                                                              |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Action           | Tracked session at `actions/YYYY-MM-DD_topic/ACTION.md` (`bf action new`, `bf action status`).                                               | [Actions](brain.md#actions)                                            |
+| Alias / Entity   | Exact `scheme:value` identity or owned `bf://` subject declared on a note.                                                                   | [Identities](links.md#give-a-subject-a-stable-identity)                |
+| Backlink / Claim | Incoming link grouped by relation at its target; outgoing typed assertion keeping its `origin`.                                              | [Relation links](link-reference.md#relation-links)                     |
+| Broader relation | Parent relation whose `--rel` page includes narrower relations (`organizer` → `participant`).                                                | [Narrower relations](schema.md#narrower-relations-and-allowed-targets) |
+| Coverage         | Contiguous windows and health recorded on this machine for a source.                                                                         | [Source coverage](retrieval.md#source-coverage)                        |
+| Field / Ontology | Typed property or `relation: true` declared under `fields:` in `bf.yaml`.                                                                    | [Ontology](schema.md#shared-fields-and-sensor-mappings)                |
+| Freshness        | `fresh`, `overdue`, `never`, `manual` or `unknown` on this machine.                                                                          | [Timing and health](schedule.md#timing-and-health)                     |
+| Gate / `when:`   | Declarative `when:` rule (`sources`, `review`, `actions`, `attention`) or custom `gate` script filtering scheduled runs before any LLM call. | [Gates](prompts.md#gates)                                              |
+| Harness          | External agent CLI (`claude`, `codex`, etc.) started by an assistant with configured `command` and trigger args.                             | [Assistants](prompts.md#how-the-harness-receives-the-prompt)           |
+| OKF              | Open Knowledge Format v0.2 frontmatter (`type`, `status: draft\|stable\|deprecated`, `updated`, `sources`).                                  | [Notes](brain.md#notes)                                                |
+| Propose          | `propose: true` on an assistant, allowing validated `status: draft` `ACTION.md` proposals in structured replies.                             | [Propose, then act](prompts.md#propose-then-act)                       |
+| Queue            | Durable SQLite store outside the brain tracking assistant jobs, wakes and channel deliveries (`bf queue`).                                   | [Queue and recovery](channels.md#queue-and-recovery)                   |
+| Reprojection     | `bf build --reproject SENSOR`: re-applying `fields:` mappings to stored records offline.                                                     | [Reproject](schema.md#reproject-stored-records)                        |
+| Review page      | `bf read review`: notes with `due` or `newer_evidence`, open `draft` actions (`blocked_by`) and `attention`.                                 | [Retrieval](retrieval.md#pages)                                        |
+| Stale            | Search/read reply served while a writer held the cache lock; in `bf status`, `"cache":"stale"` marks an unrecovered write.                   | [Incomplete answers](retrieval.md#incomplete-answers-and-freshness)    |
+| Wake             | Per-slot follow-up timer (`wake:{assistant}:{slot}`) requested in a structured reply.                                                        | [Wakes](prompts.md#wakes)                                              |

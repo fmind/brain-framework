@@ -319,9 +319,13 @@ REMOTES = {
 
 
 @pytest.mark.parametrize(("url", "expected"), REMOTES.items())
-def test_git_history_names_repositories_on_any_host_without_credentials(url: str, expected: str) -> None:
+def test_git_history_names_repositories_on_any_host_without_credentials(
+    url: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.syspath_prepend(ROOT / "examples/sensors")
     identity = runpy.run_path(str(ROOT / "examples/sensors/git-history.py"))["repository_identity"]
-    assert identity(url) == expected
+    kit_identity = runpy.run_path(str(ROOT / "examples/sensors/_sensor.py"))["git_remote_identity"]
+    assert identity(url) == kit_identity(url) == expected
 
 
 @pytest.mark.parametrize(
@@ -364,7 +368,7 @@ def test_calendar_keeps_organizer_separate_from_invited_attendees(provider: Prov
     }
 
 
-def test_calendar_masks_credentials_with_the_kit_patterns(provider: Provider) -> None:
+def test_calendar_masks_credentials_with_the_kit_patterns(provider: Provider, monkeypatch: pytest.MonkeyPatch) -> None:
     # Joined at run time, so the repository's secret scan never matches a literal.
     token = "".join(("ghp_", "A1b2C3d4E5" * 4))
     event = {
@@ -378,15 +382,10 @@ def test_calendar_masks_credentials_with_the_kit_patterns(provider: Provider) ->
     assert "Location: Bridge [REDACTED]" in record.text
     assert record.attributes["location"] == "Bridge [REDACTED]"
     assert token not in json.dumps(record.model_dump())
-    # The script keeps an inline copy so it stays one file: it must match the kit's patterns.
-    patterns = [
-        [
-            (pattern.pattern, pattern.flags, replacement)
-            for pattern, replacement in runpy.run_path(str(path))["_SECRETS"]
-        ]
-        for path in (ROOT / "examples/sensors/google-calendar.py", ROOT / "examples/sensors/_sensor.py")
-    ]
-    assert patterns[0] == patterns[1]
+    monkeypatch.syspath_prepend(ROOT / "examples/sensors")
+    namespace = runpy.run_path(str(ROOT / "examples/sensors/google-calendar.py"))
+    assert "_SECRETS" not in namespace
+    assert namespace["_sensor"].redact(f"Bridge {token}") == "Bridge [REDACTED]"
 
 
 @pytest.mark.parametrize("backdated_tip", [False, True])
@@ -548,6 +547,7 @@ def test_git_history_names_a_repository_whose_remote_lookup_times_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A stalled mount can hang any Git call, including the remote lookup before `git log`.
+    monkeypatch.syspath_prepend(ROOT / "examples/sensors")
     spec = importlib.util.spec_from_file_location("git_history", ROOT / "examples/sensors/git-history.py")
     assert spec is not None
     assert spec.loader is not None
@@ -557,16 +557,19 @@ def test_git_history_names_a_repository_whose_remote_lookup_times_out(
     for name in ("healthy", "slow"):
         (root / name / ".git").mkdir(parents=True)
 
-    def git(argv: list[str], _limit: int, _timeout: int) -> bytes:
+    kit = vars(sensor)["_sensor"]
+
+    def git(argv: list[str], *, timeout: float, max_bytes: int) -> bytes:
+        del timeout, max_bytes
         if argv[1:] == ["version"]:
             return b"git version 2.47.0\n"
         if argv[3] == "remote" and Path(argv[2]).name == "slow":
-            raise TimeoutError("provider exceeded its timeout")
+            raise kit.ProviderError("git exceeded its 10s timeout")
         if argv[3] == "remote":
-            raise subprocess.CalledProcessError(2, argv)
+            raise kit.ProviderError("git failed with status 2", status=2)
         return b""
 
-    monkeypatch.setattr(sensor, "run", git)
+    monkeypatch.setattr(kit, "run", git)
     window = (root, "2026-09-01T00:00:00+00:00", "2026-09-02T00:00:00+00:00")
     with pytest.raises(sensor.InvalidError, match=r"^slow: Git failed or timed out; repair .* add --skip slow$"):
         sensor.collect(*window)

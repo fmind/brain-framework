@@ -1,39 +1,43 @@
-# Write knowledge back
+# Write knowledge, review and consolidate
 
-Use after a decision, a corrected assumption or completed work, when the user asks to remember it or the task authorizes it; for a review-only request, report the proposed edit instead. Keep the owning note short and current so a future session can act on it.
+Use after a decision, corrected assumption, completed session or review when authorized (propose the edit for review-only requests). Keep owning notes concise and current; never touch a note solely to clear a review flag, and never edit `memories/`.
 
 ## Update the owning note
 
-1. Find the owning note with `bf search "topic words"`: a project for state, decisions and next steps, a concept for reusable knowledge, an existing action for session detail. Read it whole and keep the reply's `sha256`; above 32 KiB, read the section you will change, whose `sha256` still names the whole file.
-1. Make a focused edit that keeps unrelated paragraphs and stable anchors. Replace outdated current-state claims, but keep consequential earlier rationales with their evidence. Record a decision with its reason and supporting ref under `## Decision {#decision}`, and change `updated` only when the note's meaning changes.
-1. Write only verified observations or what the user stated, marking proposals, unknowns and disputed evidence, and compare source revisions before replacing a claim.
-1. Run `bf validate` and fix what your edit introduced, then search the question and read the returned ref. When the answer must stay findable, add a [retrieval case](https://fmind.github.io/brain-framework/docs/checks/) to an `evals/` suite and run `bf eval`. Report the changed refs, diff, checks and remaining uncertainty; commit only when authorized.
+1. Locate the owner (`bf search "topic words"`): `projects/` owns live state (`## Now {#now}`), decisions (`## Decision {#decision}`) and open checkboxes (`## Next actions {#next-actions}`); `concepts/` owns reusable rules and reference syntheses ([project](../templates/project.md), [concept](../templates/concept.md)). Read the note and record its `sha256`.
+1. Edit focused passages, preserving unrelated sections and `{#id}` anchors. Update `Now`, `Decision` and `Next actions` citing `SOURCE:ID` or note refs; keep checkboxes only in their owning note so tasks never duplicate. Keep `status` as `draft`, `stable` or `deprecated` (only `deprecated` closes a note and its tasks), update `updated: YYYY-MM-DD` when meaning changes, and add `verified` (`by`, `at`) only after an actual check.
+1. Run `bf validate`, search and `bf read` the updated ref, and run `bf eval` if you added an `evals/` case ([checks](https://fmind.github.io/brain-framework/docs/checks/)). Report changed refs, diff and remaining uncertainty.
 
-Never touch a file only to clear a review reminder. When two sessions changed the same claim, keep both and follow the `bf-maintain` skill's conflict guide.
+## Guard a write {#guard-a-write}
 
-## Guard a write
-
-When your editor cannot detect another session's save, write through the guarded-write helper with the `sha256` of your read and the file's path: absolute, such as `~/brain/projects/new-website.md`, or relative to the working directory. A `bf read` ref is relative to the brain root, so outside the brain pass the absolute path. Replace one passage, which must occur exactly once:
+When concurrent sessions could edit the same file without editor locks, pass the `sha256` from `bf read` to `guarded-write.py`:
 
 ```bash
 python3 SKILL_DIR/scripts/guarded-write.py projects/new-website.md --expect-sha256 SHA256 \
   --old="- [ ] Draft the product page." --new="- [x] Draft the product page."
 ```
 
-Write `--old=TEXT` and `--new=TEXT` with `=`, so a passage that starts with `-` stays an argument. Pass multi-line text with `--old-file` and `--new-file`; an empty `--new=` deletes the passage. To replace the whole note, pass its new text with `--new-file` alone.
+Use `--old=TEXT` / `--new=TEXT` (or `--old-file` / `--new-file` for multi-line edits; `--new-file` alone replaces the whole file). Refusals (`the file changed since it was read`, missing/duplicate old text, active lock) exit 1 without modifying the file: re-read and retry with the new `sha256`.
 
-Expect `{"written":"projects/new-website.md","sha256":"..."}`: that digest guards your next write. Every refusal exits 1 and leaves the file untouched:
+## Decisions, intentions and unknowns
 
-- `the file changed since it was read`: read it again, reapply your edit and retry with the new digest.
-- `the old text does not occur` or `occurs several times`: copy the passage exactly, or include surrounding text until it is unique.
-- `another guarded write of this file is still running`: read it again and retry.
+- **Decisions**: record the chosen option, viable alternative, distinguishing assumption, `SOURCE:ID` refs, observable expected outcome and review trigger before observing outcomes:
 
-`Written, but its directory could not be synced` also exits 1, yet the file did change: check the file system, then read the file again for its new `sha256` before another edit.
+  ```markdown
+  ## Decision {#decision}
 
-Helpers lock the file while they check, write and rename it, so of two sessions that read the same digest only one succeeds; an editor that takes no lock can still save between the last check and the rename. The helper replaces only an existing regular file, atomically, following no symbolic link inside the brain; delete a `.write-HEX` file an interrupted edit left.
+  Lead with a product explanation before signup (alternative: signup-first). Expect new visitors to state what the product does without opening the form; see [brief](brief:website-brief). Review after usability testing. Outcome: unknown.
+  ```
 
-## Author notes
+  At review, compare the expectation with evidence (`met`, `missed` or `unknown`) without rewriting hindsight as foresight; link a `supersedes` note when replacing a consequential rationale ([evidence](evidence.md)).
+- **Intentions**: record owner, condition, refs to inspect, proposed next action, expiry and state (`waiting`, `ready`, `unknown`, `resolved`, `expired`). A `ready` intention prompts review; it never authorizes external effects.
+- **Unknowns**: record the blocking question, what was checked and the smallest next check; never browse, collect or contact anyone merely because a note lists an unknown.
 
-Start from [templates/project.md](../templates/project.md) or [templates/concept.md](../templates/concept.md), whose comments list the optional keys, and replace every sample value with an observed one. Keep work progress in the body: `status` is `draft`, `stable` or `deprecated`, and only `deprecated` closes a note and its tasks. Add `verified` events with real `by` and `at` values only after an actual check; a completed action alone justifies neither `status: stable` nor `verified`. Identities and tags follow [links](links.md).
+## Turnkey consolidation ("Compile, don't RAG") {#consolidate}
 
-Write next steps as checkboxes (`- [ ]`) in their owning note only: copied checkboxes become duplicate tasks.
+Compile collected evidence and settled work into durable notes instead of leaving knowledge buried in raw records:
+
+1. **Sweep**: run `bf read review` (following `next_offset`) to list non-deprecated notes with `due` or `newer_evidence`, open `draft` `actions` (with `blocked_by`) and `attention`; check `bf read actions` for recently settled (`status: stable`) sessions not yet folded into their project.
+1. **Reconcile projects**: for each flagged note, read the `SOURCE:ID` refs in `newer` and settled `ACTION.md#outcome` sections. Update `Now`, compare decision expectations against outcomes, and refresh `Next actions` checkboxes while preserving material contradictions and provenance.
+1. **Promote concepts**: when two or more outcomes establish a reusable rule or pattern (a single event stays provisional), extend or create a `concepts/*.md` note stating applicability, decision rule, failure modes and links to supporting actions/records. Keep `status: draft` until tested on an independent case.
+1. **Verify**: never write to `memories/`. Run `bf validate` (and `bf eval`) and present an inspectable diff of updated projects, promoted concepts and unresolved unknowns.

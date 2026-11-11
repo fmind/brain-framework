@@ -36,7 +36,9 @@ def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path:
     # The walkthrough copies the records gate from the cloned release: the checkout's copy stands in for it.
     demo = tmp_path / "demo"
     (demo / "source/examples/routines").mkdir(parents=True)
-    shutil.copy2(ROOT / "examples/routines/records-gate.py", demo / "source/examples/routines")
+    for script in ("_bf.py", "records-gate.py"):
+        if (ROOT / "examples/routines" / script).is_file():
+            shutil.copy2(ROOT / "examples/routines" / script, demo / "source/examples/routines")
     result = subprocess.run(  # noqa: S603 - the reviewed walkthrough on its disposable fixture copy
         ["bash", "--noprofile", "--norc", "-euc", "\n".join(blocks[1:-1])],  # noqa: S607
         cwd=brain,

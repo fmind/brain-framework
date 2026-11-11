@@ -22,7 +22,9 @@
         "runs": { "description": "Successful runs since its history began.", "minimum": 0, "type": "integer" },
         "schedules": {
           "additionalProperties": {
+            "anyOf": [{ "required": ["every"] }, { "required": ["at"] }],
             "properties": {
+              "at": { "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$", "type": "string" },
               "every": { "minimum": 1, "type": "integer" },
               "freshness": { "enum": ["fresh", "overdue", "never", "manual", "unknown"] },
               "last_success": {
@@ -36,10 +38,10 @@
                 "type": "string"
               }
             },
-            "required": ["freshness", "every"],
+            "required": ["freshness"],
             "type": "object"
           },
-          "description": "Each named timer: its interval in seconds, next due time, last success and freshness.",
+          "description": "Each named timer: its interval in seconds or wall-clock time, next due time, last success and freshness.",
           "type": "object"
         },
         "state": { "enum": ["active", "disabled"] }
@@ -48,24 +50,22 @@
       "type": "object"
     },
     "Attention": {
-      "description": "A program that needs action, named by its kind.",
+      "description": "A program or channel that needs action, identified by kind and name.",
       "properties": {
-        "assistant": { "type": "string" },
-        "channel": { "type": "string" },
         "degraded": {
           "const": true,
           "description": "Three or more committed collections in a row reported missing parts; the source's `degraded` coverage gives the counts."
         },
         "failed": { "const": true },
         "freshness": { "type": "string" },
-        "routine": { "type": "string" },
-        "sensor": { "type": "string" },
+        "kind": { "enum": ["sensor", "routine", "assistant", "channel"] },
+        "name": { "type": "string" },
         "silent": {
           "const": true,
           "description": "The source gained no new or changed record within its `silent_after`, whatever its freshness."
         }
       },
-      "required": ["freshness"],
+      "required": ["kind", "name", "freshness"],
       "type": "object"
     },
     "Problem": {

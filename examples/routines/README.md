@@ -4,6 +4,7 @@ Standalone, deterministic brain programs. Copy the ones you need into a brain, d
 
 | Routine            | Configuration                            | Result                                                                                                                                                      |
 | ------------------ | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `_bf.py`           | Copy beside routines, gates or channels  | Shared standard-library kit: windows, private state, bounded `bf` calls, pagination, exports, text sanitizers, gate events, OKF actions and channel JSON.   |
 | `weekly-review.py` | `output: action`, weekly `refresh`       | A draft action listing programs needing attention, projects due for review, a counted open-task preview, the last seven days by source and the coming week. |
 | `bf validate`      | `hooks: [pre-commit]`, no script to copy | A Git commit stops while the brain has validation problems; the reply stays in `logs/validate.log`.                                                         |
 | `records-gate.py`  | An assistant schedule's `gate`           | One event for each record a source gained or changed since the last check, reported once; without events, the harness does not start.                       |
@@ -25,7 +26,7 @@ This review uses the fictional example brain and runs only its local demo sensor
   export XDG_CONFIG_HOME="$routine_demo/config" XDG_STATE_HOME="$routine_demo/state" TZ=UTC
   cp -R examples/brain "$routine_demo/brain"
   mkdir "$routine_demo/brain/routines"
-  cp examples/routines/weekly-review.py "$routine_demo/brain/routines/"
+  cp examples/routines/_bf.py examples/routines/weekly-review.py "$routine_demo/brain/routines/"
   cd "$routine_demo/brain"
   cat >> bf.yaml <<'EOF'
 routines:
@@ -88,13 +89,13 @@ Git shows the hook's reply. The first commit passes with `{"dry_run":false,"hook
 
 [Prepare a weekly review](../../docs/docs/routines.md#prepare-a-weekly-review) copies the routine into your brain, configures it and previews its action. The routine only reads pages: it never edits notes and links nothing, naming items by their `uri` or ref, because a link from a dated action would count as newer evidence for its target. An incomplete page makes it write nothing, and BF retries after the [failure backoff](../../docs/docs/schedule.md#timing-and-health).
 
-Name the routine `weekly-review` in `bf.yaml`, after its file: [Prepare a weekly review](../../docs/docs/routines.md#prepare-a-weekly-review) explains why. Its changed notes, recent actions and coming week come from the home page: recent actions are those whose folder date falls within the last seven days, up to today. When the 20-item preview of changed notes or upcoming items is full, or the 10 newest actions all began within the period or later, the action names the `bf read` page that lists them all.
+Name the routine `weekly-review` in `bf.yaml`, after its file: [Prepare a weekly review](../../docs/docs/routines.md#prepare-a-weekly-review) explains why. Its changed notes, recent open actions and coming week come from the home page: recent actions are open (`status: draft`) actions whose folder date falls within the last seven days, up to today. When the 20-item preview of changed notes or upcoming items is full, or the 10 newest open actions all began within the period or later, the action names the `bf read` page that lists them all.
 
 ## React to new records
 
 `records-gate.py` turns a frequent assistant schedule into an event-driven one: your harness runs only when a source gained or changed records. The [four-tool walkthrough](../../docs/docs/context-hub.md#hear-of-each-change-once) runs it on a fictional Jira record. [Gates](../../docs/docs/prompts.md#gates) describes what BF does with its events.
 
-Copy it to `routines/records-gate.py` in your brain and name it as a schedule's gate. This schedule checks an `issues` source, collected by the [GitHub issues sensor](../sensors/README.md#github-issues), every 10 minutes and reports open issues only:
+Copy `records-gate.py` and `_bf.py` to `routines/` in your brain and name `records-gate.py` as a schedule's gate. For sources without field-level `--where` filters, a declarative `when: { sources: [issues] }` schedule needs no script at all; use `records-gate.py` when you want single-value `--where` filtering or period-scoped exports. This schedule checks an `issues` source, collected by the [GitHub issues sensor](../sensors/README.md#github-issues), every 10 minutes and reports open issues only:
 
 ```yaml
 schedules:

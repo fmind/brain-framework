@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import suppress
 from pathlib import Path
@@ -32,7 +33,9 @@ def local_refs(connection: sqlite3.Connection, identities: set[str], brain: str)
         f"SELECT DISTINCT i.ref FROM items i JOIN ({index.OWNED}) o ON o.item=i.id",  # noqa: S608 - fixed SQL
         {"names": json.dumps(qualified)},
     ).fetchall()
-    return identities | {row[0] for row in rows}
+    local = {str(row[0]) for row in rows}
+    shorthands = {ref.removesuffix("/ACTION.md") for ref in local if re.fullmatch(r"actions/[^/#]+/ACTION\.md", ref)}
+    return identities | local | shorthands
 
 
 # Why a selected brain answered nothing, when its failure is no Error naming its own cause.
@@ -60,6 +63,11 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
     if links.tag(value) is not None:
         return {value}, []
     parsed = links.parse(value)
+    lookup = (
+        links.address(parsed.brain, parsed.path + "/ACTION.md")
+        if parsed and re.fullmatch(r"actions/[^/#]+", parsed.path)
+        else value
+    )
     matches: list[tuple[Store, str, set[str], str]] = []
     problems: list[dict[str, object]] = []
     labels: dict[Path, str] = {}
@@ -76,7 +84,7 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
                 rows = connection.execute(
                     "SELECT id,ref,kind FROM items WHERE id IN "
                     "(SELECT id FROM items WHERE ref=?1 UNION SELECT item FROM names WHERE name=?1) LIMIT 3",
-                    (value,),
+                    (lookup,),
                 ).fetchall()
                 for item, ref, kind in rows:
                     names = {
@@ -98,6 +106,8 @@ def expand(stores: list[Store], value: str) -> tuple[set[str], list[dict[str, ob
         return {value}, problems
     # Each pass reads its own snapshot, and a concurrent re-index renumbers an edited note: its ref names the owner.
     owner, ref, names, bare = matches[0]
+    if re.fullmatch(r"actions/[^/#]+/ACTION\.md", ref):
+        names = names | {links.address(labels[owner.root], ref.removesuffix("/ACTION.md"))}
     # Another brain never holds a name in the owner's namespace: like local_refs, ignore a cache built before a rule
     # rejected one. The owner's claim to another brain's address still counts as shared.
     namespace = links.address(labels[owner.root], "")
@@ -178,14 +188,14 @@ def outgoing(connection: sqlite3.Connection, subjects: set[str]) -> tuple[list[d
             kept.append(row)
     truncated = any(count > RELATION for count in seen.values()) or len(kept) > CLAIMS
     claims = _claims(kept[:CLAIMS])
-    owners = _owners(connection, {str(claim["target"]) for claim in claims})
+    claim_owners = owners(connection, {str(claim["target"]) for claim in claims})
     for claim in claims:
-        if owner := owners.get(str(claim["target"])):
+        if owner := claim_owners.get(str(claim["target"])):
             claim["target_ref"], claim["target_title"] = owner
     return claims, truncated
 
 
-def _owners(connection: sqlite3.Connection, targets: set[str]) -> dict[str, tuple[str, str]]:
+def owners(connection: sqlite3.Connection, targets: set[str]) -> dict[str, tuple[str, str]]:
     """The one local item each target names, by its ref or a name, so a reader can follow a claim without searching;
     a target several items claim, by ref or name, names none. A note section's address names its note: the claim's
     target keeps the section, which `bf read` opens. Titles are previews, as in listings."""
@@ -194,7 +204,13 @@ def _owners(connection: sqlite3.Connection, targets: set[str]) -> dict[str, tupl
         parsed = None
         with suppress(Error):
             parsed = links.parse(target)
-        wholes[target] = links.address(parsed.brain, parsed.path) if parsed and parsed.fragment else target
+        if parsed:
+            path = parsed.path
+            if re.fullmatch(r"actions/[^/#]+", path.rstrip("/")):
+                path = path.rstrip("/") + "/ACTION.md"
+            wholes[target] = links.address(parsed.brain, path) if parsed.fragment or path != parsed.path else target
+        else:
+            wholes[target] = target
     rows = connection.execute(
         """SELECT target,min(ref) AS ref,min(title) AS title,min(kind) AS kind FROM (
              SELECT ref AS target,ref,title,kind FROM items WHERE ref IN (SELECT value FROM json_each(:names))

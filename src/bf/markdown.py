@@ -612,13 +612,14 @@ def broken(note: Note, exists: Callable[[str], bool], slugs: dict[str, set[str]]
         if scheme(note.path, target) or target == "#":
             continue
         name, fragment = resolve(note.path, target)
+        entry = name + "/ACTION.md" if re.fullmatch(r"actions/[^/#]+", name) else name
         if name == ".." or name.startswith("../"):
             problems.append(f"link leaves the brain: {target}")
         elif name.startswith("/"):
             problems.append(f"absolute link; use a path relative to this file: {target}")
         elif not exists(name):
             problems.append(f"broken link: {target}")
-        elif fragment and name in slugs and fragment not in slugs[name]:
+        elif fragment and entry in slugs and fragment not in slugs[entry]:
             problems.append(f"missing heading: {target}")
     return problems
 

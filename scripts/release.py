@@ -94,6 +94,13 @@ def toplevel() -> Path:
     return Path(run("git", "rev-parse", "--show-toplevel", cwd=Path.cwd()))
 
 
+def trusted_env(clone: Path, **extra: str) -> dict[str, str]:
+    """Trust the disposable clone's mise.toml when tools such as uv or gh run through mise shims."""
+    existing = os.environ.get("MISE_TRUSTED_CONFIG_PATHS", "")
+    paths = f"{clone}{os.pathsep}{existing}" if existing else str(clone)
+    return {**os.environ, "MISE_TRUSTED_CONFIG_PATHS": paths, **extra}
+
+
 def load_manifest(clone: Path) -> dict[str, Any]:
     path = clone / ".git" / MANIFEST
     if not path.is_file():
@@ -218,8 +225,8 @@ def copy(root: Path, clone: Path, files: list[str]) -> dict[str, str | None]:
 
 def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major: bool) -> list[str]:
     """Set the version, date the changelog section and, for a major, refresh compatibility and the contract."""
-    tag = f"v{version}"
-    run("uv", "version", "--quiet", version, cwd=clone)
+    tag, env = f"v{version}", trusted_env(clone)
+    run("uv", "version", "--quiet", version, cwd=clone, env=env)
     init = clone / "src/bf/__init__.py"
     text, count = re.subn(
         r'^__version__ = "[^"]+"$', f'__version__ = "{version}"', init.read_text(), flags=re.MULTILINE
@@ -250,7 +257,6 @@ def bump(clone: Path, version: str, old_major: int, new_major: int, *, is_major:
         if count != 1:
             raise ReleaseError(f"{skill.relative_to(clone)} must hold one `compatibility: Requires Brain Framework N`")
         skill.write_text(text)
-    env = {**os.environ, "MISE_TRUSTED_CONFIG_PATHS": str(clone)}
     run("mise", "run", "generate:schema", cwd=clone, env=env)
     for schema in sorted(clone.glob("docs/*.schema.json")):
         shutil.copy2(schema, clone / "tests/contract" / schema.name)
@@ -275,7 +281,7 @@ def check() -> None:
     clone = toplevel()
     load_manifest(clone)
     # GitHub Actions makes Typer color its errors, which once failed a tag's gate that had passed locally.
-    env = {**os.environ, "GITHUB_ACTIONS": "true", "MISE_TRUSTED_CONFIG_PATHS": str(clone)}
+    env = trusted_env(clone, GITHUB_ACTIONS="true")
     stream("uv", "sync", "--locked", cwd=clone, env=env)
     stream("mise", "run", "all", cwd=clone, env=env)
 
@@ -288,7 +294,7 @@ def publish(version: str) -> None:
         raise ReleaseError(f"this clone prepares {manifest['version']}, not {version}")
     if run("git", "rev-parse", "HEAD", cwd=clone) == manifest["base"]:
         raise ReleaseError("nothing is committed yet: commit the release with a Conventional Commit first")
-    tag = f"v{version}"
+    tag, env = f"v{version}", trusted_env(clone)
     tagged = run("git", "ls-remote", "origin", f"refs/tags/{tag}^{{}}", cwd=clone).split("\t")[0]
     if tagged and tagged != run("git", "rev-parse", "HEAD", cwd=clone):
         raise ReleaseError(f"{tag} on origin names {tagged}, not HEAD; tags never move, so investigate first")
@@ -298,22 +304,22 @@ def publish(version: str) -> None:
         run("git", "fetch", "--quiet", "origin", f"refs/tags/{tag}:refs/tags/{tag}", cwd=clone)
     else:
         # push-and-tag refuses a dirty tree, another branch or an existing tag, and tags only after CI succeeded.
-        stream(str(clone / "scripts/push-and-tag.sh"), version, cwd=clone)
+        stream(str(clone / "scripts/push-and-tag.sh"), version, cwd=clone, env=env)
     attempts = int(os.environ.get("RELEASE_ATTEMPTS", "60"))
     delay = float(os.environ.get("RELEASE_DELAY", "5"))
     run_id = ""
     for _ in range(attempts):
         run_id = run(
             "gh", "run", "list", "--workflow", "cd.yml", "--branch", tag, "--limit", "1",
-            "--json", "databaseId", "-q", ".[0].databaseId // empty", cwd=clone,
+            "--json", "databaseId", "-q", ".[0].databaseId // empty", cwd=clone, env=env,
         )  # fmt: skip
         if run_id:
             break
         time.sleep(delay)
     if not run_id:
         raise ReleaseError(f"no CD run was listed for {tag}: check the tag's workflow, then rerun `publish`")
-    stream("gh", "run", "watch", run_id, "--exit-status", cwd=clone)
-    stream(str(clone / "scripts/verify-release.sh"), version, cwd=clone)
+    stream("gh", "run", "watch", run_id, "--exit-status", cwd=clone, env=env)
+    stream(str(clone / "scripts/verify-release.sh"), version, cwd=clone, env=env)
     sync()
 
 

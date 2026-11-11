@@ -27,9 +27,11 @@ from bf.models import (
     NAME,
     Bounds,
     Error,
+    GateReply,
     InputError,
     NotFoundError,
     Query,
+    When,
     addressable,
     encode,
     present,
@@ -37,7 +39,7 @@ from bf.models import (
     tag_name,
     timestamp,
 )
-from bf.storage import FileAncestorError, Store, relative, temporary, unread
+from bf.storage import BusyError, FileAncestorError, Store, relative, temporary, unread
 
 # The automatic reminder interval for project files; modification time is not evidence of verification.
 REVIEW_DAYS = 14
@@ -51,7 +53,7 @@ PREVIEW = 5
 # Serialized bytes of a page's items, or of an exact read's text page. Agents read a reply whole: a larger one
 # ends early and continues at next_offset.
 BUDGET = 32 << 10
-BROWSE = ["projects", "concepts", "actions", "tasks", "memories", "tags", "today", "7d"]
+BROWSE = ["projects", "concepts", "actions", "review", "tasks", "memories", "tags", "today", "7d"]
 _SCOPE = (
     "scope accepts a folder or a whole note (projects, memories/gmail, projects/atlas.md), a period (today, 7d, "
     "2026-09, 2026-09-25, "
@@ -148,7 +150,7 @@ class Route:
     is a page only where it exists.
     """
 
-    kind: Literal["period", "tasks", "tags", "tag", "memories", "action", "note", "folder", "other"]
+    kind: Literal["period", "review", "tasks", "tags", "tag", "memories", "action", "note", "folder", "other"]
     name: str
     window: Period | None = None
 
@@ -158,16 +160,20 @@ def route(path: str, now: datetime | None = None) -> Route:
     if found := period(name, now):
         return Route("period", name, found)
     top = name.split("/")[0]
+    if name == "review":
+        return Route("review", name)
     if name == "tasks":
         return Route("tasks", name)
     if top == "tags":
         return Route("tags" if name == "tags" else "tag", name)
     if top == "memories":
         return Route("memories", name)
-    if authored(split_ref(path)[0]):
+    base, fragment = split_ref(path)
+    if authored(base):
         return Route("note", path)
-    if re.fullmatch(r"actions/[^/#]+", name):
-        return Route("action", name + "/ACTION.md")
+    action = base.rstrip("/")
+    if re.fullmatch(r"actions/[^/#]+", action) and "/" not in fragment:
+        return Route("action", action + "/ACTION.md" + (f"#{fragment}" if fragment else ""))
     return Route("folder", name) if top in AUTHORED else Route("other", path)
 
 
@@ -220,7 +226,8 @@ def _scope(value: str, now: datetime | None) -> Scope:
     if parts[0] == "memories" and len(parts) > 1 and "#" in parts[1]:
         # A source has no sections, and no source name holds `#`: memories/gmail#x would fail as an unknown source.
         raise Error(_SCOPE)
-    if authored(note := split_ref(path)[0]) and note != path:
+    note = split_ref(path)[0]
+    if (authored(note) or re.fullmatch(r"actions/[^/#]+", note.rstrip("/"))) and note != path:
         # Items carry a note's path, never a section's: a section ref, as search returns it, would scope nothing.
         raise Error(_WHOLE)
     if parts[0] == "memories" and len(parts) >= 3:
@@ -347,7 +354,7 @@ def _named(entry: object) -> object:
     found = cast("dict[str, object]", entry)
     brain = str(found["brain"])
     changed: dict[str, object] = {}
-    for key in ("newer", "also"):
+    for key in ("newer", "also", "blocked_by"):
         if isinstance(refs := found.get(key), list):
             changed[key] = [links.address(brain, str(ref)) for ref in refs]
     if isinstance(refs := found.get("sections"), list):
@@ -465,7 +472,7 @@ def _newest(
 def _rows(
     connection: sqlite3.Connection, where: str, params: Mapping[str, object], order: str, limit: int
 ) -> list[dict[str, object]]:
-    return list(index.listing(connection, where, params, order, limit)[0])
+    return list(index.listing(connection, where, params, order, limit, counted=False)[0])
 
 
 def _paged(
@@ -654,7 +661,7 @@ def home(
     def build(store: Store, _name: str, connection: sqlite3.Connection) -> dict[str, object]:
         # Each preview's SQL order matches the Python merge below, so ties at a cap select the same items.
         projects = _rows(connection, f"{project} AND {current}", {}, "time DESC,i.ref DESC", -1)
-        actions = _rows(connection, f"{index.ACTION} AND {current}", {}, "i.path DESC", 10)
+        actions = _rows(connection, f"{index.ACTION} AND i.status='draft'", {}, "i.path DESC", 10)
         # Projects carry their own review signals in `projects`.
         changed = _rows(
             connection,
@@ -719,6 +726,255 @@ def home(
         printed,
     )
     return reply
+
+
+_WHEN_EVENTS = 64
+_WHEN_BYTES = 64 << 10
+_REVIEW_REASONS = frozenset({"due", "newer_evidence", "future_modified", "unknown_modified"})
+
+
+def _blocked_by(connection: sqlite3.Connection, actions: list[dict[str, object]]) -> None:
+    """Populate `blocked_by` on open draft actions from unresolved draft `depends-on` targets in the same brain."""
+    if not actions:
+        return
+    refs = [str(item["ref"]) for item in actions]
+    rows = connection.execute(
+        "SELECT i.ref,e.target FROM edges e JOIN items i ON i.id=e.item "
+        "WHERE e.relation='depends-on' AND i.ref IN (SELECT value FROM json_each(?))",
+        (json.dumps(refs),),
+    ).fetchall()
+    if not rows:
+        return
+    owners = graph.owners(connection, {str(row["target"]) for row in rows})
+    resolved_refs = sorted({ref for ref, _ in owners.values()})
+    if not resolved_refs:
+        return
+    draft_actions = {
+        str(row[0])
+        for row in connection.execute(
+            f"SELECT i.ref FROM items i WHERE {index.ACTION} AND i.status='draft' "  # noqa: S608 - fixed SQL
+            "AND i.ref IN (SELECT value FROM json_each(?))",
+            (json.dumps(resolved_refs),),
+        )
+    }
+    by_action: dict[str, set[str]] = {}
+    for row in rows:
+        owner = owners.get(str(row["target"]))
+        if owner and owner[0] in draft_actions and owner[0] != row["ref"]:
+            by_action.setdefault(str(row["ref"]), set()).add(owner[0])
+    for item in actions:
+        if blockers := by_action.get(str(item["ref"])):
+            item["blocked_by"] = sorted(blockers)[:10]
+
+
+def review_page(
+    stores: list[Store],
+    now: datetime | None = None,
+    *,
+    offset: int = 0,
+    counted: bool = True,
+    single: bool = False,
+) -> dict[str, object]:
+    """Computed triage view: paginated non-deprecated notes needing review, open draft actions and attention items."""
+    now = now or datetime.now(UTC)
+
+    def build(store: Store, name: str, connection: sqlite3.Connection) -> dict[str, object]:
+        candidates = _rows(connection, f"{index.ENTRY} AND i.status!='deprecated'", {}, "time DESC,i.ref DESC", -1)
+        _review(connection, candidates, now)
+        due_items = [
+            item
+            for item in candidates
+            if bool(set(cast("list[str]", item.get("review_reasons", ()))) & _REVIEW_REASONS)
+        ]
+        drafts = sorted(
+            (dict(item) for item in candidates if action_note(str(item["ref"])) and item.get("status") == "draft"),
+            key=lambda item: str(item["ref"]),
+            reverse=True,
+        )
+        previewed = drafts[:SECTION]
+        _blocked_by(connection, previewed)
+        issues: list[dict[str, object]] = []
+        try:
+            alerts = attention(store, now, index.sources(connection))
+        except Error, OSError, UnicodeError:
+            alerts = []
+            issues.append({"brain": name, "error": "operational status is unavailable; run bf status"})
+        return {
+            "problems": issues,
+            "items": due_items,
+            "actions": previewed,
+            "actions_total": len(drafts),
+            "attention": alerts,
+        }
+
+    parts, extra = brains(stores, build, counted=counted, kind="review")
+    ordered = sorted(
+        _gather(parts, "items"),
+        key=lambda item: (str(item.get("review_due", "9999-99-99")), str(item["ref"])),
+    )
+    total = len(ordered)
+    window = ordered[offset : offset + PAGE]
+    actions = sorted(_gather(parts, "actions"), key=lambda item: str(item["ref"]), reverse=True)[:SECTION]
+    actions_total = sum(cast("int", part.get("actions_total", 0)) for _, part in parts)
+    alerts = _gather(parts, "attention")
+    reply: dict[str, object] = {
+        "page": "review",
+        "items": [],
+        "total": total,
+        "actions": actions,
+        "actions_total": actions_total,
+        "attention": alerts,
+        **extra,
+    }
+
+    def printed(value: object) -> object:
+        return present(_plain(value) if single else _named(value))
+
+    budget = BUDGET - len(encode(present(local(reply) if single else addressed(reply))))
+    selected = fitting(window, budget, printed)
+    reply["items"] = selected
+    if offset + len(selected) < total:
+        reply["next_offset"] = offset + len(selected)
+    return reply
+
+
+def cap_events(events: list[dict[str, str]], *, total: int | None = None) -> list[dict[str, str]]:
+    """Bound declarative `when:` events to <= 64 items and <= 64 KiB JSON, summarizing overflow when cut."""
+    if not events:
+        return []
+    overall = max(len(events), total or 0)
+    limit = _WHEN_EVENTS if overall <= _WHEN_EVENTS else _WHEN_EVENTS - 1
+    kept: list[dict[str, str]] = []
+    for event in events[:limit]:
+        candidate = [*kept, event]
+        reserve = 160 if overall > len(candidate) else 0
+        if kept and len(encode({"events": candidate})) + reserve > _WHEN_BYTES:
+            break
+        kept = candidate
+    omitted = overall - len(kept)
+    if omitted > 0:
+        summary = {"key": "when:overflow", "text": f"{omitted} additional matched signal(s) omitted"}
+        while kept and len(encode({"events": [*kept, summary]})) > _WHEN_BYTES:
+            kept.pop()
+            summary = {
+                "key": "when:overflow",
+                "text": f"{overall - len(kept)} additional matched signal(s) omitted",
+            }
+        kept.append(summary)
+    GateReply.model_validate({"events": kept})
+    return kept
+
+
+def evaluate_when(
+    store: Store,
+    when: When,
+    now: datetime,
+    *,
+    cursor: str,
+    exclude: tuple[str, str],
+) -> tuple[bool, list[dict[str, str]], str]:
+    """Evaluate a declarative `when:` condition offline against SQLite and brain health."""
+    groups: list[list[dict[str, str]]] = []
+    total = 0
+    next_cursor = cursor
+    with index.database(store) as (connection, state):
+        if state != "ready":
+            raise BusyError(f"search cache is {state}; retry when ready")
+        if when.sources:
+            source_json = json.dumps(list(when.sources))
+            source_count = int(
+                connection.execute(
+                    "SELECT count(*) FROM items WHERE kind='record' "
+                    "AND source IN (SELECT value FROM json_each(?)) AND observed>?",
+                    (source_json, cursor),
+                ).fetchone()[0]
+            )
+            if source_count:
+                total += source_count
+                rows = connection.execute(
+                    "SELECT ref,title,observed FROM items WHERE kind='record' "
+                    "AND source IN (SELECT value FROM json_each(?)) AND observed>? "
+                    "ORDER BY observed DESC,ref DESC LIMIT ?",
+                    (source_json, cursor, _WHEN_EVENTS),
+                ).fetchall()
+                next_cursor = max(cursor, str(rows[0]["observed"]))
+                groups.append(
+                    [
+                        {
+                            "key": f"source:{row['ref']}"[:256],
+                            "ref": str(row["ref"])[:4096],
+                            "text": preview(str(row["title"]), 200),
+                        }
+                        for row in rows
+                    ]
+                )
+        if when.review:
+            candidates = _rows(connection, f"{index.ENTRY} AND i.status!='deprecated'", {}, "time DESC,i.ref DESC", -1)
+            _review(connection, candidates, now)
+            review_events: list[dict[str, str]] = []
+            for item in candidates:
+                reasons = [r for r in cast("list[str]", item.get("review_reasons", ())) if r in _REVIEW_REASONS]
+                if reasons:
+                    total += 1
+                    if len(review_events) < _WHEN_EVENTS:
+                        ref = str(item["ref"])
+                        review_events.append(
+                            {
+                                "key": f"review:{ref}"[:256],
+                                "ref": ref[:4096],
+                                "text": f"{', '.join(reasons)}: {preview(str(item.get('title', '')), 200)}",
+                            }
+                        )
+            if review_events:
+                groups.append(review_events)
+        if when.actions:
+            action_count = int(
+                connection.execute(
+                    f"SELECT count(*) FROM items i WHERE {index.ACTION} AND i.status='draft'"  # noqa: S608 - fixed SQL
+                ).fetchone()[0]
+            )
+            if action_count:
+                total += action_count
+                groups.append(
+                    [
+                        {
+                            "key": f"action:{item['ref']}"[:256],
+                            "ref": str(item["ref"])[:4096],
+                            "text": preview(str(item.get("title", "")), 200),
+                        }
+                        for item in _rows(
+                            connection, f"{index.ACTION} AND i.status='draft'", {}, "i.path DESC", _WHEN_EVENTS
+                        )
+                    ]
+                )
+        if when.attention:
+            alerts = [
+                alert
+                for alert in attention(store, now, index.sources(connection))
+                if (alert.get("kind"), alert.get("name")) != exclude
+            ]
+            if alerts:
+                total += len(alerts)
+                groups.append(
+                    [
+                        {
+                            "key": f"attention:{alert['kind']}:{alert['name']}"[:256],
+                            "text": (
+                                f"{alert['kind']} {alert['name']}: {alert['freshness']}"
+                                + (
+                                    f" ({', '.join(flags)})"
+                                    if (flags := [f for f in ("failed", "silent", "degraded") if alert.get(f)])
+                                    else ""
+                                )
+                            ),
+                        }
+                        for alert in alerts[:_WHEN_EVENTS]
+                    ]
+                )
+    events: list[dict[str, str]] = []
+    for position in range(_WHEN_EVENTS):
+        events.extend(group[position] for group in groups if position < len(group))
+    return bool(events), cap_events(events, total=total), next_cursor
 
 
 def timeline(
@@ -1002,6 +1258,8 @@ def page(
     match target.kind:
         case "period":
             return timeline(stores, target.name, cast("Period", target.window), offset=offset, counted=counted)
+        case "review":
+            return review_page(stores, now, offset=offset, counted=counted, single=single)
         case "tasks":
             return tasks(stores, offset=offset, counted=counted)
         case "tags":
@@ -1097,15 +1355,15 @@ def _syntax(ref: str) -> tuple[str, bool]:
     target = route(path)
     if target.kind == "tag":
         _label(target.name.removeprefix("tags/"))
-    elif target.kind == "note":
+    elif target.kind in {"note", "action"}:
         if bare:
             raise Error("a ref ending in # names no section; read the whole note without it, or add the section")
         # A note's section fragment is free text; only its path must be normalized.
-        relative(note)
+        relative(note.rstrip("/") if target.kind == "action" else note)
         return path, bool(fragment)
-    elif target.kind in {"memories", "action", "folder"}:
+    elif target.kind in {"memories", "folder"}:
         # Pages and folders check the whole path, including any `#`.
-        parts = relative(target.name.removesuffix("/ACTION.md") if target.kind == "action" else target.name)
+        parts = relative(target.name)
         if parts[0] == "memories" and len(parts) == 3:
             # A source's period page, such as memories/mail/7d.
             period(parts[2])

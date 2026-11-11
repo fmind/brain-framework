@@ -12,11 +12,11 @@ The documentation site distributes these pinned third-party artifacts. Python di
 
 | Component               | Version | Distributed use                           | License                                                           |
 | ----------------------- | ------- | ----------------------------------------- | ----------------------------------------------------------------- |
-| Zensical                | 0.1.0   | Site generator                            | [MIT](third-party/zensical-LICENSE.txt)                           |
-| Zensical UI             | 0.0.41  | Templates, styles, and site JavaScript    | [MIT](third-party/zensical-ui-LICENSE.txt)                        |
+| Zensical                | 0.1.1   | Site generator                            | [MIT](third-party/zensical-LICENSE.txt)                           |
+| Zensical UI             | 0.0.42  | Templates, styles, and site JavaScript    | [MIT](third-party/zensical-ui-LICENSE.txt)                        |
 | Lucide Icons            | bundled | Inline interface icons                    | [ISC and MIT](third-party/lucide-LICENSE.txt)                     |
 | Simple Icons            | bundled | GitHub and PyPI brand icons               | [CC0-1.0](third-party/simple-icons-LICENSE.txt)                   |
-| Zensical browser bundle | 0.0.41  | Clipboard, escaping, focus, and RxJS code | [Component licenses](third-party/zensical-javascript-LICENSE.txt) |
+| Zensical browser bundle | 0.0.42  | Clipboard, escaping, focus, and RxJS code | [Component licenses](third-party/zensical-javascript-LICENSE.txt) |
 | Preact                  | bundled | Search dialog rendering                   | [MIT](third-party/preact-LICENSE.txt)                             |
 | Preact Signals          | bundled | Search dialog state                       | [MIT](third-party/preact-signals-LICENSE.txt)                     |
 | clsx                    | bundled | Search dialog class names                 | [MIT](third-party/clsx-LICENSE.txt)                               |

@@ -4,7 +4,7 @@ Keep one year of commits reachable from `main`, and all available issues and pul
 
 ## Configure one repository
 
-Install and authenticate [GitHub CLI](https://cli.github.com/manual/) for the intended account. Copy `github-history.py` from the release tag matching `bf --version` into your brain's `sensors/` and make it executable, as [Example sensors](README.md) shows. It uses only Python 3.11's standard library and `gh`; the package does not install it. Run the following commands inside that brain.
+Install and authenticate [GitHub CLI](https://cli.github.com/manual/) for the intended account. Copy `_sensor.py` and `github-history.py` from the release tag matching `bf --version` into your brain's `sensors/` and make `github-history.py` executable, as [Example sensors](README.md) shows. They use only Python 3.11's standard library and `gh`; the package does not install them. Run the following commands inside that brain.
 
 Replace the fictional `example/project` in these entries with the selected repository, then merge them into `bf.yaml` under its existing `sensors` mapping:
 
@@ -69,8 +69,8 @@ Existing `bf watch` or `bf update` runs then collect incremental windows. The we
 
 ## Evidence and limits
 
-- Commits retain their message, SHA, author name, committer date and repository link. No diffs or file contents are copied; bot commits are included when reachable from the selected branch.
-- Issues and PRs retain title, description, creation and modification dates, state, canonical URL and repository link; PR state distinguishes merged from closed. All ages and states are eligible. Comments, reviews, attachments, patches, CI logs and timeline events are outside this projection.
+- Commits retain their message, SHA, author name, committer date, repository link and `attributes.kind: commit`. No diffs or file contents are copied; bot commits are included when reachable from the selected branch.
+- Issues and PRs retain title, description, creation and modification dates, state, `attributes.kind` (`issue` or `pull-request`), canonical URL and repository link; PR state distinguishes merged from closed. All ages and states are eligible. Comments, reviews, attachments, patches, CI logs and timeline events are outside this projection.
 - The [repository issues endpoint](https://docs.github.com/en/rest/issues/issues#list-repository-issues) includes PRs with their merge time, so one request lists 100 issues and PRs. The adapter separates them and selects by modification time. The [commits endpoint](https://docs.github.com/en/rest/commits/commits#list-commits) uses the explicit branch and dates. Output windows are half-open: `START <= time < END`, using modification time for issues/PRs.
 - There is one current record per upstream identity, not a revision archive. An old record can be updated later. Missing/deleted/private-inaccessible objects cannot be reconstructed, and window mode does not remove previously saved records. Pagination is not a transaction: each page of issues and PRs restarts after the last modification time read, so an object modified during a run moves to a later window instead of hiding an unread one. When more than 100 objects share two seconds of modification time, those are paged by number instead, and a concurrent change can still hide one of them from that run.
 - Each run allows at most 100 API pages of 100 items, so at most 10,000 commits or 10,000 listed issues and PRs, 10,000 output records and 16 MiB of JSON; each provider call allows 60 seconds and 16 MiB. BF's configured `timeout`, 300 seconds by default, also bounds the whole run: a manual backfill of a busy repository that fails on its timeout can instead be split into shorter windows, or run with a larger `timeout` (at most 3600) for that sensor. Issue and PR runs each scan the combined issue/PR endpoint, so the page bound includes both kinds.

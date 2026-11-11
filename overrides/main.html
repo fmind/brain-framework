@@ -11,8 +11,4 @@
     <meta property="og:url" content="{{ page.canonical_url }}">
   {% endif %}
   <meta name="twitter:card" content="summary">
-  {#- The llmstxt plugin writes index.md beside every guide under docs/; point agents to that Markdown copy. -#}
-  {% if page.url is startingwith("docs/") %}
-    <link rel="alternate" type="text/markdown" title="Markdown" href="index.md">
-  {% endif %}
 {% endblock %}

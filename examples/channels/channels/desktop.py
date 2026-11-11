@@ -14,16 +14,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import shutil
 import subprocess
 import sys
 import time
-import unicodedata
-from typing import NoReturn
+from typing import Any, NoReturn
+
+import _bf
 
 # Outgoing text holds up to 4 MiB; its JSON escapes can take six bytes per character.
-INPUT_BYTES = 32 << 20
+INPUT_BYTES = _bf.ENVELOPE_BYTES
 BODY_CHARS = 1000
 TITLE_CHARS = 100
 TIMEOUT = 10
@@ -33,38 +33,24 @@ APPLESCRIPT = ("on run argv", "display notification (item 1 of argv) with title 
 
 def fail(message: str, code: int = 1) -> NoReturn:
     """Stop with one diagnostic that names the failure and never quotes the message."""
-    sys.stderr.write(f"desktop: {message}\n")
-    raise SystemExit(code)
+    _bf.fail(message, code, prefix="desktop")
 
 
 def shown(text: str, limit: int) -> str:
     """Text a notification can show: bounded, hidden characters made visible, never read as an option."""
     if len(text) > limit:
         text = text[: limit - 1] + "…"
-    text = "".join(
-        char.encode("unicode_escape").decode()
-        if char != "\n" and unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
-        else char
-        for char in text
-    )
+    text = "\n".join(_bf.visible(part) for part in text.split("\n"))
     # osascript stops reading options at its first other argument; a leading dash would make the text one.
     return f" {text}" if text.startswith("-") else text
 
 
-def outgoing() -> dict:
+def outgoing() -> dict[str, Any]:
     """The message BF pipes on stdin: a nonempty `id` and `text`, and an optional `conversation`."""
-    data = sys.stdin.buffer.read(INPUT_BYTES + 1)
     try:
-        message = json.loads(data) if len(data) <= INPUT_BYTES else None
-    except (ValueError, RecursionError):
-        message = None
-    if (
-        not isinstance(message, dict)
-        or not all(isinstance(message.get(key), str) and message[key] for key in ("id", "text"))
-        or not isinstance(message.get("conversation", ""), str)
-    ):
-        fail("expected one outgoing message with a nonempty id and text on stdin", 2)
-    return message
+        return _bf.read_envelope(max_bytes=INPUT_BYTES)
+    except _bf.BfError as error:
+        fail(str(error), error.status)
 
 
 def main(argv: list[str]) -> None:
@@ -100,8 +86,7 @@ def main(argv: list[str]) -> None:
         fail(f"{args.notifier} exited with status {result.returncode}; nothing was confirmed")
     # The notification has no provider id: name it by its message and the moment it was shown.
     digest = hashlib.sha256(f"{message['id']}\n{time.time_ns()}\n{message['text']}".encode()).hexdigest()
-    receipt = {"id": f"desktop-{digest[:32]}", "conversation": message.get("conversation") or "desktop"}
-    sys.stdout.write(json.dumps(receipt) + "\n")
+    _bf.emit_receipt(f"desktop-{digest[:32]}", conversation=message.get("conversation") or "desktop")
 
 
 if __name__ == "__main__":

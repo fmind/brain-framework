@@ -19,31 +19,32 @@ from importlib.resources import files
 from pathlib import Path
 from string import Template
 from types import FrameType
-from typing import Annotated, Any, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 import typer
-import yaml
 from pydantic import ValidationError
 from typer.completion import completion_init
 from typer.core import TyperCommand, TyperGroup, TyperOption
 
-from bf import __version__, assistants, channels, health, index, pages, records
-from bf.collect import collect, hooked
-from bf.collect import reproject as remap
-from bf.config import execution, load, one, register, select
-from bf.messages import Outgoing
+from bf import __version__
 from bf.models import (
+    ACTION_SLUG,
     FAILURES,
     FORMAT,
+    MAX_NOTE,
     MAX_OFFSET,
     NAME,
+    PROGRAM_KINDS,
     SLUG,
-    Config,
+    Bounds,
     Error,
     InputError,
-    SchemaField,
+    NotFoundError,
+    ProgramKind,
+    SchemaKind,
     Send,
+    clean,
     decode,
     explain,
     failure,
@@ -53,12 +54,10 @@ from bf.models import (
     suggest,
     terminal,
 )
-from bf.retrieve import edges, identities, items, read, search
-from bf.runtime import Queue
-from bf.schemas import Kind, document
-from bf.storage import Store, expand, relative, writer
-from bf.update import KINDS, ProgramKind, run_assistant, run_routines, runnable, update
-from bf.validate import validate
+
+if TYPE_CHECKING:
+    from bf.models import SchemaField
+    from bf.storage import Store
 
 
 def _diagnose(message: str) -> None:
@@ -76,8 +75,8 @@ def _usage(error: typer.TyperException) -> str:
     ctx: Any = getattr(error, "ctx", None)
     hint, message = "", error.format_message()
     if isinstance(error, typer.BadParameter) and error.message:
-        hint = _named(error.param_hint or (error.param.get_error_hint(ctx) if error.param else ""))
-        message = error.message
+        hint = _named(error.param_hint) if error.param_hint else _param_hint(error.param)
+        message = error.message.removeprefix("Value error, ")
     if not hint and message[1:2].islower():
         # Click's own sentences, such as "Missing argument 'QUERY'.", in the lowercase of other diagnostics.
         message = message[:1].lower() + message[1:]
@@ -89,6 +88,15 @@ def _usage(error: typer.TyperException) -> str:
 def _named(hint: str | Sequence[str]) -> str:
     """A parameter as help names it, such as --brain or PATH: Click quotes it in its own messages."""
     return (hint if isinstance(hint, str) else " / ".join(hint)).replace("'", "")
+
+
+def _param_hint(param: Any) -> str:
+    """Name an option from `opts` (without Typer 0.29's metavar suffix) or an argument from its metavar."""
+    if param is None:
+        return ""
+    if getattr(param, "param_type_name", "") == "option":
+        return _named([*getattr(param, "opts", ()), *getattr(param, "secondary_opts", ())])
+    return _named(getattr(param, "metavar", None) or (getattr(param, "name", None) or "").upper())
 
 
 @contextmanager
@@ -294,74 +302,79 @@ _ROLES = {
     "organizer": "Organizer declared by the calendar provider.",
     "attendee": "Accounts listed as attendees; not proof of attendance.",
 }
-STANDARD_FIELDS = {
-    **{
-        name: SchemaField(
-            description=description,
+
+
+def _standard_fields() -> dict[str, SchemaField]:
+    from bf.models import SchemaField
+
+    return {
+        **{
+            name: SchemaField(
+                description=description,
+                type="identity",
+                cardinality="many",
+                relation=True,
+                path=f"/attributes/{name}_refs",
+            )
+            for name, description in _PEOPLE.items()
+        },
+        **{
+            name: SchemaField(
+                description=description,
+                type="identity",
+                cardinality="many",
+                relation=True,
+                broader="participant",
+                path=f"/attributes/{name}_refs",
+            )
+            for name, description in _ROLES.items()
+        },
+        "repository": SchemaField(
+            description="Repository the item belongs to.",
             type="identity",
             cardinality="many",
             relation=True,
-            path=f"/attributes/{name}_refs",
-        )
-        for name, description in _PEOPLE.items()
-    },
-    **{
-        name: SchemaField(
-            description=description,
+            path="/attributes/repository_refs",
+        ),
+        "project": SchemaField(
+            description="Project the source names for the item.",
             type="identity",
             cardinality="many",
             relation=True,
-            broader="participant",
-            path=f"/attributes/{name}_refs",
-        )
-        for name, description in _ROLES.items()
-    },
-    "repository": SchemaField(
-        description="Repository the item belongs to.",
-        type="identity",
-        cardinality="many",
-        relation=True,
-        path="/attributes/repository_refs",
-    ),
-    "project": SchemaField(
-        description="Project the source names for the item.",
-        type="identity",
-        cardinality="many",
-        relation=True,
-        path="/attributes/project_refs",
-    ),
-    "part-of": SchemaField(
-        description="Containing thread, folder, list, epic, project or other parent item.",
-        type="identity",
-        cardinality="many",
-        relation=True,
-        path="/attributes/parent_refs",
-    ),
-    "label": SchemaField(
-        description="Label the provider attaches to the item.",
-        type="identity",
-        cardinality="many",
-        relation=True,
-        path="/attributes/label_refs",
-    ),
-    "kind": SchemaField(
-        description="Provider-declared kind of item within a source that mixes several kinds.",
-        type="string",
-        cardinality="one",
-        path="/attributes/kind",
-    ),
-    "status": SchemaField(
-        description="The item's state in its own tool.", type="string", cardinality="one", path="/attributes/status"
-    ),
-    **{
-        name: SchemaField(description=description, type="identity", cardinality="many", relation=True)
-        for name, description in {
-            "depends-on": "The subject requires the target to operate or remain valid.",
-            "related-to": "An explicit association without a more specific known relation.",
-            "supersedes": "The subject replaces the target, which remains historical evidence.",
-        }.items()
-    },
-}
+            path="/attributes/project_refs",
+        ),
+        "part-of": SchemaField(
+            description="Containing thread, folder, list, epic, project or other parent item.",
+            type="identity",
+            cardinality="many",
+            relation=True,
+            path="/attributes/parent_refs",
+        ),
+        "label": SchemaField(
+            description="Label the provider attaches to the item.",
+            type="identity",
+            cardinality="many",
+            relation=True,
+            path="/attributes/label_refs",
+        ),
+        "kind": SchemaField(
+            description="Provider-declared kind of item within a source that mixes several kinds.",
+            type="string",
+            cardinality="one",
+            path="/attributes/kind",
+        ),
+        "status": SchemaField(
+            description="The item's state in its own tool.", type="string", cardinality="one", path="/attributes/status"
+        ),
+        **{
+            name: SchemaField(description=description, type="identity", cardinality="many", relation=True)
+            for name, description in {
+                "depends-on": "The subject requires the target to operate or remain valid.",
+                "related-to": "An explicit association without a more specific known relation.",
+                "supersedes": "The subject replaces the target, which remains historical evidence.",
+            }.items()
+        },
+    }
 
 
 @app.command("init", rich_help_panel="Set up")
@@ -382,10 +395,15 @@ def initialize(
     ] = False,
 ) -> None:
     """Create a brain at PATH (recommended: ~/brain); no global registration is needed."""
+    import yaml
+
+    from bf.models import Config
+    from bf.storage import Store, expand, writer
+
     path = expand(path)
     # Only an omitted --name derives one: an empty or blank value is invalid, never the directory's name.
     name = _derived(path.resolve().name) if name is None else _name(name)
-    config = Config(version=FORMAT, name=name, fields=STANDARD_FIELDS)
+    config = Config(version=FORMAT, name=name, fields=_standard_fields())
     if path.exists():
         _vacant(path)
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -421,6 +439,9 @@ def enroll(
     ] = Path(),
 ) -> None:
     """Register an existing brain to select it by name outside its folder; never runs its programs."""
+    from bf.config import register
+    from bf.storage import Store, expand
+
     path = expand(path)
     if not path.is_dir():
         raise Error("PATH is not an existing directory; pass the brain's directory")
@@ -432,6 +453,8 @@ def enroll(
 @app.command("mcp", rich_help_panel="Set up")
 def serve(brain: BrainOption = "") -> None:
     """Serve search and read over MCP stdio for agents that prefer tools to the CLI; needs the mcp extra."""
+    from bf.config import select
+
     try:
         from bf.mcp import server
     except ModuleNotFoundError as error:
@@ -472,25 +495,36 @@ def install(
     check: Annotated[
         bool,
         typer.Option(
-            help="Report each skill as current, outdated, modified, unmanaged, newer or missing; write nothing."
+            "--check",
+            help="Report each skill as current, outdated, modified, unmanaged, newer or missing; write nothing.",
         ),
     ] = False,
     force: Annotated[
-        bool, typer.Option(help="Replace edited, foreign or newer skill folders with the packaged copies.")
+        bool,
+        typer.Option("--force", help="Replace edited, foreign or newer skill folders with the packaged copies."),
+    ] = False,
+    link: Annotated[
+        bool,
+        typer.Option(
+            "--link",
+            help="When DIR sits inside a brain, link <brain>/.agents/skills/bf-* and <brain>/.claude/skills/bf-* to it.",
+        ),
     ] = False,
 ) -> None:
     """Install or update this version's bf-use, bf-action, bf-setup and bf-maintain skills; never overwrites edits."""
     from bf.install import skills
 
-    result = skills(destination, check=check, force=force)
+    result = skills(destination, check=check, force=force, link=link)
     _finish(result, failed=not result["ok"])
 
 
 @app.command("schema", rich_help_panel="Set up")
 def schema(
-    kind: Annotated[Kind, typer.Option(help="Configuration format or command reply to describe.")] = "brain",
+    kind: Annotated[SchemaKind, typer.Option(help="Configuration format or command reply to describe.")] = "brain",
 ) -> None:
     """Print a configuration or reply JSON Schema; defaults to bf.yaml. No brain selection or network access."""
+    from bf.schemas import document
+
     emit(document(kind), reply=False)
 
 
@@ -513,6 +547,10 @@ def find(
     offset: Annotated[int, typer.Option(min=0, max=MAX_OFFSET, help="Continue at the reply's next_offset.")] = 0,
 ) -> None:
     """Search notes and records; results carry refs for bf read."""
+    from bf import pages
+    from bf.config import select
+    from bf.retrieve import search
+
     # Invalid input fails before any brain is read.
     request = pages.query(query, scope, limit=limit, offset=offset)
     emit(search(select(brain), request))
@@ -541,6 +579,10 @@ def exact(
     ] = 0,
 ) -> None:
     """Read the home page, another page, a note, a note section, a record or an identity with its backlinks."""
+    from bf import pages
+    from bf.config import select
+    from bf.retrieve import read
+
     # A malformed ref, or a relation page of a page or a section, fails before any brain is read; an undeclared
     # relation fails once the selected brains name the declared ones.
     pages.readable(ref, rel)
@@ -564,10 +606,37 @@ def export(
             "projects or 2026-09; edges keep the claims those items assert."
         ),
     ] = "",
+    observed_since: Annotated[
+        str,
+        typer.Option(
+            "--observed-since",
+            help="With --kind items, keep only collected records observed at or after this instant or relative period "
+            "(such as 7d).",
+        ),
+    ] = "",
 ) -> None:
     """Print the graph of the selected brains as JSON Lines from their caches; exit 1 when evidence was skipped."""
+    from bf import pages
+    from bf.config import select
+    from bf.retrieve import edges, identities, items
+
     # Invalid input fails before any brain is read, as for search.
-    bounds = pages.bounds(scope)
+    if observed_since and kind != "items":
+        raise typer.BadParameter("applies only to --kind items", param_hint="--observed-since")
+    cutoff = (
+        _option("--observed-since", lambda value: moment(value, datetime.now(UTC)), observed_since)
+        if observed_since
+        else ""
+    )
+    parsed = pages.bounds(scope)
+    bounds = Bounds(
+        since=parsed.since,
+        until=parsed.until,
+        observed_since=cutoff,
+        undated=parsed.undated,
+        prefix=parsed.prefix,
+        target=parsed.target,
+    )
     with ExitStack() as stack:
         stream, extra = {"edges": edges, "identities": identities, "items": items}[kind](select(brain), stack, bounds)
         for row in stream:
@@ -603,7 +672,10 @@ def capture(
     since: Annotated[str, typer.Option(help="Window start: 7d, yesterday, YYYY-MM-DD or ISO 8601.")] = "",
     until: Annotated[str, typer.Option(help="Window end.")] = "now",
     dry_run: Annotated[
-        bool, typer.Option(help="Run the sensor (can contact providers); preview samples without saving records.")
+        bool,
+        typer.Option(
+            "--dry-run", help="Run the sensor (can contact providers); preview samples without saving records."
+        ),
     ] = False,
     allow_removal: Annotated[
         bool,
@@ -624,6 +696,9 @@ def capture(
     ] = "",
 ) -> None:
     """Run one sensor now, for a backfill or to debug a collector."""
+    from bf.collect import collect
+    from bf.config import execution, load
+
     now = datetime.now(UTC)
     start = _option("--since", lambda value: moment(value, now), since) if since else ""
     end = _option("--until", lambda value: moment(value, now), until)
@@ -660,6 +735,7 @@ def capture(
             allow_removal=allow_removal,
             clock=lambda: now,
             fixture=fixture,
+            live=True,
         )
     )
 
@@ -681,9 +757,13 @@ def forget_records(
         ),
     ],
     brain: OneBrainOption = "",
-    dry_run: Annotated[bool, typer.Option(help="List what would be removed; change nothing.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="List what would be removed; change nothing.")] = False,
 ) -> None:
     """Remove collected records and keep their sensors from storing them again; Git history keeps old copies."""
+    from bf import index, records
+    from bf.config import load, one
+    from bf.storage import writer
+
     targets: dict[str, dict[str, str]] = {}
     for ref in refs:
         # The UTF-8 check of single values skips arguments that take several, as `run` passes Git's arguments as given.
@@ -732,7 +812,8 @@ def perform(
     dry_run: Annotated[
         bool,
         typer.Option(
-            help="Run the routines or the assistant, but write no action or record and record no run; logs still grow."
+            "--dry-run",
+            help="Run the routines or the assistant, but write no action or record and record no run; logs still grow.",
         ),
     ] = False,
     forward: Annotated[
@@ -745,6 +826,10 @@ def perform(
     ] = False,
 ) -> None:
     """Run one routine or assistant, or every routine of a hook, now; a hook's piped input reaches each routine."""
+    from bf.collect import hooked
+    from bf.config import execution, load
+    from bf.update import run_assistant, run_routines, runnable
+
     values = tuple(arguments or ())
     if hook:
         _option("--hook", _slug, hook)
@@ -792,6 +877,11 @@ def channel_command(
     forward: Annotated[bool, typer.Option("--stdin", help="Read a JSON outgoing message from stdin for send.")] = False,
 ) -> None:
     """Use a passive channel explicitly; reading never advances subscriptions or starts an assistant."""
+    from bf import assistants, channels
+    from bf.config import execution
+    from bf.messages import Outgoing
+    from bf.runtime import Queue
+
     # Invalid input fails before any brain is selected, as for every other command.
     if action == "send" and (not forward or since or until != "now"):
         raise typer.BadParameter("send requires --stdin and takes no time window", param_hint="--stdin")
@@ -841,6 +931,186 @@ def channel_command(
     _finish(saved, failed=saved["state"] != "delivered")
 
 
+action_app = typer.Typer(
+    cls=_Group,
+    no_args_is_help=True,
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+    pretty_exceptions_show_locals=False,
+    help="Create and update authored action notes.",
+)
+app.add_typer(action_app, name="action", rich_help_panel="Collect and automate")
+
+
+def _single_line(name: str, value: str) -> str:
+    stripped = value.strip()
+    if not stripped or any(c in stripped for c in "\r\n"):
+        raise typer.BadParameter("expected a non-empty single line", param_hint=name)
+    try:
+        return clean(stripped)
+    except ValueError:
+        raise typer.BadParameter("control and format characters are forbidden", param_hint=name) from None
+
+
+def _resolve_action(store: Store, target: str) -> str:
+    """Resolve an action slug, folder name or `actions/.../ACTION.md` path to one existing `ACTION.md`."""
+    from bf.storage import relative
+
+    found = [file for file in store.files("actions") if file.endswith("/ACTION.md")]
+    if target.startswith("actions/"):
+        norm = target if target.endswith("/ACTION.md") else f"{target.rstrip('/')}/ACTION.md"
+        try:
+            relative(norm)
+        except Error as error:
+            raise typer.BadParameter(str(error), param_hint="SLUG") from None
+        if norm.count("/") != 2:
+            raise typer.BadParameter(
+                "expected an action slug, folder name or actions/FOLDER/ACTION.md", param_hint="SLUG"
+            )
+        if norm in found:
+            return norm
+        if not target.endswith("/ACTION.md"):
+            folder = target.removeprefix("actions/").rstrip("/")
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}_[a-z0-9]+(?:-[a-z0-9]+)*", folder):
+                prefixed = [
+                    file
+                    for file in found
+                    if re.fullmatch(rf"actions/{re.escape(folder)}-[0-9a-f]{{8,12}}/ACTION\.md", file)
+                ]
+                if len(prefixed) == 1:
+                    return prefixed[0]
+                if len(prefixed) > 1:
+                    folders = ", ".join(file.removesuffix("/ACTION.md") for file in prefixed)
+                    raise Error(f"multiple actions match {target}; pass the exact folder: {folders}")
+        raise NotFoundError(f"action {target} does not exist")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}_[a-z0-9]+(?:-[a-z0-9]+)*", target):
+        exact_path = f"actions/{target}/ACTION.md"
+        if exact_path in found:
+            return exact_path
+        prefixed = [
+            file for file in found if re.fullmatch(rf"actions/{re.escape(target)}-[0-9a-f]{{8,12}}/ACTION\.md", file)
+        ]
+        if len(prefixed) == 1:
+            return prefixed[0]
+        if len(prefixed) > 1:
+            folders = ", ".join(file.removesuffix("/ACTION.md") for file in prefixed)
+            raise Error(f"multiple actions match {target}; pass the exact folder: {folders}")
+        raise NotFoundError(f"action {target} does not exist")
+    if re.fullmatch(ACTION_SLUG, target) and len(target) <= 64:
+        pattern = re.compile(rf"actions/\d{{4}}-\d{{2}}-\d{{2}}_{re.escape(target)}(?:-[0-9a-f]{{8,12}})?/ACTION\.md")
+        matches = [file for file in found if pattern.fullmatch(file)]
+        if not matches:
+            raise NotFoundError(f"action {target} does not exist")
+        if len(matches) > 1:
+            folders = ", ".join(file.removesuffix("/ACTION.md") for file in matches)
+            raise Error(f"multiple actions match {target}; pass the folder name: {folders}")
+        return matches[0]
+    raise typer.BadParameter("expected an action slug, folder name or actions/FOLDER/ACTION.md", param_hint="SLUG")
+
+
+@action_app.command("new")
+def action_new(
+    slug: Annotated[
+        str,
+        typer.Argument(metavar="SLUG", help="Lowercase words or digits joined by single hyphens, such as rotate-keys."),
+    ],
+    title: Annotated[
+        str,
+        typer.Option("--title", help="Single-line heading; defaults to the humanized slug."),
+    ] = "",
+    summary: Annotated[
+        str,
+        typer.Option("--summary", help="Optional one-line OKF summary in frontmatter."),
+    ] = "",
+    unique: Annotated[
+        bool,
+        typer.Option("--unique", help="Append a random 12-hex folder suffix so concurrent writers never collide."),
+    ] = False,
+    brain: OneBrainOption = "",
+) -> None:
+    """Create a validated draft action note at actions/YYYY-MM-DD_SLUG/ACTION.md and refresh the search cache."""
+    import yaml
+
+    from bf import index
+    from bf.collect import allocate_action_path, validate_action_markdown
+    from bf.config import load, one
+    from bf.storage import writer
+
+    if not re.fullmatch(ACTION_SLUG, slug) or len(slug) > 64:
+        raise typer.BadParameter(
+            "expected lowercase letters or digits joined by single hyphens, up to 64 characters", param_hint="SLUG"
+        )
+    heading = _single_line("--title", title) if title else slug.replace("-", " ").capitalize()
+    front_summary = _single_line("--summary", summary) if summary else ""
+    store = one(brain)
+    config = load(store)
+    today = datetime.now(UTC).astimezone().date().isoformat()
+    with writer(store, wait=120):
+        path = allocate_action_path(store, slug, today, unique=unique)
+        attributes: dict[str, object] = {"type": "action", "status": "draft", "updated": today}
+        if front_summary:
+            attributes["summary"] = front_summary
+        body = (
+            f"# {heading}\n\n"
+            "## Context {#context}\n\n"
+            "## TODO\n\n"
+            "## Decision {#decision}\n\n"
+            "## Resume {#resume}\n\n"
+            "## Outcome\n"
+        )
+        raw = (
+            "---\n" + yaml.safe_dump(attributes, sort_keys=False, allow_unicode=True, width=1000) + "---\n" + body
+        ).encode("utf-8")
+        validate_action_markdown(store, config, path, raw, require_draft=True)
+        store.write(path, raw)
+    refreshed = index.refresh(store, recover=True)
+    _finish({"ok": True, "action": path, "status": "draft", "index": refreshed}, failed=bool(refreshed.get("skipped")))
+
+
+@action_app.command("status")
+def action_status(
+    slug: Annotated[
+        str,
+        typer.Argument(
+            metavar="SLUG", help="Action slug, folder name (YYYY-MM-DD_SLUG) or actions/.../ACTION.md path."
+        ),
+    ],
+    status: Annotated[
+        Literal["draft", "stable", "deprecated"],
+        typer.Argument(metavar="STATUS", help="Target OKF status: draft, stable or deprecated."),
+    ],
+    brain: OneBrainOption = "",
+) -> None:
+    """Update an existing action note's OKF status and updated date atomically, then refresh the search cache."""
+    import yaml
+
+    from bf import index
+    from bf.collect import validate_action_markdown
+    from bf.config import load, one
+    from bf.markdown import lines as markdown_lines
+    from bf.markdown import parse as parse_markdown
+    from bf.storage import writer
+
+    store = one(brain)
+    config = load(store)
+    today = datetime.now(UTC).astimezone().date().isoformat()
+    with writer(store, wait=120):
+        path = _resolve_action(store, slug)
+        parsed = parse_markdown(path, store.read(path, MAX_NOTE))
+        attributes = dict(parsed.attributes)
+        attributes.setdefault("type", "action")
+        attributes["status"] = status
+        attributes["updated"] = today
+        body = "".join(markdown_lines(parsed.text)[parsed.offset :])
+        raw = (
+            "---\n" + yaml.safe_dump(attributes, sort_keys=False, allow_unicode=True, width=1000) + "---\n" + body
+        ).encode("utf-8")
+        validate_action_markdown(store, config, path, raw)
+        store.write(path, raw)
+    refreshed = index.refresh(store, recover=True)
+    _finish({"ok": True, "action": path, "status": status, "index": refreshed}, failed=bool(refreshed.get("skipped")))
+
+
 @app.command("queue", rich_help_panel="Collect and automate")
 def queue_command(
     key: Annotated[
@@ -848,12 +1118,19 @@ def queue_command(
     ] = "",
     brain: RunOption = "",
     retry: Annotated[
-        bool, typer.Option(help="Retry unresolved work; a harness without a saved answer may repeat effects.")
+        bool,
+        typer.Option("--retry", help="Retry unresolved work; a harness without a saved answer may repeat effects."),
     ] = False,
-    cancel: Annotated[bool, typer.Option(help="Cancel pending or unresolved work, preserving its identity.")] = False,
+    cancel: Annotated[
+        bool, typer.Option("--cancel", help="Cancel pending or unresolved work, preserving its identity.")
+    ] = False,
     limit: Annotated[int, typer.Option(min=1, max=10000, help="Maximum listed jobs and deliveries.")] = 50,
 ) -> None:
     """Inspect durable work or explicitly resolve an uncertain attempt; listing contains no message bodies."""
+    from bf import assistants
+    from bf.config import execution
+    from bf.runtime import Queue
+
     if (retry and cancel) or ((retry or cancel) and not key):
         raise typer.BadParameter("give an ID and exactly one of --retry or --cancel", param_hint="ID")
     queue = Queue(execution(brain))
@@ -889,10 +1166,14 @@ def refresh(
         typer.Option(help="Run only this kind of program: sensor, routine or assistant; repeat for several."),
     ] = None,
     dry_run: Annotated[
-        bool, typer.Option(help="List due sensors, routines and assistants with their windows; run nothing.")
+        bool,
+        typer.Option("--dry-run", help="List due sensors, routines and assistants with their windows; run nothing."),
     ] = False,
 ) -> None:
     """Run due sensors, then due routines, then due assistants, of one brain, then refresh its search cache."""
+    from bf.config import execution
+    from bf.update import update
+
     kinds = _kinds(kind or [])
     result = update(
         execution(brain),
@@ -907,10 +1188,10 @@ def refresh(
 
 def _kinds(values: list[str]) -> frozenset[ProgramKind]:
     """The program kinds an update runs; none given runs every kind."""
-    if unknown := sorted(set(values) - KINDS):
+    if unknown := sorted(set(values) - PROGRAM_KINDS):
         # Worded like Click's choices, which quote the value: an empty one, as an unset variable gives, stays visible.
         raise typer.BadParameter(f"{unknown[0]!r} is not one of 'sensor', 'routine', 'assistant'", param_hint="--kind")
-    return cast("frozenset[ProgramKind]", frozenset(values)) if values else KINDS
+    return cast("frozenset[ProgramKind]", frozenset(values)) if values else PROGRAM_KINDS
 
 
 @app.command("watch", rich_help_panel="Collect and automate")
@@ -944,6 +1225,7 @@ def monitor(
     ] = False,
 ) -> None:
     """Watch one brain and run its due programs until you quit; this can contact providers."""
+    from bf.config import execution
     from bf.watch import watch
 
     watch(
@@ -964,19 +1246,23 @@ def report(
     check: Annotated[
         bool,
         typer.Option(
+            "--check",
             help="Exit 1 on problems, an unavailable cache, brain or reference, scheduled programs that failed, are "
             "overdue, due but never succeeded or fell silent, sources degraded three runs in a row, unresolved "
-            "assistant work, or a failing channel."
+            "assistant work, or a failing channel.",
         ),
     ] = False,
     watch: Annotated[
         bool,
         typer.Option(
-            help="Observe local program history in a dashboard; never execute programs. Needs one brain, as build does."
+            "--watch",
+            help="Observe local program history in a dashboard; never execute programs. Needs one brain, as build does.",
         ),
     ] = False,
 ) -> None:
     """Show each brain's cache, notes, records, sensor, routine and assistant freshness, errors, logs and usage."""
+    from bf.config import one, select
+
     if watch:
         if check:
             raise typer.BadParameter("cannot be combined with --check", param_hint="--watch")
@@ -984,6 +1270,8 @@ def report(
 
         observe(one(brain), observe=True)
         return
+    from bf import health
+
     result = health.report(select(brain))
     _finish(result, failed=check and not result["healthy"])
 
@@ -991,6 +1279,9 @@ def report(
 @app.command("validate", rich_help_panel="Check and repair")
 def check(brain: OneBrainOption = "") -> None:
     """Check OKF projects, concepts and ACTION.md notes, links, record files and program files; exit 1 on problems."""
+    from bf.config import one
+    from bf.validate import validate
+
     result = validate(one(brain))
     _finish(result, failed=not result["valid"])
 
@@ -1005,7 +1296,9 @@ def acceptance(
     ] = None,
 ) -> None:
     """Run the brain's retrieval cases; exit 1 when one fails."""
+    from bf.config import one
     from bf.evaluate import evaluate, load_baseline
+    from bf.storage import relative
 
     # Like --scope, a folder may end with the slash that shell completion adds.
     path = path.rstrip("/") or path
@@ -1027,10 +1320,14 @@ def rebuild(
         ),
     ] = "",
     dry_run: Annotated[
-        bool, typer.Option(help="With --reproject, count the records that would change; write nothing.")
+        bool, typer.Option("--dry-run", help="With --reproject, count the records that would change; write nothing.")
     ] = False,
 ) -> None:
     """Recover interrupted record writes and rebuild the disposable search cache; exit 1 when files were skipped."""
+    from bf import index
+    from bf.collect import reproject as remap
+    from bf.config import one
+
     if reproject and not re.fullmatch(NAME, reproject):
         raise typer.BadParameter("expected a sensor name from bf.yaml", param_hint="--reproject")
     if dry_run and not reproject:
@@ -1102,13 +1399,17 @@ _GIVEN = {
     "--hook": "give an event name; an empty value would run the first argument as a routine",
     "--input": "give a file, or - for stdin; an empty value would run the sensor",
     "--assistant": "give an assistant name; an empty value names none",
+    "--observed-since": "give a cutoff time or period; an empty value names none",
     "--reproject": "give a sensor name; an empty value would rebuild the cache instead",
     "--routine": "give a routine name; an empty value names none",
     "--sensor": "give a sensor name; an empty value names none",
     "--since": "give a start time; an empty value names none",
+    "--summary": "give a summary; an empty value names none",
+    "--title": "give a title; an empty value names none",
     "DIR": "give a directory; an empty value would name the working directory",
     "PATH": "give a directory; an empty value would name the working directory",
     "SENSOR": "give a sensor name from bf.yaml",
+    "SLUG": "give an action slug or path",
     "CHANNEL": "give a channel name from bf.yaml",
 }
 
@@ -1149,14 +1450,14 @@ class _Command(TyperCommand):
                 seen.add(param.name)
         for param in self.params:
             value = given.get(param.name)
-            reason = _GIVEN.get(_named(param.get_error_hint(ctx)))
+            reason = _GIVEN.get(_param_hint(param))
             # Run's variadic arguments arrive as one tuple, left to perform(): only their PROGRAM must be text.
             values = value if isinstance(value, list) else [value]
             # Python decodes other bytes as surrogates: refuse them before a command writes, such as init's files.
             if any(isinstance(item, str) and not item.isascii() and _surrogates(item) for item in values):
-                return typer.BadParameter("expected UTF-8 text", ctx, param)
+                return typer.BadParameter("expected UTF-8 text", ctx, param_hint=_param_hint(param))
             if reason and any(isinstance(item, str) and not item.strip() for item in values):
-                return typer.BadParameter(reason, ctx, param)
+                return typer.BadParameter(reason, ctx, param_hint=_param_hint(param))
         return None
 
     def invoke(self, ctx: Any) -> Any:
@@ -1227,5 +1528,5 @@ def main() -> None:
 
 # Last in the module, so every command declared here gets _Command's checks: repeated or empty values, and invalid
 # input a service finds.
-for _command in app.registered_commands:
+for _command in (*app.registered_commands, *action_app.registered_commands):
     _command.cls = _Command

@@ -821,3 +821,26 @@ def test_declarative_validate_policies_and_line_files(brain: Store) -> None:
     assert "concepts/evidence.md: frontmatter status must be explicitly set to one of: draft, stable" in errors
     assert "concepts/evidence.md: stale_after exceeds max_stale_days (30 days)" in errors
     assert "concepts/evidence.md: line 7: matches forbidden pattern /Users/[A-Za-z0-9._-]+" in errors
+
+
+def test_action_folder_links_validate_sections_and_forbid_action_folder_identities(brain: Store) -> None:
+    brain.write(
+        "actions/2026-09-25_audit/ACTION.md",
+        b"---\ntype: action\nstatus: draft\n---\n# Audit\n\n## Context {#context}\n\nScope.\n",
+    )
+    brain.write(
+        "projects/good.md",
+        b"---\ntype: project\n---\n# Good\n\nSee [ok](../actions/2026-09-25_audit#context) and "
+        b"[bf](bf://fixture/actions/2026-09-25_audit#context).\n",
+    )
+    assert validate(brain)["valid"]
+
+    brain.write(
+        "projects/bad.md",
+        b"---\ntype: project\nentity: bf://fixture/actions/2026-09-25_audit\n---\n# Bad\n\n"
+        b"[rel](../actions/2026-09-25_audit#missing) [bf](bf://fixture/actions/2026-09-25_audit#missing)\n",
+    )
+    problems = located(validate(brain))
+    assert any("link to the action instead" in item for item in problems)
+    assert "projects/bad.md: missing heading: ../actions/2026-09-25_audit#missing" in problems
+    assert "projects/bad.md: missing BF section: bf://fixture/actions/2026-09-25_audit#missing" in problems

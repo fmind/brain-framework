@@ -15,12 +15,14 @@ from uuid import uuid4
 
 from pydantic import JsonValue, ValidationError
 
-from bf import channels, records
+from bf import channels, pages, records
 from bf.collect import (
     MAX_ARGUMENT,
     RUN_ID,
+    ExitError,
     NotStartedError,
     Runner,
+    allocate_action_path,
     arguments,
     enabled,
     exposing,
@@ -29,11 +31,13 @@ from bf.collect import (
     reply_title,
     run,
     structured_reply,
+    validate_action_markdown,
 )
 from bf.config import load
 from bf.history import ASSISTANTS, append_log, log_path, remember, state
 from bf.messages import MAX_BATCH, Message, Outgoing
 from bf.models import (
+    MAX_NOTE,
     MAX_PROMPT,
     AssistantReply,
     Command,
@@ -41,6 +45,7 @@ from bf.models import (
     Error,
     GateReply,
     Invocation,
+    ProposedAction,
     ReadInput,
     Record,
     Send,
@@ -49,7 +54,6 @@ from bf.models import (
     digest,
     encode,
     reason,
-    retried,
     timestamp,
 )
 from bf.replies import ASSISTANT
@@ -70,7 +74,8 @@ from bf.storage import BusyError, Store, collecting, writer
 
 _TEMPLATE = re.compile(r"\{\{(brain|home|start|end|input|context)\}\}")
 # Settings that only decide when jobs start or how many runs stay: editing them leaves queued jobs compatible.
-SCHEDULING = {"inputs", "schedules", "keep", "idempotent", "wake"}
+SCHEDULING = {"inputs", "schedules", "keep", "idempotent", "wake", "retries"}
+EX_TEMPFAIL = 75
 # Seconds a dispatcher leaves work that was busy, waiting for space or failing to start before trying it again.
 BACKOFF = 10
 # The reply schema {{schema}} passes, as compact JSON.
@@ -195,6 +200,21 @@ def _schedule(work: Work) -> str:
     return work.slot.removeprefix("schedule:") if work.kind == "schedule" and work.slot.startswith("schedule:") else ""
 
 
+def _schedule_slot_name(work: Work) -> str:
+    """The schedule slot name for a scheduled run or a wake originating from a schedule, else ""."""
+    return work.slot.removeprefix("schedule:") if work.slot.startswith("schedule:") else ""
+
+
+def _extra_args(work: Work) -> tuple[str, ...]:
+    """Trigger-scoped extra arguments appended after `work.settings.command`."""
+    if work.kind == "input" or (work.kind == "wake" and work.slot.startswith("input:")):
+        return tuple(work.settings.input_args)
+    if work.kind == "schedule" or (work.kind == "wake" and work.slot.startswith("schedule:")):
+        spec = work.settings.schedules.get(work.slot.removeprefix("schedule:"))
+        return (*work.settings.schedule_args, *(spec.args if spec is not None else ()))
+    return ()
+
+
 def _body(store: Store, work: Work, history: list[dict[str, str]] | None, events: JsonValue = None) -> str:
     context: dict[str, object] = {"kind": work.kind, "start": work.start, "end": work.end}
     if schedule := _schedule(work):
@@ -205,7 +225,7 @@ def _body(store: Store, work: Work, history: list[dict[str, str]] | None, events
         context["wake"] = {"reason": work.reason}
     if work.origin is not None:
         # The text reaches the prompt once: through {{input}} when the template uses it, otherwise here.
-        hidden = {"cursor", "text"} if "{{input}}" in work.template else {"cursor"}
+        hidden = {"cursor", "text"} if work.kind == "input" and "{{input}}" in work.template else {"cursor"}
         context.update(channel=work.origin.channel, message=work.origin.message.model_dump(exclude=hidden))
         if history is not None:
             context["history"] = history
@@ -244,23 +264,26 @@ def expanded(store: Store, work: Work, queue: Queue | None = None) -> tuple[list
             break
     else:
         raise Error("expanded assistant prompt exceeds 120000 bytes; shorten the template or input")
-    passed = any("{{prompt}}" in argument for argument in work.settings.command)
+    extra = _extra_args(work)
+    passed = any("{{prompt}}" in argument for argument in (*work.settings.command, *extra))
     if passed and "\x00" in body:
         raise Error("a prompt passed as an argument cannot contain NUL; use standard input")
-    argv = arguments(store, work.settings, work.start, work.end, body if passed else "", SCHEMA)
+    argv = arguments(store, work.settings, work.start, work.end, body if passed else "", SCHEMA, extra_args=extra)
     if passed and max(len(os.fsencode(argument)) for argument in argv) > MAX_ARGUMENT:
         raise Error("the argument holding the prompt exceeds Linux's 128 KiB limit")
     return argv, b"" if passed else body.encode()
 
 
-def _answer(raw: bytes, work: Work) -> tuple[str, Requested | None, dict[str, JsonValue]]:
-    """The message, the clamped wake it asks for and the other members of the harness's output.
+def _answer(
+    raw: bytes, work: Work, *, store: Store | None = None
+) -> tuple[str, Requested | None, dict[str, JsonValue], list[ProposedAction]]:
+    """The message, the clamped wake, extra metadata and validated proposed actions of the harness's output.
 
     A structured answer that is missing or does not match the reply schema fails the attempt, as a nonzero exit does:
     that covers a model error a harness reports while exiting 0. The error never quotes the output.
     """
     if work.settings.reply is None:
-        return parse_reply(raw), None, {}
+        return parse_reply(raw), None, {}, []
     pointer = work.settings.reply.path
     value, metadata = structured_reply(raw, pointer)
     try:
@@ -271,12 +294,26 @@ def _answer(raw: bytes, work: Work) -> tuple[str, Requested | None, dict[str, Js
             f"assistant reply at {pointer or 'the root'} is missing or does not match bf schema --kind "
             f"assistant-reply; see {log_path(work.assistant)}"
         ) from None
+    if answer.actions and not work.settings.propose:
+        raise Error(f"assistant {work.assistant} returned proposed actions, but propose is false in bf.yaml")
+    proposed = list(answer.actions or ())
+    if proposed and store is not None:
+        config = load(store)
+        day = datetime.fromisoformat(work.end).astimezone().date().isoformat()
+        for item in proposed:
+            validate_action_markdown(
+                store,
+                config,
+                f"actions/{day}_{item.slug}/ACTION.md",
+                item.markdown.encode("utf-8"),
+                require_draft=True,
+            )
     wake = None
     if answer.wake is not None and (bounds := work.settings.wake) is not None:
         delay = min(max(answer.wake.in_, bounds.min), bounds.max)
         due = timestamp((datetime.now(UTC) + timedelta(seconds=delay)).isoformat())
         wake = Requested(due=due, reason=answer.wake.reason)
-    return (answer.say or "").strip(), wake, metadata
+    return (answer.say or "").strip(), wake, metadata, proposed
 
 
 # Gate events in one prompt, encoded; 64 events of maximal text would otherwise exceed the prompt bound.
@@ -343,8 +380,50 @@ def _attempt(store: Store, work: Work, runner: Runner, argv: list[str], stdin: b
     """Run the harness once, telling it why it runs; an answer that cannot be parsed or recorded fails the attempt."""
     with _exposed(work):
         raw = runner(argv, work.settings, store, work.assistant, stdin)
-    _recorded(work, *_answer(raw, work))
+    reply, wake, metadata, _ = _answer(raw, work, store=store)
+    _recorded(work, reply, wake, metadata)
     return raw
+
+
+def _write_proposed_actions(store: Store, work: Work, actions: list[ProposedAction]) -> list[str]:
+    """Validate and atomically write proposed `status: draft` `ACTION.md` notes under `writer(store)`."""
+    if not actions:
+        return []
+    config = load(store)
+    day = datetime.fromisoformat(work.end).astimezone().date().isoformat()
+    written: list[str] = []
+    for index_num, item in enumerate(actions):
+        raw = item.markdown.encode("utf-8")
+        det_folder = f"actions/{day}_{item.slug}-{digest(f'{work.id}:{index_num}'.encode())[:12]}"
+        det_path = f"{det_folder}/ACTION.md"
+        with suppress(FileNotFoundError, Error, OSError):
+            if store.read(det_path, MAX_NOTE) == raw:
+                written.append(det_path)
+                continue
+        base_folder = f"actions/{day}_{item.slug}"
+        base_path = f"{base_folder}/ACTION.md"
+        try:
+            store.mode(base_folder)
+        except FileNotFoundError:
+            path = base_path
+        else:
+            reused = False
+            with suppress(FileNotFoundError, Error, OSError):
+                if store.read(base_path, MAX_NOTE) == raw:
+                    written.append(base_path)
+                    reused = True
+            if reused:
+                continue
+            try:
+                store.mode(det_folder)
+            except FileNotFoundError:
+                path = det_path
+            else:
+                path = allocate_action_path(store, item.slug, day)
+        validate_action_markdown(store, config, path, raw, require_draft=True)
+        store.write(path, raw)
+        written.append(path)
+    return written
 
 
 def _gate(store: Store, work: Work, runner: Runner) -> list[JsonValue] | None:
@@ -394,9 +473,19 @@ def _current(store: Store, work: Work, *, started: bool) -> None:
         # A bf.yaml mid-edit delays the job instead of failing it: it starts once the file loads again.
         raise BusyError(f"the job waits until bf.yaml loads: {error}") from error
     current = config.assistants.get(work.assistant)
+    sched_name = _schedule_slot_name(work)
+    sched_args_changed = (
+        not started
+        and bool(sched_name)
+        and current is not None
+        and sched_name in current.schedules
+        and sched_name in work.settings.schedules
+        and current.schedules[sched_name].args != work.settings.schedules[sched_name].args
+    )
     if (
         current is None
         or not current.enabled
+        or sched_args_changed
         or (not started and current.model_dump(exclude=SCHEDULING) != work.settings.model_dump(exclude=SCHEDULING))
     ):
         raise Error("assistant configuration changed; restore it, then retry or cancel this job with bf queue")
@@ -425,11 +514,17 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
             if not row["prepared"]:
                 return {"assistant": work.assistant, "job": key, "text": ""}
             saved = Prepared.model_validate_json(str(row["prepared"]))
+            existing_actions: object = None
+            if saved.actions:
+                with suppress(Error, OSError):
+                    if found := records.find(store, work.assistant, saved.record.id):
+                        existing_actions = found[1].attributes.get("actions")
             return {
                 "assistant": work.assistant,
                 "job": key,
                 "record": f"{work.assistant}:{saved.record.id}",
                 "text": saved.record.text,
+                **({"actions": existing_actions} if isinstance(existing_actions, list) and existing_actions else {}),
             }
         if row["state"] not in {"pending", "answered", "prepared"}:
             raise Error("assistant job is not runnable; inspect bf queue before explicitly retrying it")
@@ -452,19 +547,29 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                 queue.answer(key, _attempt(store, work, runner, argv, stdin))
                 row = queue.get(key)
             if row["state"] == "answered":
-                reply, wake, metadata = _answer(cast(bytes, row["raw"]), work)
+                reply, wake, metadata, proposed = _answer(cast(bytes, row["raw"]), work)
                 if work.kind == "input" and not reply:
                     raise Error("assistant returned no response to an incoming message; inspect the saved answer")
-                if work.kind in {"schedule", "wake"} and not reply and not metadata:
+                if work.kind in {"schedule", "wake"} and not reply and not metadata and not proposed:
                     return _quiet(store, queue, work, key, wake)
                 record, replies = _recorded(work, reply, wake, metadata)
-                queue.prepare(work, record, replies, wake)
+                queue.prepare(work, record, replies, wake, actions=proposed)
                 row = queue.get(key)
             saved = Prepared.model_validate_json(str(row["prepared"]))
             ref = f"{work.assistant}:{saved.record.id}"
             with writer(store, wait=120):
                 records.recover(store)
-                records.upsert(store, work.assistant, [saved.record], snapshot=False)
+                written_actions = _write_proposed_actions(store, work, saved.actions)
+                record_to_save = (
+                    saved.record.model_copy(
+                        update={
+                            "attributes": {**saved.record.attributes, "actions": cast("JsonValue", written_actions)}
+                        }
+                    )
+                    if written_actions
+                    else saved.record
+                )
+                records.upsert(store, work.assistant, [record_to_save], snapshot=False)
                 queue.finish(work, saved.wake)
                 previous = state(store, ASSISTANTS).get(work.assistant, {})
                 remember(
@@ -485,7 +590,13 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                         # The run is recorded: a file that cannot be pruned must never make it run again.
                         with suppress(Error, OSError):
                             append_log(store, work.assistant, f"{now()} kept older runs: {error}")
-            return {"assistant": work.assistant, "job": key, "record": ref, "text": saved.record.text}
+            return {
+                "assistant": work.assistant,
+                "job": key,
+                "record": ref,
+                "text": saved.record.text,
+                **({"actions": written_actions} if written_actions else {}),
+            }
         except (Error, OSError, UnicodeError, ValidationError) as error:
             current = queue.get(key)
             # Busy or waiting work keeps its durable state for a later pass, unless its harness attempt started.
@@ -497,16 +608,17 @@ def _execute(store: Store, key: str, runner: Runner) -> dict[str, object]:
                 else "assistant execution or saved reply failed; inspect its local log"
             )
             if current["state"] not in {"complete", "cancelled"}:
-                # A harness that never started cannot have acted: its job fails plainly instead of uncertainly, and
-                # retries like a failed attempt when the run is idempotent. A failed gate retries by itself: no
-                # harness ran.
-                idempotent = retried(work.settings.idempotent, work.kind)
+                # A harness that never started or exited 75 (EX_TEMPFAIL) cannot have acted: its job fails plainly
+                # instead of uncertainly, and retries up to its budget. A failed gate retries by itself.
+                tempfail = isinstance(error, ExitError) and error.code == EX_TEMPFAIL
+                not_started = isinstance(error, NotStartedError)
                 queue.fail(
                     key,
                     message,
-                    uncertain=current["state"] == "running" and not isinstance(error, NotStartedError),
-                    idempotent=idempotent,
-                    retry=isinstance(error, GateError) or (idempotent and isinstance(error, NotStartedError)),
+                    uncertain=current["state"] == "running" and not not_started and not tempfail,
+                    gate=isinstance(error, GateError),
+                    tempfail=tempfail,
+                    not_started=not_started,
                 )
             with suppress(Error, OSError):
                 append_log(store, work.assistant, message)
@@ -530,17 +642,18 @@ def deliver(
     key: str = "",
     names: set[str] | None = None,
     skip: Collection[str] = (),
+    include_standalone: bool = False,
 ) -> bool:
     """Attempt the next due delivery; False when none is due. A delivery another process sends raises BusyError."""
     queue = Queue(store)
-    delivery = queue.delivery(job=job, key=key, names=names, skip=skip)
+    delivery = queue.delivery(job=job, key=key, names=names, skip=skip, include_standalone=include_standalone)
     if delivery is None:
         return False
     key, name = str(delivery["id"]), str(delivery["channel"])
     lock = f".delivery-{digest(key.encode())}"
     with collecting(store, lock):
         # Read it again under the lock: another process may have sent, failed or rescheduled it meanwhile.
-        delivery = queue.delivery(job=job, key=key, names=names)
+        delivery = queue.delivery(job=job, key=key, names=names, include_standalone=include_standalone)
         if delivery is None:
             return False
         try:
@@ -566,14 +679,14 @@ def deliver(
             except (Error, OSError, UnicodeError) as error:
                 cause = reason(error, "channel send failed; inspect its local log")
                 attempts = int(str(delivery["attempts"])) + 1
-                # A send command that never started sent nothing, so it retries like an idempotent one. A misrouted
-                # send may have posted elsewhere: it waits for inspection even on an idempotent channel.
+                # A send command that never started sent nothing; a misrouted send may have posted elsewhere, so it
+                # waits for inspection even on an idempotent channel.
                 outcome, cause, due = retry_policy(
-                    (command.idempotent and not isinstance(error, channels.MisroutedError))
-                    or isinstance(error, NotStartedError),
+                    command.idempotent and not isinstance(error, channels.MisroutedError),
                     delivery["job"] is not None,
                     attempts,
                     cause,
+                    not_started=isinstance(error, NotStartedError),
                 )
                 queue.delivery_failed(key, cause, outcome=outcome, due=due)
             except BaseException:
@@ -656,28 +769,42 @@ def manual(
 def due_schedules(
     store: Store, names: set[str], at: datetime, *, config: Config | None = None
 ) -> list[tuple[str, str, str, str]]:
-    """Each due (assistant, slot, start, end): named schedules, then a wake the assistant asked for."""
+    """Each due (assistant, slot, start, end): per-slot wakes the assistant asked for, then named schedules."""
+    loaded = config or load(store)
+    enabled_names = {name for name, settings in loaded.assistants.items() if name in names and settings.enabled}
+    if not enabled_names:
+        return []
     queue = Queue(store)
+    has_queue = queue.exists()
+    wakes_map, sched_progress, active_slots, blocking_schedules, failed_schedules = (
+        queue.scheduling_state(enabled_names) if has_queue else ({}, {}, set(), set(), {})
+    )
+    end = timestamp(at.isoformat())
     result = []
-    for name, settings in sorted((config or load(store)).assistants.items()):
-        if name not in names or not settings.enabled:
+    for name, settings in sorted(loaded.assistants.items()):
+        if name not in enabled_names:
             continue
-        if settings.wake is not None:
-            wake = queue.progress(f"wake:{name}")
-            end = timestamp(at.isoformat())
-            # A wake taken by a job, even a cancelled one, never starts again.
-            if wake and not wake.get("job") and str(wake["due"]) <= end and not queue.active(name, "wake"):
-                start = str(wake.get("set") or end)
-                result.append((name, "wake", min(start, end), end))
-        for schedule, specification in settings.schedules.items():
-            slot = f"schedule:{schedule}"
-            progress = queue.progress(f"schedule:{name}:{slot}")
-            success = str(progress.get("success") or "")
-            if specification.next_due(at, success) > at:
+        if settings.wake is not None and has_queue:
+            for wake_slot_name, wake in wakes_map.get(name, ()):
+                blocking = (
+                    (name, wake_slot_name) in blocking_schedules
+                    if wake_slot_name.startswith("schedule:")
+                    else (name, wake_slot_name) in active_slots
+                )
+                # A wake taken by a job, even a cancelled one, never starts again.
+                if not wake.get("job") and str(wake.get("due") or "") <= end and not blocking:
+                    start = str(wake.get("set") or end)
+                    slot_token = "wake" if wake_slot_name == "wake" else f"wake:{wake_slot_name}"
+                    result.append((name, slot_token, min(start, end), end))
+        for schedule_name, specification in settings.schedules.items():
+            slot = f"schedule:{schedule_name}"
+            if (name, slot) in blocking_schedules:
                 continue
-            if queue.active(name, slot):
+            progress = sched_progress.get(f"schedule:{name}:{slot}", {})
+            failed_at = failed_schedules.get((name, slot), "")
+            anchor = max(str(progress.get("success") or ""), failed_at)
+            if specification.next_due(at, anchor) > at:
                 continue
-            end = timestamp(at.isoformat())
             start = str(progress.get("end") or timestamp((at - timedelta(seconds=specification.lookback)).isoformat()))
             if start >= end:
                 start = timestamp((at - timedelta(seconds=specification.lookback)).isoformat())
@@ -688,32 +815,82 @@ def due_schedules(
 def schedule(
     store: Store, names: set[str], at: datetime, *, config: Config | None = None, skip: Collection[str] = ()
 ) -> tuple[list[str], list[dict[str, object]]]:
-    """Enqueue every due schedule; returns the new job ids and one failed row per schedule that could not start.
+    """Enqueue every due schedule; returns the new job ids and gated/failed rows.
 
     A schedule whose prompt is missing or that the full queue refuses stays due; other assistants still run.
     """
     queue, config = Queue(store), config or load(store)
     keys: list[str] = []
-    failures: list[dict[str, object]] = []
+    outcomes: list[dict[str, object]] = []
     broken = set(skip)
     for name, slot, start, end in due_schedules(store, names, at, config=config):
         if name in broken:
             continue
         try:
-            if slot == "wake":
-                wake = queue.progress(f"wake:{name}")
+            if slot == "wake" or slot.startswith("wake:"):
+                wake_slot_name = "wake" if slot == "wake" else slot.removeprefix("wake:")
+                wake = queue.progress(f"wake:{name}:{wake_slot_name}")
+                origin_raw = wake.get("origin")
+                origin = Origin.model_validate(origin_raw) if isinstance(origin_raw, dict) else None
                 work = prepare(
-                    store, name, "wake", start, end, slot=slot, reason=str(wake.get("reason", "")), config=config
+                    store,
+                    name,
+                    "wake",
+                    start,
+                    end,
+                    slot=wake_slot_name,
+                    origin=origin,
+                    reason=str(wake.get("reason", "")),
+                    config=config,
                 )
                 if not queue.enqueue_wake(work, wake):
                     continue  # A run that finished meanwhile replaced or took the wake.
             else:
-                work = prepare(store, name, "schedule", start, end, slot=slot, config=config)
-                queue.enqueue(work)
+                sched_name = slot.removeprefix("schedule:")
+                spec = config.assistants[name].schedules[sched_name]
+                if spec.when is not None:
+                    when_key = f"when:{name}:{slot}"
+                    saved_cursor = str(queue.progress(when_key).get("cursor") or "") if queue.exists() else ""
+                    cursor = saved_cursor or timestamp((at - timedelta(seconds=spec.lookback)).isoformat())
+                    try:
+                        matched, when_events, next_cursor = pages.evaluate_when(
+                            store, spec.when, at, cursor=cursor, exclude=("assistant", name)
+                        )
+                    except BusyError:
+                        continue
+                    if not matched:
+                        queue.advance_gated_schedule(
+                            name,
+                            slot,
+                            end,
+                            when_key=when_key,
+                            when_cursor=next_cursor if next_cursor != saved_cursor else "",
+                        )
+                        remember(store, name, ASSISTANTS, run=end, success=end, error="", failures=0)
+                        outcomes.append(
+                            {
+                                "assistant": name,
+                                "schedule": sched_name,
+                                "start": start,
+                                "end": end,
+                                "status": "gated",
+                            }
+                        )
+                        continue
+                    work = prepare(store, name, "schedule", start, end, slot=slot, config=config)
+                    queue.enqueue(
+                        work,
+                        events=cast("list[JsonValue]", when_events) if spec.gate is None else None,
+                        when_key=when_key,
+                        when_cursor=next_cursor,
+                    )
+                else:
+                    work = prepare(store, name, "schedule", start, end, slot=slot, config=config)
+                    queue.enqueue(work)
             keys.append(work.id)
         except (Error, OSError, UnicodeError, ValueError) as error:
             broken.add(name)
-            failures.append(
+            outcomes.append(
                 {
                     "assistant": name,
                     "schedule": slot.removeprefix("schedule:"),
@@ -721,7 +898,7 @@ def schedule(
                     "error": reason(error, "assistant files are inaccessible"),
                 }
             )
-    return keys, failures
+    return keys, outcomes
 
 
 # Reads one poll makes at most while catching up on a window that holds more than one batch.
@@ -791,7 +968,9 @@ def poll(store: Store, name: str, binding: ReadInput, *, runner: Runner = run) -
     return lower < end
 
 
-def _cycle(store: Store, names: set[str], at: datetime, runner: Runner) -> list[dict[str, object]]:
+def _cycle(
+    store: Store, names: set[str], at: datetime, runner: Runner, *, include_standalone: bool = False
+) -> list[dict[str, object]]:
     queue = Queue(store)
     queue.recover_attempts()
     config = load(store)
@@ -819,7 +998,11 @@ def _cycle(store: Store, names: set[str], at: datetime, runner: Runner) -> list[
     results.extend(schedule(store, names, at, config=config)[1])
     for name in sorted(names):
         # The health a dispatcher records too, so bf status names an assistant whose schedules wait.
-        errors = [str(item["error"]) for item in results if item["assistant"] == name and "input" not in item]
+        errors = [
+            str(item["error"])
+            for item in results
+            if item.get("assistant") == name and item.get("status") == "failed" and "input" not in item
+        ]
         with suppress(Error, OSError):
             queue.set_progress(f"health:assistant:{name}", {"error": "; ".join(errors), "at": now()})
     tried: set[str] = set()
@@ -847,18 +1030,22 @@ def _cycle(store: Store, names: set[str], at: datetime, runner: Runner) -> list[
                 }
             )
     failed: set[str] = set()
-    while (delivery := queue.delivery(names=names, skip=tried)) is not None:
+    while (delivery := queue.delivery(names=names, skip=tried, include_standalone=include_standalone)) is not None:
         key = str(delivery["id"])
         tried.add(key)
         try:
-            deliver(store, runner=runner, key=key, names=names)
+            deliver(store, runner=runner, key=key, names=names, include_standalone=include_standalone)
         except BusyError:
             pass  # Another process is sending it; it is reported below while it stays unresolved.
         except (Error, OSError, UnicodeError, ValueError) as error:
             failed.add(key)
             results.append(
                 {
-                    "assistant": delivery["assistant"],
+                    **(
+                        {"assistant": delivery["assistant"]}
+                        if delivery["assistant"]
+                        else {"channel": delivery["channel"]}
+                    ),
                     "delivery": key,
                     "status": "failed",
                     "error": reason(error, "assistant files are inaccessible"),
@@ -866,12 +1053,12 @@ def _cycle(store: Store, names: set[str], at: datetime, runner: Runner) -> list[
             )
     results.extend(
         {
-            "assistant": item["assistant"],
+            **({"assistant": item["assistant"]} if item["assistant"] else {"channel": item["channel"]}),
             "delivery": item["id"],
             "status": "failed",
             "error": item["error"] or "delivery pending; inspect bf queue",
         }
-        for item in queue.outstanding(names)
+        for item in queue.outstanding(names, include_standalone=include_standalone)
         if item["id"] not in failed
     )
     return results
@@ -884,26 +1071,45 @@ def cycle(
     at: datetime,
     dry_run: bool = False,
     runner: Runner = run,
+    include_standalone: bool = False,
 ) -> list[dict[str, object]]:
     """One finite update: batch inputs, due schedules, queued work and independent deliveries.
 
     One assistant's failing read, prompt or admission is reported in its own row while the others still run; it
     never raises for them, so the caller's other programs and its report survive.
     """
-    if not names:
+    if not names and not (include_standalone and Queue(store).exists()):
         return []
     try:
         if dry_run:
-            return [
-                {
-                    "assistant": name,
-                    "schedule": slot.removeprefix("schedule:"),
-                    "start": start,
-                    "end": end,
-                    "status": "due",
-                }
-                for name, slot, start, end in due_schedules(store, names, at)
-            ]
+            config = load(store)
+            queue = Queue(store)
+            has_queue = queue.exists()
+            preview: list[dict[str, object]] = []
+            for name, slot, start, end in due_schedules(store, names, at, config=config):
+                status = "due"
+                if slot.startswith("schedule:"):
+                    sched_name = slot.removeprefix("schedule:")
+                    spec = config.assistants[name].schedules[sched_name]
+                    if spec.when is not None:
+                        when_key = f"when:{name}:{slot}"
+                        saved_cursor = str(queue.progress(when_key).get("cursor") or "") if has_queue else ""
+                        cursor = saved_cursor or timestamp((at - timedelta(seconds=spec.lookback)).isoformat())
+                        matched, _, _ = pages.evaluate_when(
+                            store, spec.when, at, cursor=cursor, exclude=("assistant", name)
+                        )
+                        if not matched:
+                            status = "gated"
+                preview.append(
+                    {
+                        "assistant": name,
+                        "schedule": slot.removeprefix("schedule:"),
+                        "start": start,
+                        "end": end,
+                        "status": status,
+                    }
+                )
+            return preview
         with ExitStack() as stack:
             try:
                 stack.enter_context(collecting(store, ".dispatch"))
@@ -912,7 +1118,7 @@ def cycle(
                     {"assistant": name, "status": "skipped", "skipped": "the active dispatcher owns assistant work"}
                     for name in sorted(names)
                 ]
-            return _cycle(store, names, at, runner)
+            return _cycle(store, names, at, runner, include_standalone=include_standalone)
     except (Error, OSError, UnicodeError, ValueError) as error:
         cause = reason(error, "the assistant queue or brain files are inaccessible")
         return [{"assistant": name, "status": "failed", "error": cause} for name in sorted(names)]
@@ -925,8 +1131,9 @@ class Dispatcher:
     retried later. Only a stream worker that stopped outside shutdown raises StreamStoppedError.
     """
 
-    def __init__(self, store: Store, names: set[str]) -> None:
+    def __init__(self, store: Store, names: set[str], *, include_standalone: bool = True) -> None:
         self.store, self.names, self.queue = store, names, Queue(store)
+        self.include_standalone = include_standalone
         self.stopped = Event()
         self.pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="bf-assistant")
         self.readers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bf-read")
@@ -1128,12 +1335,19 @@ class Dispatcher:
         busy = {name.removeprefix("delivery:") for name in self.tasks if name.startswith("delivery:")}
         waiting = self._waiting()
         while len(busy) < 4:
-            delivery = self.queue.delivery(names=self.names, excluding=busy, skip=waiting)
+            delivery = self.queue.delivery(
+                names=self.names, excluding=busy, skip=waiting, include_standalone=self.include_standalone
+            )
             if delivery is None:
                 break
             channel, key = str(delivery["channel"]), str(delivery["id"])
             self.tasks[f"delivery:{channel}"] = self.pool.submit(
-                deliver, self.store, runner=self.runner, key=key, names=self.names
+                deliver,
+                self.store,
+                runner=self.runner,
+                key=key,
+                names=self.names,
+                include_standalone=self.include_standalone,
             )
             self.keys[f"delivery:{channel}"] = key
             busy.add(channel)
@@ -1164,10 +1378,11 @@ class Dispatcher:
         self.admit_at = clock + 1
         later = self._waiting()
         waiting = {name for name in self.names if f"assistant:{name}" in later}
-        failures = schedule(self.store, self.names, datetime.now(UTC), config=config, skip=waiting)[1]
+        outcomes = schedule(self.store, self.names, datetime.now(UTC), config=config, skip=waiting)[1]
         errors: dict[str, list[str]] = {}
-        for item in failures:
-            errors.setdefault(str(item["assistant"]), []).append(str(item["error"]))
+        for item in outcomes:
+            if item["status"] == "failed":
+                errors.setdefault(str(item["assistant"]), []).append(str(item["error"]))
         for name in self.names - waiting:
             if name in errors:
                 self.later[f"assistant:{name}"] = clock + BACKOFF

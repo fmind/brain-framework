@@ -17,7 +17,7 @@ import pytest
 
 from conftest import ROOT
 
-SCRIPTS = sorted((ROOT / "examples").rglob("*.py"))
+SCRIPTS = sorted([*(ROOT / "examples").rglob("*.py"), *(ROOT / "src/bf/skills").rglob("scripts/*.py")])
 
 
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.relative_to(ROOT).as_posix())
@@ -30,9 +30,20 @@ def test_example_scripts_are_standalone_python311_scripts(script: Path) -> None:
     modules = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
     # A relative import keeps its dots, so it names no standard-library module: a copied script has no package.
     modules |= {"." * node.level + (node.module or "") for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-    # The sensor kit is the one sibling a copied sensor may import: owners copy `_sensor.py` beside it.
-    kit = {"_sensor"} if (script.parent / "_sensor.py").is_file() and script.name != "_sensor.py" else set()
+    # The sensor and program kits are the only siblings a copied script may import: owners copy them beside it.
+    kit = set()
+    if (script.parent / "_sensor.py").is_file() and script.name != "_sensor.py":
+        kit.add("_sensor")
+    if (script.parent / "_bf.py").is_file() and script.name != "_bf.py":
+        kit.add("_bf")
     assert {module.partition(".")[0] for module in modules} <= sys.stdlib_module_names | {"__future__"} | kit
+
+
+def test_bf_kit_copies_stay_identical() -> None:
+    expected = (ROOT / "examples/routines/_bf.py").read_bytes()
+    assert expected
+    for folder in ("examples/hooks", "examples/channels/channels"):
+        assert (ROOT / folder / "_bf.py").read_bytes() == expected
 
 
 def test_example_scripts_use_only_the_python311_standard_library() -> None:

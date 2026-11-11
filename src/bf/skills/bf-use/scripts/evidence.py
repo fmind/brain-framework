@@ -203,7 +203,12 @@ def limitations(reply: dict[str, JSON]) -> list[JSON]:
         if attributes.get("partial"):
             result.append("partial record")
         collection = object_value(reply.get("collection", {}))
-        if collection.get("failed") or collection.get("freshness") != "fresh" or collection.get("state") != "active":
+        if (
+            collection.get("failed")
+            or collection.get("degraded")
+            or collection.get("freshness") != "fresh"
+            or collection.get("state") != "active"
+        ):
             result.append("source freshness is not established")
     return result
 

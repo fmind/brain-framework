@@ -41,7 +41,7 @@ KINDS: dict[str, frozenset[str]] = {
         | {"combined", OTHER}
     ),
     "read": frozenset(
-        {"home", "period", "tasks", "tags", "tag", "memories", "source", "source-period", "record", "folder"}
+        {"home", "review", "period", "tasks", "tags", "tag", "memories", "source", "source-period", "record", "folder"}
         | {"note", "section", "action", "identity", "relation", OTHER}
     ),
 }

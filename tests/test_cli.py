@@ -200,7 +200,7 @@ def test_a_cancelled_command_exits_130_without_a_message(brain: Store, monkeypat
         raise KeyboardInterrupt
 
     # A real brain: the cancellation, not the selection, must decide the exit.
-    monkeypatch.setattr("bf.cli.health.report", cancelled)
+    monkeypatch.setattr("bf.health.report", cancelled)
     result = CliRunner().invoke(app, ["status", "--brain", str(brain.root)])
     assert (result.exit_code, result.output) == (130, "")
 
@@ -393,7 +393,7 @@ def test_a_failure_discards_a_partial_reply_a_closed_pipe_cannot_take(
         raise Error("reference not found")
 
     monkeypatch.setattr(sys, "stdout", stdout)
-    monkeypatch.setattr("bf.cli.read", failing)
+    monkeypatch.setattr("bf.retrieve.read", failing)
     monkeypatch.setattr(sys, "argv", ["bf", "read", "projects/offline.md", "--brain", str(brain.root)])
     with pytest.raises(SystemExit) as exited:
         main()
@@ -489,3 +489,174 @@ def test_arguments_that_are_not_utf8_are_invalid_before_anything_is_written(tmp_
             arguments[0],
         )
     assert not list(parent.iterdir())
+
+
+def test_action_commands_create_and_settle_actions(brain: Store) -> None:
+    runner = CliRunner()
+    created = runner.invoke(
+        app,
+        [
+            "action",
+            "new",
+            "rotate-keys",
+            "--title",
+            "Rotate API keys",
+            "--summary",
+            "Quarterly key rotation",
+            "--brain",
+            str(brain.root),
+        ],
+    )
+    assert created.exit_code == 0, created.output
+    first_reply = json.loads(created.stdout)
+    first_path = str(first_reply["action"])
+    assert first_reply["status"] == "draft"
+    assert "summary: Quarterly key rotation" in brain.read(first_path).decode()
+
+    # Same slug on the same day allocates a suffixed folder instead of overwriting.
+    second = runner.invoke(
+        app, ["action", "new", "rotate-keys", "--title", "Second rotation", "--brain", str(brain.root)]
+    )
+    assert second.exit_code == 0, second.output
+    second_path = str(json.loads(second.stdout)["action"])
+    assert second_path != first_path
+
+    # Validation errors on bad slug or multi-line title.
+    assert runner.invoke(app, ["action", "new", "Bad_Slug", "--title", "Ok", "--brain", str(brain.root)]).exit_code == 2
+    assert (
+        runner.invoke(
+            app, ["action", "new", "clean-slug", "--title", "Line1\nLine2", "--brain", str(brain.root)]
+        ).exit_code
+        == 2
+    )
+
+    # Bare slug is ambiguous when two folders match; exact folder or path resolves cleanly.
+    ambiguous = runner.invoke(app, ["action", "status", "rotate-keys", "stable", "--brain", str(brain.root)])
+    assert ambiguous.exit_code == 1
+    assert "multiple actions match rotate-keys" in str(ambiguous.exception)
+
+    folder_name = Path(first_path).parent.name
+    settled = runner.invoke(app, ["action", "status", folder_name, "stable", "--brain", str(brain.root)])
+    assert settled.exit_code == 0, settled.output
+    assert json.loads(settled.stdout)["status"] == "stable"
+
+    # Home shows only open draft actions; settled actions leave Home while remaining readable.
+    home = json.loads(runner.invoke(app, ["read", "--brain", str(brain.root)]).stdout)
+    assert [item["ref"] for item in home["actions"]] == [second_path]
+
+    # Unique slug resolves directly; missing and malformed targets fail cleanly.
+    unique = runner.invoke(app, ["action", "new", "ship-notes", "--title", "Ship notes", "--brain", str(brain.root)])
+    assert unique.exit_code == 0
+    deprecated = runner.invoke(app, ["action", "status", "ship-notes", "deprecated", "--brain", str(brain.root)])
+    assert deprecated.exit_code == 0
+    assert json.loads(deprecated.stdout)["status"] == "deprecated"
+    assert runner.invoke(app, ["action", "status", "missing-slug", "stable", "--brain", str(brain.root)]).exit_code == 1
+    assert (
+        runner.invoke(app, ["action", "status", "2020-01-01_missing", "stable", "--brain", str(brain.root)]).exit_code
+        == 1
+    )
+    assert runner.invoke(app, ["action", "status", second_path, "stable", "--brain", str(brain.root)]).exit_code == 0
+    assert (
+        runner.invoke(
+            app, ["action", "status", "actions/nope/ACTION.md", "stable", "--brain", str(brain.root)]
+        ).exit_code
+        == 1
+    )
+    assert (
+        runner.invoke(
+            app, ["action", "status", "actions/a/b/ACTION.md", "stable", "--brain", str(brain.root)]
+        ).exit_code
+        == 2
+    )
+    assert (
+        runner.invoke(app, ["action", "status", "actions/../bad", "stable", "--brain", str(brain.root)]).exit_code == 2
+    )
+    assert (
+        runner.invoke(app, ["action", "status", "projects/offline.md", "stable", "--brain", str(brain.root)]).exit_code
+        == 2
+    )
+
+
+def test_export_items_emits_values_attributes_and_observed_since(brain: Store) -> None:
+    from pydantic import JsonValue
+
+    from bf.models import Record, encode
+    from bf.records import path as record_path
+
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nfields:\n  topic:\n    description: Topics\n    type: string\n    cardinality: many\n"
+        b"sensors:\n  feed:\n    command: [echo]\n    fields:\n      topic:\n        path: /attributes/topics\n",
+    )
+    brain.write(
+        "projects/tagged.md",
+        b"---\ntype: project\nstatus: stable\nupdated: 2026-09-25\nfields:\n  topic: [alpha, beta]\n---\n\n# Tagged\n",
+    )
+    cases: tuple[tuple[str, str, list[JsonValue]], ...] = (
+        ("old", "2026-09-01T00:00:00Z", ["legacy"]),
+        ("recent", "2026-09-25T10:00:00Z", ["gamma", "delta"]),
+    )
+    for rec_id, obs, topics in cases:
+        rec = Record(
+            id=rec_id,
+            title=f"Item {rec_id}",
+            time=obs,
+            fields={"topic": topics},
+            attributes={"observed": obs, "topics": topics, "priority": "high"},
+        )
+        brain.write(record_path("feed", rec.id), encode(rec.model_dump(exclude_defaults=True)))
+
+    runner = CliRunner()
+    wrong_kind = runner.invoke(app, ["export", "--kind", "edges", "--observed-since", "7d", "--brain", str(brain.root)])
+    assert wrong_kind.exit_code == 2
+
+    all_exported = runner.invoke(app, ["export", "--kind", "items", "--brain", str(brain.root)])
+    assert all_exported.exit_code == 0, all_exported.output
+    all_rows = {row["ref"]: row for row in (json.loads(line) for line in all_exported.stdout.splitlines())}
+    assert all_rows["projects/tagged.md"]["values"] == {"topic": ["alpha", "beta"]}
+    assert "feed:old" in all_rows
+
+    exported = runner.invoke(
+        app,
+        ["export", "--kind", "items", "--observed-since", "2026-09-20T00:00:00Z", "--brain", str(brain.root)],
+    )
+    assert exported.exit_code == 0, exported.output
+    rows = {row["ref"]: row for row in (json.loads(line) for line in exported.stdout.splitlines())}
+    assert "feed:old" not in rows
+    recent_row = rows["feed:recent"]
+    assert recent_row["values"] == {"topic": ["gamma", "delta"]}
+    assert recent_row["attributes"]["priority"] == "high"
+
+
+def test_action_status_preserves_rich_frontmatter_and_resolves_unique_slugs(brain: Store) -> None:
+    import yaml
+
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\nfields:\n  priority:\n    description: Priority.\n    type: string\n",
+    )
+    runner = CliRunner()
+    created = runner.invoke(app, ["action", "new", "audit-logs", "--unique", "--brain", str(brain.root)])
+    assert created.exit_code == 0, created.output
+    action_path = str(json.loads(created.stdout)["action"])
+    assert "# Audit logs\n" in brain.read(action_path).decode()
+
+    brain.write(
+        action_path,
+        b"---\ntype: action\nstatus: draft\nupdated: 2026-09-20\nsummary: Keep keys\ntags: [ops, audit]\n"
+        b"fields:\n  priority: high\n---\n# Audit logs\n\n## Outcome\n\nSettled.\n",
+    )
+    updated = runner.invoke(app, ["action", "status", "audit-logs", "stable", "--brain", str(brain.root)])
+    assert updated.exit_code == 0, updated.output
+    raw_text = brain.read(action_path).decode()
+    parts = raw_text.split("---\n")
+    assert len(parts) == 3
+    meta = yaml.safe_load(parts[1])
+    assert (meta["type"], meta["status"], meta["summary"], meta["tags"], meta["fields"]) == (
+        "action",
+        "stable",
+        "Keep keys",
+        ["ops", "audit"],
+        {"priority": "high"},
+    )
+    assert "# Audit logs\n\n## Outcome\n\nSettled.\n" in parts[2]

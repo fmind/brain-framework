@@ -5,6 +5,7 @@ No expressions, inference or provider access.
 
 from __future__ import annotations
 
+import re
 from contextlib import suppress
 
 from pydantic import JsonValue, ValidationError
@@ -13,11 +14,12 @@ from bf import links
 from bf.markdown import Note, authored, reference, split_ref
 from bf.models import CITES, RECORD_KEYS, Config, Error, Record, Sensor, explain
 
-_PAGES = "home, folder roots, tasks, periods, tags and memories are computed page addresses"
+_PAGES = "home, folder roots, review, tasks, periods, tags and memories are computed page addresses"
 # Reads resolve such a path as a record ref, so an entity or alias there would never reach its owner.
 _RECORDS = "a BF path whose first segment contains ':' names a source:id record"
 # Reads open such a path as that file, so an entity or alias there would never reach its owner either.
 _NOTES = "a BF path to a .md file in projects, actions or concepts names that note"
+_ACTION_FOLDERS = "a BF path to an action folder in actions/ names its ACTION.md"
 
 
 def pointer(document: JsonValue, path: str) -> JsonValue:
@@ -146,6 +148,9 @@ def _reachable(values: list[str], config: Config, declared: str) -> None:
             raise Error(f"{_RECORDS} and no other subject; link to the record instead")
         if authored(parsed.path):
             raise Error(f"{_NOTES} and no other subject; link to the note instead")
+        parts = parsed.path.split("/")
+        if len(parts) == 2 and parts[0] == "actions" and parts[1]:
+            raise Error(f"{_ACTION_FOLDERS} and no other subject; link to the action instead")
         if parsed.fragment:
             raise Error(f"BF {declared} name a whole subject; remove the #section")
 
@@ -219,6 +224,9 @@ def note_claims(
             # reference() has already resolved a Markdown-relative path. One holding a backslash or control character,
             # as a copied Windows path, has no BF address: it stays a plain path, and `bf validate` reports the link.
             path, section = split_ref(ref)
+            action = path.rstrip("/")
+            if re.fullmatch(r"actions/[^/#]+", action):
+                path = action + "/ACTION.md"
             if authored(path):
                 with suppress(Error):
                     return links.target(qualify(config, path, section))

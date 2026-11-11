@@ -31,7 +31,7 @@ from bf.collect import next_due, starting
 from bf.config import load
 from bf.health import DEGRADED, assistant_health, degradation, is_late
 from bf.history import ROUTINES, SENSORS, environment, log_path, state
-from bf.models import Error, WatchSettings, decode, local, present, printable, terminal, timestamp
+from bf.models import Error, Routine, WatchSettings, decode, local, present, printable, terminal, timestamp
 from bf.runtime import Queue
 from bf.storage import BusyError, Store, collecting
 from bf.update import KINDS, ProgramKind, late, selection
@@ -116,11 +116,12 @@ def snapshot(
             success, error = str(entry.get("success", "")), str(entry.get("error", "")) if program.enabled else ""
             # The same due rule as update, including failure backoff.
             due_at = next_due(program, entry, now)
+            is_scheduled = program.scheduled if isinstance(program, Routine) else bool(program.refresh)
             status = (
                 State.DISABLED
                 if not program.enabled
                 else State.MANUAL
-                if not program.refresh
+                if not is_scheduled
                 else State.FAILED
                 if error
                 else State.NEVER
@@ -149,6 +150,7 @@ def snapshot(
                     log=log_path(name) if error else "",
                     action=str(entry.get("action", "")),
                     records=cast(int | None, entry.get("records")),
+                    early=status is State.NEVER and not is_late(program, {"freshness": "never"}, now),
                     degraded=degradation(entry) if kind == "sensor" else None,
                 )
             )
@@ -180,7 +182,7 @@ def snapshot(
                 name=name,
                 status=status,
                 included=name in selected[2],
-                refresh=min((spec.every for spec in settings.schedules.values()), default=0),
+                refresh=min((spec.every for spec in settings.schedules.values() if spec.every), default=0),
                 success=success,
                 next_due=timestamp(due) if due else "",
                 error=error,
@@ -440,7 +442,14 @@ class Dashboard:
             detail.append(f"Runs: {row.runs:,}\n")
         if row.record and not row.error:
             detail.append("Latest record: " + clean(row.record) + "\n")
-        detail.append(f"Refresh: {period(row.refresh) if row.refresh else 'manual only'}\n")
+        refresh_label = (
+            period(row.refresh)
+            if row.refresh
+            else "scheduled"
+            if row.status not in {State.MANUAL, State.DISABLED}
+            else "manual only"
+        )
+        detail.append(f"Refresh: {refresh_label}\n")
         detail.append("Last OK: " + (local(row.success) if row.success else "never") + "\n")
         detail.append("Last run items: " + ("—" if row.records is None else f"{row.records:,}") + "\n")
         if row.elapsed_seconds is not None and row.output_bytes is not None:
@@ -712,9 +721,12 @@ def _failing(dispatcher: Dispatcher) -> str:
     for channel in sorted(dispatcher.transports):
         if error := str(dispatcher.queue.progress(f"health:channel:{channel}").get("error") or ""):
             return error if error.startswith(f"channel {channel}: ") else f"channel {channel}: {error}"
-    if failed := sorted(
-        str(item["channel"]) for item in dispatcher.queue.outstanding(dispatcher.names) if item["error"]
-    ):
+    outstanding = (
+        dispatcher.queue.outstanding(dispatcher.names, include_standalone=dispatcher.include_standalone)
+        if hasattr(dispatcher, "include_standalone")
+        else dispatcher.queue.outstanding(dispatcher.names)
+    )
+    if failed := sorted(str(item["channel"]) for item in outstanding if item["error"]):
         return f"channel {failed[0]}: delivery failed or uncertain; inspect bf queue"
     return ""
 
@@ -749,7 +761,12 @@ class Assistants:
             if self.dispatcher is None:
                 # The current selection: a retry must not start an assistant that bf.yaml no longer declares.
                 names = selection(load(self.store), *self.selected)[2]
-                self.dispatcher = self.stack.enter_context(Dispatcher(self.store, names))
+                dispatcher = (
+                    Dispatcher(self.store, names, include_standalone=False)
+                    if any(self.selected)
+                    else Dispatcher(self.store, names)
+                )
+                self.dispatcher = self.stack.enter_context(dispatcher)
             self.dispatcher.tick()
             # The dispatcher keeps running past a failing pass, input or delivery and records why.
             reason = _failing(self.dispatcher)
@@ -849,9 +866,13 @@ def watch(
         stack.callback(_stop, job)
         # Exit callbacks run in reverse: the update is signalled first, then the dispatcher stops its streams and
         # workers, then watch waits for the update.
+        current_cfg = load(store)
+        has_dispatch = bool(selection(current_cfg, *selected)[2]) or (
+            not any(selected) and any(ch.send is not None for ch in current_cfg.channels.values())
+        )
         dispatcher = (
             Assistants(store, selected, stack.enter_context(ExitStack()))
-            if not dashboard.observe and selection(load(store), *selected)[2]
+            if not dashboard.observe and has_dispatch
             else None
         )
         stack.callback(job.terminate)

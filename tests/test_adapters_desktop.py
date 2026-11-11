@@ -110,6 +110,7 @@ def test_an_invalid_message_exits_2_before_any_notification(provider: Provider, 
 
 
 def test_bf_channel_send_accepts_the_receipt(provider: Provider, brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    brain.write("channels/_bf.py", (ROOT / "examples" / FOLDER / "_bf.py").read_bytes())
     brain.write("channels/desktop.py", (ROOT / "examples" / FOLDER / ADAPTER).read_bytes())
     channel = {"desktop": {"send": {"command": ["python3", "channels/desktop.py", "send"]}}}
     brain.write("bf.yaml", yaml.safe_dump({"version": 8, "name": "fixture", "channels": channel}).encode())

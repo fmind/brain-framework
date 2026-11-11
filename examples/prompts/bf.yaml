@@ -1,6 +1,17 @@
 # https://fmind.github.io/brain-framework/docs/prompts/
 version: 8
 name: prompt-demo
+channels:
+  inbox:
+    send:
+      command: [printf, '{"id":"sent-1","conversation":"t1"}']
+    read:
+      command:
+        [
+          printf,
+          '{"messages":[{"id":"m1","sender":"fictional-owner","conversation":"t1","time":"%s","text":"Approve launch"}]}',
+          "{{start}}",
+        ]
 assistants:
   assistant:
     prompt: prompts/assistant.md
@@ -8,3 +19,17 @@ assistants:
     command: [cat]
     # No schedules or inputs: this assistant runs only through bf run.
     timeout: 60
+  triage:
+    prompt: prompts/assistant.md
+    command: [echo, narrow]
+    # Channel messages append --wide; scheduled and manual runs stay narrow without a wrapper script.
+    input_args: [--wide]
+    inputs:
+      - channel: { name: inbox, mode: read, every: 1 }
+    schedules:
+      overdue:
+        every: 86400
+        when: { review: true }
+      actions:
+        every: 86400
+        when: { actions: true }

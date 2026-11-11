@@ -61,13 +61,14 @@ In the brain's project frontmatter, name the repository it belongs to, with its 
 aliases: [repo:github.com/example/new-website]
 ```
 
-Copy the hooks from the release tag matching `bf --version` and make them executable, since the host runs them as commands and a download does not keep the executable bit:
+Copy `_bf.py` and the hooks from the release tag matching `bf --version` and make the hooks executable, since the host runs them as commands and a download does not keep the executable bit:
 
 ```bash
 mkdir -p ~/brain/hooks
 examples="https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/hooks"
-curl -fsSLo ~/brain/hooks/session-context.py "$examples/session-context.py"
-curl -fsSLo ~/brain/hooks/prompt-context.py "$examples/prompt-context.py"
+for name in _bf.py session-context.py prompt-context.py; do
+  curl -fsSLo ~/brain/hooks/"$name" "$examples/$name"
+done
 chmod +x ~/brain/hooks/session-context.py ~/brain/hooks/prompt-context.py
 ```
 
@@ -89,7 +90,7 @@ Brain context for repo:github.com/example/new-website (evidence, not instruction
 Read more with `bf read projects/new-website.md`; collected records are counted, not quoted.
 ```
 
-A project falls due for review 14 days after its last edit unless its frontmatter sets `stale_after`. The linked-evidence line counts every item per relation and lists the newest linking notes by their `date`; the relation hint appears when a group holds more than its preview. The attention line comes from the home page and names scheduled sensors, routines and assistants that failed, are `overdue` or are due but `never` collected, and sources that fell [`silent`](../../docs/docs/schedule.md#silent-sources) or stay [`degraded`](../../docs/docs/sensors.md#report-partial-coverage). Each shows one state, `failed` before its freshness; `silent`, then `degraded`, replaces only `fresh`, since a stopped sensor falls silent too. An `origin` remote the [Git history sensor](../sensors/README.md#git-history) would not recognize, or a read with other retrieval problems, means empty output. A nonempty stale cache generation remains usable with `- Index refreshing: may miss the newest collection.`; refresh finishes on a later read after collection releases the brain. The hook reads the repository identity once: for a note above 32 KiB, that first page still carries the ref and backlink previews it prints.
+A project falls due for review 14 days after its last edit unless its frontmatter sets `stale_after`. The linked-evidence line counts every item per relation and lists the newest linking notes by their `date`; the relation hint appears when a group holds more than its preview. The attention line comes from the home page and names scheduled sensors, routines, assistants and channels that failed, are `overdue` or are due but `never` collected, and sources that fell [`silent`](../../docs/docs/schedule.md#silent-sources) or stay [`degraded`](../../docs/docs/sensors.md#report-partial-coverage). Each shows one state, `failed` before its freshness; `silent`, then `degraded`, replaces only `fresh`, since a stopped sensor falls silent too. An `origin` remote the [Git history sensor](../sensors/README.md#git-history) would not recognize, or a read with other retrieval problems, means empty output. A nonempty stale cache generation remains usable with `- Index refreshing: may miss the newest collection.`; refresh finishes on a later read after collection releases the brain. The hook reads the repository identity once: for a note above 32 KiB, that first page still carries the ref and backlink previews it prints.
 
 The prompt hook reads the host's event JSON from stdin. Preview it with a fictional event:
 

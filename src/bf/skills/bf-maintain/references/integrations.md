@@ -1,10 +1,10 @@
-# Implement a selected integration
+# Extension recipes: sensors, routines, assistants and channels
 
-Use once a source is selected and implementation is authorized, carrying forward its question, scope, fields, exclusions and needed freshness. Test with fictional data before any provider or model runs.
+Use once a source or automation is approved; test with synthetic fixtures before running against live providers or models. Run `bf skills skills --link` inside the brain root to link the four packaged `bf-*` skills into `.agents/skills` and `.claude/skills`, and symlink any custom `skills/<name>` folders there directly.
 
-## Sensors
+## Sensors (`_sensor.py`)
 
-Start from a reviewed [sensor example](https://github.com/fmind/brain-framework/tree/main/examples/sensors), copied from the release matching `bf --version`, and the [sensor contract](https://fmind.github.io/brain-framework/docs/sensors/). Put the executable in `sensors/` and declare it disabled first, with an explicit account, folder or channel scope:
+Copy [`examples/sensors/_sensor.py`](https://github.com/fmind/brain-framework/blob/main/examples/sensors/_sensor.py) (`cli` runner, `BF_START`/`BF_END` window parsing, `load_state`/`save_state` in `BF_STATE_DIR`, `git_remote_identity`) beside your script in `sensors/` and start disabled ([sensor contract](https://fmind.github.io/brain-framework/docs/sensors/)):
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/sensors/
@@ -12,81 +12,83 @@ sensors:
   docs:
     command: [sensors/local-documents.py, team, "{{home}}/Documents/team"]
     mode: snapshot
-    enabled: false # confirm the folder before enabling
+    max_text_bytes: 262144
+    enabled: false
     fields:
       kind: { value: document }
 ```
 
-- `command` is direct argv without a shell; arguments accept `{{brain}}`, `{{home}}`, `{{start}}` and `{{end}}`.
-- `mode: window` (the default) collects a time window each run; `mode: snapshot` returns the whole catalog, and records it no longer returns are removed. Know how the provider reports changes, pagination, partial content and deletions.
-- `priority: low` quiets a high-volume feed on period and home pages.
-- `kind` is a standard field `bf init` declares; add a field it lacks to the existing top-level `fields:` mapping, since a duplicate key or a second `fields:` breaks every command.
+- Sensors print a JSON array or JSON Lines (JSONL) of records (`id`, `title`, optional `text`, `time`, `url`, `links`, `aliases`, `attributes`).
+- Long text fails unless the sensor sets `max_text_bytes`, which cuts UTF-8 cleanly and sets `attributes.partial: true`.
+- Emit [standard vocabulary](https://fmind.github.io/brain-framework/docs/schema/#standard-vocabulary) attributes (`author_refs`, `sender_refs`, `repository_refs`, `status`, `kind`, `updated`) and lowercase `scheme:value` identities; follow [credentials](https://fmind.github.io/brain-framework/docs/sensors/#credentials) and clean temp copies on `SIGTERM` ([limits](https://fmind.github.io/brain-framework/docs/limits/#processes-and-logs)).
+- Test offline with `bf collect docs --input fixture.jsonl`, then within live authority enable and run `bf collect docs --dry-run`, `bf collect docs` and `bf read memories/docs`; re-apply changed mappings offline with `bf build --reproject docs --dry-run` / `bf build --reproject docs`.
 
-A sensor's `fields:` maps each shared field, declared once under the top-level `fields:` of `bf.yaml`, from a JSON pointer into its output (`path`, such as `/attributes/repository_refs`) or a constant (`value`); the sensor prints `attributes`, never `fields`. Emit explicit namespaced identities only (`person:email/address`, `repo:github.com/owner/name`, lowercase as the reviewed examples write them); `links` and `url` take identities or URLs. Keep the upstream modification time in `attributes.updated`, which flags linking notes for review, and mark incomplete text with `attributes.partial`. See [good records](https://fmind.github.io/brain-framework/docs/sensors/#good-records) and the [limits](https://fmind.github.io/brain-framework/docs/limits/).
+## Routines, declarative `when:` and `_bf.py`
 
-Print the [standard vocabulary](https://fmind.github.io/brain-framework/docs/schema/#standard-vocabulary) attribute names, such as `author_refs`, `sender_refs` or `status`, so the default paths of a brain created by `bf init` map them. Build a new sensor on the copy-in [`_sensor.py` kit](https://github.com/fmind/brain-framework/blob/main/examples/sensors/_sensor.py), which reads the window from `BF_START`/`BF_END` and keeps cursors in `BF_STATE_DIR` ([what a program receives](https://fmind.github.io/brain-framework/docs/sensors/#what-a-program-receives)). Give it its provider login in the order [credentials](https://fmind.github.io/brain-framework/docs/sensors/#credentials) prefers. A sensor that copies private files, such as a browser database, removes the copy on SIGTERM: BF sends SIGKILL 5 seconds later ([how a run ends](https://fmind.github.io/brain-framework/docs/limits/#processes-and-logs)).
-
-Test with a fake provider: a complete response and a realistic failure, such as an incomplete page, which must leave saved evidence untouched and provider text out of diagnostics. Check the saved fixture output against the brain's mappings with `bf collect docs --input FILE`, which runs nothing, even while the sensor is disabled. Then, within live authority, set `enabled: true`, preview and collect once:
-
-```bash
-bf collect docs --dry-run
-bf collect docs
-bf read memories/docs
-```
-
-Recurring collection needs its own authority: add `refresh: 3600` (seconds) only once it is granted.
-
-After changing a sensor's `fields:` mappings, `bf build --reproject SENSOR --dry-run` counts the records that would change and `bf build --reproject SENSOR` re-applies the mappings to stored `attributes`; a value never kept there needs a new collection.
-
-## Routines
-
-A routine is a deterministic brain program under `routines:`, such as a review generator, a backup or a Git hook check: it uses no model and makes no decision, and may read the brain through `bf`, since every program receives `BF_BRAIN`. For every record of one source, it runs `bf export --kind items --scope memories/SOURCE`, never reads `memories/` files. Start from the reviewed [routine example](https://github.com/fmind/brain-framework/tree/main/examples/routines) and the [routine contract](https://fmind.github.io/brain-framework/docs/routines/).
+Copy [`examples/routines/_bf.py`](https://github.com/fmind/brain-framework/blob/main/examples/routines/_bf.py) (`window`, `state_dir`, `load_state`/`save_state`, `bf_json`, `bf_pages`, `bf_export`, `visible`/`plain`/`code`, `emit_events`, `emit_action`, `read_envelope`/`emit_receipt`) into `routines/` ([routines](https://fmind.github.io/brain-framework/docs/routines/)). Stream records via `bf export --kind items --scope memories/SOURCE --observed-since 7d` (includes `fields`, multi-value `values`, `attributes` and `text`) instead of reading `memories/` files directly:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/routines/
 routines:
   weekly-review:
     command: [routines/weekly-review.py, "{{brain}}", "{{end}}"]
-    refresh: 604800
+    at: "08:00"
+    days: [mon]
+    timezone: Europe/Paris
+    when: { review: true, actions: true }
     output: action
   check-links:
     command: [routines/check-links.sh]
     hooks: [pre-push]
 ```
 
-- `output: log` (the default) keeps stdout in `logs/NAME.log`. `output: action` turns non-empty OKF Markdown (`type: action`, `status: draft`) into `actions/YYYY-MM-DD_NAME-XXXXXXXX/ACTION.md`, at most one a day; empty output means nothing to review.
-- Without `refresh`, a routine runs only on demand; `hooks` lists the events `bf run --hook EVENT` runs it for. A failing routine writes no action and reports `failed` in `bf status`.
+- Schedule routines by interval (`refresh: 604800`) **or** wall clock (`at`, optional `days` and `timezone` — mutually exclusive with `refresh`).
+- Optional `when:` (`sources: [NAME]`, `review: true`, `actions: true`, `attention: true`) evaluates offline against SQLite/health and skips as `gated` without spawning a subprocess when nothing matched.
+- Run manually via `bf run weekly-review --dry-run`, `bf run weekly-review` or `bf run --hook pre-push -- origin https://example.test/repo.git < /dev/null`. Wire `.git/hooks/pre-push` as `exec bf run --hook pre-push --brain "$HOME/brain" -- "$@"` (prefix with `exec uv run --project "$HOME/brain" --locked bf` in a reviewed pinned brain).
 
-Put `--` before arguments that start with a dash. A direct run reads piped input only with `--stdin`; `--hook` reads what Git pipes, so close stdin with `< /dev/null` when running a hook by hand. `--dry-run` runs the routine but writes no action, returning its Markdown as `text`.
+## Assistants and channels {#assistants-and-channels}
 
-```bash
-bf run weekly-review --dry-run
-bf run weekly-review
-bf run --hook pre-push -- origin https://example.test/repo.git < /dev/null
+Assistants run the owner's harness over `prompts/NAME.md` ([assistant guide](https://fmind.github.io/brain-framework/docs/prompts/), [channels](https://fmind.github.io/brain-framework/docs/channels/)). Keep base `command` read-only and scope extra flags per trigger with `input_args`, `schedule_args` and per-schedule `args` instead of wrapper scripts:
+
+```yaml
+# https://fmind.github.io/brain-framework/docs/prompts/
+assistants:
+  triage:
+    prompt: prompts/triage.md
+    command:
+      [
+        claude,
+        --print,
+        --output-format,
+        json,
+        --json-schema,
+        "{{schema}}",
+        --tools,
+        "Read,Grep,Glob,Bash",
+        --allowedTools,
+        "Bash(bf read *),Bash(bf search *)",
+        --permission-mode,
+        dontAsk,
+      ]
+    input_args: [--allowedTools, "Bash(bf action *)"]
+    reply: { path: /structured_output }
+    propose: true
+    idempotent: [schedule, wake]
+    inputs: [desk]
+    post: desk
+    schedules:
+      inbox:
+        every: 1800
+        when: { sources: [mail] }
+      consolidate:
+        at: "18:00"
+        days: [fri]
+        when: { review: true }
 ```
 
-To run hook routines from Git, make `.git/hooks/pre-push` executable with:
+- **Schedules & `when:`**: each schedule sets `every` **or** `at` (never both). `when:` runs offline first and populates `{{context}}`'s `events` (up to 64 events / 64 KiB); if custom `gate:` ([records-gate.py](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py)) is also set, `gate:` runs only after `when:` matches.
+- **Safe action proposals (`propose: true`)**: keeps the harness read-only while letting `assistant-reply` return up to 3 `actions` (`{slug, markdown}`), validated and saved strictly as `status: draft` `actions/YYYY-MM-DD_SLUG/ACTION.md` notes ([propose, then act](https://fmind.github.io/brain-framework/docs/prompts/#propose-then-act)).
+- **Channels**: implement `send`, `read` or `stream` in `channels/` using `_bf.py` (`read_envelope`, `emit_receipt`); authenticate senders in the adapter and admit an input channel only when every admitted sender may see what the harness reads ([choose inputs](https://fmind.github.io/brain-framework/docs/prompts/#choose-inputs)).
+- **Retries, wakes & recovery**: `retries` (`0..20`, default `3` when `idempotent`, else `0`) governs automatic retries; harness exit `75` (`EX_TEMPFAIL`) retries with backoff without entering `uncertain`. Terminal `failed` (never `uncertain`) `schedule:<name>` jobs self-heal at the next due window, standalone `bf channel send` retries in `bf watch` when `send.idempotent: true`, per-slot wakes (`wake:{assistant}:{slot}`, up to 16, with `reason` in `bf queue`) isolate conversations from schedules, and terminal `failed`/`uncertain` channel inputs post one deterministic `[bf] <assistant> did not finish (<state>); run bf queue to inspect.` notice.
 
-```sh
-#!/bin/sh
-exec bf run --hook pre-push --brain "$HOME/brain" -- "$@"
-```
-
-Git passes the remote and URL as arguments and the pushed refs on stdin (within 10 seconds and 1 MiB); a non-zero exit from any routine blocks the push. In a pinned brain the user created or reviewed, start the line with `exec uv run --project "$HOME/brain" --locked bf` so the routines' own `bf` calls use the pin too.
-
-## Assistants and channels
-
-An assistant runs the owner's harness over `prompts/NAME.md`; its records are model output, not verified facts. Declare it under `assistants:` with `prompt`, argv `command`, an optional structured `reply`, and reviewed tool permissions. No schedule is implicit. Add named `schedules`, their `gate` programs and `wake` bounds only within recurring-work authority; `inputs` and `post` are separate assistant-level fields. Follow the [assistant guide](https://fmind.github.io/brain-framework/docs/prompts/) for the complete configuration.
-
-1. Test with `command: [cat]` and no `reply`, then switch to the approved harness, such as `[claude, --print, --output-format, json, --json-schema, "{{schema}}", --tools, "Read,Grep,Glob,Bash", --allowedTools, "Bash(bf read *),Bash(bf search *)", --permission-mode, dontAsk]` with `reply: { path: /structured_output }`, so a harness error or a missing answer fails the attempt instead of saving an empty one, and run `bf run NAME --stdin` once. `--dry-run` still executes the harness; it skips records and delivery, not tool effects or provider cost.
-1. Put provider code in brain-owned `channels/` scripts. Declare only supported `send`, `read` and `stream` capabilities. A stream owns push/long-poll/fast-poll transport and acknowledges its provider only after BF's durable ACK; a polling stream resumes from the resume frame's `cursor`, since `since` stays its first start. Batch reads are complete bounded windows, never partial pagination. [Channel contracts](https://fmind.github.io/brain-framework/docs/channels/) own envelopes and limits.
-1. Authenticate and admit senders in the adapter, preserve their identity and constrain destinations. Prompt text must not grant extra authority to arbitrary remote input. BF delivers the saved answer; remove model-owned duplicate sends.
-1. A message is answered in its own conversation, so every input channel needs send support. `post: CHANNEL` receives scheduled, wake and manual runs; a silent structured reply (`say: null`) sends nothing. Notifications are send-only channels. Include the `post` channel as an input if later replies must reach the assistant.
-1. Declare a channel as an input only when every sender it admits may read what the harness can read, since answers go back to them ([choose inputs](https://fmind.github.io/brain-framework/docs/prompts/#choose-inputs)). To act only on approval, pair a read-only `scout` (schedules and gate, `idempotent: true`, no inputs, `post`) with a wider `actor` whose only input is that channel ([propose, then act](https://fmind.github.io/brain-framework/docs/prompts/#propose-then-act)).
-1. Move detection rules, such as deduplication and thresholds, into a schedule's `gate`: a stdlib script that reads records through `bf export --kind items --scope memories/SOURCE`, keeps its cursor in `BF_STATE_DIR` and prints `{"events": [...]}`, so the model runs only on events. Start from the [records gate](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py), which reports each new or changed record once. Test it with fake records like any program.
-1. Run one `bf watch` owner for persistent streams; finite `bf update` does not start them. Stop competing legacy consumers before cutover and preserve their unresolved accepted work. Restart watch after subscription/transport changes.
-1. Inspect `bf queue` and the exact job/delivery before retrying uncertain effects. A delivery retry sends the saved answer; a job without a saved answer can repeat model tool effects. Up to 20 attempts with backoff happen by themselves in three cases: a failed gate; a failed or unstarted harness attempt of an assistant declared `idempotent: true` or listing that run kind (such as `idempotent: [schedule, wake]`); and an assistant delivery on a channel declared `idempotent`. A standalone `bf channel send` waits for `bf queue ID --retry`. A killed run or send stays `running` or `sending` until watch, the next `bf update` or `bf queue ID --retry` or `--cancel` records it; while its process lives, those refuse. Preserve the durable local runtime queue, including after configuration removal; it is not the `.bf/` cache. Resolve its work before moving or renaming a brain: a drained queue follows at the next `bf queue`, while unresolved work refuses execution until the brain is restored.
-
-## Verify and hand off
-
-Keep fake-provider tests beside the program and questions with expected refs in `evals/`. Run `bf validate` and `bf eval`, then read the evidence for the original question. A fake-provider test does not prove live access: report configured, tested and collected sources separately. Ongoing refresh follows [operations](operations.md).
+Verify with `bf validate` and `bf eval`, reporting offline checks, fixture runs and live runs separately; ongoing operations live in [operations.md](operations.md).

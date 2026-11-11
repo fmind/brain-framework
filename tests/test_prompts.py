@@ -114,8 +114,9 @@ def test_configuration_validates_assistants() -> None:
 @pytest.mark.parametrize(
     ("schedule", "reason"),
     [
-        ({}, "schedule requires every or at"),
-        ({"lookback": 5}, "schedule requires every or at"),
+        ({}, "schedule requires either every or at, not both"),
+        ({"lookback": 5}, "schedule requires either every or at, not both"),
+        ({"every": 60, "at": "08:00"}, "schedule requires either every or at, not both"),
         ({"at": "09:00", "timezone": "Mars/Base"}, "invalid IANA timezone"),
         ({"every": 60, "days": ["mon", "mon"]}, "days must be distinct"),
     ],
@@ -125,7 +126,7 @@ def test_a_schedule_needs_every_or_at_a_known_timezone_and_distinct_days(schedul
         AssistantSchedule.model_validate(schedule)
 
 
-def test_days_filter_an_interval_schedule_and_every_beside_at_never_repeats_it() -> None:
+def test_days_filter_an_interval_schedule_and_at_moves_to_the_next_day() -> None:
     sunday = datetime(2026, 9, 27, 9, tzinfo=UTC)
     weekdays = AssistantSchedule.model_validate({"every": 3600, "days": ["mon"], "timezone": "Europe/Paris"})
     # An interval due on Sunday moves to Monday's local midnight.
@@ -133,8 +134,7 @@ def test_days_filter_an_interval_schedule_and_every_beside_at_never_repeats_it()
     assert weekdays.next_due(sunday + timedelta(days=1), "2026-09-28T08:00:00.000000Z") == datetime(
         2026, 9, 28, 9, tzinfo=UTC
     )
-    # With at, every is only the overdue grace: the next run is the next day's slot, not an hour later.
-    daily = AssistantSchedule.model_validate({"every": 3600, "at": "08:00", "timezone": "UTC"})
+    daily = AssistantSchedule.model_validate({"at": "08:00", "timezone": "UTC"})
     assert daily.next_due(sunday, "2026-09-27T08:00:05.000000Z") == datetime(2026, 9, 28, 8, tzinfo=UTC)
 
 
@@ -602,12 +602,14 @@ def test_a_wake_is_clamped_runs_once_with_its_reason_and_is_replaced_by_a_newer_
     queue = Queue(configured)
     before = datetime.now(UTC)
     ask(configured, name="checked", output=wake_reply(5, say="Waiting for CI"))
-    wake = queue.progress("wake:checked")
+    wake = queue.progress("wake:checked:wake")
     # Five seconds is below the 600-second minimum.
     assert datetime.fromisoformat(str(wake["due"])) >= before + timedelta(seconds=600)
     assert stored(configured, "checked")[0].attributes["wake"] == {"due": wake["due"], "reason": "Recheck CI"}
-    # The listing names when, never the model's reason.
-    assert queue.report()["wakes"] == [{"assistant": "checked", "due": wake["due"], "job": None}]
+    # The listing names the slot, due time and reason.
+    assert queue.report()["wakes"] == [
+        {"assistant": "checked", "slot": "wake", "due": wake["due"], "reason": "Recheck CI", "job": None}
+    ]
     assert assistants.due_schedules(configured, {"checked"}, before + timedelta(seconds=300)) == []
     # Derived from the stored wake, so a slow ask() cannot push the due time past it.
     later = datetime.fromisoformat(str(wake["due"])) + timedelta(seconds=1)
@@ -627,7 +629,7 @@ def test_a_wake_is_clamped_runs_once_with_its_reason_and_is_replaced_by_a_newer_
     assert '"kind":"wake"' in seen[0]
     assert '"wake":{"reason":"Recheck CI"}' in seen[0]
     # Its own new wake replaces the one it consumed, clamped to the 3600-second maximum.
-    renewed = queue.progress("wake:checked")
+    renewed = queue.progress("wake:checked:wake")
     assert renewed["reason"] == "Again tomorrow"
     assert datetime.fromisoformat(str(renewed["due"])) <= datetime.now(UTC) + timedelta(seconds=3600)
     assert renewed["job"] == ""
@@ -638,16 +640,16 @@ def test_a_wake_needs_bounds_and_a_failed_run_asks_for_none(configured: Store) -
     queue = Queue(configured)
     ask(configured, name="retried", output=wake_reply(900, say="Noted"))
     # Without wake bounds, the request stays in the record's output only.
-    assert queue.progress("wake:retried") == {}
+    assert queue.progress("wake:retried:wake") == {}
     with pytest.raises(Error):
         ask(configured, name="checked", output=b'{"structured_output":{"say":"x","wake":{"in":900}}}')
-    assert queue.progress("wake:checked") == {}
+    assert queue.progress("wake:checked:wake") == {}
 
 
 def test_harness_learns_it_runs_for_a_wake(configured: Store) -> None:
     configured.write("bf.yaml", CHECKED)
     queue = Queue(configured)
-    queue.set_progress("wake:checked", {"due": START, "reason": "Recheck", "set": START, "job": ""})
+    queue.set_progress("wake:checked:wake", {"due": START, "reason": "Recheck", "set": START, "job": ""})
     [key], _ = assistants.schedule(configured, {"checked"}, NOW)
     told: list[str] = []
 
@@ -660,7 +662,7 @@ def test_harness_learns_it_runs_for_a_wake(configured: Store) -> None:
     assert told == ["wake"]
     # A silent wake run completes, records nothing and clears the wake it took.
     assert queue.get(key)["state"] == "complete"
-    assert queue.progress("wake:checked") == {}
+    assert queue.progress("wake:checked:wake") == {}
     assert stored(configured, "checked") == []
 
 
@@ -795,26 +797,26 @@ def test_a_job_cancelled_while_its_gate_runs_stays_cancelled(configured: Store, 
 def test_a_wake_replaced_while_it_was_read_is_not_queued(configured: Store) -> None:
     configured.write("bf.yaml", CHECKED)
     queue = Queue(configured)
-    queue.set_progress("wake:checked", {"due": START, "reason": "Old", "set": START, "job": ""})
-    stale = queue.progress("wake:checked")
+    queue.set_progress("wake:checked:wake", {"due": START, "reason": "Old", "set": START, "job": ""})
+    stale = queue.progress("wake:checked:wake")
     # A run that finished between the read and the enqueue asked for a later wake.
     newer: dict[str, JsonValue] = {"due": END, "reason": "Newer", "set": START, "job": ""}
-    queue.set_progress("wake:checked", newer)
+    queue.set_progress("wake:checked:wake", newer)
     work = assistants.prepare(configured, "checked", "wake", START, END, slot="wake", reason="Old")
     assert not queue.enqueue_wake(work, stale)
-    assert queue.progress("wake:checked") == newer
+    assert queue.progress("wake:checked:wake") == newer
     assert queue.report()["jobs"] == []
     assert queue.enqueue_wake(work, newer)
-    assert queue.progress("wake:checked")["job"] == work.id
+    assert queue.progress("wake:checked:wake")["job"] == work.id
 
 
 def test_cancelling_a_wake_run_drops_its_wake(configured: Store) -> None:
     configured.write("bf.yaml", CHECKED)
     queue = Queue(configured)
-    queue.set_progress("wake:checked", {"due": START, "reason": "Recheck", "set": START, "job": ""})
+    queue.set_progress("wake:checked:wake", {"due": START, "reason": "Recheck", "set": START, "job": ""})
     [key], _ = assistants.schedule(configured, {"checked"}, NOW)
     queue.retry(key, cancel=True)
-    assert queue.progress("wake:checked") == {}
+    assert queue.progress("wake:checked:wake") == {}
     assert queue.report()["wakes"] == []
 
 
@@ -822,5 +824,276 @@ def test_bf_schema_prints_the_assistant_reply_schema() -> None:
     result = CliRunner().invoke(app, ["schema", "--kind", "assistant-reply"])
     assert result.exit_code == 0
     schema = json.loads(result.stdout)
-    assert schema["required"] == ["say", "wake"]
+    assert schema["required"] == ["say", "wake", "actions"]
     assert schema["additionalProperties"] is False
+
+
+def test_when_gates_trigger_scoped_args_tempfail_retries_wakes_and_proposed_actions(brain: Store) -> None:
+    from bf.models import When
+    from conftest import records_file
+
+    with pytest.raises(ValidationError, match="when requires at least one active condition"):
+        When()
+
+    brain.write(
+        "bf.yaml",
+        b"""version: 8
+name: fixture
+sensors:
+  feed:
+    command: [echo]
+assistants:
+  triage:
+    prompt: prompts/triage.md
+    command: [agent]
+    input_args: [--mode=chat, "{{schema}}"]
+    schedule_args: [--mode=batch]
+    reply: {path: ""}
+    wake: {min: 60, max: 3600}
+    propose: true
+    retries: 2
+    schedules:
+      morning:
+        at: "08:00"
+        timezone: UTC
+        args: [--slot=morning]
+        when:
+          sources: [feed]
+  plain:
+    prompt: prompts/triage.md
+    command: [agent]
+    reply: {path: ""}
+""",
+    )
+    brain.write("prompts/triage.md", b"Window {{start}}..{{end}}\nContext: {{context}}\n")
+
+    # Trigger-scoped extra arguments apply to input/schedule runs and their respective wakes.
+    in_work = assistants.prepare(brain, "triage", "input", START, END, slot="input:chat:t1", text="hi")
+    in_argv, _ = assistants.expanded(brain, in_work)
+    assert in_argv[:2] == ["agent", "--mode=chat"]
+    assert '"say"' in in_argv[2]
+    in_wake = assistants.prepare(brain, "triage", "wake", START, END, slot="input:chat:t1", reason="recheck")
+    assert assistants.expanded(brain, in_wake)[0][1] == "--mode=chat"
+    sched_work = assistants.prepare(brain, "triage", "schedule", START, END, slot="schedule:morning")
+    assert assistants.expanded(brain, sched_work)[0] == ["agent", "--mode=batch", "--slot=morning"]
+
+    # Declarative `when:` skips as `gated` when unmatched, then populates `{{events}}` when matched.
+    preview = assistants.cycle(brain, {"triage"}, at=NOW, dry_run=True)
+    assert preview[0]["status"] == "gated"
+    keys_none, outcomes = assistants.schedule(brain, {"triage"}, NOW)
+    assert keys_none == []
+    assert outcomes[0]["status"] == "gated"
+
+    records_file(
+        brain,
+        "feed",
+        [Record(id="sig-1", title="Alert item", attributes={"observed": "2026-09-26T07:00:00Z"})],
+    )
+    day2 = NOW + timedelta(days=1)
+    [key], _ = assistants.schedule(brain, {"triage"}, day2)
+    queue = Queue(brain)
+    saved_events = cast("list[dict]", queue.progress(f"gate:{key}")["events"])
+    assert saved_events[0]["key"] == "source:feed:sig-1"
+
+    # Harness exit code 75 (EX_TEMPFAIL) retries with backoff without entering `uncertain`.
+    def tempfail_runner(*_args: object) -> bytes:
+        raise collect.ExitError(75, "provider rate limited")
+
+    with pytest.raises(Error, match="provider rate limited"):
+        assistants.execute(brain, key, runner=tempfail_runner)
+    assert queue.get(key)["state"] == "pending"
+    assert queue.progress(f"retry:{key}")["attempts"] == 1
+    queue.set_progress(f"retry:{key}", {"attempts": 1, "due": START})
+
+    # `propose: true` validates and writes up to 3 draft ACTION.md files, suffixing collisions.
+    valid_action = "---\ntype: action\nstatus: draft\n---\n\n# Follow up\n"
+    second_action = "---\ntype: action\nstatus: draft\n---\n\n# Second follow up\n"
+    reply_payload = json.dumps(
+        {
+            "say": "## Triage complete\n\nQueued follow-ups.",
+            "wake": {"in": 120, "reason": "Verify follow-up"},
+            "actions": [
+                {"slug": "follow-up", "markdown": valid_action},
+                {"slug": "follow-up", "markdown": second_action},
+            ],
+        }
+    ).encode()
+    done = assistants.execute(brain, key, runner=lambda *_: reply_payload)
+    written_actions = cast("list[str]", done["actions"])
+    assert len(written_actions) == 2
+    assert written_actions[0] != written_actions[1]
+    assert brain.read(written_actions[0]).decode() == valid_action
+    assert assistants.execute(brain, key, runner=lambda *_: b"")["actions"] == written_actions
+    # Re-running _write_proposed_actions with identical bytes reuses existing files idempotently.
+    reused = assistants._write_proposed_actions(  # noqa: SLF001
+        brain,
+        queue.work(key),
+        [
+            assistants.ProposedAction(slug="follow-up", markdown=valid_action),
+            assistants.ProposedAction(slug="follow-up", markdown=second_action),
+        ],
+    )
+    assert reused == written_actions
+
+    # Per-slot wake was recorded with `reason`, and >16 active wakes per assistant evicts the oldest.
+    assert queue.progress("wake:triage:schedule:morning")["reason"] == "Verify follow-up"
+    for idx in range(18):
+        w_work = assistants.prepare(
+            brain, "triage", "input", START, f"2026-09-25T08:{idx:02d}:00.000000Z", slot=f"input:chat:c{idx}", text="hi"
+        )
+        queue.enqueue(w_work)
+        assistants.execute(
+            brain,
+            w_work.id,
+            runner=lambda *_: json.dumps({"say": "Ok", "wake": {"in": 300, "reason": "Later"}}).encode(),
+        )
+    active_wakes = [item for item in cast("list[dict]", queue.report()["wakes"]) if item["assistant"] == "triage"]
+    assert len(active_wakes) == 16
+
+    # Empty `actions: []` matches `bf schema --kind assistant-reply` even when `propose: false`.
+    plain_empty = assistants.prepare(brain, "plain", "manual", START, END)
+    queue.enqueue(plain_empty)
+    empty_res = assistants.execute(
+        brain,
+        plain_empty.id,
+        runner=lambda *_: json.dumps({"say": "Nothing to propose.", "wake": None, "actions": []}).encode(),
+    )
+    assert empty_res["assistant"] == "plain"
+    assert queue.get(plain_empty.id)["state"] == "complete"
+
+    # Rejections: `propose: false` with non-empty actions, non-draft status, or broken relative links never write an action.
+    plain_work = assistants.prepare(brain, "plain", "manual", START, END)
+    queue.enqueue(plain_work)
+    with pytest.raises(Error, match="propose is false"):
+        assistants.execute(
+            brain,
+            plain_work.id,
+            runner=lambda *_: json.dumps(
+                {"say": "Hi", "wake": None, "actions": [{"slug": "x", "markdown": valid_action}]}
+            ).encode(),
+        )
+    bad_status = assistants.prepare(brain, "triage", "manual", START, END)
+    queue.enqueue(bad_status)
+    with pytest.raises(Error, match="proposed action requires status: draft"):
+        assistants.execute(
+            brain,
+            bad_status.id,
+            runner=lambda *_: json.dumps(
+                {
+                    "say": "Hi",
+                    "wake": None,
+                    "actions": [{"slug": "non-draft", "markdown": "---\ntype: action\nstatus: stable\n---\n\n# Bad\n"}],
+                }
+            ).encode(),
+        )
+    bad_link = assistants.prepare(brain, "triage", "manual", START, END)
+    queue.enqueue(bad_link)
+    with pytest.raises(Error, match="broken link"):
+        assistants.execute(
+            brain,
+            bad_link.id,
+            runner=lambda *_: json.dumps(
+                {
+                    "say": "Hi",
+                    "wake": None,
+                    "actions": [
+                        {
+                            "slug": "broken",
+                            "markdown": "---\ntype: action\nstatus: draft\n---\n\n# Broken\n\nSee [missing](../../projects/nope.md).\n",
+                        }
+                    ],
+                }
+            ).encode(),
+        )
+
+
+def test_when_cursor_defers_until_finish_gated_schedules_supersede_failures_and_scoped_notices_deliver(
+    brain: Store,
+) -> None:
+    from conftest import records_file
+
+    brain.write("prompts/assistant.md", b"Prompt {{context}}\n{{input}}\n")
+    brain.write(
+        "bf.yaml",
+        b"version: 8\nname: fixture\n"
+        b"sensors:\n  feed:\n    command: [feed-cli]\n"
+        b"channels:\n  chat:\n    stream: {command: [stream-chat]}\n    send: {command: [send-chat]}\n"
+        b"assistants:\n"
+        b"  watcher:\n    prompt: prompts/assistant.md\n    command: [harness]\n    idempotent: true\n    retries: 0\n"
+        b"    schedules:\n      digest:\n        every: 60\n        when: {sources: [feed]}\n"
+        b"  responder:\n    prompt: prompts/assistant.md\n    command: [harness]\n"
+        b"    inputs: [{channel: {name: chat, mode: stream}}]\n"
+        b"  strict:\n    prompt: prompts/assistant.md\n    command: [harness]\n    idempotent: true\n    retries: 0\n"
+        b"    inputs: [{channel: {name: chat, mode: stream}}]\n",
+    )
+    t1 = datetime.now(UTC)
+    obs1 = (t1 - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    records_file(
+        brain,
+        "feed",
+        [Record(id="f1", title="First", attributes={"observed": obs1})],
+    )
+    queue = Queue(brain)
+
+    # First scheduled run matches `feed:f1`, fails terminally (`retries: 0`), and must NOT advance `when_cursor`.
+    failed_tick = assistants.cycle(brain, {"watcher"}, at=t1, runner=lambda *_: (_ for _ in ()).throw(Error("boom")))
+    assert failed_tick[0]["status"] == "failed"
+    failed_job_id = str(failed_tick[0]["job"])
+    assert queue.progress("when:watcher:schedule:digest") == {}
+    assert queue.get(failed_job_id)["state"] == "failed"
+
+    # Next due window re-evaluates `when:` from the unadvanced cursor, supersedes the failed job, and advances on finish!
+    t2 = t1 + timedelta(seconds=65)
+    ok_tick = assistants.cycle(brain, {"watcher"}, at=t2, runner=lambda *_: b"Digest ready.")
+    assert ok_tick[0]["status"] == "ran"
+    assert queue.get(failed_job_id)["state"] == "cancelled"
+    assert bool(queue.progress("when:watcher:schedule:digest").get("cursor"))
+
+    # If a later scheduled run fails and the following window has NO new signal, `advance_gated_schedule` still supersedes it.
+    obs2 = (t2 + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+    records_file(
+        brain,
+        "feed",
+        [Record(id="f2", title="Second", attributes={"observed": obs2})],
+    )
+    t3 = t2 + timedelta(seconds=65)
+    second_fail = assistants.cycle(brain, {"watcher"}, at=t3, runner=lambda *_: (_ for _ in ()).throw(Error("boom")))
+    second_fail_id = str(second_fail[0]["job"])
+    assert queue.get(second_fail_id)["state"] == "failed"
+    brain.delete(records.path("feed", "f2"))
+    t4 = t3 + timedelta(seconds=65)
+    gated_tick = assistants.cycle(brain, {"watcher"}, at=t4, runner=lambda *_: b"unused")
+    assert gated_tick[0]["status"] == "gated"
+    assert queue.get(second_fail_id)["state"] == "cancelled"
+
+    # EX_TEMPFAIL (75) retries non-idempotent input jobs by default (`responder`), while explicit `retries: 0` (`strict`) stops.
+    msg = Message(id="m1", conversation="conv-1", sender="alice", time=START, text="Help")
+    assistants.accept(brain, "chat", [msg], {"responder", "strict"})
+    resp_id = queue.next(True, {"responder"})
+    strict_id = queue.next(True, {"strict"})
+    assert resp_id
+    assert strict_id
+
+    def tempfail_or_send(argv: list[str], *_: object) -> bytes:
+        if argv[0] == "send-chat":
+            return b'{"id":"rcpt","conversation":"conv-1"}'
+        raise collect.ExitError(75, "rate limited")
+
+    assistants.cycle(brain, {"responder"}, at=t4, runner=tempfail_or_send)
+    assert queue.get(resp_id)["state"] == "pending"
+    assert queue.progress(f"retry:{resp_id}")["attempts"] == 1
+
+    # Scoped cycle on `strict` fails terminally, enqueues `notice:...` tied to `strict_id`, and delivers ONLY `strict`'s notice!
+    strict_cycle = assistants.cycle(brain, {"strict"}, at=t4, runner=tempfail_or_send)
+    assert strict_cycle[0]["status"] == "failed"
+    outcomes_first = queue.outcomes(strict_id)
+    assert len(outcomes_first) == 1
+    assert outcomes_first[0]["state"] == "delivered"
+    assert str(outcomes_first[0]["id"]).startswith("notice:")
+
+    # Explicit `--retry` that fails terminally a second time emits a second fresh notice delivery on the thread!
+    queue.retry(strict_id)
+    assistants.cycle(brain, {"strict"}, at=t4, runner=tempfail_or_send)
+    outcomes_second = queue.outcomes(strict_id)
+    assert len(outcomes_second) == 2
+    assert all(item["state"] == "delivered" for item in outcomes_second)

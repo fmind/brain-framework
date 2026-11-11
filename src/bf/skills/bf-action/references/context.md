@@ -1,21 +1,21 @@
 # Working context
 
-Keep `## Context {#context}` in `ACTION.md` within **300 words, six evidence refs and 4 KiB of UTF-8**, and `## Resume {#resume}` within 100 words: the last verified state, the blocker and the next step. These are writing budgets, not targets.
+Keep `## Context {#context}` within **300 words, six evidence refs and 4 KiB of UTF-8**, and `## Resume {#resume}` within **100 words** (last verified state, blocker and exact next step).
 
-Context holds only the requested outcome, binding constraints, the current decision, material unknowns and the refs the next step needs. Put long evidence and artifacts in `inputs/` and `outputs/`; never paste transcripts or the project's history. For example:
+Context holds only the requested outcome, constraints, active project decision, material unknowns and refs needed next; put artifacts in `inputs/` and `outputs/`, never transcripts:
 
 ```markdown
 ## Context {#context}
 
-Draft a product page that explains the service before asking visitors to sign up. Follow the [project decision](../../projects/new-website.md#decision). The draft needs a clear audience, benefit and example; pricing is still undecided. Save the draft in outputs/product-page.md for review.
+Draft a product page explaining the service before signup, following [project decision](../../projects/new-website.md#decision). Include audience, benefit and example; pricing remains open. Save draft to outputs/product-page.md.
 
 ## Resume {#resume}
 
-The objective and project decision are recorded. No draft exists yet. Next: read the decision and outline the page; leave pricing as an explicit open question.
+Objective and decision recorded; no draft yet. Next: read the decision and outline the page, keeping pricing as an open question.
 ```
 
-With several brains, keep refs brain-qualified (`uri`). Name external evidence by ref and say why it matters instead of copying it; incomplete or outdated evidence belongs in the unknowns. Refresh both sections in place only when the outcome, constraints, evidence or next step change. The [handoff checker](handoff.md) measures them; count the refs and judge readiness yourself.
+Use brain-qualified `uri` refs when multiple brains are selected, and refresh both sections in place when state changes ([handoff](handoff.md)).
 
-## Read on resume
+## Read on resume {#read-on-resume}
 
-After Context, Resume and the owning project's current decision, open only the evidence the next step depends on, following at most one layer of links. Stop after six supporting reads, and name a remaining consequential gap before widening the scope.
+After `#context`, `#resume` and the owning project's `#decision`, read only the refs the next step depends on (one link hop, at most six supporting reads) and flag any remaining gap before widening scope.

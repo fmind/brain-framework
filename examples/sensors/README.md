@@ -14,11 +14,13 @@ Standalone sensors for common providers. Copy the ones you need into a brain's `
 | `gmail-headers.py`                               | `START END [--query=SEARCH]`                                          | Gmail senders, recipients, subjects and dates with thread links; never message bodies. |
 | [Four-tool demo](../context-hub/sensors/demo.py) | `TOOL END`, where `TOOL` is `workspace`, `jira`, `github` or `gcloud` | Fictional adapter records for the four-tool walkthrough; no provider access.           |
 
-Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). For other sources, copy the selected script from the release tag matching `bf --version` and make it executable, since the configuration below runs each script as a command and a download does not keep the executable bit:
+Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). Each example imports [`_sensor.py`](_sensor.py) from the same folder. Copy `_sensor.py` and the selected script from the release tag matching `bf --version` and make the script executable, since the configuration below runs each script as a command and a download does not keep the executable bit:
 
 ```bash
 mkdir -p sensors
-curl -fsSLo sensors/git-history.py "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors/git-history.py"
+for name in _sensor.py git-history.py; do
+  curl -fsSLo "sensors/$name" "https://raw.githubusercontent.com/fmind/brain-framework/v$(bf --version)/examples/sensors/$name"
+done
 chmod +x sensors/git-history.py
 ```
 
@@ -133,7 +135,7 @@ The limits below also bound the time of each call to a provider or converter, wh
 
 - Selects events overlapping the requested interval: [Google's `timeMin` bounds event end, while `timeMax` bounds event start](https://developers.google.com/workspace/calendar/api/v3/reference/events/list). It is not a modification-time feed: reconcile past windows to revisit changed events.
 - Keeps cancellations, titled `Cancelled: SUMMARY`, so they overwrite records collected earlier.
-- Masks common credential shapes in the description and location, such as a pasted access token or `password:` pair, with an inline copy of the kit's [`redact`](#write-a-sensor-with-the-kit), so the script stays one file. It is best effort: keep the brain private.
+- Masks common credential shapes in the description and location, such as a pasted access token or `password:` pair, with the kit's [`redact`](#write-a-sensor-with-the-kit). It is best effort: keep the brain private.
 - An invitee entry means the person was listed, not that they attended. Participant emails become lowercase `person:email/` links.
 - Keeps at most BF's 1,000 links per event: organizer, source, attachment and agenda links first, then invitees in email order. A cut sets `attributes.participants_truncated`; `attributes.participants` keeps every address.
 - Limits: 10,000 events and 20 pages; 60 seconds per `gws` call.
@@ -239,13 +241,13 @@ Preview it with `bf collect github-issues --since 7d --dry-run`. Expected result
 
 [`_sensor.py`](_sensor.py) is a standard-library helper file to copy beside your own sensors, not a package to install: `import _sensor` works from any script in the same folder. Read it once; it then belongs to your brain like the sensors that import it. It provides:
 
-- `window()` and `state_dir()`: the run's `[START, END)` from `BF_START` and `BF_END`, and the private, machine-local folder in `BF_STATE_DIR` for cursors. That folder can disappear: treat an empty one as a first run.
-- `run(argv, timeout=, max_bytes=)` and `fetch(url, timeout=, max_bytes=)` with `fetch_json`: a bounded provider CLI started from `/` without a shell, and a bounded HTTPS GET that refuses redirects to another host or to plain HTTP. Neither echoes provider output.
+- `window()`, `state_dir()`, `load_state(name, default)` and `save_state(name, data)`: the run's `[START, END)` from `BF_START` and `BF_END`, and atomic JSON cursor files in the private, machine-local folder `BF_STATE_DIR` names. That folder can disappear: treat an empty one as a first run.
+- `run(argv, timeout=, max_bytes=)` and `fetch(url, timeout=, max_bytes=)` with `fetch_json`: a bounded provider CLI started from `/` without a shell, and a bounded HTTPS GET that refuses redirects to another host or to plain HTTP. Neither echoes provider output; provider failures raise `ProviderError` (carrying `.status` on nonzero exit) and validation failures raise `InvalidError`.
 - `secret(path)`: a credential read from a private regular file you own that only you can read, such as with mode `600`, outside the brain and at most 64 KiB, with one trailing newline removed; errors never quote its content ([credentials](../../docs/docs/sensors.md#credentials)).
-- `person(email)`, `account(host, login)` and `repo(host, owner, name)`: lowercase, percent-encoded identities, or `""` when BF would reject one.
-- `record(id, title, ...)` and `emit(records)`: records normalized to BF's [limits](../../docs/docs/limits.md#size-bounds), such as one-line titles, valid URLs, U+FFFD for a lone UTF-16 surrogate outside the id and at most 1,000 links or values per `*_refs` list, printed as one JSON array; duplicate ids fail. A sensor that tolerates a failed feed or account counts it first and calls `emit(records, missed=1, of=3)`, which [reports what it missed](../../docs/docs/sensors.md#report-partial-coverage); name the missed parts on stderr.
+- `person(email)`, `account(host, login)`, `repo(host, owner, name)` and `git_remote_identity(url)`: lowercase, percent-encoded identities (including credential-free HTTPS and `git@` SSH remotes), or `""` when BF would reject one.
+- `line(value, fallback)`, `reference(value)`, `record(id, title, ...)` and `emit(records)`: records normalized to BF's [limits](../../docs/docs/limits.md#size-bounds), such as one-line titles, valid URLs, U+FFFD for a lone UTF-16 surrogate outside the id and at most 1,000 links or values per `*_refs` list, printed as one JSON array; duplicate ids fail. A sensor that tolerates a failed feed or account counts it first and calls `emit(records, missed=1, of=3)`, which [reports what it missed](../../docs/docs/sensors.md#report-partial-coverage); name the missed parts on stderr.
 - `redact(text)`: a best-effort mask for common credential shapes, such as bearer tokens, GitHub and AWS keys, private key blocks and `password=` pairs.
-- `main(collect, failure)` and `fail(message)`: exit 1 with nothing on stdout and one content-free stderr line, so BF keeps the saved records.
+- `cli(fn, prefix, hint)`, `main(collect, failure)` and `fail(message)`: exit 1 with nothing on stdout and one content-free stderr line on `ProviderError`, `InvalidError`, `OSError`, `UnicodeError` or unexpected failures, so BF keeps the saved records.
 
 Name identity lists after [the standard vocabulary](../../docs/docs/schema.md#standard-vocabulary), such as `author_refs` or `recipient_refs`, so sensors written by different people map to the same fields. [`github-issues.py`](github-issues.py) shows the whole pattern in about 130 lines.
 

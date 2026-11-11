@@ -1321,7 +1321,7 @@ def test_line_list_file_expansion_and_oversized_text_truncation(configured: Stor
         "bf.yaml",
         b"version: 8\nname: fixture\nsensors:\n  scoped:\n"
         b'    command: [echo, "{{lines:settings/repos.txt}}"]\n'
-        b"    truncate_text: true\n    max_text_bytes: 10\n",
+        b"    max_text_bytes: 10\n",
     )
     seen: list[list[str]] = []
 
@@ -1341,22 +1341,24 @@ def test_line_list_file_expansion_and_oversized_text_truncation(configured: Stor
     # "héllo world" is 12 UTF-8 bytes; 10 bytes cuts cleanly before the end and marks the text partial.
     assert stored_record[1].text == "héllo wor"
     observed = timestamp(NOW.isoformat())
-    assert stored_record[1].attributes == {"keep": 1, "partial": True, "truncated": True, "observed": observed}
+    assert stored_record[1].attributes == {"keep": 1, "partial": True, "observed": observed}
     bare = records.find(configured, "scoped", "r2")
     assert bare is not None
     assert bare[1].text == "alpha beta"
-    assert bare[1].attributes == {"partial": True, "truncated": True, "observed": observed}
+    assert bare[1].attributes == {"partial": True, "observed": observed}
     # Retrieval reports the cut text as incomplete evidence.
     found = CliRunner().invoke(app, ["search", "alpha", "--scope", "memories/scoped", "--brain", "fixture"])
     assert found.exit_code == 0, found.output
     assert [item.get("partial") for item in json.loads(found.stdout)["items"]] == [True]
     with pytest.raises(Exception, match="lines placeholder"):
         Sensor(command=["echo", "{{lines:../escape.txt}}"])
+    with pytest.raises(Exception, match="Extra inputs are not permitted"):
+        Sensor.model_validate({"command": ["echo"], "truncate_text": True})
 
 
 def test_oversized_text_fails_without_truncation_opt_in(configured: Store) -> None:
     oversized = "x" * ((4 << 20) + 1)
-    with pytest.raises(Error, match=r"nothing was written"):
+    with pytest.raises(Error, match=r"set max_text_bytes on this sensor to cut longer text; nothing was written"):
         collect(
             configured,
             "sample",
@@ -1370,7 +1372,7 @@ def test_oversized_text_fails_without_truncation_opt_in(configured: Store) -> No
 
 def test_truncation_leaves_invalid_unicode_text_to_record_validation(configured: Store) -> None:
     configured.write(
-        "bf.yaml", b"version: 8\nname: fixture\nsensors:\n  sample:\n    command: [echo]\n    truncate_text: true\n"
+        "bf.yaml", b"version: 8\nname: fixture\nsensors:\n  sample:\n    command: [echo]\n    max_text_bytes: 10\n"
     )
     # A lone surrogate cannot be measured in UTF-8: the run names the field, not inaccessible files.
     with pytest.raises(Error, match=r"0\.text: .*unicode.*; nothing was written"):
@@ -1576,3 +1578,71 @@ def test_run_history_of_an_earlier_release_keeps_loading(configured: Store) -> N
     collect(configured, "sample", start=START, end=END, runner=lambda *_: envelope(1, 2), clock=lambda: NOW)
     assert state(configured)["sample"]["incomplete_runs"] == 1
     assert source_health(configured, now=NOW)["sample"]["degraded"] == {"runs": 1, "missed": 1, "of": 2}
+
+
+def test_collect_accepts_jsonl_single_object_empty_and_reports_bad_jsonl_lines(
+    configured: Store, tmp_path: Path
+) -> None:
+    # Multi-line JSONL with blank lines stores every record.
+    jsonl = b'{"id": "one", "title": "First"}\n\n{"id": "two", "title": "Second"}\n'
+    result = collect(configured, "sample", start=START, end=END, runner=lambda *_: jsonl, clock=lambda: NOW)
+    assert (result["records"], result["added"]) == (2, 2)
+
+    # Single-line JSONL (one JSON record object) and empty JSONL both succeed cleanly.
+    single = collect(
+        configured,
+        "sample",
+        start=START,
+        end=END,
+        runner=lambda *_: b'{"id": "three", "title": "Third"}\n',
+        clock=lambda: NOW,
+    )
+    assert (single["records"], single["added"]) == (1, 1)
+    empty = collect(configured, "sample", start=START, end=END, runner=lambda *_: b"  \n", clock=lambda: NOW)
+    assert empty["records"] == 0
+
+    # `bf collect --input` also accepts JSONL files.
+    fixture = tmp_path / "records.jsonl"
+    fixture.write_bytes(jsonl)
+    checked = CliRunner().invoke(app, ["collect", "sample", "--input", str(fixture), "--brain", str(configured.root)])
+    assert checked.exit_code == 0, checked.output
+    assert json.loads(checked.stdout)["records"] == 2
+
+    # Malformed or non-object JSONL lines name the 1-based non-empty line number.
+    with pytest.raises(Error, match="line 2:"):
+        collect(configured, "sample", start=START, end=END, runner=lambda *_: b'{"id":"a","title":"A"}\n{broken\n')
+    with pytest.raises(Error, match="line 2: collector JSONL line must be a JSON object"):
+        collect(configured, "sample", start=START, end=END, runner=lambda *_: b'{"id":"a","title":"A"}\n[1, 2]\n')
+
+    # validate_action_markdown enforces brain validation policies and OKF type: action.
+    from bf.models import ValidateSettings
+
+    policy_cfg = collect_module.load(configured).model_copy(
+        update={
+            "validation": ValidateSettings(
+                required_status=["draft"], max_stale_days=10, forbid_patterns=["TODO-SECRET"]
+            )
+        }
+    )
+    with pytest.raises(Error, match="requires type: action"):
+        collect_module.validate_action_markdown(
+            configured, policy_cfg, "actions/2026-09-02_x/ACTION.md", b"---\ntype: project\nstatus: draft\n---\n# X\n"
+        )
+    with pytest.raises(Error, match="frontmatter status must be explicitly set"):
+        collect_module.validate_action_markdown(
+            configured, policy_cfg, "actions/2026-09-02_x/ACTION.md", b"---\ntype: action\nstatus: stable\n---\n# X\n"
+        )
+    with pytest.raises(Error, match="stale_after exceeds max_stale_days"):
+        collect_module.validate_action_markdown(
+            configured,
+            policy_cfg,
+            "actions/2026-09-02_x/ACTION.md",
+            b"---\ntype: action\nstatus: draft\nstale_after: 2099-01-01T00:00:00Z\n---\n# X\n",
+        )
+    with pytest.raises(Error, match="matches forbidden pattern"):
+        collect_module.validate_action_markdown(
+            configured,
+            policy_cfg,
+            "actions/2026-09-02_x/ACTION.md",
+            b"---\ntype: action\nstatus: draft\n---\n# X\n\nTODO-SECRET\n",
+        )

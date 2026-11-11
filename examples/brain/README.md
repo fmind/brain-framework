@@ -154,7 +154,7 @@ bf validate --brain "$bf_team"
 bf read concepts/selected-evidence.md --brain "$bf_team"
 ```
 
-The integration test exercises this isolated destination with retrieval cases. It checks this prepared fixture, not automatic redaction of arbitrary notes. For real transfers, use the [sharing guide](../../src/bf/skills/bf-use/references/share.md); review the complete candidate for its audience before an authorized write or publication.
+The integration test exercises this isolated destination with retrieval cases. It checks this prepared fixture, not automatic redaction of arbitrary notes. For real transfers, use the [sharing guide](../../src/bf/skills/bf-use/references/evidence.md#share-across-audiences); review the complete candidate for its audience before an authorized write or publication.
 
 ## Try a brain-local skill
 

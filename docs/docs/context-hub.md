@@ -5,13 +5,9 @@ description: Run a fictional four-tool example that collects evidence, records a
 
 # Four-tool walkthrough
 
-Ask one question across Google Workspace, Jira, GitHub and Gcloud: **“Can the New website launch, what remains, and why did we choose one page?”** You collect each tool's evidence into one brain and record the answer in the project. Then BF flags that answer when Jira changes, and an assistant hears of the change once.
-
-The four records are fictional fixtures, and URLs under `example.test` are illustrative. No provider account, credential or model is needed; only the `git clone` below uses the network. [Getting started](getting-started.md) and its [collection exercise](getting-started.md#collect-your-first-source) introduce the sensors, field mappings and identities combined here.
+Answer one question across Google Workspace, Jira, GitHub and Gcloud fixtures: **"Can the New website launch, what remains, and why did we choose one page?"** Only the initial `git clone` uses the network; no credentials or LLM are required.
 
 ## Get the example
-
-You need Linux or macOS, BF, Git and `python3`. Copy the example from the release matching your installation into a disposable folder:
 
 ```bash
 context_demo=$(mktemp -d)
@@ -20,9 +16,7 @@ cp -R "$context_demo/source/examples/context-hub" "$context_demo/brain"
 cd "$context_demo/brain"
 ```
 
-The brain holds a minimal project note, `bf.yaml` and a small sensor, `sensors/demo.py`. The sensor prints `fixtures/TOOL.json` as if each tool had returned it. Review `bf.yaml` and `sensors/demo.py` before running anything.
-
-From a source checkout, copy `examples/context-hub` instead, and later `examples/routines/records-gate.py` from the checkout. Put the checkout's `.venv/bin` first on PATH, so each `bf` command, and the gate's own `bf` calls, run the checkout.
+The copy contains `projects/new-website.md`, `bf.yaml` and `sensors/demo.py` (which emits `fixtures/TOOL.json`). Review `bf.yaml` and `sensors/demo.py` before running.
 
 ## Collect four tools
 
@@ -34,7 +28,7 @@ bf collect gcloud
 bf read project:new-website
 ```
 
-Each collection reports `"records":1`. `project:new-website` is the project note's alias, so the read opens the note. Its `backlinks` group the four records under the shared `project` relation, each with its `fields` side by side (trimmed here to refs, kinds and statuses):
+Each collection reports `"records":1`. Reading `project:new-website` opens the project note and groups all four records under the `project` backlink relation:
 
 ```json
 {
@@ -49,7 +43,7 @@ Each collection reports `"records":1`. `project:new-website` is the project note
 }
 ```
 
-The previews already answer most of the question. Read the blocking record and check the brain:
+Read the blocking issue and verify the brain:
 
 ```bash
 bf read jira:review
@@ -57,20 +51,18 @@ bf validate
 bf eval
 ```
 
-The Jira review says launch is blocked until the keyboard navigation check passes. Validation reports `"valid":true`, and the example's retrieval cases report `"score":"10/10"`. These reads reuse the saved records; no sensor runs again. The evidence supports a precise answer: **the implementation is merged and its preview is healthy, but accessibility review still blocks launch.** A healthy deployment alone cannot establish launch readiness.
+`bf read jira:review` shows keyboard navigation still blocks launch; validation reports `"valid":true` and evaluation `"score":"10/10"`.
 
 ## How the four tools share one project
 
-Each tool names its project and state differently. `bf.yaml` maps them into the same shared fields:
+Each tool names its project and status differently, and `bf.yaml` maps them once at collection ([field mappings](schema.md#shared-fields-and-sensor-mappings)):
 
-| Tool      | Project field                   | Status field        | Shared fields                             |
+| Tool      | Project pointer                 | Status pointer      | Mapped `fields`                           |
 | --------- | ------------------------------- | ------------------- | ----------------------------------------- |
 | Workspace | `attributes.project`            | `attributes.state`  | `project`, `status`, `kind: brief`        |
 | Jira      | `attributes.workstream`         | `attributes.status` | `project`, `status`, `kind: issue`        |
 | GitHub    | `attributes.repository_project` | `attributes.state`  | `project`, `status`, `kind: pull-request` |
 | Gcloud    | `attributes.service_project`    | `attributes.health` | `project`, `status`, `kind: deployment`   |
-
-For example, the Jira part of the configuration:
 
 ```yaml
 # https://fmind.github.io/brain-framework/docs/schema/
@@ -90,11 +82,9 @@ sensors:
       status: { path: /attributes/status }
 ```
 
-At collection, BF validates each mapped value, stores it under the record's `fields` and turns `project` into a relation to `project:new-website`. You configure what each mapping means; BF applies it automatically and never guesses that similar names identify the same project. See [field mappings](schema.md#shared-fields-and-sensor-mappings).
-
 ## Record the conclusion
 
-Write what the reads establish into the owning project, dated today:
+Save the verified state in `projects/new-website.md`, dated today:
 
 ```bash
 cat > projects/new-website.md <<EOF
@@ -123,15 +113,15 @@ EOF
 bf read
 ```
 
-The home page lists the project under `projects`, with its new `next` task; `changed` names other notes changed this week. It is not flagged for review: no linked evidence is newer than the edit.
+Home lists the project with its `next` task and no `review` flag (`changed` is empty because projects report under `projects`).
 
 ## Hear of each change once
 
-An [assistant](prompts.md) can watch the evidence for you. Its schedule's [gate](prompts.md#gates) is a small program that checks the collected records and starts your agent harness only when one changed. Copy the [records gate](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py) from the release, then declare an assistant that runs it on Jira every second:
+An [assistant](prompts.md) schedule can filter changes with built-in declarative `when: { sources: [jira] }` or a custom [`gate`](prompts.md#gates) script ([records-gate.py](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py), built on `_bf.py`, when you also filter fields with `--where`):
 
 ```bash
 mkdir -p routines
-cp "$context_demo/source/examples/routines/records-gate.py" routines/
+cp "$context_demo/source/examples/routines/"*.py routines/
 cat >> bf.yaml <<'EOF'
 assistants:
   watcher:
@@ -147,17 +137,11 @@ sleep 1
 bf update --assistant watcher
 ```
 
-`printf` stands in for your harness, so BF runs no model here: it prints the same [structured reply](prompts.md#structured-replies) on every run. A real harness receives `prompts/watcher.md` with the gate's events, reads their refs and decides what to say.
-
-- Validation still reports `"valid":true`.
-- The first update runs the gate, which finds `jira:review`, collected within the schedule's first window. The harness runs once: the row shows `"status":"ran"` and the `record` it wrote under `memories/watcher`.
-- `every: 1` makes the schedule due again one second after its last run, hence the `sleep`. The second update runs the gate again. It finds nothing new, so no harness starts: the row shows `"status":"ran"` without a `record`.
-
-The gate remembers what it reported, so it reports a record again only when the record changes. In your brain, check less often, such as `every: 600`: the [records gate guide](https://github.com/fmind/brain-framework/blob/main/examples/routines/README.md#react-to-new-records) measures its cost and lists its limits.
+`printf` stands in for an LLM harness and returns a [structured reply](prompts.md#structured-replies). Validation stays `"valid":true`; the first update finds `jira:review` and writes a `record` under `memories/watcher`, while the second finds nothing new and starts no harness (`"status":"ran"` with no `record`).
 
 ## Follow a change
 
-In the fictional tracker, the keyboard navigation check passes and the review moves to Done. Swap in the tracker's next fixture and collect Jira again. Like a [good record](sensors.md#good-records), the fixture keeps the issue's event `time` and records the change in `attributes.updated`. Its value `now` makes the demo sensor date the change at collection, like a transition that just happened:
+Move the Jira fixture to `Done` (`attributes.updated` updates while event `time` stays fixed; [good records](sensors.md#good-records)):
 
 ```bash
 cp fixtures/jira-done.json fixtures/jira.json
@@ -169,7 +153,7 @@ bf update --assistant watcher
 bf read memories/watcher/7d
 ```
 
-Collection reports `"updated":1`. The home page now flags the project: the Jira review linked to it changed upstream after its last edit, and `newer` names the record to read:
+Collection reports `"updated":1`, Home flags the project with `newer_evidence`, and the watcher runs once for the transition (`"total":2` in `memories/watcher/7d`):
 
 ```json
 {
@@ -182,19 +166,7 @@ Collection reports `"updated":1`. The home page now flags the project: the Jira 
 }
 ```
 
-The Jira record's `fields` now hold `"status":"Done"`. The saved conclusion is out of date: update the Launch review and Next actions, and the flag clears with the edit.
-
-The watcher's next check finds the changed review and runs the harness once more. Its page lists both answers, `"total":2`: one for the first collection and one for the change.
-
-## Give a terminal agent the same context
-
-Print the demo path with `echo "$context_demo/brain"`. In a fresh terminal-agent session, replace `ABSOLUTE_DEMO_PATH` in this prompt:
-
-> Work in `ABSOLUTE_DEMO_PATH` and use the `bf` CLI. Read `project:new-website`, then the Workspace, Jira, GitHub and Gcloud records supporting it. Can the website launch, what remains, and why did we choose one page? Cite each supporting ref and separate recorded facts from inference. Report incomplete or outdated evidence. Do not collect, fetch source URLs or change files.
-
-This first task needs no skill or MCP setup. Check the tool history: the agent should read the records and cite the Jira review before answering. A plausible answer without those reads does not verify access. A cloud agent's provider may receive what the agent reads. Install [the skills](agents.md#install-the-skills) to make the procedure available in every session.
-
-Remove the disposable copy when you are done:
+Clean up the demo directory when finished:
 
 ```bash
 cd
@@ -203,14 +175,4 @@ rm -rf -- "$context_demo"
 
 ## Use it on your work
 
-Choose one recurring question whose answer spans tools. Keep the decision in its project note and collect only the evidence the question needs:
-
-| Tool               | Access and starting point                                                                                                                                                                                                                                                                                                                                                                           | What you implement                                                                             |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| GitHub             | [`gh`](https://cli.github.com/) and the reviewed [GitHub history sensor](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) for commits, issues and pull requests.                                                                                                                                                                                              | The repositories to select.                                                                    |
-| Google Workspace   | [`gws`](https://github.com/googleworkspace/cli) and the reviewed [Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py), [Gmail headers](https://github.com/fmind/brain-framework/blob/main/examples/sensors/gmail-headers.py) and [Drive folder](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py) sensors. | Extraction of selected document content; the folder sensor lists folders, not document bodies. |
-| Jira               | [`acli`](https://developer.atlassian.com/cloud/acli/) or the API.                                                                                                                                                                                                                                                                                                                                   | A sensor for selected issues, their status and explicit project identities.                    |
-| Gcloud             | [`gcloud`](https://cloud.google.com/sdk/gcloud) or the API.                                                                                                                                                                                                                                                                                                                                         | A sensor for selected deployment revisions and observed service state.                         |
-| Your agent harness | The [records gate](https://github.com/fmind/brain-framework/blob/main/examples/routines/records-gate.py) as the gate of an [assistant](prompts.md) schedule, once a sensor collects the evidence.                                                                                                                                                                                                   | The prompt that decides what to say, and the `--where` filters for changes worth a run.        |
-
-A sensor is a script printing JSON records, and provider tools own authentication. Your script owns scope, complete pagination, output bounds, failures and identity normalization. Test it with fake provider output before collecting, as the [sensor guide](sensors.md) describes. Add a gated assistant last, once the records answer the question. The [team pilot](team.md#evaluate-a-pilot) checks whether the loop helps people in practice.
+Pick one cross-tool question, author its project note and connect only the sources it needs: [GitHub history](https://github.com/fmind/brain-framework/blob/main/examples/sensors/github-history.md) (`gh`), [Calendar](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-calendar.py) / [Gmail](https://github.com/fmind/brain-framework/blob/main/examples/sensors/gmail-headers.py) / [Drive](https://github.com/fmind/brain-framework/blob/main/examples/sensors/google-drive-folders.py) (`gws`), Jira (`acli`) or Gcloud (`gcloud`), then add an assistant schedule with `when:` or [`records-gate.py`](https://github.com/fmind/brain-framework/blob/main/examples/routines/README.md#react-to-new-records). See [sensors](sensors.md) and [team pilots](team.md#evaluate-a-pilot).

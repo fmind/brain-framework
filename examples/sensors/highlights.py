@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """Snapshot selected highlights from one explicit portable JSON export; never fetch source URLs."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
 import re
 import stat
-import sys
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
+
+import _sensor
 
 FILE_BYTES = 8 << 20
 OUTPUT_BYTES = 16 << 20
 TEXT_BYTES = 64 << 10
 MAX_HIGHLIGHTS = 1000
-
-
-class InvalidError(ValueError):
-    """A content-free diagnostic safe to show on stderr."""
+InvalidError = _sensor.InvalidError
 
 
 def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
@@ -144,7 +144,7 @@ def highlight(value: object, label: str) -> dict[str, object]:
     }
 
 
-def collect(label: str, path: Path) -> str:
+def collect(label: str, path: Path) -> list[dict[str, object]]:
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", label):
         raise InvalidError("label requires a stable lowercase scope name")
     export = fields(
@@ -170,22 +170,20 @@ def collect(label: str, path: Path) -> str:
         except InvalidError as error:
             raise InvalidError(f"highlight {position}: {error}") from error
     records.sort(key=lambda record: str(record["id"]))
-    payload = json.dumps(records, ensure_ascii=False, allow_nan=False)
-    if len(payload.encode("utf-8")) > OUTPUT_BYTES:
-        raise InvalidError("normalized highlight snapshot exceeds 16 MiB")
-    return payload
+    return records
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("label", help="stable personal/team export scope")
     parser.add_argument("export", type=Path, help="selected complete JSON export; use snapshot mode")
     args = parser.parse_args()
-    try:
-        print(collect(args.label, args.export))
-    except (OSError, ValueError, RecursionError) as error:
-        detail = (
-            str(error) if isinstance(error, InvalidError) else "check the regular UTF-8 JSON file, syntax and symlinks"
-        )
-        print(f"Highlight collection failed: {detail}.", file=sys.stderr)
-        sys.exit(1)
+    _sensor.cli(
+        lambda: _sensor.emit(collect(args.label, args.export), max_bytes=OUTPUT_BYTES),
+        "Highlight collection failed",
+        "check the regular UTF-8 JSON file, syntax and symlinks",
+    )
+
+
+if __name__ == "__main__":
+    main()

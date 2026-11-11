@@ -10,10 +10,10 @@ import signal
 import stat
 import subprocess
 import time
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from contextvars import ContextVar
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import current_thread, main_thread
 from types import FrameType
@@ -25,6 +25,7 @@ from pydantic import FailFast, JsonValue, TypeAdapter, ValidationError
 from bf import ontology, records
 from bf.config import load
 from bf.history import ROUTINES, SENSORS, append_log, environment, log_path, remember, state
+from bf.markdown import lines as markdown_lines
 from bf.markdown import note, parse, validate_okf
 from bf.models import (
     _CONTROL,
@@ -34,6 +35,7 @@ from bf.models import (
     Command,
     Config,
     Error,
+    Knowledge,
     Program,
     Record,
     Routine,
@@ -217,6 +219,14 @@ class NotStartedCancelledError(NotStartedError, CancelledError):
     """A cancelled update stopped the program before it started."""
 
 
+class ExitError(Error):
+    """A finished program exited with a non-zero status or signal."""
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def executable(store: Store, command: str, env: Mapping[str, str]) -> str:
     """Resolve an owner's argv executable without following brain-owned symlinks."""
     if command.startswith(("sensors/", "routines/", "channels/")):
@@ -351,7 +361,7 @@ def run(
         if code:
             # BF's own kills fail above: a signal means the program crashed, or another process, such as the
             # out-of-memory killer, ended it.
-            raise Error(f"program {ended(code)}")
+            raise ExitError(code, f"program {ended(code)}")
         outcome = ended(code)
         return bytes(output)
     except Error as error:
@@ -442,6 +452,34 @@ def _coverage(
     return {"start": interval[0], "end": interval[1]}, contiguous and (sensor.mode == "snapshot" or end >= observed)
 
 
+def _parse_collector_output(raw: bytes) -> tuple[object, dict[str, int]]:
+    """Parse a sensor's stdout or `--input` file: a JSON array, `{records, incomplete}`, or JSON Lines."""
+    stripped = raw.strip()
+    if not stripped:
+        return [], {}
+    try:
+        printed = decode(raw)
+    except Error:
+        raw_lines = [line for line in raw.splitlines() if line.strip()]
+        if not stripped.startswith(b"[") and len(raw_lines) >= 2:
+            items: list[object] = []
+            for index, line in enumerate(raw_lines, 1):
+                try:
+                    obj = decode(line)
+                except Error as line_error:
+                    raise Error(f"line {index}: {line_error}") from line_error
+                if not isinstance(obj, dict):
+                    raise Error(f"line {index}: collector JSONL line must be a JSON object") from None
+                items.append(obj)
+            return items, {}
+        raise
+    if isinstance(printed, dict):
+        if "records" in printed or "incomplete" in printed:
+            return _envelope(printed)
+        return [printed], {}
+    return printed, {}
+
+
 def _envelope(printed: object) -> tuple[object, dict[str, int]]:
     """The records a sensor printed and what it reported missing: a JSON array alone, or the object
     `{"records": [...], "incomplete": {"missed": N, "of": M}}` with integers 1 <= N <= M and no other keys.
@@ -492,6 +530,10 @@ def _shrink(store: Store, name: str, retention: records.Retention) -> str:
     return ""
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 def collect(
     store: Store,
     name: str,
@@ -502,7 +544,8 @@ def collect(
     reconcile: bool = False,
     allow_removal: bool = False,
     runner: Runner = run,
-    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    clock: Callable[[], datetime] = _utc_now,
+    live: bool = False,
     fixture: bytes | None = None,
 ) -> dict[str, object]:
     """Run one sensor over [start, end) and upsert its records; failures write nothing.
@@ -540,8 +583,7 @@ def collect(
                 # A fixture runs nothing, so its placeholders never need this machine's line files or HOME.
                 argv = [] if fixture is not None else arguments(store, sensor, start, end)
                 raw = runner(argv, sensor, store, name, b"")
-            printed, incomplete = _envelope(decode(raw))
-            text_limit = sensor.max_text_bytes or (4 << 20)
+            printed, incomplete = _parse_collector_output(raw)
             truncated_count = 0
             if isinstance(printed, list):
                 for position, item in enumerate(printed):
@@ -549,31 +591,36 @@ def collect(
                     # 1,000-name bound instead of this rule.
                     if isinstance(item, dict) and item.get("fields"):
                         raise Error(f"record {position}: sensors must supply mapped output, not precomputed fields")
-                    # Without opting in, oversized text reaches validation and fails the run, as documented.
-                    opted_in = sensor.truncate_text or sensor.max_text_bytes is not None
-                    if opted_in and isinstance(item, dict) and isinstance(item.get("text"), str):
+                    if isinstance(item, dict) and isinstance(item.get("text"), str):
                         try:
                             encoded_text = item["text"].encode("utf-8")
                         except UnicodeEncodeError:
                             continue  # A lone surrogate: record validation names the invalid field.
-                        if len(encoded_text) > text_limit:
-                            cut = encoded_text[:text_limit].decode("utf-8", errors="ignore")
-                            attrs = item.get("attributes")
-                            # Cut text is incomplete evidence, which retrieval reports from `partial`. Validation
-                            # still rejects attributes that are not an object.
-                            updated_attrs = (
-                                {**(attrs or {}), "truncated": True, "partial": True}
-                                if attrs is None or isinstance(attrs, dict)
-                                else attrs
+                        if sensor.max_text_bytes is not None:
+                            if len(encoded_text) > sensor.max_text_bytes:
+                                cut = encoded_text[: sensor.max_text_bytes].decode("utf-8", errors="ignore")
+                                attrs = item.get("attributes")
+                                # Cut text is incomplete evidence, which retrieval reports from `partial`. Validation
+                                # still rejects attributes that are not an object.
+                                updated_attrs = (
+                                    {**(attrs or {}), "partial": True}
+                                    if attrs is None or isinstance(attrs, dict)
+                                    else attrs
+                                )
+                                printed[position] = {**item, "text": cut, "attributes": updated_attrs}
+                                truncated_count += 1
+                        elif len(encoded_text) > 4 << 20:
+                            raise Error(
+                                f"record {position}: text exceeds 4 MiB; set max_text_bytes on this sensor to cut "
+                                "longer text"
                             )
-                            printed[position] = {**item, "text": cut, "attributes": updated_attrs}
-                            truncated_count += 1
-            if truncated_count:
+            if truncated_count and sensor.max_text_bytes is not None:
                 with suppress(Error, OSError):
                     append_log(
                         store,
                         name,
-                        f"{_now()} truncated {truncated_count} oversized record text value(s) to {text_limit} bytes",
+                        f"{_now()} truncated {truncated_count} oversized record text value(s) to "
+                        f"{sensor.max_text_bytes} bytes",
                     )
             try:
                 # Stop at the first invalid record: a large invalid array must not build one diagnostic per item.
@@ -622,6 +669,13 @@ def collect(
             with writer(store, wait=120):
                 # An interrupted commit may have removed files already: count the catalog it restores.
                 records.recover(store)
+                if clock is _utc_now or live:
+                    commit_observed = timestamp(max(started, datetime.now(UTC)).isoformat())
+                    if commit_observed != observed:
+                        incoming = [
+                            record.model_copy(update={"attributes": {**record.attributes, "observed": commit_observed}})
+                            for record in incoming
+                        ]
                 # Read under the lock, so a concurrent bf forget is either seen or waits for this run.
                 kept = records.retention(store, name, incoming, cutoff=cutoff, expire_stored=expire_stored)
                 # Forgotten and expired records leave on purpose: only other removals need --allow-removal.
@@ -774,11 +828,19 @@ def expand_lines(store: Store, path: str) -> list[str]:
     return items
 
 
-def arguments(store: Store, program: Command, start: str, end: str, prompt: str = "", schema: str = "") -> list[str]:
+def arguments(
+    store: Store,
+    program: Command,
+    start: str,
+    end: str,
+    prompt: str = "",
+    schema: str = "",
+    extra_args: Sequence[str] = (),
+) -> list[str]:
     values = {"brain": str(store.root), "start": start, "end": end, "prompt": prompt, "schema": schema}
     # One pass: an expanded prompt that mentions a placeholder keeps it as text.
     expanded: list[str] = []
-    for index, arg in enumerate(program.command):
+    for index, arg in enumerate([*program.command, *extra_args]):
         if index > 0 and (lines_match := re.fullmatch(r"\{\{lines:([^{}\\]+)\}\}", arg)):
             expanded.extend(expand_lines(store, lines_match[1]))
         else:
@@ -792,6 +854,62 @@ def arguments(store: Store, program: Command, start: str, end: str, prompt: str 
     if len(expanded) > 128:
         raise NotStartedError("command arguments exceed 128 items after expanding line files")
     return expanded
+
+
+def validate_action_markdown(
+    store: Store,
+    config: Config,
+    path: str,
+    raw: bytes,
+    *,
+    require_draft: bool = False,
+) -> None:
+    """Validate an `actions/.../ACTION.md` note against OKF, ontology, brain policies and relative links."""
+    if len(raw) > MAX_NOTE:
+        raise Error("action note exceeds 4 MiB")
+    markdown = parse(path, raw)
+    action = note(path, markdown)
+    ontology.note_claims(action, config, strict=True)
+    validate_okf(path, markdown)
+    if action.knowledge.type != "action":
+        raise Error(f"{path}: action note requires type: action")
+    if require_draft and markdown.attributes.get("status") != "draft":
+        raise Error(f"{path}: proposed action requires status: draft")
+    for key in sorted(markdown.attributes):
+        if key in config.ontology and key not in Knowledge.model_fields:
+            raise Error(f"{path}: {key}: declared fields belong under fields:, such as fields: {{{key}: ...}}")
+    rules = config.validation
+    if rules.required_status is not None and markdown.attributes.get("status") not in rules.required_status:
+        allowed = ", ".join(rules.required_status)
+        raise Error(f"{path}: frontmatter status must be explicitly set to one of: {allowed}")
+    if action.knowledge.stale_after and rules.max_stale_days is not None:
+        due_days = (date.fromisoformat(action.knowledge.stale_after[:10]) - date.today()).days
+        if due_days > rules.max_stale_days:
+            raise Error(f"{path}: stale_after exceeds max_stale_days ({rules.max_stale_days} days)")
+    for pattern in rules.forbid_patterns:
+        compiled = re.compile(pattern)
+        for line_number, line in enumerate((item.rstrip("\r\n") for item in markdown_lines(markdown.text)), 1):
+            if compiled.search(line):
+                raise Error(f"{path}: line {line_number}: matches forbidden pattern {pattern}")
+    if broken := broken_links(store, action):
+        first = broken[0] if len(broken[0]) <= _QUOTE else broken[0][: _QUOTE - 1] + "…"
+        raise Error(first + (f" and {len(broken) - 1} more" if len(broken) > 1 else ""))
+
+
+def allocate_action_path(store: Store, slug: str, day: str, *, unique: bool = False) -> str:
+    """Allocate a new `actions/YYYY-MM-DD_<slug>/ACTION.md` path, appending a 12-hex suffix on collision or `unique`."""
+    with suppress(FileNotFoundError):
+        if not stat.S_ISDIR(store.mode("actions")):
+            raise Error("actions: expected a directory; symlinks and special files are forbidden")
+    candidates = ([] if unique else [f"actions/{day}_{slug}"]) + [
+        f"actions/{day}_{slug}-{uuid4().hex[-12:]}" for _ in range(5)
+    ]
+    for folder in candidates:
+        try:
+            store.mode(folder)
+        except FileNotFoundError:
+            return f"{folder}/ACTION.md"
+    raise Error(f"could not allocate a unique action folder for {slug}")
 
 
 def _written(store: Store, prefix: str) -> bool:
@@ -867,6 +985,7 @@ def routine(
     dry_run: bool = False,
     args: tuple[str, ...] = (),
     stdin: bytes = b"",
+    when_cursor: str = "",
     runner: Runner = run,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
@@ -898,16 +1017,9 @@ def routine(
                 except UnicodeError as error:
                     raise Error("routine must print UTF-8 Markdown") from error
                 if text.strip():
-                    # Validate the action's OKF metadata, declared relations and relative links before anything
-                    # is written: an action bf validate rejects would block the brain's next checked commit.
-                    action = note(path, markdown := parse(path, raw))
-                    ontology.note_claims(action, config, strict=True)
-                    validate_okf(path, markdown)
-                    if broken := broken_links(store, action):
-                        # Run history and status keep this error: quote only the start of a link, which can carry
-                        # evidence from the output.
-                        first = broken[0] if len(broken[0]) <= _QUOTE else broken[0][: _QUOTE - 1] + "…"
-                        raise Error(first + (f" and {len(broken) - 1} more" if len(broken) > 1 else ""))
+                    # Validate the action's OKF metadata, declared relations, policies and relative links before
+                    # anything is written: an action bf validate rejects would block the brain's next checked commit.
+                    validate_action_markdown(store, config, path, raw)
             if dry_run:
                 # A preview predicts the skip, but names no action: the real run draws its own folder suffix.
                 if text.strip() and _written(store, f"{day}_{name}-"):
@@ -941,6 +1053,7 @@ def routine(
                     failures=0,
                     **({"action": path} if "action" in result else {}),
                     **({"reports": reports} if "removed" in result else {}),
+                    **({"when_cursor": when_cursor} if when_cursor and "skipped" not in result else {}),
                 )
             outcome = f"wrote {path}" if "action" in result else str(result.get("skipped", "succeeded"))
             with suppress(Error, OSError):
@@ -1019,10 +1132,26 @@ def window(store: Store, name: str, now: datetime) -> tuple[str, str]:
 def next_due(program: Program, last: dict[str, object], now: datetime) -> datetime | None:
     """When an enabled scheduled program is next due; None when it is manual or disabled.
 
-    It is due one refresh after its last success. After consecutive failures, it retries after
-    BACKOFF, doubling per failure but never waiting longer than its refresh.
+    Sensors and interval routines are due one refresh after their last success; wall-clock routines follow `at` and
+    `days`. After consecutive failures, a program retries after BACKOFF, doubling per failure up to its refresh (or
+    24h for wall-clock routines).
     """
-    if not program.enabled or not program.refresh:
+    if not program.enabled:
+        return None
+    if isinstance(program, Routine):
+        if not program.scheduled:
+            return None
+        cap = timedelta(seconds=program.refresh or 86_400)
+        if last.get("error"):
+            anchor = str(last.get("run", ""))
+            failures = max(1, int(str(last.get("failures", 1))))
+            delay = min(cap, BACKOFF * 2 ** min(failures - 1, 30))
+            if not anchor:
+                return now
+            since = datetime.fromisoformat(anchor)
+            return now if since > now else since + delay
+        return program.schedule_due(now, str(last.get("success", "")))
+    if not program.refresh:
         return None
     refresh = timedelta(seconds=program.refresh)
     anchor, delay = str(last.get("success", "")), refresh
