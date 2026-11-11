@@ -38,7 +38,7 @@ def identity() -> str:
     """The working directory's repository, as the Git history sensor records it; never raw remote credentials."""
     try:
         result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],  # noqa: S607 - literal argv to git on PATH
+            ["git", "remote", "get-url", "origin"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=5,

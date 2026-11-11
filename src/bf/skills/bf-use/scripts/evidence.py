@@ -110,9 +110,9 @@ def exact(ref: str, brain: str) -> dict[str, JSON]:
     limits: dict[str, list[JSON]] = {key: [] for key in LIMITS}
     offset = 0
     while True:
-        # bf reads offline and never runs sensors. Its diagnostics may contain private paths: discard them.
-        result = subprocess.run(  # noqa: S603 - literal argv; main() rejects a ref that could start an option
-            ["bf", "read", ref, "--brain", brain, *(["--offset", str(offset)] if offset else [])],  # noqa: S607
+        # bf reads offline with literal argv; main() rejects a ref that could start an option. Discard private stderr.
+        result = subprocess.run(
+            ["bf", "read", ref, "--brain", brain, *(["--offset", str(offset)] if offset else [])],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=20,

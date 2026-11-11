@@ -30,9 +30,9 @@ def read(action: str, brain: str, section: str) -> tuple[str, str | int]:
     """The section's brain and text, or its length in characters when bf pages it."""
     ref = f"{action}#{section}"
     try:
-        # bf already bounds replies. Capture its stdout only; diagnostics may contain private paths.
-        result = subprocess.run(  # noqa: S603 - literal argv; bf never executes providers on read
-            ["bf", "read", ref, "--brain", brain],  # noqa: S607 - use the host's selected bf executable
+        # bf already bounds replies and never runs providers on read. Discard stderr, which may name private paths.
+        result = subprocess.run(
+            ["bf", "read", ref, "--brain", brain],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=20,
@@ -50,7 +50,8 @@ def read(action: str, brain: str, section: str) -> tuple[str, str | int]:
         if any(key in reply for key in ("page", "record")):
             raise ValueError("expected an exact section")
         match = ACTION.fullmatch(action)
-        assert match is not None  # noqa: S101 - argument validation happens before any read
+        if match is None:
+            raise ValueError("invalid action reference")
         owner, path = match.groups()
         canonical = path if path.endswith("/ACTION.md") else f"{path}/ACTION.md"
         name, text = reply.get("brain"), reply.get("text")

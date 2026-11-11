@@ -77,9 +77,8 @@ def main(argv: list[str]) -> None:
     else:
         command = [executable, *(part for line in APPLESCRIPT for part in ("-e", line)), body, title]
     try:
-        result = subprocess.run(  # noqa: S603 - argv only: no shell or script code ever holds the text
-            command, stdin=subprocess.DEVNULL, capture_output=True, timeout=TIMEOUT, check=False
-        )
+        # Literal argv only: no shell or script code ever holds the text.
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, timeout=TIMEOUT, check=False)
     except (OSError, subprocess.TimeoutExpired):
         fail(f"{args.notifier} did not finish within {TIMEOUT} seconds or could not start; nothing was confirmed")
     if result.returncode:

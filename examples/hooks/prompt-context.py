@@ -19,8 +19,7 @@ LIMIT = 3
 # Any query word matches, so a whole prompt would match nearly everything: keep its first few content words.
 WORDS = 8
 # bf search's English and French function words (src/bf/index.py _STOP): the words a prompt adds to its subject.
-STOP = frozenset(
-    """
+_STOP_WORDS = """
     a about am an and another any are as at be been being but by can could did do does doing for from had has have
     having he her hers him his how i if in into is it its me might must my not of on one ones or other others our ours
     please shall she should so than that the their theirs them there these they this those to us was we were what when
@@ -28,8 +27,8 @@ STOP = frozenset(
     ai au autre autres aux avec c ce ces cet cette d dans de des donc du elle elles en est et eu eux il ils j je l la le
     les leur leurs lui m ma mais me mes moi mon n ne nos notre nous on ont ou où par pas pour pourquoi qu quand que quel
     quelle quelles quels qui quoi s sa se ses si son sont sur t ta te tes toi ton tu un une vos votre vous y à été être
-    """.split()  # noqa: SIM905 - one readable word list, grouped by language, like the core's
-)
+"""
+STOP = frozenset(_STOP_WORDS.split())
 # Written in capitals, a function word is an acronym bf search keeps (EU AI Act); AND and OR stay habitual operators.
 OPERATORS = frozenset({"AND", "OR"})
 # Only authored note refs are printed, in code spans; a record ref or title is provider-controlled text and stays out.

@@ -23,6 +23,7 @@ SCRIPTS = sorted([*(ROOT / "examples").rglob("*.py"), *(ROOT / "src/bf/skills").
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda path: path.relative_to(ROOT).as_posix())
 def test_example_scripts_are_standalone_python311_scripts(script: Path) -> None:
     source = script.read_text(encoding="utf-8")
+    assert "# noqa" not in source, "keep lint suppressions in pyproject.toml so copied scripts pass RUF100"
     tree = ast.parse(source, filename=str(script), feature_version=(3, 11))
     if source.startswith("#!/usr/bin/env python3\n"):
         assert os.access(script, os.X_OK), "a script run through its shebang needs its executable bit"

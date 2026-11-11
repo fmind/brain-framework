@@ -214,8 +214,8 @@ def bf_json(
     if timeout <= 0:
         raise BfError("bf call exceeded its time budget")
     try:
-        result = subprocess.run(  # noqa: S603
-            ["bf", *args],  # noqa: S607 - literal argv to bf on the owner's PATH
+        result = subprocess.run(
+            ["bf", *args],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout,
@@ -271,7 +271,7 @@ def bf_pages(
 
 def _bf_version(executable: str) -> tuple[int, ...] | None:
     try:
-        result = subprocess.run(  # noqa: S603 - literal argv
+        result = subprocess.run(
             [executable, "--version"], stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -317,7 +317,7 @@ def bf_export(
     deadline: float | None = None,
     max_line_bytes: int = LINE_BYTES,
     executable: str | None = None,
-) -> Generator[dict[str, Any], None, None]:
+) -> Generator[dict[str, Any]]:
     """Stream JSONL objects from `bf export --kind KIND [--scope SCOPE] [--observed-since ...]`, failing closed."""
     bf_bin = executable or shutil.which("bf")
     if bf_bin is None:
@@ -356,7 +356,7 @@ def bf_export(
     ]
     try:
         # Stay in the caller's process group so BF's SIGTERM on timeout or shutdown stops the nested export too.
-        child = subprocess.Popen(  # noqa: S603 - literal argv, no shell
+        child = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -614,7 +614,7 @@ def read_envelope(*, max_bytes: int = ENVELOPE_BYTES) -> dict[str, Any]:
 
 
 def emit_receipt(
-    id: str,  # noqa: A002 - BF's receipt field name
+    id: str,
     *,
     conversation: str = "",
 ) -> dict[str, str]:

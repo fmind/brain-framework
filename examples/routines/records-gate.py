@@ -97,7 +97,7 @@ def window() -> tuple[datetime, datetime, Path]:
     return start, end, folder
 
 
-def export(bf: str, scope: str, deadline: float) -> Generator[dict[str, Any], None, None]:
+def export(bf: str, scope: str, deadline: float) -> Generator[dict[str, Any]]:
     """Stream each line of `bf export --kind items --scope SCOPE`, failing on any sign of incomplete evidence."""
     try:
         yield from _bf.bf_export(

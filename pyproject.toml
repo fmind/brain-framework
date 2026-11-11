@@ -143,13 +143,31 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"examples/**/_bf.py" = [
+  "A002", # `emit_receipt(id=...)` matches BF's channel receipt field name.
+  "S603", # Helpers invoke `bf` with literal argv lists and no shell.
+  "S607", # `bf` is resolved on the PATH Brain Framework or the host provides.
+]
+"examples/channels/**" = [
+  "S603", # Channel adapters invoke notifier CLIs with literal argv lists and no shell.
+]
 "examples/hooks/**" = [
   "BLE001", # Silent hooks must exit 0 with no output on any unexpected error.
+  "S607", # Hooks resolve `git` by bare name on PATH with literal arguments.
 ]
 "examples/sensors/**" = [
   "S603", # Adapters invoke provider CLIs with literal argv lists; no shell is involved.
   "S607", # Provider CLIs are resolved by bare name on the PATH Brain Framework sanitizes.
   "T201", # Adapters print exactly one JSON array to stdout.
+]
+"examples/sensors/_sensor.py" = [
+  "A002", # `record(id=...)` matches BF's record field name.
+  "BLE001", # `main()` and `cli()` catch unexpected exceptions so tracebacks never quote provider data.
+  "S310", # `fetch()` rejects non-HTTPS schemes, credentials and cross-host redirects before opening.
+]
+"src/bf/skills/*/scripts/*.py" = [
+  "S603", # Skill helpers invoke `bf read` offline with validated literal argv lists.
+  "S607", # Skill helpers use the host's installed `bf` executable on PATH.
 ]
 "tests/**" = [
   "BLE001", # Worker-thread test helpers record any exception so the test thread can assert on it.

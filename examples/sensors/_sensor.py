@@ -101,7 +101,8 @@ def main(collect: Callable[[], Iterable[Mapping[str, Any]]], failure: str) -> No
         emit(collect())
     except SensorError as error:
         fail(str(error))
-    except Exception as error:  # noqa: BLE001 - any failure must exit 1 without a traceback quoting provider data
+    except Exception as error:
+        # Any failure must exit 1 without a traceback quoting provider data.
         fail(f"{failure} ({type(error).__name__})")
 
 
@@ -122,7 +123,8 @@ def cli(
     except (OSError, UnicodeError) as error:
         del error
         fail(f"{prefix}; {hint}.")
-    except Exception:  # noqa: BLE001 - never echo provider payloads, paths or parser slices
+    except Exception:
+        # Never echo provider payloads, paths or parser slices.
         fail(f"{prefix}; {hint}.")
 
 
@@ -359,7 +361,7 @@ def fetch(url: str, *, timeout: float, max_bytes: int, headers: Mapping[str, str
     opener = urllib.request.build_opener(
         _SameHostHttps(), urllib.request.HTTPSHandler(context=ssl.create_default_context())
     )
-    request = urllib.request.Request(url, headers=dict(headers or {}), method="GET")  # noqa: S310 - HTTPS checked
+    request = urllib.request.Request(url, headers=dict(headers or {}), method="GET")
     deadline = time.monotonic() + timeout
     try:
         with opener.open(request, timeout=timeout) as response:
@@ -479,7 +481,7 @@ def _timestamp(value: object) -> str:
 
 
 def record(
-    id: str,  # noqa: A002 - BF's own field name
+    id: str,
     title: str,
     *,
     text: str = "",
