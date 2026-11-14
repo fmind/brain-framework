@@ -34,7 +34,7 @@ CURRENT = f"{runtime._SCHEMA}PRAGMA user_version={runtime.VERSION};"  # noqa: SL
 def messaging(brain: Store) -> Store:
     brain.write(
         "bf.yaml",
-        b"""version: 10
+        b"""version: 11
 name: fixture
 jobs:
   calendar:
@@ -54,7 +54,7 @@ jobs:
     on:
       - every: 1800
       - event:
-          kind: [channel.received, message.received]
+          kind: message.received
           source: chat
 """,
     )
@@ -294,7 +294,7 @@ def test_old_backlog_message_keeps_its_admission_marker(messaging: Store) -> Non
     old = message().model_copy(update={"time": timestamp((datetime.now(UTC) - timedelta(days=40)).isoformat())})
     assert len(queue.admit("chat", [old])) == 1
     with queue.connect() as db:
-        assert db.execute("SELECT count(*) FROM events WHERE kind='channel.received'").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM events WHERE kind='message.received'").fetchone()[0] == 1
 
 
 def test_receipts_suppress_echoes_and_duplicate_send_ids(messaging: Store) -> None:
@@ -419,7 +419,7 @@ def test_cli_post_run_and_queue_roundtrip(brain: Store) -> None:
 
     brain.write(
         "bf.yaml",
-        b"""version: 10
+        b"""version: 11
 name: fixture
 jobs:
   local:
@@ -519,7 +519,7 @@ def test_retention_counts_utf8_bytes_without_losing_unresolved_delivery(
     # Unresolved delivery payload is never stripped while still pending.
     assert json.loads(str(queue.inspect("pending-big")["payload"]))["text"] == "🧠" * 60
     with queue.connect() as db:
-        assert db.execute("SELECT data FROM events WHERE kind='channel.received'").fetchone()[0] == "{}"
+        assert db.execute("SELECT data FROM events WHERE kind='message.received'").fetchone()[0] == "{}"
 
 
 def test_finite_manual_sends_compact_without_a_watcher(messaging: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -540,7 +540,7 @@ def test_removed_job_still_exposes_unresolved_work(messaging: Store) -> None:
     queue = Queue(messaging)
     queue.enqueue_delivery("chat", Outgoing(id="u-1", text="hello"), ["send-chat"], job="personal")
     queue.delivery_failed("u-1", "needs review", outcome="uncertain")
-    messaging.write("bf.yaml", b"version: 10\nname: fixture\njobs: {}\n")
+    messaging.write("bf.yaml", b"version: 11\nname: fixture\njobs: {}\n")
     status = report(messaging)
     assert not status["healthy"]
     assert cast("dict[str, object]", status["queue"])["uncertain"] == 1
@@ -584,7 +584,7 @@ def test_real_watch_replies_once_and_recovers_stream_redelivery(
                         and cast("dict[str, object]", report["status"])["pending"] == 0
                         and daemon_ok
                     )
-                    if settled and q.progress("events:personal"):
+                    if settled and q.event_cursor("personal")[0]:
                         break
                     time.sleep(0.05)
                 else:
@@ -730,7 +730,7 @@ def test_queue_resolves_abandoned_delivery_via_cli(brain: Store) -> None:
 
     from bf.cli import app
 
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  local:\n    send: [send-local]\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n  local:\n    send: [send-local]\n")
     queue = Queue(brain)
     queue.enqueue_delivery("local", Outgoing(id="stable", text="Hello"), ["send-local"])
     assert queue.sending("stable")
@@ -855,9 +855,9 @@ def test_runtime_queue_guards_recovery_and_edge_paths(messaging: Store, monkeypa
     with pytest.raises(Error, match="unknown run id"):
         queue.get_run("")
 
-    queue.record_event("record.created", "mail", {"n": 1}, key="evt-1")
+    queue.record_event("record.added", "mail", {"n": 1}, key="evt-1")
     with pytest.raises(Error, match="event id reused with different content"):
-        queue.record_event("record.created", "mail", {"n": 2}, key="evt-1")
+        queue.record_event("record.added", "mail", {"n": 2}, key="evt-1")
 
     m1 = Message(
         id="m1",
@@ -926,3 +926,55 @@ def test_runtime_queue_guards_recovery_and_edge_paths(messaging: Store, monkeypa
     db_path.chmod(0o600)
     with pytest.raises(Error, match="unknown runtime database format"):
         queue.set_progress("k", {"v": 1})
+
+
+def test_runtime_v4_schema_and_incident_alert_cooldown_and_recovery(messaging: Store) -> None:
+    assert runtime.VERSION == 4
+    queue = Queue(messaging)
+    assert queue.incidents() == []
+    assert queue.status()["incidents"] == 0
+
+    # First opening with no defaults.post still records incident silently, and resolves silently.
+    t0 = timestamp("2026-10-01T00:00:00Z")
+    queue.open_incident("calendar", "offline error", at=t0)
+    with queue.read() as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"events", "item_checkpoints", "event_cursors", "incidents"} <= tables
+    assert len(queue.incidents()) == 1
+    assert queue.status()["incidents"] == 1
+    assert queue.report()["deliveries"] == []
+    queue.resolve_incident("calendar")
+    assert queue.incidents() == []
+    assert queue.report()["deliveries"] == []
+
+    # With defaults.post configured: alert once, suppress within INCIDENT_REMIND, remind after 6h, and notify recovery.
+    configure(messaging, lambda raw: raw.__setitem__("defaults", {"post": "chat"}))
+    queue.open_incident("calendar", "network timeout", at=t0)
+    inc1 = queue.incidents()
+    assert len(inc1) == 1
+    assert (inc1[0]["count"], inc1[0]["last_error"], inc1[0]["last_alert_at"]) == (1, "network timeout", t0)
+    assert len(cast("list[object]", queue.report()["deliveries"])) == 1
+
+    # Repeat failure after 1h (< INCIDENT_REMIND): count & last_error update without enqueueing a second alert.
+    t1 = timestamp("2026-10-01T01:00:00Z")
+    queue.open_incident("calendar", "still failing", at=t1)
+    inc2 = queue.incidents()
+    assert (inc2[0]["count"], inc2[0]["last_error"], inc2[0]["last_alert_at"]) == (2, "still failing", t0)
+    assert len(cast("list[object]", queue.report()["deliveries"])) == 1
+
+    # Repeat failure after INCIDENT_REMIND (6h+): enqueues a reminder delivery and advances last_alert_at.
+    t2 = timestamp("2026-10-01T07:00:00Z")
+    queue.open_incident("calendar", "still failing 6h", at=t2)
+    inc3 = queue.incidents()
+    assert (inc3[0]["count"], inc3[0]["last_alert_at"]) == (3, t2)
+    assert len(cast("list[object]", queue.report()["deliveries"])) == 2
+
+    # Resolution clears incident row and enqueues one recovery notice (idempotent if called twice).
+    queue.resolve_incident("calendar")
+    assert queue.incidents() == []
+    assert queue.status()["incidents"] == 0
+    deliveries = cast("list[dict[str, object]]", queue.report()["deliveries"])
+    assert len(deliveries) == 3
+    assert any("recovered" in str(queue.inspect(str(d["id"]))["payload"]) for d in deliveries)
+    queue.resolve_incident("calendar")
+    assert len(cast("list[object]", queue.report()["deliveries"])) == 3

@@ -52,7 +52,7 @@ def main() -> None:
         root = Path(temporary)
         (root / "brain").mkdir()
         store = Store(root / "brain")
-        store.write("bf.yaml", b"version: 10\nname: benchmark\n")
+        store.write("bf.yaml", b"version: 11\nname: benchmark\n")
         background = ("Routine project background. " * args.body_chars)[: args.body_chars]
         items = [
             Record(

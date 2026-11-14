@@ -26,7 +26,7 @@ from bf.models import Job, encode, timestamp
 from bf.runtime import MAX_BATCH, Message, Queue
 from bf.storage import Store
 
-CONFIG = b"""version: 10
+CONFIG = b"""version: 11
 name: paths
 jobs:
   calendar:
@@ -218,6 +218,7 @@ def test_collection_records_state_without_queueing_runs_or_deliveries(store: Sto
         "pending": 0,
         "failed": 0,
         "uncertain": 0,
+        "incidents": 0,
         "wakes": 0,
         "active_runs": 0,
         "oldest_pending": None,
@@ -225,7 +226,10 @@ def test_collection_records_state_without_queueing_runs_or_deliveries(store: Sto
     assert report["deliveries"] == []
     assert report["wakes"] == []
     assert report["active_runs"] == []
-    assert len(queue.recent_events("job.completed", "calendar")) == 1
+    assert queue.recent_events("job.completed", "calendar") == []
+    from bf.storage import wakeup_mtime
+
+    assert wakeup_mtime(store) > 0
 
 
 def test_stream_daemon_admits_messages_and_kills_process_group_on_stop(store: Store) -> None:
@@ -317,7 +321,7 @@ def test_stopping_watch_kills_a_running_harness_and_leaves_its_job_uncertain(tmp
     store = Store(root)
     store.write(
         "bf.yaml",
-        b"""version: 10
+        b"""version: 11
 name: stop
 jobs:
   out:
@@ -370,6 +374,7 @@ print("too late")
         "pending": 0,
         "failed": 0,
         "uncertain": 1,
+        "incidents": 0,
         "wakes": 0,
         "active_runs": 0,
         "oldest_pending": None,

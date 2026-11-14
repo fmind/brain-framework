@@ -31,14 +31,10 @@ from bf.storage import BusyError, Store, reader
 
 _PENDING = "memories/.pending"
 _MANIFEST = _PENDING + "/manifest.json"
-# Bounds reading an untrusted manifest: a commit's own, of at most MAX_FILES - 1 changes, stays below 10 MB.
 _MANIFEST_LIMIT = 16 << 20
-# Link failures of filesystems or mounts without hard links: backups and restores copy the bytes instead.
+# Cross-device or unsupported hard links fall back to synced copies.
 _UNLINKABLE = frozenset({errno.EXDEV, errno.EPERM, errno.EMLINK, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS})
-# Seconds an exact read waits for a writer before reading one whole file without the brain lock.
 WAIT = 3
-# A source's forgotten records: one SHA-256 of a record id per line, the record file's own name, so the list reveals
-# no id. Hidden, so search and validation never read it as a record.
 FORGOTTEN = ".forgotten"
 _FORGOTTEN_LIMIT = 8 << 20
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -58,8 +54,6 @@ class _Journal(Model):
 
 def pending(store: Store) -> bool:
     try:
-        # An excluded or unreadable memories root cannot contain an accessible transaction. Retrieval reports the
-        # root through its scan; a linked or unreadable .pending inside a readable root still fails closed.
         if not stat.S_ISDIR(store.mode("memories")):
             return False
         try:
@@ -73,16 +67,11 @@ def pending(store: Store) -> bool:
 
 
 def interrupted(store: Store) -> bool:
-    """Whether a pending journal may describe half-changed records.
-
-    A completed manifest proves every record was committed or restored: only cleanup remains, which the next writer
-    finishes, so reads need not wait for it. A missing or invalid manifest proves nothing.
-    """
+    """Whether an incomplete pending journal may leave half-changed records."""
     return pending(store) and not _completed(store)
 
 
 def _completed(store: Store) -> bool:
-    """Whether the pending manifest on disk marks its commit complete."""
     try:
         return _Journal.model_validate(decode(store.read(_MANIFEST, _MANIFEST_LIMIT))).complete
     except FileNotFoundError, Error, ValidationError:
@@ -90,17 +79,14 @@ def _completed(store: Store) -> bool:
 
 
 def _clear(store: Store) -> None:
-    # A full journal holds MAX_FILES entries; a write killed while completing it leaves one more than a scan lists.
     store.sweep(_PENDING)
     names = store.files(_PENDING)
     pattern = re.compile(r"memories/\.pending/(?:manifest\.json|[0-9]+\.before|\.write-[0-9a-f]{32})")
     if unexpected := next((name for name in names if not pattern.fullmatch(name)), ""):
-        # Named, so the owner knows which file to move out.
         raise Error(
             f"{unexpected}: unexpected file in memories/.pending; preserve it and repair the pending transaction"
         )
-    # The completion marker remains until every staged file is gone. Removing the directory syncs its
-    # parent once: a crash before then leaves staged files that the next recovery clears again.
+    # Remove manifest last so recovery re-runs cleanly after an interrupted cleanup.
     for name in sorted(names, key=lambda name: name == _MANIFEST):
         store.delete(name, durable=False)
     with suppress(FileNotFoundError):
@@ -108,17 +94,12 @@ def _clear(store: Store) -> None:
 
 
 def recover(store: Store) -> None:
-    """Roll back an interrupted commit, under the caller's exclusive brain writer lock.
-
-    Originals and the manifest are durable evidence under memories/, never disposable state.
-    A completion marker means all records were committed (or restored) and only cleanup remains.
-    """
+    """Roll back an interrupted commit under the exclusive brain writer lock."""
     if not pending(store):
         return
     try:
         raw = store.read(_MANIFEST, _MANIFEST_LIMIT)
     except FileNotFoundError:
-        # Preparation never changes a source before its manifest is durable.
         _clear(store)
         return
     try:
@@ -129,7 +110,6 @@ def recover(store: Store) -> None:
         raise Error("duplicate paths in memories/.pending manifest")
     directory = f"memories/{journal.source}"
     if not journal.complete:
-        # Check all backups before restoring any source file.
         for number, change in enumerate(journal.changes):
             if not change.existed:
                 continue
@@ -137,14 +117,11 @@ def recover(store: Store) -> None:
             try:
                 size = store.lstat(backup).st_size
             except FileNotFoundError:
-                # A commit makes every backup durable before its manifest names it.
                 raise Error(
                     f"{backup} is missing; preserve memories/.pending and repair the pending transaction"
                 ) from None
             if size > MAX_RECORD:
                 raise Error(f"{backup}: file exceeds {MAX_RECORD} bytes")
-        # Only files the commit reached change back, as their backups were made; one directory sync then makes
-        # every restored entry durable before the completion marker.
         for number, change in enumerate(journal.changes):
             target = f"{directory}/{change.name}"
             if not change.existed:
@@ -153,7 +130,6 @@ def recover(store: Store) -> None:
             elif not _kept(store, target, f"{_PENDING}/{number}.before"):
                 _copy(store, f"{_PENDING}/{number}.before", target)
         with suppress(FileNotFoundError):
-            # A commit interrupted before creating its source directory changed nothing there.
             store.sync(directory)
         journal.complete = True
         store.write(_MANIFEST, encode(journal.model_dump()))
@@ -162,7 +138,7 @@ def recover(store: Store) -> None:
 
 
 def _kept(store: Store, target: str, backup: str) -> bool:
-    """Whether a commit left a file as its backup holds it: the same inode, or the same bytes for a copied backup."""
+    """Whether `target` matches `backup` by inode or bytes."""
     try:
         current = store.lstat(target)
     except FileNotFoundError:
@@ -174,7 +150,7 @@ def _kept(store: Store, target: str, backup: str) -> bool:
 
 
 def _copy(store: Store, name: str, target: str) -> None:
-    """Give `target` the bytes of `name`: a hard link where the filesystem allows one, otherwise a synced copy."""
+    """Give `target` the bytes of `name` via hard link or synced copy fallback."""
     try:
         store.link(name, target)
     except OSError as error:
@@ -184,7 +160,7 @@ def _copy(store: Store, name: str, target: str) -> None:
 
 
 def require_ready(store: Store) -> None:
-    """Keep read operations from applying an untrusted on-disk recovery journal."""
+    """Keep reads from acting on an interrupted transaction before recovery."""
     if interrupted(store):
         raise Error(
             "records contain an interrupted transaction; run bf build or bf update to recover it before reading"
@@ -202,9 +178,7 @@ def reading(store: Store) -> Generator[None]:
 def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) -> None:
     if not replacements:
         return
-    # A commit's backups and its manifest share memories/.pending, which the scan limit bounds like any tree.
     if len(replacements) >= MAX_FILES:
-        # A failed operation, like any other collection failure: history records it and evidence stays as it was.
         raise Error(
             f"one collection may change at most {MAX_FILES - 1:,} records; narrow the window or split the source"
         )
@@ -216,7 +190,6 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
         except FileNotFoundError:
             existed = False
         changes.append(_Change(name=name.removeprefix(f"memories/{source}/"), existed=existed))
-    # A source past the scan limit would fail every search and read of the brain, so collection stops below it.
     tree, entries = f"memories/{source}", {}
     store.scan(tree, skipped={}, counts=entries, fingerprints=False)
     grown = sum(
@@ -231,9 +204,7 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
     journal = _Journal(source=source, changes=changes)
     manifest = encode(journal.model_dump())
     try:
-        # Each file's bytes are synced as it is written; one sync per directory then makes its entries
-        # durable. Backups are durable before the manifest names them, and records before completion. A backup
-        # links the replaced file's inode, whose bytes a commit never changes, instead of copying and syncing them.
+        # Persist backups and manifest before mutating source files, then mark complete before cleanup.
         backups = False
         for number, (name, change) in enumerate(zip(replacements, changes, strict=True)):
             if change.existed:
@@ -251,7 +222,6 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
         journal.complete = True
         store.write(_MANIFEST, encode(journal.model_dump()))
     except BaseException as error:
-        # The completion marker may land before its directory sync fails: the commit then succeeded.
         landed = journal.complete and _completed(store)
         try:
             recover(store)
@@ -260,7 +230,6 @@ def _commit(store: Store, source: str, replacements: dict[str, bytes | None]) ->
         if not (landed and isinstance(error, Error | OSError)):
             raise
         return
-    # A cleanup failure cannot turn a durable successful commit into a failed collection; recovery clears it later.
     with suppress(Error, OSError):
         _clear(store)
 
@@ -275,15 +244,12 @@ def serialize(record: Record) -> bytes:
 
 
 def stored(name: str) -> bool:
-    """Whether collection, search and `bf validate` read a memories/ file as a record, even a hidden or misnamed one."""
+    """Whether collection, search and `bf validate` read a memories/ file as a record."""
     return name.endswith(".json") and not name.startswith(_PENDING + "/")
 
 
 def files(store: Store, source: str = "", *, skipped: dict[str, tuple[int, int, int, int]] | None = None) -> list[str]:
-    """Record files below memories/, each source bounded on its own; `bf validate` also reports other visible files.
-
-    Callers hold a brain lock, so no writer changes records meanwhile: the listing types them without a stat each.
-    """
+    """Record files below memories/, each source bounded on its own (caller holds brain lock)."""
     directory = f"memories/{source}" if source else "memories"
     listed = store.scan(directory, skipped=skipped, split=not source, fingerprints=False)
     return sorted(name for name in listed if stored(name))
@@ -309,12 +275,7 @@ def parse(name: str, data: bytes) -> Record:
 
 
 def _stored(store: Store, name: str) -> Record | None:
-    """The record a change replaces or removes; None when the file holds exactly this name's id but breaks the
-    current record rules, such as a display-name alias or an over-long title.
-
-    Its SHA-256 name proves the file belongs to this record, so collection may replace or remove it; misnamed,
-    unparsable or unreadable evidence still fails the change. A missing file raises FileNotFoundError.
-    """
+    """Replaced/removed record; None if unparsable under current rules yet its SHA-256 filename matches `id`."""
     try:
         return load(store, name)
     except FileNotFoundError:
@@ -340,7 +301,6 @@ def source_of(name: str) -> str:
     ):
         raise Error(f"{name}: expected memories/<source>/<sha256-id>.json")
     if parts[1] == RESERVED:
-        # No program takes this name: its records' `bf:ID` refs would read as BF addresses, so none could be read.
         raise Error(
             f"{name}: source {RESERVED} is reserved for BF addresses; move memories/{RESERVED}/ to the folder of its "
             "renamed sensor or assistant"
@@ -351,24 +311,14 @@ def source_of(name: str) -> str:
 def upsert(
     store: Store, source: str, incoming: list[Record], *, snapshot: bool, removals: list[str] | None = None
 ) -> dict[str, int]:
-    """Update independent record files; snapshot removal and all replacements remain transactional.
-
-    `removals`, such as forgotten and expired files, leave in the same transaction without counting as removed, so a
-    failed collection never removes them alone.
-
-    Only files a change replaces or removes are parsed, and each must hold its own id: collection never
-    overwrites or deletes misnamed evidence, while a file with its own id that breaks the current record
-    rules is replaced like any update. `bf validate` and the search cache check every other file.
-    """
+    """Transactionally apply replacements, snapshot removals, and `removals` under the writer lock."""
     recover(store)
     if not re.fullmatch(NAME, source):
         raise Error("invalid record source")
-    # Only writers holding the brain lock write records: a temporary file there belongs to a killed write.
     store.sweep(f"memories/{source}")
     counts, replacements = plan(store, source, incoming, snapshot=snapshot)
     for name in removals or ():
         if name in replacements:
-            # A snapshot already planned to remove this file, unwanted, and counted it.
             counts["removed"] -= 1
         replacements[name] = None
     _commit(store, source, replacements)
@@ -376,13 +326,7 @@ def upsert(
 
 
 def prune(store: Store, source: str, keep: int, ids: re.Pattern[str], *, newest: str = "") -> int:
-    """Remove a source's oldest records whose id `ids` matches beyond the newest `keep`, in one transaction.
-
-    Records are ordered by time, then id; the record whose id is `newest`, such as the one a run just wrote, counts as
-    the newest whatever its time, so a clock that ran ahead never makes it the oldest. A file that does not load, or a
-    record with another id, is left alone and not counted. The caller holds the writer lock, as for `upsert`; it
-    returns how many records were removed.
-    """
+    """Remove a source's oldest matching records beyond the newest `keep`, under the writer lock."""
     recover(store)
     names = files(store, source)
     if len(names) <= keep:
@@ -405,10 +349,7 @@ def prune(store: Store, source: str, keep: int, ids: re.Pattern[str], *, newest:
 def plan(
     store: Store, source: str, incoming: list[Record], *, snapshot: bool
 ) -> tuple[dict[str, int], dict[str, bytes | None]]:
-    """What an upsert would change, without writing: its counts and each replaced file's bytes, or None to remove it.
-
-    A dry run calls it under `reading`; `upsert` under the writer lock, after recovering.
-    """
+    """Compute counts and file mutations (`bytes` or `None` to delete) for an upsert without writing."""
     if not re.fullmatch(NAME, source):
         raise Error("invalid record source")
     wanted = {path(source, record.id): record for record in incoming}
@@ -416,7 +357,6 @@ def plan(
         raise Error("duplicate incoming record ids; reconcile them before collecting")
     counts = {"added": 0, "updated": 0, "unchanged": 0, "removed": 0}
     replacements: dict[str, bytes | None] = {}
-    # A window leaves other files alone; a snapshot lists its catalog without parsing what it keeps.
     for name in files(store, source) if snapshot else ():
         if name not in wanted:
             _stored(store, name)
@@ -452,13 +392,7 @@ def plan(
 def find(
     store: Store, source: str, record_id: str, *, complete: bool = False, wait: float = WAIT
 ) -> tuple[str, Record, bytes, int, bool] | None:
-    """Exact identities resolve directly by their SHA-256 filename, with the file's bytes and modification time.
-
-    Malformed or misnamed evidence never proves absence: a missing file is confirmed by parsing the source,
-    unless `complete` states that a ready search cache has already parsed all of it without a problem.
-    The last value is true when a writer kept the brain lock past `wait` seconds: the file was then read whole
-    without it, since writes rename complete files into place, but it may be changing, and absence fails instead.
-    """
+    """Resolve `source:record_id` by filename, verifying absence unless `complete` or returning unlocked on busy wait."""
     if not re.fullmatch(NAME, source):
         return None
     try:
@@ -496,7 +430,7 @@ def find(
 
 
 def forgotten(store: Store, source: str) -> set[str]:
-    """The SHA-256 digests of the record ids `bf forget` removed from a source; collection never stores them again."""
+    """The SHA-256 digests of the record ids `bf forget` removed from a source."""
     name = f"memories/{source}/{FORGOTTEN}"
     try:
         data = store.read(name, _FORGOTTEN_LIMIT)
@@ -519,13 +453,9 @@ def _digest(name: str) -> str:
 
 @dataclass(frozen=True)
 class Retention:
-    """What a collection keeps and removes on purpose: forgotten records and, with a cutoff, expired ones.
-
-    A dataclass, not a model: the printed records are validated already and may be many.
-    """
+    """Printed records kept alongside stored removals and forgotten/expired counts."""
 
     kept: list[Record]
-    # Stored files the run removes before saving `kept`.
     removals: list[str]
     forgotten: int
     expired: int
@@ -534,14 +464,7 @@ class Retention:
 def retention(
     store: Store, source: str, printed: list[Record], *, cutoff: str, expire_stored: bool = True
 ) -> Retention:
-    """Split printed records and stored files by the source's forgotten list and, with a cutoff, by age.
-
-    Counts are distinct records, whether printed, stored or both. A record the sensor still prints is never expired
-    by when it was observed: only its own event time ages it. Without `expire_stored`, as for a run that reported
-    missing items, stored files leave only when forgotten: an undated record of a lost feed would otherwise age out
-    because the run did not print it. A stored file that does not load is left alone, as `prune` does: `bf validate`
-    reports it. The caller holds a brain lock, so `bf forget` cannot interleave.
-    """
+    """Partition printed records and stored files against `forgotten` and event-time `cutoff`."""
     hidden = forgotten(store, source)
     forgot: set[str] = set()
     expired: set[str] = set()
@@ -585,9 +508,7 @@ def remove(store: Store, source: str, names: list[str]) -> None:
 
 
 def forget(store: Store, source: str, targets: dict[str, str], *, dry_run: bool = False) -> list[dict[str, object]]:
-    """Remove records and add their files' digests, keyed by the ref naming each, to the source's forgotten list, so
-    collection never stores them again; the caller holds the writer lock. A record not stored yet is still listed.
-    """
+    """Record forgotten digests and remove their stored files under the writer lock."""
     if not re.fullmatch(NAME, source):
         raise Error("invalid record source")
     recover(store)
@@ -607,7 +528,6 @@ def forget(store: Store, source: str, targets: dict[str, str], *, dry_run: bool 
         hidden.add(entry)
     if dry_run:
         return result
-    # Append, so the owner's comments and order stay as written.
     listing = f"memories/{source}/{FORGOTTEN}"
     try:
         listed = store.read(listing, _FORGOTTEN_LIMIT)
@@ -618,7 +538,7 @@ def forget(store: Store, source: str, targets: dict[str, str], *, dry_run: bool 
     listed += "".join(f"{entry}\n" for entry in sorted(hidden - known)).encode()
     if len(listed) > _FORGOTTEN_LIMIT:
         raise Error(f"{listing} would exceed {_FORGOTTEN_LIMIT:,} bytes; split the source")
-    # The list first: a crash before the removal leaves a listed record that the next collection removes.
+    # Write the forgotten list first so any crash before removal still blocks future collection.
     store.write(listing, listed)
     remove(store, source, present)
     return result

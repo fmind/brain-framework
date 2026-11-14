@@ -623,7 +623,7 @@ def test_pruning_passes_over_a_record_it_cannot_read(brain: Store) -> None:
 
 
 ATTENDED = (
-    b"version: 10\nname: fixture\nfields:\n  attendee:\n    description: A person who attended.\n"
+    b"version: 11\nname: fixture\nfields:\n  attendee:\n    description: A person who attended.\n"
     b"    targets: ['person:']\njobs:\n  meetings:\n    run: [sensors/meetings.py]\n    emit: records\n"
 )
 

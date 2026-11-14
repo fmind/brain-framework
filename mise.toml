@@ -60,6 +60,7 @@ depends = [
   "check:schema",
   "check:screenshot",
   "check:shell",
+  "check:size",
   "check:types",
   "check:vuln",
 ]
@@ -147,6 +148,10 @@ run = "uv run --locked python scripts/render_watch.py"
 [tasks."check:shell"]
 description = "Lint the release shell scripts"
 run = "shellcheck -S warning scripts/*.sh"
+
+[tasks."check:size"]
+description = "Enforce the src/bf Python source line-count budget"
+run = 'uv run --locked python -c "import pathlib, sys; n = sum(len(p.read_text().splitlines()) for p in pathlib.Path(sys.argv[1]).glob(sys.argv[2])); sys.exit(0 if n <= 15000 else str(n))" src/bf "*.py"'
 
 [tasks."check:types"]
 alias = "ct"

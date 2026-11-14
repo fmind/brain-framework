@@ -36,30 +36,23 @@ from bf.models import (
 )
 from bf.storage import FileAncestorError, Store, relative, temporary, unread
 
-# The automatic reminder interval for project files; modification time is not evidence of verification.
 REVIEW_DAYS = 14
-# The refs a reminder names beside its count of newer linked evidence, newest first.
 NEWER = 5
 SECTION = 20
 PAGE = 50
 LISTING = 200
-# The newest items previewed in each backlink group; its relation page lists them all.
 PREVIEW = 5
-# Serialized bytes of a page's items, or of an exact read's text page. Agents read a reply whole: a larger one
-# ends early and continues at next_offset.
+# Reply byte budget (items or exact text page) so continuation advances via next_offset.
 BUDGET = 32 << 10
 BROWSE = ["projects", "concepts", "actions", "review", "tasks", "memories", "tags", "today", "7d"]
 _SCOPE = (
     "scope accepts a folder or a whole note (projects, memories/gmail, projects/atlas.md), a period (today, 7d, "
-    "2026-09, 2026-09-25, "
-    "2026-09-21..2026-09-25), "
-    "a source period or its undated records (memories/gmail/7d, memories/gmail/undated), an identity or a tag "
-    "(bf://NAME/tags/LABEL)"
+    "2026-09, 2026-09-25, 2026-09-21..2026-09-25), a source period or its undated records (memories/gmail/7d, "
+    "memories/gmail/undated), an identity or a tag (bf://NAME/tags/LABEL)"
 )
 _WHOLE = "scope takes a whole note without its #section; search the note, then read the section"
 _MISSING = "page not found; read projects, concepts, actions or memories to browse the brain"
 _BELOW = "(i.path=:prefix OR substr(i.path,1,length(:prefix)+1)=:prefix||'/')"
-# Items outside the :low sources; notes have no source. Period and home lists keep those sources as counts.
 _LOUD = "i.source NOT IN (SELECT value FROM json_each(:low))"
 
 
@@ -82,16 +75,11 @@ class Period:
 
 
 def _midnight(day: date) -> str:
-    # A naive datetime resolves the local offset at that date, including DST transitions.
     return timestamp(datetime.combine(day, time.min).astimezone().isoformat())
 
 
 def period(value: str, now: datetime | None = None) -> Period | None:
-    """A local day, inclusive range of days or month, or a trailing window ending now; None for another value.
-
-    A range's previous and next pages are the ranges of the same length around it. links.PERIOD is the one period
-    syntax, the page namespace links.reserved() keeps from entities.
-    """
+    """Parse a local day, range of days, month, or trailing window; None for other values."""
     if links.PERIOD.fullmatch(value) is None:
         return None
     now = (now or datetime.now(UTC)).astimezone()
@@ -99,7 +87,6 @@ def period(value: str, now: datetime | None = None) -> Period | None:
         if value in {"today", "yesterday"}:
             day = now.date() - timedelta(days=value == "yesterday")
         elif value[-1] in "hdw":
-            # An empty window holds nothing: `0d` would be a page no search scope could match.
             if not int(value[:-1]):
                 raise ValueError
             start = now - timedelta(hours=int(value[:-1]) * {"h": 1, "d": 24, "w": 168}[value[-1]])
@@ -132,12 +119,7 @@ def period(value: str, now: datetime | None = None) -> Period | None:
 
 @dataclass(frozen=True)
 class Route:
-    """What a brain-relative path names by its syntax alone: the one grammar of pages, folders, actions and notes.
-
-    `name` drops a trailing slash, as shell completion writes `projects/` or `7d/`; an action folder names its
-    ACTION.md. A note keeps its `#section`. `other` is a record, an identity or nothing; a `folder` below a root
-    is a page only where it exists.
-    """
+    """Syntax classification of a brain-relative path."""
 
     kind: Literal["period", "review", "tasks", "tags", "tag", "memories", "action", "note", "folder", "other"]
     name: str
@@ -149,10 +131,8 @@ def route(path: str, now: datetime | None = None) -> Route:
     if found := period(name, now):
         return Route("period", name, found)
     top = name.split("/")[0]
-    if name == "review":
-        return Route("review", name)
-    if name == "tasks":
-        return Route("tasks", name)
+    if name in {"review", "tasks"}:
+        return Route(name, name)
     if top == "tags":
         return Route("tags" if name == "tags" else "tag", name)
     if top == "memories":
@@ -167,10 +147,7 @@ def route(path: str, now: datetime | None = None) -> Route:
 
 
 def scope(value: str, now: datetime | None = None) -> Scope:
-    """Search bounds for one scope: a period, an explicit identity, or a brain folder or file.
-
-    A scope is checked without a brain, so any failure is invalid input.
-    """
+    """Parse search bounds without opening a brain; invalid input names `scope`."""
     try:
         return _scope(value.strip(), now)
     except Error as error:
@@ -184,25 +161,17 @@ def _scope(value: str, now: datetime | None) -> Scope:
         return {"since": found.since, "until": found.until}
     head, _, rest = value.partition(" ")
     if rest.strip() and (window := period(head, now)) is not None:
-        # A period, a space, then one other scope, such as `7d repo:github.com/owner/name`: no folder, identity or
-        # tag starts with a period followed by a space, so this form widens what a scope accepts.
         inner = _scope(rest.strip(), now)
         if {"since", "until", "undated"} & inner.keys():
             raise Error("combine a period with a folder, note, source, identity or tag, not with another period")
         return {**inner, "since": window.since, "until": window.until}
     if index.identity(value) or value.lower().startswith("bf:"):
-        # A tag scope takes no relation, unlike a read. Otherwise as `bf read` takes it: a page's #fragment would
-        # scope nothing, a complete-looking empty reply.
         tagged = links.tag(value)
         _syntax(value)
         parsed = links.parse(value)
         if not tagged and parsed and links.reserved(parsed.path):
-            # A page's address, such as bf://brain/projects or bf://brain/7d, is never a link target: it would
-            # scope nothing. Its brain-relative form, such as projects or 7d, scopes the brain.
             raise Error(_SCOPE)
         if parsed and parsed.fragment:
-            # A section's address, as a result's uri gives it, would scope only the links naming that section, an
-            # empty-looking answer about the note: scope the whole note, as for its path.
             raise Error(_WHOLE)
         return {"target": links.identity(value)}
     path = value.rstrip("/")
@@ -213,14 +182,11 @@ def _scope(value: str, now: datetime | None) -> Scope:
     if parts[0] not in (*AUTHORED, "memories"):
         raise Error(_SCOPE)
     if parts[0] == "memories" and len(parts) > 1 and "#" in parts[1]:
-        # A source has no sections, and no source name holds `#`: memories/gmail#x would fail as an unknown source.
         raise Error(_SCOPE)
     note = split_ref(path)[0]
     if (authored(note) or re.fullmatch(r"actions/[^/#]+", note.rstrip("/"))) and note != path:
-        # Items carry a note's path, never a section's: a section ref, as search returns it, would scope nothing.
         raise Error(_WHOLE)
     if parts[0] == "memories" and len(parts) >= 3:
-        # The source pages below memories/SOURCE, and nothing else: another segment would scope nothing.
         if len(parts) == 3 and not parts[2].endswith(".json") and (found := period(parts[2], now)):
             return {"prefix": "/".join(parts[:2]), "since": found.since, "until": found.until}
         if len(parts) == 3 and parts[2] == "undated":
@@ -231,24 +197,20 @@ def _scope(value: str, now: datetime | None) -> Scope:
 
 
 def query(text: str, bounds: str = "", *, limit: int = 10, offset: int = 0) -> Query:
-    """A search checked without a brain, as the CLI, MCP and eval take it; invalid input names `query` or `scope`.
-
-    An identity-shaped query must be a well-formed identity, like a read ref. Each interface bounds `limit` and
-    `offset` itself, before calling.
-    """
+    """Validate search text and scope bounds without a brain."""
     window = scope(bounds)
     if index.identity(text):
         try:
             links.tag(links.identity(text.strip()))
         except Error as error:
             raise InputError(str(error), "query") from None
-    # The words alone first: a query without words names the query, and any other reason the scope's bounds.
+    # Check query words alone first so empty queries report `query` before `scope`.
     _request(Query, "query", text=text)
     return _request(Query, "scope", text=text, limit=limit, offset=offset, **window)
 
 
 def bounds(value: str) -> Bounds:
-    """A scope checked without a brain, as search checks it, for commands that take a scope without words."""
+    """Validate a scope without query text."""
     return _request(Bounds, "scope", **scope(value))
 
 
@@ -256,25 +218,21 @@ def _request[T: Bounds](model: type[T], argument: str, **values: object) -> T:
     try:
         return model.model_validate(values)
     except ValidationError as error:
-        # pydantic's reasons without its field names, which are not the arguments a caller wrote.
         reasons = sorted({item["msg"].removeprefix("Value error, ") for item in error.errors(include_input=False)})
         raise InputError("; ".join(reasons), argument) from None
 
 
 def sources(store: Store, connection: sqlite3.Connection) -> dict[str, dict[str, object]]:
-    """Each source a brain indexes or configures via a `records` job, with its indexed record count."""
-    config = load(store)
-    return {**{name: {"records": 0} for name in config.record_sources()}, **index.sources(connection)}
+    """Configured and indexed record sources with their indexed counts."""
+    return {**{name: {"records": 0} for name in load(store).record_sources()}, **index.sources(connection)}
 
 
 def low(store: Store) -> list[str]:
-    """Record sources whose job is low-priority (including prompt jobs), read at query time without rebuilding."""
-    config = load(store)
-    return sorted(name for name, (_, job) in config.record_sources().items() if job.is_low_priority)
+    """Low-priority record sources, resolved at query time without rebuilding."""
+    return sorted(name for name, (_, job) in load(store).record_sources().items() if job.is_low_priority)
 
 
 def _counts(store: Store, rows: list[tuple[str, int]], page: str) -> list[dict[str, object]]:
-    """Records per source with the page listing them; a low-priority source is marked, its items listed only there."""
     quiet = set(low(store))
     return [
         {
@@ -288,14 +246,14 @@ def _counts(store: Store, rows: list[tuple[str, int]], page: str) -> list[dict[s
 
 
 def address(brain: str, item: Mapping[str, object]) -> str:
-    """The portable address of one cached item: a record id may contain `#`, a note ref names its section."""
+    """Portable BF address of a cached item."""
     ref = str(item["ref"])
     return links.address(brain, ref) if item.get("kind") == "record" else links.address(brain, *split_ref(ref))
 
 
 @contextmanager
 def _open(store: Store) -> Generator[tuple[str, sqlite3.Connection, dict[str, object]]]:
-    """Load the brain config and open its cache, collecting cache problems and staleness."""
+    """Load brain config and open its cache with staleness and problems."""
     try:
         name = load(store).name
         with index.database(store) as (connection, state):
@@ -310,21 +268,21 @@ def _open(store: Store) -> Generator[tuple[str, sqlite3.Connection, dict[str, ob
 
 
 def absent(extra: Mapping[str, object], message: str = _MISSING) -> Error:
-    """A missing page or source is NotFoundError only when the brain answered from a complete cache."""
+    """Return NotFoundError only when the cache answered cleanly without stale or problem items."""
     if extra.get("problems") or extra.get("stale"):
         return Error("not found in the readable evidence; run bf status before concluding it is absent")
     return NotFoundError(message)
 
 
 def unique(problems: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Each problem once: identity expansion and the page itself can meet the same unreadable cache."""
+    """Deduplicate problem dicts while preserving order."""
     return list({encode(problem): problem for problem in problems}.values())
 
 
 def fitting(
     items: list[dict[str, object]], budget: int = BUDGET, shape: Callable[[object], object] = present
 ) -> list[dict[str, object]]:
-    """The leading items within the reply budget; at least one, so a continuation always advances."""
+    """Leading items fitting `budget`, keeping at least one so pagination always advances."""
     size = 0
     for count, item in enumerate(items):
         size += len(encode(shape(item)))
@@ -347,7 +305,7 @@ def _paged(
     *,
     reserved: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Fit one SQL page within the reply budget and emit its continuation offset when rows remain."""
+    """Fit one SQL page within the reply budget and add `next_offset` when rows remain."""
     space = BUDGET - (len(encode(present(dict(reserved)))) if reserved else 0)
     selected = fitting(items, space)
     return {
@@ -381,10 +339,7 @@ def _listing(
 
 
 def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now: datetime) -> None:
-    """Derive reminders from local edits, explicit deadlines and newer linked evidence, without asserting a review.
-
-    The same note may appear in several of `items`, such as a home section's: each copy gets the same signals.
-    """
+    """Derive review reminders from edits, explicit deadlines, and newer linked evidence."""
     rows = {
         row["ref"]: row
         for row in connection.execute(
@@ -405,15 +360,12 @@ def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now:
             or not (item.get("type") == "project" or row["stale_after"])
         ):
             continue
-        reasons = []
-        modified = ""
-        due = ""
+        reasons, modified, due = [], "", ""
         try:
             instant = datetime.fromtimestamp(row["mtime"] / 1_000_000_000, UTC)
             modified = timestamp(instant.isoformat())
             item["modified"] = modified
             if modified > stamp:
-                # A future clock cannot establish an age. Surface it instead of postponing forever.
                 reasons.append("future_modified")
             if not row["stale_after"]:
                 due = timestamp((instant + timedelta(days=REVIEW_DAYS)).isoformat())
@@ -423,8 +375,6 @@ def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now:
             due = row["stale_after"]
         item["review_source"] = "stale_after" if row["stale_after"] else "modified"
         if due:
-            # A review is due on a local day: state that date, compare its first instant. A far-future
-            # placeholder, such as 9999-12-31T23:00:00Z, can pass the last local day; it keeps its UTC date.
             review = datetime.fromisoformat(due)
             with suppress(OverflowError):
                 review = review.astimezone()
@@ -434,25 +384,20 @@ def _review(connection: sqlite3.Connection, items: list[dict[str, object]], now:
         if modified:
             edits[row["id"]] = modified
         reviewed.append((item, row["id"], reasons))
-    # Linked evidence that happened or changed upstream since the edit; copying another note is not new evidence.
     newer = index.newer_links(connection, edits, stamp, NEWER)
     for item, item_id, reasons in reviewed:
         if item_id in newer:
             item["new_links"], item["newer"] = newer[item_id]
             reasons.append("newer_evidence")
         if reasons:
-            item["review"] = True
-            item["review_reasons"] = reasons
+            item["review"], item["review_reasons"] = True, reasons
 
 
 def _brief(item: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in item.items() if key != "excerpt"}
 
 
-# A recently changed note on the home page: which note, when, and whether it needs review; its read holds the rest.
 _CHANGED = ("ref", "kind", "title", "time", "date", "modified", "review")
-# A record changed upstream on a period page: which record, when it happened and when it changed. Each continuation
-# page repeats the list, so its read holds the rest and the page budget goes to the items.
 _UPDATED = ("ref", "kind", "title", "time", "updated")
 
 
@@ -460,13 +405,19 @@ def _only(item: dict[str, object], keys: tuple[str, ...]) -> dict[str, object]:
     return {key: item[key] for key in keys if key in item}
 
 
-def home(store: Store, now: datetime | None = None, *, counted: bool = True) -> dict[str, object]:
-    """What needs attention now: projects needing review first, recent actions and notes, activity and the coming week.
+def _alerts(
+    store: Store, connection: sqlite3.Connection, now: datetime, extra: Mapping[str, object]
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    issues = list(cast("list[dict[str, object]]", extra.get("problems", [])))
+    try:
+        # Use this connection; opening the cache again would wait behind a publish waiting on this read.
+        return attention(store, now, index.sources(connection)), issues
+    except Error, OSError, UnicodeError:
+        return [], [*issues, {"error": "operational status is unavailable; run bf status"}]
 
-    Every current project is reviewed; those that fit the page budget are listed, and `projects_total` counts all.
-    `changed` names the other notes changed this week. A deprecated note no longer applies, so it leaves every
-    section. The budget is measured on the reply as printed.
-    """
+
+def home(store: Store, now: datetime | None = None, *, counted: bool = True) -> dict[str, object]:
+    """Home page: projects needing review, open draft actions, weekly changes, activity, and upcoming items."""
     now = now or datetime.now(UTC)
     stamp = timestamp(now.isoformat())
     day, week = (timestamp((now - timedelta(days=days)).isoformat()) for days in (1, 7))
@@ -476,7 +427,6 @@ def home(store: Store, now: datetime | None = None, *, counted: bool = True) -> 
     with _open(store) as (_name, connection, extra):
         projects = _rows(connection, f"{project} AND {current}", {}, "time DESC,i.ref DESC", -1)
         actions = _rows(connection, f"{index.ACTION} AND i.status='draft'", {}, "i.path DESC", 10)
-        # Projects carry their own review signals in `projects`.
         changed = _rows(
             connection,
             f"i.kind='note' AND {current} AND NOT ({project}) AND i.time!='' "
@@ -492,16 +442,9 @@ def home(store: Store, now: datetime | None = None, *, counted: bool = True) -> 
             "time,i.ref",
             SECTION,
         )
-        # A note listed in several sections carries the same signals in each.
         _review(connection, [*projects, *actions, *changed, *upcoming], now)
         activity = _counts(store, index.activity(connection, day, stamp), "24h")
-        issues = list(cast("list[dict[str, object]]", extra.get("problems", [])))
-        try:
-            # From this connection: opening the cache again would wait behind a publish that waits for this read.
-            alerts = attention(store, now, index.sources(connection))
-        except Error, OSError, UnicodeError:
-            alerts = []
-            issues.append({"error": "operational status is unavailable; run bf status"})
+        alerts, issues = _alerts(store, connection, now, extra)
         if counted:
             usage.note(store, "read", 1, kind="home")
     reply: dict[str, object] = {
@@ -509,19 +452,16 @@ def home(store: Store, now: datetime | None = None, *, counted: bool = True) -> 
         "projects": [],
         "projects_total": len(projects),
         "actions": actions,
-        # Orientation previews: titles and times; read an item for its text.
         "changed": [_only(item, _CHANGED) for item in changed],
         "activity": activity,
         "upcoming": [_brief(item) for item in upcoming],
         "attention": alerts,
         "pages": BROWSE,
-        **({k: v for k, v in extra.items() if k != "problems"}),
+        **{k: v for k, v in extra.items() if k != "problems"},
         **({"problems": issues} if issues else {}),
     }
-    # Projects needing review first, each group newest first, in what the bounded previews leave of the budget.
     reply["projects"] = fitting(
-        sorted(projects, key=lambda item: not item.get("review")),
-        BUDGET - len(encode(present(reply))),
+        sorted(projects, key=lambda item: not item.get("review")), BUDGET - len(encode(present(reply)))
     )
     return reply
 
@@ -530,7 +470,7 @@ _REVIEW_REASONS = frozenset({"due", "newer_evidence", "future_modified", "unknow
 
 
 def _blocked_by(connection: sqlite3.Connection, actions: list[dict[str, object]]) -> None:
-    """Populate `blocked_by` on open draft actions from unresolved draft `depends-on` targets in the same brain."""
+    """Populate `blocked_by` on draft actions from unresolved draft `depends-on` targets."""
     if not actions:
         return
     refs = [str(item["ref"]) for item in actions]
@@ -566,7 +506,7 @@ def _blocked_by(connection: sqlite3.Connection, actions: list[dict[str, object]]
 def review_page(
     store: Store, now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
-    """Computed triage view: paginated non-deprecated notes needing review, open draft actions and attention items."""
+    """Triage view of notes needing review, draft actions, and attention items."""
     now = now or datetime.now(UTC)
     with _open(store) as (_name, connection, extra):
         candidates = _rows(connection, f"{index.ENTRY} AND i.status!='deprecated'", {}, "time DESC,i.ref DESC", -1)
@@ -583,18 +523,10 @@ def review_page(
         )
         previewed = drafts[:SECTION]
         _blocked_by(connection, previewed)
-        issues = list(cast("list[dict[str, object]]", extra.get("problems", [])))
-        try:
-            alerts = attention(store, now, index.sources(connection))
-        except Error, OSError, UnicodeError:
-            alerts = []
-            issues.append({"error": "operational status is unavailable; run bf status"})
+        alerts, issues = _alerts(store, connection, now, extra)
         if counted:
             usage.note(store, "read", 1, kind="review")
-    ordered = sorted(
-        due_items,
-        key=lambda item: (str(item.get("review_due", "9999-99-99")), str(item["ref"])),
-    )
+    ordered = sorted(due_items, key=lambda item: (str(item.get("review_due", "9999-99-99")), str(item["ref"])))
     total = len(ordered)
     reply: dict[str, object] = {
         "page": "review",
@@ -603,7 +535,7 @@ def review_page(
         "actions": previewed,
         "actions_total": len(drafts),
         "attention": alerts,
-        **({k: v for k, v in extra.items() if k != "problems"}),
+        **{k: v for k, v in extra.items() if k != "problems"},
         **({"problems": issues} if issues else {}),
     }
     selected = fitting(ordered[offset : offset + PAGE], BUDGET - len(encode(present(reply))))
@@ -614,13 +546,9 @@ def review_page(
 
 
 def timeline(store: Store, name: str, found: Period, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
-    """Items dated within a period, items modified within it, and each source's share of the period.
-
-    Low-priority sources, such as a news feed, appear only in `sources`: their records would crowd out the rest.
-    """
+    """Items dated or modified within a period plus per-source activity counts."""
     with _open(store) as (_brain, connection, extra):
         params = {"since": found.since, "until": found.until, "low": json.dumps(low(store))}
-        # Brief before the page measures what its summaries leave the items.
         changed = [
             _only(item, _UPDATED)
             for item in _rows(
@@ -656,8 +584,6 @@ def timeline(store: Store, name: str, found: Period, *, offset: int = 0, counted
 
 
 def _kind(store: Store, path: str) -> int:
-    """An entry's own file type, never a link target's; 0 when it is absent, unreadable or below a file. A link or
-    special file above it raises, naming that entry."""
     try:
         return stat.S_IFMT(store.mode(path))
     except FileAncestorError, OSError:
@@ -667,33 +593,21 @@ def _kind(store: Store, path: str) -> int:
 def folder(
     store: Store, path: str, now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
-    """Notes below an authored folder, with a continuation through the complete order."""
+    """Notes below an authored folder."""
     now = now or datetime.now(UTC)
     top = path.split("/")[0]
     where = index.ACTION if path == "actions" else f"i.kind='note' AND {_BELOW}"
-    order = {
-        "projects": "i.status='deprecated',time DESC,i.ref DESC",
-        "concepts": "i.title,i.ref",
-    }.get(top, "i.path DESC")
-    reply = _listing(
-        store,
-        where,
-        {"prefix": path},
-        order,
-        LISTING,
-        offset,
-        counted=counted,
-        kind="folder",
-        review=now,
+    order = {"projects": "i.status='deprecated',time DESC,i.ref DESC", "concepts": "i.title,i.ref"}.get(
+        top, "i.path DESC"
     )
+    reply = _listing(store, where, {"prefix": path}, order, LISTING, offset, counted=counted, kind="folder", review=now)
     return {"page": path, **reply}
 
 
 def memories(
     store: Store, parts: tuple[str, ...], now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
-    """Sources with their coverage, or one source's coverage with its records: all of them, those in a period, the
-    undated ones or one record file's."""
+    """Source coverage overview or records for one source, period, `undated`, or record file."""
     now = now or datetime.now(UTC)
     if len(parts) == 1:
         if offset:
@@ -716,7 +630,6 @@ def memories(
         raise NotFoundError(_MISSING)
     window = None
     if len(parts) == 2:
-        # A record's time is its stored instant: ordering by the column walks items_kind_source_time.
         where, params = "i.kind='record' AND i.source=:source", {"source": source}
         order, budget, kind = "i.time DESC,i.ref DESC", SECTION, "source"
     else:
@@ -737,7 +650,6 @@ def memories(
     with _open(store) as (_name, connection, extra):
         counts = sources(store, connection)
         if (count := counts.get(source)) is None:
-            # An unknown source is a missing page, never an empty answer.
             raise absent(extra, _MISSING + suggest(source, set(counts), prefix="memories/"))
         coverage = [{"source": source, **count, **source_health(store, {source: count}, now=now)[source]}]
         rows, total = index.listing(connection, where, params, order, budget, offset)
@@ -758,8 +670,7 @@ def memories(
 
 
 def tasks(store: Store, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
-    """Open checkboxes in current entry notes, with source lines and complete aggregate counts."""
-    # Working attachments can quote source checkboxes: only authored entry notes join the task queue.
+    """Open checkboxes in current entry notes with aggregate counts."""
     eligible = f"{index.ENTRY} AND i.status!='deprecated'"
     with _open(store) as (_name, connection, extra):
         summary = connection.execute(
@@ -792,7 +703,7 @@ def tasks(store: Store, *, offset: int = 0, counted: bool = True) -> dict[str, o
 
 
 def tags(store: Store, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
-    """Enumerate local tag identities, with exact note counts and bounded pagination."""
+    """Enumerate local tag identities with note counts."""
     with _open(store) as (_name, connection, extra):
         rows = connection.execute(
             "SELECT target,count(*) AS total FROM tags GROUP BY target ORDER BY target LIMIT ? OFFSET ?",
@@ -814,7 +725,7 @@ def _label(name: str) -> None:
 
 
 def tagged(store: Store, name: str, *, offset: int = 0, counted: bool = True) -> dict[str, object]:
-    """List only explicit frontmatter membership, not prose, aliases or ordinary links to a tag."""
+    """List items declaring frontmatter tag `name`."""
     _label(name)
     with _open(store) as (brain, connection, extra):
         target = links.address(brain, f"tags/{name}")
@@ -833,17 +744,9 @@ def tagged(store: Store, name: str, *, offset: int = 0, counted: bool = True) ->
 
 
 def page(
-    store: Store,
-    path: str,
-    now: datetime | None = None,
-    *,
-    offset: int = 0,
-    counted: bool = True,
+    store: Store, path: str, now: datetime | None = None, *, offset: int = 0, counted: bool = True
 ) -> dict[str, object] | None:
-    """The page a ref names, or None when it names a note, a record or an identity.
-
-    An offset on a page that is never paged is invalid input, decided by the ref alone.
-    """
+    """Return the page named by `path`, or None for a note, record, or identity."""
     if not path:
         if offset:
             raise InputError(
@@ -870,35 +773,26 @@ def page(
 
 
 def folder_page(store: Store, path: str) -> str | None:
-    """The folder page an authored path names: a root, or an existing folder below one other than an action's,
-    which reads as its ACTION.md. Notes and their sections (`path#heading`) are items, not folders; a symlink or
-    special file where the folder would be, or above it, fails, naming it."""
+    """Return the authored folder page named by `path`, or None when it is not a folder."""
     if (target := route(path)).kind != "folder":
         return None
     name = target.name
     relative(name)
     if name in AUTHORED:
         return name
-    # Entity names such as projects/archive are logical: only an existing folder is a page.
     kind = _kind(store, name)
     if kind == stat.S_IFDIR:
         return name
     if kind not in {0, stat.S_IFREG}:
-        # Skipped and reported like a path below it: not found would claim the folder absent.
         raise Error(f"{name}: expected a directory; symlinks and special files are not followed")
     return None
 
 
-# A page has no relation page: by its syntax here, or once retrieve finds an existing folder below a root.
 RELATIONLESS = "rel lists the links to a note, record or identity, not a page"
 
 
 def readable(ref: str, rel: str = "") -> str:
-    """Check a read's syntax without a brain, as `page` and `retrieve.read` apply it; a failure is invalid input.
-
-    A malformed ref, or a relation page of a page or a #section, fails here; a well-formed ref can still name
-    nothing in the brain.
-    """
+    """Validate read `ref` and optional `rel` syntax without opening a brain."""
     try:
         path, section = _syntax(ref)
     except Error as error:
@@ -911,18 +805,16 @@ def readable(ref: str, rel: str = "") -> str:
 
 
 _SECTIONLESS = "pages have no sections; read the page without its #fragment"
-# A label may hold `#`, which only its address encodes: dropping the fragment of tags/C# would read the label C.
 _TAGGED = "tag pages have no sections; for a label holding #, read the tags page and use its ref"
 
 
 def _syntax(ref: str) -> tuple[str, bool]:
-    """A read ref's path, once its syntax is checked, and whether it names a note's section."""
+    """Validate read ref syntax and return `(path, has_section)`."""
     if len(ref) > 8192:
         raise Error("expected a reference of at most 8192 characters")
     try:
         ref.encode()
     except UnicodeEncodeError:
-        # Undecodable argument bytes arrive as lone surrogates, which no note path, record id or identity holds.
         raise Error("expected UTF-8 text") from None
     value = ref.strip()
     if parsed := links.parse(value):
@@ -933,10 +825,7 @@ def _syntax(ref: str) -> tuple[str, bool]:
             return parsed.path, True
     path = parsed.path if parsed else value
     note, fragment = split_ref(path)
-    # A trailing `#` names no section: like a scope, a read rejects it instead of echoing it as part of the ref, as
-    # links.parse rejects a BF address's. A BF address's decoded path, like a record id, may itself end in `#`.
     bare = parsed is None and note != path and not fragment
-    # A page, such as tasks or 7d, has no sections; a folder below a root may hold `#` in its name.
     if (fragment or bare) and links.reserved(note.rstrip("/")):
         raise Error(_TAGGED if note.startswith("tags/") else _SECTIONLESS)
     target = route(path)
@@ -945,27 +834,21 @@ def _syntax(ref: str) -> tuple[str, bool]:
     elif target.kind in {"note", "action"}:
         if bare:
             raise Error("a ref ending in # names no section; read the whole note without it, or add the section")
-        # A note's section fragment is free text; only its path must be normalized.
         relative(note.rstrip("/") if target.kind == "action" else note)
         return path, bool(fragment)
     elif target.kind in {"memories", "folder"}:
-        # Pages and folders check the whole path, including any `#`.
         parts = relative(target.name)
         if parts[0] == "memories" and len(parts) == 3:
-            # A source's period page, such as memories/mail/7d.
             period(parts[2])
     return path, False
 
 
-# A backlink preview names an item; its relation page and exact read hold the rest.
 _PREVIEWED = ("ref", "title", "time", "date", "kind", "source", "status", "type", "@type", "excerpt")
-# A backlink preview's excerpt: enough to see what each linking item says without reading it.
 GLIMPSE = 160
 
 
 def _glimpse(item: dict[str, object]) -> dict[str, object]:
     if isinstance(excerpt := item.get("excerpt"), str):
-        # Cut at a word, as other previews are.
         item["excerpt"] = preview(excerpt, GLIMPSE)
     return item
 
@@ -981,19 +864,9 @@ def _backlinks(connection: sqlite3.Connection, targets: set[str], exclude: str =
 
 
 def relation_page(
-    store: Store,
-    targets: set[str],
-    relation: str,
-    *,
-    ref: str = "",
-    offset: int = 0,
-    counted: bool = True,
+    store: Store, targets: set[str], relation: str, *, ref: str = "", offset: int = 0, counted: bool = True
 ) -> dict[str, object]:
-    """Every item linking to the expanded targets through one relation, newest first, 50 per page.
-
-    `relation` is a RelationName, CITES or LINKS; the owning item is not its own backlink. Also lists the links of
-    relations declaring this one `broader`; an item carries its `relation` only when it differs from the requested one.
-    """
+    """List items linking to expanded `targets` through `relation` (or narrower ones), newest first."""
     with _open(store) as (name, connection, extra):
         relations = [relation, *load(store).narrower(relation)]
         local = graph.local_refs(connection, targets, name)
@@ -1013,10 +886,7 @@ def _graph(
     counted: bool = False,
     kind: str = "",
 ) -> dict[str, object]:
-    """Backlinks and typed claims about the expanded targets; the owning item is not its own backlink.
-
-    With `now`, also gives the whole note's reminders.
-    """
+    """Backlinks, typed claims, and optional whole-note reminders for expanded `targets`."""
     try:
         with _open(store) as (name, connection, extra):
             local = graph.local_refs(connection, targets, name)
@@ -1037,12 +907,10 @@ def _graph(
     }
 
 
-# What a whole read adds from the note's listing entry when the note gets reminders.
 _REMINDERS = ("tasks", "next", "review", "review_due", "review_source", "review_reasons", "new_links", "newer")
 
 
 def _reminders(connection: sqlite3.Connection, ref: str, now: datetime) -> dict[str, object]:
-    """A note's tasks and review signals as listings show them; nothing for a note without reminders."""
     items = _rows(connection, "i.ref=:ref", {"ref": ref}, "i.ref", 1)
     _review(connection, items, now)
     if not items or "review_source" not in items[0]:
@@ -1051,12 +919,10 @@ def _reminders(connection: sqlite3.Connection, ref: str, now: datetime) -> dict[
 
 
 def _summary(reply: Mapping[str, object]) -> dict[str, object]:
-    """A section's note title, type, status and date, from the file it was read from: its text omits them."""
     try:
         path, data, markdown = cast("tuple[str, bytes, Markdown | None]", reply["_source"])
         found = note(path, markdown or data)
     except Error:
-        # The section still reads; only a note that search can index states its metadata.
         return {}
     values = {
         "title": found.title,
@@ -1068,27 +934,19 @@ def _summary(reply: Mapping[str, object]) -> dict[str, object]:
 
 
 def context(store: Store, reply: dict[str, object]) -> dict[str, object]:
-    """Backlinks of a whole note or record and typed claims about it.
-
-    A whole note that gets reminders adds its tasks and review signals, and an action's ACTION.md the action's files
-    and the projects it links to. A section names its note's title, type, status and date instead.
-    """
-    brain = str(reply["brain"])
-    ref = str(reply["ref"])
+    """Backlinks, typed claims, reminders, and action attachments/projects for a read reply."""
+    brain, ref = str(reply["brain"]), str(reply["ref"])
     record = "record" in reply
     path, fragment = ("", "") if record else split_ref(ref)
     if fragment:
         return _summary(reply)
     if not record and not addressable(path):
-        # Record ids are bounded to fit a BF address; a note path is not, but the note itself still reads.
         return {"problems": [{"error": "backlinks are unavailable for a path this long; shorten it"}]}
     try:
         targets, problems = graph.expand(store, links.address(brain, ref if record else path))
     except Error:
-        # Only an invalid address raises, such as a note path with a control character; the note itself reads.
         return {"problems": [{"file": path, "error": "backlinks are unavailable for this path; rename it"}]}
-    reminded = None if record else datetime.now(UTC)
-    result = _graph(store, targets, ref, reminded)
+    result = _graph(store, targets, ref, None if record else datetime.now(UTC))
     issues: list[dict[str, object]] = [*problems, *cast("list[dict[str, object]]", result.pop("problems", []))]
     if not record and action_note(path):
         skipped: dict[str, tuple[int, int, int, int]] = {}
@@ -1096,9 +954,6 @@ def context(store: Store, reply: dict[str, object]) -> dict[str, object]:
             result.update(_action(store, brain, path, str(reply["text"]), skipped))
         except Error, OSError, sqlite3.DatabaseError:
             issues.append({"error": "the action's files or projects are unavailable; run bf status"})
-        # Never followed, so never offered as the action's files; the owner can replace or rename them. The cache
-        # names each entry it scanned with its cause: only those it did not report, such as past its 200, are added,
-        # with the cause bf validate names.
         reported = {problem.get("file") for problem in issues}
         unlisted = sorted(name for name in skipped if not editor_lock(name) and name not in reported)
         issues.extend({"file": name, "error": unread(store, name)} for name in unlisted[:LISTING])
@@ -1108,7 +963,6 @@ def context(store: Store, reply: dict[str, object]) -> dict[str, object]:
 def _action(
     store: Store, brain: str, path: str, text: str, skipped: dict[str, tuple[int, int, int, int]]
 ) -> dict[str, object]:
-    """The files kept with an action, and the projects its ACTION.md links to by path, address, entity or alias."""
     folder = path.rsplit("/", 1)[0]
     files = [
         name
@@ -1125,7 +979,6 @@ def _action(
         if name.startswith("projects/") and authored(name):
             projects.add(name)
         elif parsed or index.identity(resolved):
-            # An identity names its one local owner, as backlinks do; a name several items claim names none.
             names.add(links.address(parsed.brain, parsed.path) if parsed else resolved)
     with index.database(store) as (connection, _state):
         linked = _rows(
@@ -1140,7 +993,7 @@ def _action(
 
 
 def identity(store: Store, value: str, *, counted: bool = True) -> dict[str, object] | None:
-    """Everything that links to an identity without an owning note, and the claims made about it."""
+    """Backlinks and typed claims for an unowned identity."""
     if not (index.identity(value) or value.lower().startswith("bf:")):
         return None
     value = links.identity(value)

@@ -284,7 +284,7 @@ def brain(tmp_path: Path) -> Store:
     root = tmp_path / "brain"
     root.mkdir()
     store = Store(root)
-    store.write("bf.yaml", b"version: 10\nname: fixture\njobs: {}\n")
+    store.write("bf.yaml", b"version: 11\nname: fixture\njobs: {}\n")
     store.write("projects/offline.md", PROJECT)
     store.write(
         "concepts/evidence.md",

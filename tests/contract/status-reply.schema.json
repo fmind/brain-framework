@@ -112,6 +112,7 @@
       "properties": {
         "active_runs": { "minimum": 0, "type": "integer" },
         "failed": { "minimum": 0, "type": "integer" },
+        "incidents": { "minimum": 0, "type": "integer" },
         "oldest_pending": { "format": "date-time", "type": ["string", "null"] },
         "pending": { "minimum": 0, "type": "integer" },
         "uncertain": { "minimum": 0, "type": "integer" },

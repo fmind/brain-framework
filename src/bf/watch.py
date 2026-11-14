@@ -6,6 +6,7 @@ import os
 import re
 import select
 import selectors
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,7 @@ from enum import StrEnum
 from threading import Event, Lock, Thread
 from typing import IO, TextIO, cast
 
-from pydantic import JsonValue, TypeAdapter, ValidationError
+from pydantic import ValidationError
 from rich import box
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -30,13 +31,12 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from bf import collect, config, runtime, update
+from bf import collect, config, index, runtime, update
 from bf import jobs as job_ops
 from bf.health import DEGRADED, _load_states, degradation, is_late
 from bf.models import Error, WatchSettings, decode, local, present, printable, terminal, timestamp
-from bf.models import Job as JobSpec
-from bf.runtime import MAX_BATCH, Batch, Message, Queue
-from bf.storage import BusyError, Store, collecting
+from bf.runtime import Queue, sync_item_events
+from bf.storage import BusyError, Store, collecting, wakeup_mtime
 from bf.watch_settings import Notifications, settings
 
 
@@ -55,6 +55,11 @@ COLORS = {State.FAILED: "red", State.NEVER: "yellow", State.DUE: "yellow", State
 MARKERS = {"action": "* ", "message": "@ ", "messages": "~ "}
 _MAX_STREAM_LINE, _MAX_STREAM_FAILS, _COMPACT_EVERY = 1 << 20, 5, 3600.0
 _STATE_ORDER = list(State)
+_REFRESH_MSG = (
+    ("observe", "Rereading configuration and runtime state"),
+    ("paused", "Refresh queued; resume with Space to check due jobs"),
+    ("running", "Refresh queued after the active update"),
+)
 
 
 @dataclass
@@ -81,6 +86,7 @@ class Row:
     daemon: bool = False
     early: bool = False
     degraded: dict[str, object] | None = None
+    incident_count: int = 0
 
 
 def needs_attention(row: Row) -> bool:
@@ -91,8 +97,10 @@ def needs_attention(row: Row) -> bool:
     )
 
 
-def _is_daemon(job: JobSpec) -> bool:
-    return any(t.daemon for t in job.triggers)
+def _incidents(store: Store) -> list[dict[str, object]]:
+    with suppress(Error, OSError, sqlite3.DatabaseError):
+        return Queue(store).incidents()
+    return []
 
 
 def snapshot(store: Store, jobs: tuple[str, ...] = (), *, now: datetime | None = None) -> list[Row]:
@@ -100,31 +108,34 @@ def snapshot(store: Store, jobs: tuple[str, ...] = (), *, now: datetime | None =
     cfg, now = config.load(store), now or datetime.now(UTC)
     selected, tz = update.selection(cfg, jobs), cfg.defaults.timezone
     states, _, failing, daemon_errors, _ = _load_states(store)
+    inc_by_job = {str(inc["job"]): inc for inc in _incidents(store)}
     rows: list[Row] = []
     for name, job in sorted(cfg.jobs.items()):
-        entry, daemon = states.get(name, {}), _is_daemon(job)
+        entry, daemon, inc = states.get(name, {}), job.is_daemon, inc_by_job.get(name)
         timed = [t for t in job.triggers if t.every is not None or t.at is not None]
         q_err = "unresolved work in runtime queue; inspect bf queue" if name in failing else ""
-        error = str(entry.get("last_error") or daemon_errors.get(name, "") or q_err) if job.enabled else ""
+        inc_err = (inc or {}).get("last_error") or ""
+        error = str(entry.get("last_error") or daemon_errors.get(name, "") or inc_err or q_err) if job.enabled else ""
         success, due_at = str(entry.get("last_success", "")), collect.next_due(job, entry, now, default_tz=tz)
         status = State.DISABLED if not job.enabled else State.FAILED if error else State.MANUAL
         if status is State.MANUAL and (timed or daemon):
             status = (
                 State.NEVER if not success and not daemon else State.DUE if due_at and due_at <= now else State.FRESH
             )
-        added, updated, removed = (cast("int | None", entry.get(k)) for k in ("added", "updated", "removed"))
-        out_b, recs, runs = (cast("int | None", entry.get(k)) for k in ("output_bytes", "records", "runs"))
+        keys = ("added", "updated", "removed", "output_bytes", "records", "runs")
+        added, updated, removed, out_b, recs, runs = (cast("int | None", entry.get(k)) for k in keys)
         refresh = min((t.every for t in timed if t.every), default=0)
         due_s = timestamp(due_at.isoformat()) if due_at else ""
-        row = Row(job.emit, name, status, name in selected, refresh, success, due_s, added, updated, removed)
-        row.output_bytes, row.records, row.runs = out_b, recs, runs
-        row.daemon, row.reconcile = daemon, bool(entry.get("reconcile", False))
-        row.early = status is State.NEVER and (daemon or not is_late(job, {"freshness": "never"}, now, default_tz=tz))
-        row.elapsed_seconds = cast("float | None", entry.get("elapsed_seconds"))
-        row.error, row.log = error, runtime.log_path(name) if error else ""
-        row.action, row.record = str(entry.get("action", "")), str(entry.get("record", ""))
-        row.degraded = degradation(entry) if job.emit == "records" else None
-        rows.append(row)
+        early = status is State.NEVER and (daemon or not is_late(job, {"freshness": "never"}, now, default_tz=tz))
+        r = Row(job.emit, name, status, name in selected, refresh, success, due_s, added, updated, removed)
+        r.elapsed_seconds, r.output_bytes = cast("float | None", entry.get("elapsed_seconds")), out_b
+        r.reconcile, r.error = bool(entry.get("reconcile", False)), error
+        r.log = runtime.log_path(name) if error else ""
+        r.action, r.records, r.runs, r.record = str(entry.get("action", "")), recs, runs, str(entry.get("record", ""))
+        r.daemon, r.early = daemon, early
+        r.degraded = degradation(entry) if job.emit == "records" else None
+        r.incident_count = int(cast("int", inc["count"])) if inc and job.enabled else 0
+        rows.append(r)
     return rows
 
 
@@ -155,25 +166,20 @@ class Sort(StrEnum):
     def value_for(self, r: Row) -> str | float | None:
         if self is Sort.STATE:
             return _STATE_ORDER.index(r.status)
-        if self is Sort.UPDATED:
-            return datetime.fromisoformat(r.success).timestamp() if r.success else None
-        if self is Sort.DUE:
-            return datetime.fromisoformat(r.next_due).timestamp() if r.next_due else None
+        if self in {Sort.UPDATED, Sort.DUE}:
+            raw = r.success if self is Sort.UPDATED else r.next_due
+            return datetime.fromisoformat(raw).timestamp() if raw else None
         if self is Sort.CHANGES:
-            return (
-                None if r.added is None or r.updated is None or r.removed is None else r.added + r.updated + r.removed
-            )
+            if None in (r.added, r.updated, r.removed):
+                return None
+            return (r.added or 0) + (r.updated or 0) + (r.removed or 0)
         m = {"items": "records", "duration": "elapsed_seconds", "output bytes": "output_bytes"}
         return cast("str | float | None", getattr(r, m.get(self.value, self.value)))
 
 
-KEYS = {
-    "Q": "q",
-    **dict.fromkeys(("\x1b[A", "\x1bOA"), "k"),
-    **dict.fromkeys(("\x1b[B", "\x1bOB"), "j"),
-    **dict.fromkeys(("\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~"), "g"),
-    **dict.fromkeys(("\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~"), "G"),
-}
+KEYS = {"Q": "q", **dict.fromkeys(("\x1b[A", "\x1bOA"), "k"), **dict.fromkeys(("\x1b[B", "\x1bOB"), "j")}
+KEYS |= dict.fromkeys(("\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~"), "g")
+KEYS |= dict.fromkeys(("\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~"), "G")
 SEQUENCE = re.compile(r"\x1b\[[0-9;]*[~A-Za-z]|\x1bO[A-Za-z]|\x1b|[^\x1b]")
 PARTIAL = re.compile(rb"\x1b(?:\[[0-9;]*|O)?\Z")
 HEADER, FOOTER, FRAME, DETAILS, WIDE, STOP, TICK = 2, 4, 4, 8, 120, 60, 1.0
@@ -203,6 +209,7 @@ class Dashboard:
     preferences: WatchSettings = field(default_factory=WatchSettings)
     sort: Sort = Sort.NAME
     descending: bool = False
+    incidents: list[dict[str, object]] = field(default_factory=list)
 
     def visible(self) -> list[Row]:
         rows = sorted(
@@ -279,6 +286,8 @@ class Dashboard:
         d.append(" · ".join(p for p in (f"emit:{row.emit}", row.status, scope) if p) + "\n")
         if row.error:
             d.append(f"{clean(row.error)}\n", style="red")
+            if row.incident_count:
+                d.append(f"Incident: {row.incident_count} consecutive failure(s)\n", style="red")
             d.append(f"Log: {clean(row.log)}\n", style="dim")
         if (deg := row.degraded) is not None:
             m = f"Last run missed {deg['missed']:,} of {deg['of']:,}; {int(cast(int, deg['runs']))} incomplete in a row\n"
@@ -296,12 +305,10 @@ class Dashboard:
             d.append(f"Last run: {row.elapsed_seconds:.2f}s · {row.output_bytes:,} bytes\n")
             if row.reconcile:
                 d.append("Wider reconciliation window\n", style="cyan")
-        if not (self.observe or row.error) and row.status is not State.DISABLED:
+        if not (self.observe or row.error) and row.status is not State.DISABLED and (row.daemon or not row.action):
             cmd = "bf collect" if row.emit == "records" else "bf run"
-            if row.daemon:
-                d.append("Runs continuously as a daemon stream while bf watch is active.")
-            elif not row.action:
-                d.append(f"Only due jobs run automatically; {cmd} {clean(row.name)} runs it now.")
+            hint = f"Only due jobs run automatically; {cmd} {clean(row.name)} runs it now."
+            d.append("Runs continuously as a daemon stream while bf watch is active." if row.daemon else hint)
         d.rstrip()
         return d
 
@@ -312,13 +319,15 @@ class Dashboard:
         nxt = duration(self.next_check - time.monotonic())
         w = "Updating…" if self.running else "Checks paused" if self.paused else f"Next check in {nxt}"
         w += (" · reactive active" if self.assisting else "") + (" · dispatcher waiting" if self.waiting else "")
-        st, lbl = "yellow" if self.paused else "cyan", f"  {clean(self.brain)}"
-        header = _line(Text.assemble((" BF ", "bold white on blue"), (lbl, "bold cyan"), (f"    {mode}", st)))
+        p_hdr = ((" BF ", "bold white on blue"), (f"  {clean(self.brain)}", "bold cyan"))
+        header = _line(Text.assemble(*p_hdr, (f"    {mode}", "yellow" if self.paused else "cyan")))
         att = sum(needs_attention(r) for r in self.rows)
         sel = "" if self.observe else f"{sum(r.included for r in self.rows)} selected   "
         n, w = len(self.rows), "Reading local history" if self.observe else w
-        s_line = f"{n} job{'' if n == 1 else 's'}   {sel}{att} need{'s' if att == 1 else ''} attention   {w}"
-        summary, visible = _line(s_line, "dim"), self.visible()
+        inc_n = len(self.incidents) or sum(r.incident_count > 0 for r in self.rows)
+        inc_s = f" · {inc_n} active incident{'' if inc_n == 1 else 's'}" if inc_n else ""
+        s_txt = f"{n} job{'' if n == 1 else 's'}   {sel}{att} need{'s' if att == 1 else ''} attention   {w}{inc_s}"
+        summary, visible = _line(s_txt, "dim"), self.visible()
         self.cursor = max(0, min(self.cursor, len(visible) - 1))
         wide, body = width >= WIDE, height - HEADER - FOOTER
         t_h = body if wide else min(body, FRAME + max(1, len(visible)), max(FRAME + 1, body - DETAILS))
@@ -333,28 +342,25 @@ class Dashboard:
         for idx, r in enumerate(shown, offset):
             succ = datetime.fromisoformat(r.success) if r.success else None
             due = datetime.fromisoformat(r.next_due) if r.next_due else None
-            due_s = "daemon" if r.daemon and r.included else "—"
-            if due is not None and due_s == "—":
-                due_s = "now" if due <= now else duration((due - now).total_seconds())
+            rem = "now" if due and due <= now else duration((due - now).total_seconds()) if due else "—"
             name = Text(("> " if idx == self.cursor else "  ") + MARKERS.get(r.emit, "") + r.name)
             st_t = Text(r.status, style=COLORS.get(r.status, "dim")) if r.included else Text("excluded", "dim")
             ok_s = duration((now - succ).total_seconds()) + " ago" if succ else "never"
             delta = "/".join("—" if v is None else str(v) for v in (r.added, r.updated, r.removed))
-            hl = "white on #183040" if idx == self.cursor else ""
+            due_s, hl = "daemon" if r.daemon and r.included else rem, "white on #183040" if idx == self.cursor else ""
             table.add_row(name, st_t, ok_s, due_s, "—" if r.records is None else str(r.records), delta, style=hl)
         if not visible:
             table.add_row("No matching jobs", "", "", "", "", "")
         rng, arrow = f"{offset + 1}-{offset + len(shown)}" if shown else "0-0", "↓" if self.descending else "↑"
         title = f"{'Attention' if self.attention else 'Jobs'} · {rng}/{len(visible)} · {self.sort} {arrow}"
+        e_att = "Nothing needs attention; press Tab to show every job."
         empty = (
-            "Nothing needs attention; press Tab to show every job."
-            if self.attention and self.rows
-            else "Add a reviewed job in bf.yaml. Press ? for controls and timing."
+            e_att if self.attention and self.rows else "Add a reviewed job in bf.yaml. Press ? for controls and timing."
         )
         detail = self.guide() if self.help else self.details(visible[self.cursor]) if visible else Text(empty)
         k_end = "u reread" if self.observe else "f refresh  Space pause"
-        keys = f"s sort  r reverse  n name  t last OK  i items  ? help  q quit\nj/k ↑/↓ select  g/G first/last  Tab attention  {k_end}"
         b_end = "observation only" if self.observe else "closing watch stops its collection"
+        keys = f"s sort  r reverse  n name  t last OK  i items  ? help  q quit\nj/k ↑/↓ select  g/G first/last  Tab attention  {k_end}"
         jp = Panel(table, title=title, border_style="blue")
         dp = Panel(detail, title="Guide" if self.help else "Details", border_style="cyan")
         body_lay = Layout(dp if self.help else jp)
@@ -363,13 +369,9 @@ class Dashboard:
         elif not self.help and body - t_h > 2:
             body_lay.split_column(Layout(jp, size=t_h), Layout(dp))
         layout = Layout()
-        layout.split_column(
-            Layout(Group(header, summary), size=HEADER),
-            body_lay,
-            Layout(_line(clean(self.message), "yellow"), size=1),
-            Layout(_line(keys, "bold cyan"), size=2),
-            Layout(_line(f"Local run history · no provider text · {b_end}", "dim"), size=1),
-        )
+        foot = Layout(_line(f"Local run history · no provider text · {b_end}", "dim"), size=1)
+        msg_l, key_l = Layout(_line(clean(self.message), "yellow"), size=1), Layout(_line(keys, "bold cyan"), size=2)
+        layout.split_column(Layout(Group(header, summary), size=HEADER), body_lay, msg_l, key_l, foot)
         return layout
 
 
@@ -405,11 +407,10 @@ class Job:
             return 0
         if not isinstance(val, dict) or not isinstance(cache := val.get("index"), dict) or "error" in cache:
             return 0
-        jobs = cast(list[object], val.get("jobs") or [])
-        if any(not isinstance(i, dict) or i.get("status") == "failed" for i in jobs):
+        jobs_v = cast("list[object]", val.get("jobs") or [])
+        if any(not isinstance(i, dict) or i.get("status") == "failed" for i in jobs_v):
             return 0
-        s = cache.get("skipped")
-        return s if type(s) is int and s > 0 else 0
+        return s if type(s := cache.get("skipped")) is int and s > 0 else 0
 
     def discard(self) -> None:
         if self.reply is not None:
@@ -439,36 +440,17 @@ class Job:
         self.discard()
 
 
-def _parse_stream_line(name: str, raw: bytes) -> tuple[list[Message], str]:
-    if len(raw) > _MAX_STREAM_LINE:
-        raise Error(f"daemon {name}: output line exceeds {_MAX_STREAM_LINE} bytes")
-    try:
-        decoded = decode(raw)
-        if isinstance(decoded, list):
-            msgs = TypeAdapter(list[Message]).validate_python(decoded[: MAX_BATCH + 1])
-            if len(msgs) > MAX_BATCH:
-                raise Error(f"daemon {name}: batch exceeds {MAX_BATCH} messages")
-            return msgs, ""
-        if isinstance(decoded, dict) and "messages" in decoded:
-            batch = Batch.model_validate({k: v for k, v in decoded.items() if k != "cursor"})
-            return batch.messages, str(decoded.get("cursor") or "")
-        return [Message.model_validate(decoded)], ""
-    except ValidationError as error:
-        raise Error(f"daemon {name}: invalid stream message") from error
-
-
 def _drain_stderr(store: Store, name: str, pipe: IO[bytes] | None) -> None:
     if pipe is None:
         return
     buf = bytearray()
     with suppress(OSError, ValueError):
-        while chunk := pipe.read(4096):
-            if len(buf) < 65_536:
-                buf.extend(chunk[: 65_536 - len(buf)])
+        while len(buf) < 65_536 and (chunk := pipe.read(4096)):
+            buf.extend(chunk[: 65_536 - len(buf)])
         pipe.close()
     if buf:
         with suppress(Error, OSError):
-            runtime.append_log(store, name, f"{timestamp(datetime.now(UTC).isoformat())} daemon", bytes(buf))
+            runtime.append_log(store, name, f"{runtime.now()} daemon", bytes(buf))
 
 
 def _set_daemon_health(store: Store, name: str, err: str) -> None:
@@ -477,10 +459,12 @@ def _set_daemon_health(store: Store, name: str, err: str) -> None:
             Queue(store).set_progress(f"health:daemon:{name}", {"error": err})
         elif (q := Queue(store)).exists():
             with q.connect() as db:
-                if name:
-                    db.execute("DELETE FROM checkpoints WHERE key=?", (f"health:daemon:{name}",))
-                else:
-                    db.execute("DELETE FROM checkpoints WHERE key LIKE 'health:daemon:%'")
+                db.execute(
+                    "DELETE FROM checkpoints WHERE key=?"
+                    if name
+                    else "DELETE FROM checkpoints WHERE key LIKE 'health:daemon:%'",
+                    (f"health:daemon:{name}",) if name else (),
+                )
 
 
 def _pump_stdout(store: Store, name: str, proc: subprocess.Popen[bytes], stopped: Event, started: float) -> None:
@@ -503,35 +487,36 @@ def _pump_stdout(store: Store, name: str, proc: subprocess.Popen[bytes], stopped
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 if line.strip():
-                    msgs, cursor = _parse_stream_line(name, line)
-                    ck: dict[str, JsonValue] = {"cursor": cursor}
-                    queue.admit(name, msgs, checkpoint=(f"cursor:{name}", ck) if cursor else None)
-                    ts = timestamp(datetime.now(UTC).isoformat())
+                    try:
+                        msgs, cursor = runtime.parse_messages(decode(line), f"daemon {name}: batch", allow_single=True)
+                    except ValidationError as error:
+                        raise Error(f"daemon {name}: invalid stream message") from error
+                    queue.admit(name, msgs, checkpoint=(f"cursor:{name}", {"cursor": cursor}) if cursor else None)
+                    ts = runtime.now()
                     queue.remember(name, last_run=ts, last_success=ts, last_error="", error_count=0)
                     _set_daemon_health(store, name, "")
     finally:
         sel.close()
 
 
-def _stream_job(
-    store: Store, name: str, stopped: Event, procs: dict[str, subprocess.Popen[bytes]], lock: Lock, fatal: list[str]
-) -> None:
+_Procs = dict[str, subprocess.Popen[bytes]]
+
+
+def _stream_job(store: Store, name: str, stopped: Event, procs: _Procs, lock: Lock, fatal: list[str]) -> None:
     failures = 0
     while not stopped.is_set():
         started, failed_msg, proc = time.monotonic(), "", None
         try:
             job = config.load(store).jobs.get(name)
-            if job is None or not job.enabled or not _is_daemon(job):
+            if job is None or not job.enabled or not job.is_daemon:
                 return
             env, argv = job_ops.job_env(store, job), job_ops.expand_argv(store, job.run, name)
-            cmd = [job_ops.executable(store, argv[0], env), *argv[1:]]
-            cwd, pipe = job_ops.cwd_path(store, job.cwd), subprocess.PIPE
+            cmd, cwd = [job_ops.executable(store, argv[0], env), *argv[1:]], job_ops.cwd_path(store, job.cwd)
             with job_ops.starting():
                 if stopped.is_set():
                     return
-                proc = subprocess.Popen(  # noqa: S603
-                    cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=pipe, stderr=pipe, start_new_session=True
-                )
+                dn, p = subprocess.DEVNULL, subprocess.PIPE
+                proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=dn, stdout=p, stderr=p, start_new_session=True)  # noqa: S603
             with lock:
                 procs[name] = proc
             started = time.monotonic()
@@ -586,7 +571,7 @@ class Dispatcher:
         if (q := Queue(self.store)).exists():
             q.recover_attempts()
         for name in sorted(self.names):
-            if (job := cfg.jobs.get(name)) is not None and job.enabled and _is_daemon(job):
+            if (job := cfg.jobs.get(name)) is not None and job.enabled and job.is_daemon:
                 args = (self.store, name, self.stopped, self._procs, self._lock, self._fatal)
                 (t := Thread(target=_stream_job, args=args, daemon=True)).start()
                 self.daemons[name] = t
@@ -602,14 +587,20 @@ class Dispatcher:
             t.join(timeout=5)
         self._pool.shutdown(wait=True, cancel_futures=True)
 
-    def _reactive_pass(self) -> None:
+    def _reactive_pass(self, *, sync: bool = False) -> None:
         cfg, queue = config.load(self.store), Queue(self.store)
+        if sync:
+            try:
+                index.refresh(self.store, wait=10, recover=True)
+                sync_item_events(self.store)
+                self.health.pop("sync", None)
+            except (Error, OSError, UnicodeError) as error:
+                self.health["sync"] = str(error) if isinstance(error, Error) else "index sync failed; run bf status"
         if not queue.exists():
             return
-        non_daemon = [n for n in sorted(self.names) if (j := cfg.jobs.get(n)) and j.enabled and not _is_daemon(j)]
+        non_daemon = [n for n in sorted(self.names) if (j := cfg.jobs.get(n)) and j.enabled and not j.is_daemon]
         try:
-            submit = lambda n, evs: job_ops.run_job(self.store, n, kind="event", events=evs)  # noqa: E731
-            job_ops.dispatch_events(self.store, non_daemon, submit=submit)
+            job_ops.dispatch_events(self.store, non_daemon)
             self.health.pop("events", None)
         except (Error, OSError, UnicodeError) as error:
             self.health["events"] = str(error) if isinstance(error, Error) else "event dispatch failed; run bf status"
@@ -620,7 +611,7 @@ class Dispatcher:
             with suppress(Error, OSError):
                 queue.compact()
 
-    def tick(self) -> None:
+    def tick(self, *, force: bool = False) -> None:
         if self._fatal:
             raise StreamStoppedError(self._fatal[0])
         for key in [k for k, f in self.tasks.items() if f.done()]:
@@ -628,31 +619,30 @@ class Dispatcher:
                 self.health[key] = str(err) if isinstance(err, Error) else f"{key} pass failed; inspect bf status"
             else:
                 self.health.pop(key, None)
-        if "reactive" not in self.tasks and Queue(self.store).exists():
-            self.tasks["reactive"] = self._pool.submit(self._reactive_pass)
+        if "reactive" not in self.tasks and (force or Queue(self.store).exists()):
+            self.tasks["reactive"] = self._pool.submit(self._reactive_pass, sync=force)
 
 
 class _Supervisor:
     def __init__(self, store: Store, jobs: tuple[str, ...], stack: ExitStack) -> None:
-        self.store, self.jobs, self.stack, self.due, self.reason = store, jobs, stack, 0.0, ""
+        self.store, self.jobs, self.stack, self.due, self.reason, self.woke = store, jobs, stack, 0.0, "", False
         self.dispatcher: Dispatcher | None = None
         _set_daemon_health(store, "", "")
         stack.callback(_set_daemon_health, store, "", "")
 
     def tick(self, now: float) -> str | None:
-        if now < self.due:
+        if now < self.due and not self.woke:
             return None
-        self.due = now + TICK
+        force, self.due, self.woke = self.woke, now + TICK, False
         try:
             if (d := self.dispatcher) is None:
                 sel = update.selection(config.load(self.store), self.jobs)
                 d = self.dispatcher = self.stack.enter_context(Dispatcher(self.store, sel))
-            d.tick()
+            d.tick(force=force)
             err = next((e for e in d.health.values() if e), "")
             if not err and d.daemons and (q := Queue(d.store)).exists():
-                err = next(
-                    (str(e) for n in sorted(d.daemons) if (e := q.progress(f"health:daemon:{n}").get("error"))), ""
-                )
+                daemons = sorted(d.daemons)
+                err = next((str(e) for n in daemons if (e := q.progress(f"health:daemon:{n}").get("error"))), "")
         except StreamStoppedError:
             raise
         except (Error, OSError, UnicodeError) as error:
@@ -707,8 +697,9 @@ def watch(
     if not json_output and no_tty:
         obs = "status --watch needs an interactive terminal; use bf status for a JSON snapshot"
         raise Error(obs if observe else "watch needs an interactive terminal; use bf watch --json or bf status")
-    rows = snapshot(store, jobs)
-    dashboard, job = Dashboard(config.load(store).name, observe=observe, rows=rows, preferences=prefs), Job(store, jobs)
+    rows, inc = snapshot(store, jobs), _incidents(store)
+    dashboard = Dashboard(config.load(store).name, observe=observe, rows=rows, preferences=prefs, incidents=inc)
+    job = Job(store, jobs)
     with ExitStack() as stack:
         if not observe:
             try:
@@ -727,11 +718,11 @@ def watch(
         stack.callback(job.terminate)
         if json_output:
             _loop(store, dashboard, job, jobs, supervisor=sup)
-        else:
-            con = Console(markup=False, highlight=False)
-            live_ctx = Live(console=con, screen=True, auto_refresh=False, redirect_stdout=False, redirect_stderr=False)
-            with keyboard(sys.stdin) as desc, live_ctx as live:
-                _loop(store, dashboard, job, jobs, supervisor=sup, live=live, descriptor=desc)
+            return
+        c = Console(markup=False, highlight=False)
+        live_ctx = Live(console=c, screen=True, auto_refresh=False, redirect_stdout=False, redirect_stderr=False)
+        with keyboard(sys.stdin) as desc, live_ctx as live:
+            _loop(store, dashboard, job, jobs, supervisor=sup, live=live, descriptor=desc)
 
 
 def _loop(
@@ -746,8 +737,13 @@ def _loop(
 ) -> None:
     prefs, next_read, next_frame = dashboard.preferences, 0.0, 0.0
     size, alerts, prev, completed, refresh_req, invalid = (0, 0), Notifications(prefs), {}, None, False, False
+    wake_mtime = wakeup_mtime(store)
     while True:
         now, reason = time.monotonic(), None
+        if (wm := wakeup_mtime(store)) != wake_mtime:
+            wake_mtime, next_read = wm, 0.0
+            if supervisor is not None:
+                supervisor.due, supervisor.woke = 0.0, True
         if supervisor is not None and (d := supervisor.dispatcher) is not None:
             dashboard.assisting = "reactive" in d.tasks or bool(d.daemons)
         if dashboard.running and (code := job.poll()) is not None:
@@ -761,6 +757,7 @@ def _loop(
         if now >= next_read:
             try:
                 dashboard.replace_rows(snapshot(store, jobs))
+                dashboard.incidents = _incidents(store)
                 if invalid:
                     dashboard.message = "Configuration recovered"
                 invalid = False
@@ -775,13 +772,13 @@ def _loop(
                         if live is None:
                             sys.stderr.write(f"bf: {printable(warning)}\n")
             except (Error, OSError, UnicodeError) as error:
-                dashboard.rows, invalid = [], True
+                dashboard.rows, dashboard.incidents, invalid = [], [], True
                 msg = "Cannot read bf.yaml or runtime state; run bf status for diagnostics"
                 dashboard.message = clean(str(error)) if isinstance(error, Error) else msg
                 if supervisor is not None and dashboard.message != supervisor.reason:
                     reason = supervisor.reason = dashboard.message
-            ready = not (invalid or dashboard.observe or dashboard.paused or dashboard.running)
-            if ready and (refresh_req or now >= dashboard.next_check):
+            due = refresh_req or now >= dashboard.next_check
+            if due and not (invalid or dashboard.observe or dashboard.paused or dashboard.running):
                 prev.update({r.name: r.success for r in dashboard.rows if not r.daemon or r.name not in prev})
                 job.start()
                 refresh_req, dashboard.running = False, True
@@ -789,6 +786,8 @@ def _loop(
             if live is None:
                 d = dashboard
                 head = {"brain": d.brain, "running": d.running, "assisting": d.assisting, "message": d.message}
+                if d.incidents:
+                    head["incidents"] = d.incidents
                 sys.stdout.buffer.write(terminal(present({**head, "jobs": [asdict(r) for r in d.rows]})))
                 sys.stdout.flush()
             next_read, next_frame = now + prefs.poll_interval, 0
@@ -811,13 +810,6 @@ def _loop(
                 return
             if action == "refresh":
                 refresh_req, next_read = True, 0
-                dashboard.message = (
-                    "Rereading configuration and runtime state"
-                    if dashboard.observe
-                    else "Refresh queued; resume with Space to check due jobs"
-                    if dashboard.paused
-                    else "Refresh queued after the active update"
-                    if dashboard.running
-                    else "Reloading bf.yaml and checking due jobs"
-                )
+                fb = "Reloading bf.yaml and checking due jobs"
+                dashboard.message = next((m for a, m in _REFRESH_MSG if getattr(dashboard, a)), fb)
             next_frame = 0

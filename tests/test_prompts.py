@@ -24,7 +24,7 @@ START = "2026-09-24T08:00:00.000000Z"
 END = "2026-09-25T08:00:00.000000Z"
 NOW = datetime(2026, 9, 25, 8, tzinfo=UTC)
 
-CONFIG = b"""version: 10
+CONFIG = b"""version: 11
 name: fixture
 defaults:
   post: inbox
@@ -73,7 +73,7 @@ def agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_configuration_validates_prompt_jobs_and_triggers() -> None:
-    assert Config.model_validate({"version": 10, "name": "x", "jobs": None}).jobs == {}
+    assert Config.model_validate({"version": 11, "name": "x", "jobs": None}).jobs == {}
     default = Job.model_validate({"prompt": "prompts/a.md", "harness": ["agy", "-p={{prompt}}"]})
     assert (default.emit, default.timeout, default.max_bytes, default.extract, default.triggers) == (
         "log",
@@ -168,7 +168,7 @@ def test_input_is_expanded_once_and_prompt_bounds_apply(configured: Store, monke
 
     configured.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  once:\n    prompt: prompts/assistant.md\n    harness: [agent, '{{prompt}}']\n",
+        b"version: 11\nname: fixture\njobs:\n  once:\n    prompt: prompts/assistant.md\n    harness: [agent, '{{prompt}}']\n",
     )
     jobs.run_job(configured, "once", stdin=b"literal {{brain}}", runner=capture)
     assert "Owner: literal {{brain}}" in seen[0]
@@ -232,7 +232,7 @@ def test_extract_pointers_quiet_no_reply_and_secret_redaction(configured: Store)
 def test_emit_action_writes_validated_drafts_and_prunes_oldest(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  reviewer:\n    prompt: prompts/assistant.md\n"
+        b"version: 11\nname: fixture\njobs:\n  reviewer:\n    prompt: prompts/assistant.md\n"
         b"    harness: [agent]\n    emit: action\n    keep: 2\n",
     )
     valid = b"---\ntype: action\nstatus: draft\n---\n\n# Review item\n"
@@ -255,7 +255,7 @@ def test_emit_action_writes_validated_drafts_and_prunes_oldest(configured: Store
 def test_gate_skips_harness_on_nonzero_and_runs_with_placeholders_on_zero(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  dev:\n    prompt: prompts/assistant.md\n"
+        b"version: 11\nname: fixture\njobs:\n  dev:\n    prompt: prompts/assistant.md\n"
         b"    harness: [agent]\n    emit: log\n"
         b'    gate: [routines/gate.py, "{{start}}", "{{end}}", "{{state}}"]\n'
         b"    on: { every: 600 }\n",
@@ -400,7 +400,7 @@ def test_cli_runs_piped_prompt_and_update_dispatches_channel_events(configured: 
         CONFIG
         + b"  responder:\n    prompt: prompts/assistant.md\n    harness: [agent]\n"
         + b"    emit: message\n    post: inbox\n"
-        + b"    on:\n      event: { kind: channel.received, source: inbox }\n",
+        + b"    on:\n      event: { kind: message.received, source: inbox }\n",
     )
     configured.write("prompts/assistant.md", b"Events: {{context}}\n")
     Queue(configured).admit(
@@ -418,5 +418,5 @@ def test_cli_runs_piped_prompt_and_update_dispatches_channel_events(configured: 
     tick = update(configured, jobs=("responder",), runner=event_runner)
     assert tick["ok"] is True
     assert len(seen_contexts) == 1
-    assert '"kind":"channel.received"' in seen_contexts[0]
+    assert '"kind":"message.received"' in seen_contexts[0]
     assert "Please triage" in seen_contexts[0]

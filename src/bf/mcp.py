@@ -39,12 +39,7 @@ INSTRUCTIONS = (
 
 
 def _strict(tool: Tool, output: dict[str, object]) -> Tool:
-    """Unknown or mistyped arguments fail, like CLI options: a misspelled `scope` must not widen a search, and a
-    `limit` of true or "5" is not a number.
-
-    The SDK validates arguments with the tool's generated model, which otherwise ignores extra keys and coerces
-    values. The tool publishes the reply schema its structured content follows, the document `bf schema` prints.
-    """
+    """Reject unknown/coerced arguments and publish `output` as the tool's output schema."""
     model = tool.fn_metadata.arg_model
     model.model_config["extra"] = "forbid"
     model.model_config["strict"] = True
@@ -54,24 +49,17 @@ def _strict(tool: Tool, output: dict[str, object]) -> Tool:
     return tool
 
 
-# CLI wording in shared errors, such as "use bf search", names these tools for an MCP client.
 _COMMANDS = re.compile(r"\bbf (search|read)\b")
-# Some clients send every number as a double: 5.0 is an integer the published schema allows, unlike 5.5 or true.
-# Placed after its Field, so the published schema keeps the bounds as minimum and maximum.
+# Allow integer floats (e.g. 5.0) while placing this validator after Field() so bounds stay in JSON schema.
 _Integral = BeforeValidator(lambda value: int(value) if isinstance(value, float) and value.is_integer() else value)
 
 
 def server(store: Store | Callable[[], Store]) -> MCPServer:
-    """The two tools over `store`, or over a brain resolved again for each call.
-
-    Resolving per call sees registry changes without a restart; the brain must resolve now, so a server that could
-    not answer fails to start.
-    """
+    """Serve search and read tools over `store` or a per-call brain selector (validated immediately)."""
     annotations = ToolAnnotations(
         read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
     )
     selection = (lambda: store) if isinstance(store, Store) else store
-    # Every root selected so far: errors hide each one, even after the selection changed.
     roots: set[str] = set()
 
     def selected() -> Store:
@@ -80,16 +68,12 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
         return chosen
 
     def private(message: str) -> str:
-        """`message` without the roots, the registry or the home directory: a selection resolved for each call can
-        fail naming them."""
+        """Redact brain roots, registry path, and home directory from `message`."""
         hidden = dict.fromkeys(roots, "<brain>")
         with suppress(RuntimeError):
-            # Each raises only when it needs a home directory that does not resolve: no message can hold that path.
             hidden.setdefault(str(user_path()), "<registry>")
             if (home := Path.home()).is_absolute() and home.name:
                 hidden.setdefault(str(home), "~")
-        # The longest first, so a path that prefixes another never leaves part of it. Only where a word starts: a
-        # short home, such as /app in a container, must not rewrite a note path such as projects/apple.md.
         for path in sorted(hidden, key=len, reverse=True):
             message = re.sub(rf"(?<!\S){re.escape(path)}", hidden[path], message)
         return message
@@ -99,12 +83,10 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
     def reply(operation: Callable[[], dict[str, object]]) -> CallToolResult:
         try:
             value = present(operation())
-            # The CLI's JSON text: hosts may show it in a terminal, so DEL, C1 and format characters stay escaped.
             text = terminal(value).decode().rstrip("\n")
             return CallToolResult(content=[TextContent(type="text", text=text)], structured_content=value)
         except FAILURES as error:
             if isinstance(error, InputError):
-                # The CLI exits 2 naming its option; the tool names its own argument, never a model field.
                 message = "invalid input: " + (f"{error.argument}: " if error.argument else "") + str(error)
             else:
                 message = failure(error)
@@ -141,12 +123,7 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
         Any word matches: put variants in one query. Results carry refs to read; check unmatched, problems and
         stale before treating an empty answer as absence."""
 
-        def run() -> dict[str, object]:
-            # Like the CLI, check the arguments before selecting the brain.
-            request = pages.query(query, scope, limit=limit, offset=offset)
-            return search(selected(), request)
-
-        return reply(run)
+        return reply(lambda: search(selected(), pages.query(query, scope, limit=limit, offset=offset)))
 
     def read_tool(
         ref: Annotated[
@@ -170,9 +147,7 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
         offset: Annotated[
             int,
             Field(
-                ge=0,
-                le=MAX_OFFSET,
-                description="Continue a listing, relation page or exact text at its next_offset.",
+                ge=0, le=MAX_OFFSET, description="Continue a listing, relation page or exact text at its next_offset."
             ),
             _Integral,
         ] = 0,
@@ -181,26 +156,20 @@ def server(store: Store | Callable[[], Store]) -> MCPServer:
         A note or record above 32 KiB returns its text in pages from offset 0; its first page has any outline and the
         backlinks. Backlinks preview 5 items per relation: read the same ref with rel to list them all."""
 
-        def run() -> dict[str, object]:
-            pages.readable(ref, rel)
-            return read(selected(), ref, rel=rel, offset=offset)
+        return reply(lambda: (pages.readable(ref, rel), read(selected(), ref, rel=rel, offset=offset))[1])
 
-        return reply(run)
-
-    # Argument models and their validation messages are named after the function: name it like the tool.
     search_tool.__name__, read_tool.__name__ = "search", "read"
     return MCPServer(
         "bf",
         title="Brain Framework",
         version=__version__,
         instructions=INSTRUCTIONS,
-        # The SDK logs each rejected or failed call at INFO on stderr, in its own format: replies already carry them.
         log_level="WARNING",
         tools=[
-            _strict(Tool.from_function(function, name=name, title=title, annotations=annotations), output)
-            for name, title, function, output in (
-                ("search", "Search the brain", search_tool, document("search-reply")),
-                ("read", "Read a brain page, note or record", read_tool, document("read-reply")),
+            _strict(Tool.from_function(fn, name=name, title=title, annotations=annotations), document(schema))
+            for name, title, fn, schema in (
+                ("search", "Search the brain", search_tool, "search-reply"),
+                ("read", "Read a brain page, note or record", read_tool, "read-reply"),
             )
         ],
     )

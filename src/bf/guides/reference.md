@@ -1,69 +1,85 @@
-# Reference — commands, `bf.yaml`, OKF, record JSON, state, and exit codes
+# Reference — commands, schemas, formats, and exit codes
 
-Compact lookup for Brain Framework v24 (`bf.yaml` `version: 10`) contracts, file layouts, schemas, and exit codes.
+Complete lookup for Brain Framework v25 (`bf.yaml` and `evals/*.yaml` `version: 11`) commands, directory layout, schemas, link syntax, and exit codes.
 
-## CLI commands by task
+## CLI commands
 
-| Group         | Command                                                                                                                      | Purpose                                                                                   |
-| ------------- | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Read & search | `bf search QUERY [--scope SCOPE] [--limit N] [--offset N]`                                                                   | Full-text and explicit identity search                                                    |
-| Read & search | `bf read [REF] [--rel REL] [--offset N]`                                                                                     | Read `home`, `review`, `tasks`, periods (`7d`), note/`#section`, record, or `--rel` edges |
-| Read & search | `bf export [--kind edges\|identities\|items] [--scope SCOPE] [--observed-since T]`                                           | Stream JSON Lines graph or records offline                                                |
-| Authoring     | `bf action new SLUG [--title T] [--summary S] [--unique] [--run RUN_ID]`                                                     | Create validated `draft` note at `actions/YYYY-MM-DD_SLUG/ACTION.md`                      |
-| Authoring     | `bf action status SLUG draft\|stable\|deprecated`                                                                            | Update action status atomically and refresh index                                         |
-| Execution     | `bf collect JOB [--since T] [--until T] [--dry-run] [--reconcile] [--allow-removal] [--input FILE]`                          | Run one record job or validate fixture JSON (`map:` applied if configured)                |
-| Execution     | `bf run [JOB] [-- ARGS] [--hook EVENT] [--since T] [--until T] [--dry-run] [--stdin] [--reconcile]`                          | Run one job or subscribed hook jobs                                                       |
-| Execution     | `bf post TEXT [--to JOB] [--thread T] [--target TARGET] [--run RUN_ID] [--key K] [--stdin]`                                  | Send one message durably through a `send:` job                                            |
-| Execution     | `bf wake [AT] [--in DURATION] [--job JOB] [--reason TEXT] [--run RUN_ID] [--key K]`                                          | Queue a follow-up wake for an enabled job                                                 |
-| Execution     | `bf queue [ID] [--retry\|--cancel] [--limit N]`                                                                              | Inspect or resolve durable `.bf/runtime.sqlite3` runs, wakes, and deliveries              |
-| Execution     | `bf update [--job JOB] [--dry-run]`                                                                                          | Run due record/scheduled/event jobs, wakes, and deliveries, then refresh cache            |
-| Execution     | `bf watch [--job JOB] [--interval S] [--poll-interval S] [--notify MODE] [--json]`                                           | Run due jobs, daemons, and events continuously on one brain                               |
-| Operations    | `bf status [--check] [--watch]`, `bf doctor`                                                                                 | Check brain health, registration, or offline binary/env/script prerequisites              |
-| Operations    | `bf validate`                                                                                                                | Validate `bf.yaml`, OKF frontmatter, links, and records                                   |
-| Operations    | `bf eval`                                                                                                                    | Run offline retrieval benchmarks in `evals/*.yaml`                                        |
-| Operations    | `bf build [--reproject SOURCE]`                                                                                              | Rebuild `.bf/cache.sqlite3` or reproject cached records                                   |
-| Operations    | `bf forget REF... [--dry-run]`                                                                                               | Remove collected records and keep tombstones                                              |
-| Setup & docs  | `bf init PATH`, `bf register [PATH] [--name N] [--default]`, `bf unregister TARGET`, `bf skill install [--global]`, `bf mcp` | Create, register/unregister, install `/bf`, and run stdio MCP server                      |
-| Setup & docs  | `bf guide [TOPIC]`, `bf schema [--kind KIND]`                                                                                | Read packaged guides or inspect JSON Schemas                                              |
+`bf --help` and `bf COMMAND -h` print options offline without opening a brain. Boolean flags are positive-only (`--check`, `--force`, `--dry-run`, `--retry`, `--cancel`, `--watch`, `--link`, `--snapshot`, `--allow-removal`, `--stdin`, `--json`, `--full`).
 
-## Brain directory & `.bf/` state layout
+| Command                                                                                                               | Role                                                                                    |
+| --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `bf init PATH [--name NAME] [--full]`                                                                                 | Create a brain in a new, empty, or freshly cloned folder (`--full` adds optional dirs)  |
+| `bf register [PATH] [--name NAME] [--default]`                                                                        | Register a brain path in `~/.config/bf/config.yaml`                                     |
+| `bf unregister TARGET`                                                                                                | Remove a brain registration without modifying brain files                               |
+| `bf mcp [--brain BRAIN]`                                                                                              | Run local stdio MCP server (`search` and `read` only; needs `[mcp]` extra)              |
+| `bf guide [TOPIC]`                                                                                                    | List topics or print one packaged Markdown guide                                        |
+| `bf skill install [--brain BRAIN] [--global] [--check] [--force]`                                                     | Install, check, or overwrite `/bf` skill files                                          |
+| `bf schema [--kind brain\|registry\|eval\|search-reply\|read-reply\|status-reply\|doctor-reply]`                      | Print draft 2020-12 JSON Schema (`brain` default)                                       |
+| `bf search QUERY [--scope SCOPE] [--limit N] [--offset N]`                                                            | Offline BM25 word and explicit-identity search                                          |
+| `bf read [REF] [--rel RELATION] [--offset N]`                                                                         | Offline read of Home, `review`, `tasks`, periods, notes/`#section`, records, `--rel`    |
+| `bf export [--kind edges\|identities\|items] [--scope SCOPE] [--observed-since TIME]`                                 | Stream JSON Lines claims, identities, or items from `.bf/cache.sqlite3`                 |
+| `bf action new SLUG [--title T] [--summary S] [--unique] [--run ID]`                                                  | Create validated `draft` `actions/YYYY-MM-DD_SLUG/ACTION.md`                            |
+| `bf action status SLUG draft\|stable\|deprecated`                                                                     | Update action status and refresh cache atomically                                       |
+| `bf collect JOB [--since T] [--until T] [--dry-run] [--allow-removal] [--reconcile] [--input FILE]`                   | Run one `emit: records` job (or check `--input` fixture offline)                        |
+| `bf ingest SOURCE [--input FILE] [--snapshot] [--allow-removal] [--dry-run]`                                          | Validate & ingest JSON/JSONL records directly (`-` stdin) without runtime DB access     |
+| `bf run [JOB] [ARGS...] [--hook EVENT] [--stdin] [--dry-run] [--allow-removal] [--reconcile] [--since T] [--until T]` | Run one job or all enabled `--hook EVENT` jobs                                          |
+| `bf wake [--job JOB] [--in DUR\|--at ISO] [--reason TEXT] [--run ID] [--key K]`                                       | Queue a bounded follow-up wake                                                          |
+| `bf post [TEXT] [--to JOB] [--thread ID] [--target ID] [--reply-to ID] [--run ID] [--key K] [--stdin]`                | Enqueue and deliver one outbound message through a `send:` job                          |
+| `bf queue [ID] [--retry\|--cancel] [--limit N]`                                                                       | Inspect or explicitly retry/cancel queued runs, wakes, and deliveries                   |
+| `bf update [--job NAME] [--dry-run]`                                                                                  | Run due record/scheduled/event jobs, wakes, and deliveries, then refresh cache          |
+| `bf watch [--job NAME] [--interval S] [--poll-interval S] [--notify off\|failure\|success\|all] [--json]`             | Run daemons and due jobs continuously (or observe second session read-only)             |
+| `bf forget REF... [--dry-run]`                                                                                        | Delete records and store SHA-256 tombstones in `.forgotten`                             |
+| `bf status [--check] [--watch]`                                                                                       | Inspect cache, notes, jobs, queue summary (`incidents`), logs, and usage offline        |
+| `bf doctor`                                                                                                           | Check executables, `requires.bins`/`env` presence, scripts, and `prompt:` files offline |
+| `bf validate`                                                                                                         | Validate `bf.yaml`, OKF frontmatter, links, identities, actions, records, and jobs      |
+| `bf eval [--path evals] [--baseline FILE]`                                                                            | Run offline retrieval suites (`evals/*.yaml`)                                           |
+| `bf build [--reproject JOB [--dry-run]]`                                                                              | Recover `.pending/`, rebuild `.bf/cache.sqlite3`, or re-validate stored records         |
+
+Most brain commands also accept `--brain NAME|PATH` (`--brain` -> `BF_BRAIN` -> enclosing `bf.yaml` -> registry `default` in `~/.config/bf/config.yaml`). `--dry-run` on `bf update` executes nothing; `--dry-run` on `bf collect` and `bf run` executes the configured job without committing records, actions, or messages.
+
+### Time and duration inputs
+
+- Instants (`--since`, `--until`, `--observed-since`): `now`, `today`, `yesterday`, relative spans (`12h`, `7d`, `2w`), `YYYY-MM-DD`, or timezone-aware ISO 8601.
+- Durations in `bf.yaml` / `bf wake --in`: integer seconds or `<n>s|m|h|d|w` (`30s`, `15m`, `6h`, `7d`, `1w`).
+
+## Brain directory and `.bf/` layout
 
 ```text
 <brain>/
-  bf.yaml                   # version: 10, defaults:, watch:, validate:, fields:, jobs:
-  AGENTS.md                 # Agent instructions for this brain
-  .gitignore                # Ignores /.bf/, /memories/, /actions/, /logs/, /originals/, /inputs/
-  projects/                 # Active project notes (OKF Markdown)
-  concepts/                 # Durable concepts and concepts/index.md (home page)
-  actions/                  # actions/YYYY-MM-DD_slug/ACTION.md tracked sessions
-  memories/<source>/        # Atomic SHA256.json records written by record jobs (never hand-edited)
+  bf.yaml                 # version: 11, name:, defaults:, watch:, validate:, fields:, jobs:
+  AGENTS.md               # Brain agent instructions
+  .gitignore              # Ignores /.bf/, /memories/, /actions/, /logs/, /originals/, /inputs/
+  projects/               # Active project notes (OKF Markdown)
+  concepts/               # Concepts, entities, and concepts/index.md (Home)
+  actions/                # actions/YYYY-MM-DD_slug/ACTION.md sessions
+  memories/<source>/      # SHA256.json collected records + optional .forgotten tombstones
   sensors/ routines/ prompts/ channels/ evals/ logs/
-  .bf/                      # Internal local state (mode 0700; never committed to Git)
-    cache.sqlite3           # Disposable offline SQLite retrieval/graph cache
-    runtime.sqlite3         # Durable job runs, messages, deliveries, and wakes (never rebuilt on error)
-    usage.sqlite3           # Offline query/read telemetry (stores no matched text)
-    state/<job>/            # {{state}} directory per job
-    locks/                  # Per-brain exclusive writer locks
+  .bf/                    # Mode 0700 private state (gitignored)
+    cache.sqlite3         # Disposable offline search & graph index (index.SCHEMA = 43)
+    runtime.sqlite3       # Durable queue, runs, events, wakes, deliveries, incidents (VERSION = 4)
+    usage.sqlite3         # Daily aggregate operation counts (30d retention; no queries/refs)
+    wakeup                # Atomic timestamp file touched by collect, ingest, and Queue.admit
+    state/<job>/          # {{state}} directory per job
+    locks/                # Per-brain exclusive writer locks
 ```
 
-## Schema shapes (`bf schema --kind KIND`)
+## `bf.yaml` (`version: 11`) schema {#bf-yaml-schema}
 
-Run `bf schema --kind brain` (or `registry`, `record`, `eval`, `search-reply`, `read-reply`, `status-reply`, `doctor-reply`) for exact machine-checked JSON Schemas:
+YAML parsing enforces YAML 1.2 core schema via libyaml (rejecting duplicate keys, anchors/aliases, and custom tags):
 
-- **`bf.yaml` (`brain`)**: requires `version: 10`; `defaults:` sets shared `harness`, `timezone`, `post`; `jobs:` defines unified jobs (`run`/`prompt`/`send`, `emit`, `on`, `gate`, `map`, `extract`, `post`, `requires`, `timeout`, `max_bytes`, `retries`, `idempotent`); `fields:` is purely optional relation metadata (`description`, `broader`, `targets`). Any valid relation name (`^[a-z][a-zA-Z0-9]*(?:-[a-z0-9]+)*$`, 1–64 chars, except reserved `tagged-with`, `links`, `cites`) works everywhere with zero declaration.
-- **Registry (`~/.config/bf/config.yaml`)**: holds optional `default:` brain name and `brains:` map (`bf register`).
-- **OKF notes**: YAML frontmatter requires `type` and `status` (`draft`, `stable`, `deprecated`); optional `relations` (explicit `scheme:value` or `bf://` targets) and `attributes` (arbitrary JSON metadata, never graph edges).
-- **Collected records (`memories/<source>/<sha256>.json`)**: provenance (`updated`, `observed`, optional `partial`, `generated`, `url`, `created`, `title`, `text`), optional `@type` (`[A-Za-z][A-Za-z0-9_-]*`), `relations` (explicit `scheme:value` or `bf://` targets), and `attributes` (arbitrary JSON metadata).
+- **Top level**: `version: 11` (required), `name` (required slug), `defaults` (`harness`, `timezone`, `post`), `watch` (`interval`, `poll_interval`, `notifications`, `notification_cooldown`), `validate` (`max_stale_days`, `warn_stale_days`, `index_note`, `required_status`, `forbid_patterns`), `fields` (`{ description, broader, targets }` relation constraints), `jobs` (up to 128 named jobs).
+- **`on:` triggers**: interval `{ every }`, wall-clock `{ at: "HH:MM", days?, timezone? }`, CLI hook `{ hook }`, daemon stream `{ daemon: true }`, or runtime event `{ event: { kind, source?, match?, cooldown?, max?, expires? } }`.
+- **Canonical `event.kind`**: `"record.added"`, `"record.changed"`, `"record.removed"`, `"note.changed"`, `"message.received"`, `"job.failed"` (plus `"record"` shorthand). `match` is an offline FTS5 query string (`<= 1,024` chars).
+- **`evals/*.yaml`**: requires `version: 11` and `cases:` (`name`, `query`/`read`, `scope`, `limit`, `expect`, `forbid`, `text`, `empty`).
 
-## Addresses, refs, and `?rel=` queries
+## OKF notes, records, identities, and `?rel=` syntax
 
-- Note refs: relative file paths (`projects/api.md`) with optional section fragment (`projects/api.md#decision`).
-- Record refs: `SOURCE:ID` (for example `gmail:msg-123` or `memories/SOURCE/SHA256.json`).
-- Canonical identities: `scheme:value` or `bf://...`.
-- Typed Markdown links: `[label](../concepts/auth.md?rel=depends-on)`; `?rel=` is the only supported query parameter.
+- **OKF notes**: require `type` and `status` (`draft|stable|deprecated`); optional `title`, `updated` (`YYYY-MM-DD`), `summary`, `stale_after` (tz-aware ISO 8601), `entity`, `aliases`, `resource`, `tags`, `sources`, `verified`, `relations`, `attributes`.
+- **Records (`memories/SOURCE/<sha256>.json`)**: require `id` and single-line `title`; optional `text`, `time` (tz-aware ISO), `url`, `@type` (`[A-Za-z][A-Za-z0-9_-]*`), `links`, `aliases`, `relations`, `attributes` (`updated`, `observed`, `partial` are reserved).
+- **Links & identities**: `bf://BRAIN/PATH?rel=REL#SECTION` (`?rel=` is the only supported query param; custom heading IDs use `## Heading {#id}`). Canonical identities use `scheme:value` (recommended schemes: `person:email/`, `person:HOST/`, `repo:HOST/OWNER/NAME`, `label:...`). Reserved built-in relations: `tagged-with`, `links`, `cites`.
 
-## Exit codes and output format
+## Shell completion, diagnostics, and exit codes
 
-- Standard output: compact single-line JSON for commands (plain text for `--help`, `--version`, and `bf guide`).
-- Standard error: `bf:` diagnostics naming file/position without quoting untrusted record or provider text (control and Unicode format characters escaped).
-- Exit codes: `0` success, `1` failure or unhealthy `--check`, `2` invalid user input or malformed arguments, `130` interrupted (`SIGINT` / `SIGTERM`).
+- **Completion**: `eval "$(_BF_COMPLETE=source_bash bf)"` (`source_zsh` / `source_fish` also supported).
+- **Stdout / stderr**: commands print compact single-line JSON on stdout (plain text for `--help`, `--version`, `bf guide`); diagnostics write `bf:` lines on stderr quoting file/field only and escaping control/Unicode format characters.
+- **Exit codes**: `0` success (and no `--hook` listeners), `1` failure or unhealthy `--check`, `2` invalid input or malformed arguments, `130` interrupted (`SIGINT` / `SIGTERM`).

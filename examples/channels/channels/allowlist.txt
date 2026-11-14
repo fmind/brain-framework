@@ -1,0 +1,2 @@
+# Trusted sender IDs expanded as trailing arguments to channels/local.py read.
+fictional-owner

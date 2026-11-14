@@ -41,52 +41,33 @@ from bf.models import (
 )
 from bf.storage import UNNAMED, BusyError, Store, building, generation, reader, unnamed, unread, writer
 
-SCHEMA = 42
+SCHEMA = 43
 CACHE = models.CACHE
-# A full build fills this file beside the live cache, then renames it over CACHE.
 BUILD = CACHE + ".new"
 _SIDECARS = ("", "-wal", "-shm", "-journal")
-# Seconds a finished build waits for connections to the generation it replaces to close.
 _PUBLISH = 30
-# Seconds a search with a cache to serve waits for the brain's lock: concurrent searches' scans and refreshes are short,
-# so only a longer writer, such as a collection's commit or a bf validate, leaves the cache served as `busy`.
+# Short wait when a serving cache exists so writers leave it `busy` instead of stalling readers.
 _CONTENDED = 2.0
-# Seconds a read that found a damaged generation waits for other connections to it before leaving it to the next one.
 _DISCARD = 5
-# `bf status` warns about a scanned tree once it holds more entries than this.
 CROWDED = MAX_FILES * 4 // 5
-# A skipped file's problem keeps at most this many bytes: a reply's 200 problems per brain stay far below MAX_REPLY.
 _PROBLEM = 1024
-# The oldest SQLite with every feature the cache uses; `AS MATERIALIZED` came last.
 _SQLITE = (3, 35, 0)
-# Query features that SQLite builds can leave out or predate: a materialized CTE, a JSON table and a named window.
 _PROBE = (
     "WITH t AS MATERIALIZED (SELECT value FROM json_each('[1]')) "
     "SELECT row_number() OVER w FROM t WINDOW w AS (ORDER BY value)"
 )
-# Size, modification and change times in nanoseconds, and inode, of each brain-relative path.
 Fingerprints = dict[str, tuple[int, int, int, int]]
-# A listed source folder of memories/: its fingerprint, its entries and whether that fingerprint is trusted (1 or 0).
 Tree = tuple[int, int, int, int, int, int]
-# Nanoseconds a source folder must stay unchanged before its fingerprint is trusted. Records are renamed into place,
-# so adding, replacing or removing one changes its folder's times; but a filesystem with a coarse clock, such as FAT's
-# 2-second times, keeps them for a second change within one tick. A folder changed this recently is listed again.
+# Wait past coarse filesystem timestamp ticks (e.g. FAT 2s) before trusting a source folder fingerprint.
 _SETTLE = 5_000_000_000
 _TOKENIZER = "porter unicode61 remove_diacritics 2"
-# The same tokenizer without its stemmer: words as search folds them, lowercased and with Latin accents removed.
 _FOLDED = _TOKENIZER.removeprefix("porter ")
 _DDL = f"""
--- `file` binds a generation to the database file bf created: a cache copied, cloned or extracted from elsewhere has
--- another inode, so it is rebuilt from the brain's files instead of trusted.
 CREATE TABLE ontology(signature TEXT NOT NULL, file TEXT NOT NULL);
--- A rowid table: secondary indexes of a WITHOUT ROWID table would copy its whole composite key.
 CREATE TABLE edges(item INTEGER NOT NULL, subject TEXT NOT NULL, relation TEXT NOT NULL, target TEXT NOT NULL,
                    origin TEXT NOT NULL);
--- `tree` names the scanned tree holding a file: its authored folder, memories/ itself or one source folder below it.
 CREATE TABLE files(path TEXT PRIMARY KEY, tree TEXT NOT NULL, size INTEGER, mtime INTEGER, ctime INTEGER,
                    inode INTEGER, error TEXT NOT NULL DEFAULT '');
--- Each listed source folder of memories/: its fingerprint, stated before its listing, its entries and whether an
--- unchanged fingerprint proves its listing unchanged, so a freshness check need not list it again.
 CREATE TABLE trees(path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER NOT NULL, ctime INTEGER NOT NULL,
                    inode INTEGER NOT NULL, entries INTEGER NOT NULL, trusted INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT NOT NULL, kind TEXT NOT NULL,
@@ -94,51 +75,37 @@ CREATE TABLE items(id INTEGER PRIMARY KEY, ref TEXT NOT NULL UNIQUE, path TEXT N
                    item_type TEXT NOT NULL, status TEXT NOT NULL, lead TEXT NOT NULL, url TEXT NOT NULL,
                    updated TEXT NOT NULL, observed TEXT NOT NULL, partial INTEGER NOT NULL,
                    tasks_open INTEGER NOT NULL, tasks_done INTEGER NOT NULL, next TEXT NOT NULL,
-                   weight INTEGER NOT NULL, stale_after TEXT NOT NULL);
+                   weight INTEGER NOT NULL, stale_after TEXT NOT NULL, sha256 TEXT NOT NULL);
 CREATE TABLE tasks(item INTEGER NOT NULL, line INTEGER NOT NULL, fragment TEXT NOT NULL,
                    text TEXT NOT NULL, done INTEGER NOT NULL, PRIMARY KEY(item,line)) WITHOUT ROWID;
--- `search` holds folded words; `original` keeps a passage's text only when folding changed it, for excerpts.
--- `names` holds identity words; `context` the headings a passage ranks under: a note's tags, a section's parents.
 CREATE TABLE passages(id INTEGER PRIMARY KEY, item INTEGER NOT NULL, fragment TEXT NOT NULL, title TEXT NOT NULL,
                       original TEXT NOT NULL);
 CREATE VIRTUAL TABLE search USING fts5(title, text, names, context, tokenize='{_TOKENIZER}');
--- The indexed terms, read for spelling suggestions; it stores nothing itself.
 CREATE VIRTUAL TABLE vocabulary USING fts5vocab(search, row);
--- Each indexed word of four or more letters or digits, folded as search folds it, whose stem differs from it,
--- beside that stem: `word*` also matches the stems of the words it begins, which the stemmer can shorten below it or
--- respell, such as `organ` for organization. A word the stemmer leaves alone, such as an identifier, is its own
--- vocabulary term. `held` counts its occurrences in the passages: a refresh subtracts those of the files it drops,
--- and a word no passage holds any more leaves, as a full build would never store it.
 CREATE TABLE words(word TEXT PRIMARY KEY, stem TEXT NOT NULL, held INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE names(name TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY(name, item)) WITHOUT ROWID;
 CREATE TABLE links(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
 CREATE TABLE tags(item INTEGER NOT NULL, target TEXT NOT NULL, PRIMARY KEY(item, target)) WITHOUT ROWID;
 """
-# A full build creates secondary indexes after loading every file: sorting once beats growing each B-tree.
-# Pages list notes by kind, records by time, and each source's records and totals without scanning every item.
 _INDEXES = (
     "CREATE INDEX edges_item ON edges(item)",
     "CREATE INDEX edges_target ON edges(target)",
     "CREATE INDEX edges_subject ON edges(subject,relation)",
     "CREATE INDEX items_path ON items(path)",
     "CREATE INDEX items_kind_time ON items(kind,time)",
-    # Its (kind,source,time) prefix orders a source's page; `observed` lets source totals read this index alone.
     "CREATE INDEX items_kind_source_time ON items(kind,source,time,observed)",
     "CREATE INDEX items_kind_source_observed ON items(kind,source,observed)",
-    # The expression must stay identical to the record branch of MODIFIED for SQLite to use it.
+    # Expression must stay identical to MODIFIED's record branch for SQLite index use.
     "CREATE INDEX items_kind_modified ON items(kind,coalesce(nullif(updated,''),time))",
     "CREATE INDEX passages_item ON passages(item)",
     "CREATE INDEX tasks_done ON tasks(done,item,line)",
     "CREATE INDEX names_item ON names(item)",
     "CREATE INDEX links_target ON links(target)",
     "CREATE INDEX tags_target ON tags(target)",
-    # Every reply looks for skipped files, usually none: only their rows are indexed.
     "CREATE INDEX files_problems ON files(path) WHERE error!=''",
-    # A freshness check compares the files of the trees it lists, never those of an unchanged source folder.
     "CREATE INDEX files_tree ON files(tree)",
 )
-# Only English and French function words are dropped: a subject such as "resume", "active" or "comment" stays
-# literal. English words that stem to one of them, such as "one" to "on", drop too: they would match nearly every text.
+# English and French stopwords dropped unless quoted or uppercase acronyms.
 _STOP = frozenset(
     """
     a about am an and another any are as at be been being but by can could did do does doing for from had has have
@@ -150,39 +117,21 @@ _STOP = frozenset(
     quelle quelles quels qui quoi s sa se ses si son sont sur t ta te tes toi ton tu un une vos votre vous y à été être
     """.split()  # noqa: SIM905 - one readable word list, grouped by language
 )
-# Written in capitals, a function word is an acronym and stays a term (EU AI Act, IT budget); AND and OR are
-# habitual operators, which plain words already imply.
 _OPERATORS = frozenset({"AND", "OR"})
 _IDENTITY = re.compile(IDENTITY)
-# A quoted phrase, or a word with an optional trailing `*` for a prefix; other characters only separate terms.
 _TERM = re.compile(r'["“”]([^"“”]*)["“”]|([^\W_]+)(\*?)')
-# A word query matches any of its first 32 distinct terms; later terms are ignored.
 WORDS = 32
-# A `word*` prefix of at least SPELLED letters also matches the stems of up to EXPANSIONS indexed words it begins,
-# beside the stems its stemmed form begins: the stemmer leaves shorter words alone, and a word as long as the prefix
-# matches through its own stem.
 SPELLED, EXPANSIONS = 3, 64
-# A passage's candidates for `words`: runs of letters or digits longer than SPELLED, which the tokenizer then folds
-# and stems. In ASCII text, a plain character set finds the same runs about a third faster.
 _WORD = re.compile(rf"[^\W_]{{{SPELLED + 1},}}")
 _ASCII_WORD = re.compile(rf"[A-Za-z0-9]{{{SPELLED + 1},}}")
-# Distinct candidate words tokenized per in-memory batch while a refresh counts `words`, which bounds its memory.
 _SPELLINGS = 20_000
-# Separates words in one in-memory row: a private-use character is a token of its own and never part of a candidate.
 _APART = "\ue000"
-# A lexical result names at most this many other matching records that share its URL.
 ALSO = 5
-# A lexical result names at most this many other matching sections of its note.
 SECTIONS = 3
-# A passage matching all of a query's several terms gains this fraction of its score, one matching some of them a
-# proportional part: 2 of 3 terms gain half of it. A passage matching a single term gains nothing.
 COVERAGE = 0.2
-# The weight of a passage's context (a section's note title and parents, a note's tags) against a heading's 10: a
-# section mentioning its note's title still ranks below the note, while "Atlas next actions" finds that section.
 CONTEXT = 3.0
-# Result and listing titles are previews of at most this many characters; exact reads keep the whole title.
 TITLE = 200
-# SQL twins of markdown.action_note and markdown.entry_note over `items i`, for page builders.
+# SQL twins of markdown.action_note and markdown.entry_note over `items i`.
 ACTION = (
     "i.kind='note' AND substr(i.path,1,8)='actions/' AND substr(i.path,-10)='/ACTION.md' "
     "AND length(i.path)-length(replace(i.path,'/',''))=2"
@@ -198,18 +147,7 @@ def inputs(
     counts: dict[str, int] | None = None,
     reuse: Callable[[str, tuple[int, int, int, int]], bool] | None = None,
 ) -> tuple[Fingerprints, dict[str, Tree]]:
-    """Authored notes and record files with their file fingerprints, and each listed source folder of memories/.
-
-    Every symlink, special entry or unaddressable name stays an input so its exclusion is reported. A link can
-    hide a whole directory regardless of its filename; never inspect its target to guess its contents. Editor
-    locks beside authored files are neither: an open editor must not fail updates. The scan limit bounds each
-    authored folder and each source of memories/ on its own; `counts` receives their entries.
-
-    A source folder that `reuse` accepts by its fingerprint is not listed: the cache answers for its files and
-    entries. Each listed one comes with its fingerprint, stated before its listing, and its entries. It is trusted
-    when it holds no folder, whose own changes would leave it unchanged, and had been unchanged for _SETTLE: any
-    later change then gives it other times. An unreadable folder counts as a skipped entry, which `_dirty` states.
-    """
+    """Collect fingerprints for authored notes, stored records, and skipped entries across brain roots."""
     started = time.time_ns()
     found: Fingerprints = {}
     tally: dict[str, int] = {}
@@ -227,10 +165,8 @@ def inputs(
         skipped: Fingerprints = {}
         if directory == "memories":
             scanned = store.scan(directory, skipped=skipped, split=True, counts=tally, reuse=listing)
-            # A source folder's entries are its files and skipped entries, unless it holds another folder.
             for tree in map(_tree, (*scanned, *skipped)):
                 held[tree] = held.get(tree, 0) + 1
-            # A source folder that cannot be opened is skipped whole, never listed.
             unlisted = skipped
             found.update({name: info for name, info in scanned.items() if records.stored(name)})
             found.update(skipped)
@@ -250,19 +186,13 @@ def inputs(
 
 
 def _tree(path: str) -> str:
-    """The scanned tree holding a path: its authored folder, memories/ itself or one source folder below it."""
     parts = path.split("/", 2)
     return f"memories/{parts[1]}" if parts[0] == "memories" and len(parts) == 3 else parts[0]
 
 
 @dataclass(frozen=True)
 class Scan:
-    """One comparison of a brain's files with a cache generation.
-
-    `scope` names the trees whose files were compared: the authored folders, memories/ itself and each source folder
-    that was listed or has vanished. `known` and `current` hold the cache's and the brain's fingerprints of their
-    files; `stored` holds every source folder row the cache had, and `trees` the rows of the listed ones.
-    """
+    """Comparison between a brain's files/trees and one cache generation."""
 
     scope: frozenset[str]
     stored: dict[str, Tree]
@@ -271,21 +201,14 @@ class Scan:
     trees: dict[str, Tree]
 
     def matches(self) -> bool:
-        """Whether every compared file matches the cache, which then answers as it is."""
         return self.known == self.current
 
     def unchanged(self) -> bool:
-        """Whether the cache needs no write: its files and its rows of the listed folders match."""
         return self.matches() and self.trees == {tree: row for tree, row in self.stored.items() if tree in self.scope}
 
 
 def _scan(store: Store, connection: sqlite3.Connection | None, counts: dict[str, int] | None = None) -> Scan:
-    """Compare the brain's files with a generation, listing only the source folders that may have changed.
-
-    A source folder is not listed while its fingerprint matches its trusted row and none of its skipped files
-    changed in place; `counts` then receives its entries from that row. Without a connection, as for a new
-    generation, every folder is listed.
-    """
+    """Scan brain files, reusing unchanged trusted `memories/` source folders."""
     stored = _trees(connection) if connection is not None else {}
     dirty = _dirty(store, connection, stored) if connection is not None else set()
     reused: set[str] = set()
@@ -308,12 +231,7 @@ def _scan(store: Store, connection: sqlite3.Connection | None, counts: dict[str,
 
 
 def _dirty(store: Store, connection: sqlite3.Connection, stored: Mapping[str, Tree]) -> set[str]:
-    """Trusted source folders holding a skipped entry changed in place, as when its permissions are restored.
-
-    Such a change leaves its folder's fingerprint as it was. Each entry is stated as itself, whatever its type: an
-    unreadable subfolder, which the folder's trust counts as a skipped entry, changes only its own times when its
-    permissions are restored. An unaddressable name cannot be stated.
-    """
+    """Trusted source folders holding a skipped entry whose in-place stat changed."""
     found: set[str] = set()
     cursor = connection.cursor()
     cursor.row_factory = None
@@ -340,7 +258,6 @@ def _trees(connection: sqlite3.Connection) -> dict[str, Tree]:
 
 @contextmanager
 def _writable() -> Generator[None]:
-    """Name the cache's write access, which retrieval needs even for a brain it only reads."""
     try:
         yield
     except OSError as error:
@@ -352,14 +269,11 @@ def _writable() -> Generator[None]:
 
 
 def _path(store: Store, name: str = CACHE) -> Path:
-    # One no-follow descriptor checks and tightens .bf, so a swapped symlink cannot redirect either step;
-    # Store.parent names a .bf that is a symlink or not a directory.
     with _writable(), store.parent(name, create=True) as (directory, _name):
         info = os.fstat(directory)
         if info.st_uid != os.getuid():
             raise Error(".bf belongs to another user; remove it so bf can rebuild its own cache")
         if stat.S_IMODE(info.st_mode) & 0o077:
-            # A copied or extracted brain can bring a loose cache directory; the cache holds every record's text.
             os.fchmod(directory, stat.S_IMODE(info.st_mode) & 0o700)
     path = store.root / name
     for suffix in _SIDECARS:
@@ -369,7 +283,6 @@ def _path(store: Store, name: str = CACHE) -> Path:
 
 
 def _remove(store: Store, name: str, suffixes: Sequence[str] = _SIDECARS) -> None:
-    """Delete a database file and its SQLite sidecars without following links."""
     with _writable(), suppress(FileNotFoundError), store.parent(name) as (directory, leaf):
         for suffix in suffixes:
             with suppress(FileNotFoundError):
@@ -377,25 +290,16 @@ def _remove(store: Store, name: str, suffixes: Sequence[str] = _SIDECARS) -> Non
 
 
 def _open(store: Store, config: Config | None = None) -> sqlite3.Connection | None:
-    """The current cache generation, or None when it is missing, outdated or unreadable.
-
-    A refresh passes the configuration it indexes with, so the rows it adds match the generation's signature.
-    """
+    """Open the current cache generation if its schema, signature, and inode match."""
     path = _path(store)
     signature = _signature(load(store) if config is None else config)
     try:
-        # A concurrent full build may rename its generation over the file between this check and the connection:
-        # that generation's identity then fails below, and the caller checks again.
         expected = (signature, _file(path))
     except FileNotFoundError:
         return None
     connection = _connect(path)
-    # Queries shared with page builders place notes in time on the reading machine. A note's date resolves once per
-    # connection: a page compares the same few dates on every row, and the next reply sees a changed timezone.
     connection.create_function("note_time", 1, lru_cache(maxsize=4096)(_note_time), deterministic=True)
     try:
-        # The layout bf creates, and nothing more: a trigger or view would add rows no brain file holds, and a
-        # missing or altered table would fail queries later. SQLite stores each statement's text as written.
         if (
             connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA
             and _schema(connection) == _layout()
@@ -409,7 +313,6 @@ def _open(store: Store, config: Config | None = None) -> sqlite3.Connection | No
 
 
 def _schema(connection: sqlite3.Connection) -> list[tuple[object, ...]]:
-    """A database's tables, indexes, triggers and views, without the statistics SQLite may add itself."""
     rows = connection.execute(
         "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_stat%' ORDER BY type,name"
     )
@@ -418,7 +321,6 @@ def _schema(connection: sqlite3.Connection) -> list[tuple[object, ...]]:
 
 @cache
 def _layout() -> list[tuple[object, ...]]:
-    """The layout of a complete generation, from the statements that build one; FTS5 adds its own tables."""
     with closing(sqlite3.connect(":memory:")) as connection:
         connection.executescript(_DDL)
         for statement in _INDEXES:
@@ -429,7 +331,7 @@ def _layout() -> list[tuple[object, ...]]:
 def _connect(path: Path | str) -> sqlite3.Connection:
     _supported()
     connection = sqlite3.connect(path, timeout=30)
-    # The cache is data found on disk: its schema may not run functions or allow corrupting writes.
+    # Untrusted schema hardening: forbid SQLite triggers/views from altering queries or files.
     connection.setconfig(sqlite3.SQLITE_DBCONFIG_TRUSTED_SCHEMA, False)
     connection.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
     connection.row_factory = sqlite3.Row
@@ -438,13 +340,8 @@ def _connect(path: Path | str) -> sqlite3.Connection:
 
 @cache
 def _supported() -> None:
-    """Name a Python whose SQLite cannot hold the cache, whose errors would otherwise read as damage or a full disk.
-
-    Checked once per process when it passes: the library cannot change meanwhile.
-    """
     try:
         with closing(sqlite3.connect(":memory:")) as connection:
-            # The schema needs FTS5 with its tokenizer options; queries need the probed features.
             connection.executescript(_DDL)
             connection.execute(_PROBE).fetchall()
         capable = sqlite3.sqlite_version_info >= _SQLITE
@@ -459,34 +356,20 @@ def _supported() -> None:
 
 
 def _signature(config: Config) -> str:
-    """The configuration a generation's rows depend on. Documentation (`description`), `broader` (read at query time),
-    and `targets` (checked by validation and collection) never alter indexed rows."""
     return digest(encode({"name": config.name}))
 
 
 def _file(path: Path) -> str:
-    """The database file's inode, which no copy of it shares.
-
-    Not its device number: a remount can assign another one, as for btrfs subvolumes, NFS or FUSE, while the file
-    and its rows stay the same.
-    """
     return str(path.lstat().st_ino)
 
 
 def _create(store: Store, config: Config) -> sqlite3.Connection:
-    """An empty generation beside the live cache in rollback-journal mode; the build switches it to WAL once filled.
-
-    A new file needs almost no rollback journal, while WAL would write every page twice: once to the log
-    and again when checkpointing it. Only the build lock holder uses BUILD: any file there is an abandoned build.
-    """
+    """Create a fresh private build DB in rollback-journal mode before publishing."""
     path = _path(store, BUILD)
     _remove(store, BUILD)
     with _writable():
-        # Private from creation: SQLite gives its journal and WAL files the database file's mode.
         os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
     connection = _connect(path)
-    # Version zero withholds this generation until the ingestion transaction commits. One transaction creates the
-    # schema: executescript adds none, and each statement would otherwise commit and sync on its own.
     connection.executescript("BEGIN;" + _DDL)
     connection.execute("INSERT INTO ontology VALUES(?,?)", (_signature(config), _file(path)))
     connection.commit()
@@ -494,9 +377,7 @@ def _create(store: Store, config: Config) -> sqlite3.Connection:
 
 
 def _known(connection: sqlite3.Connection, scope: Collection[str]) -> Fingerprints:
-    """The fingerprints of the files of these trees, as a generation holds them."""
     cursor = connection.cursor()
-    # Plain tuples: a freshness check reads the fingerprint of every file it compares.
     cursor.row_factory = None
     return {
         row[0]: row[1:]
@@ -508,12 +389,10 @@ def _known(connection: sqlite3.Connection, scope: Collection[str]) -> Fingerprin
 
 
 def _holds(connection: sqlite3.Connection, scan: Scan) -> bool:
-    """Whether a generation still holds what a scan compared, so no other refresh has committed since."""
     return _trees(connection) == scan.stored and _known(connection, scan.scope) == scan.known
 
 
 def _drop(connection: sqlite3.Connection, path: str) -> None:
-    """Delete one file's rows with one statement per table, however many items the file holds."""
     owned = "item IN (SELECT id FROM items WHERE path=:path)"
     values = {"path": path}
     connection.execute(f"DELETE FROM search WHERE rowid IN (SELECT id FROM passages WHERE {owned})", values)  # noqa: S608 - fixed SQL
@@ -531,8 +410,6 @@ def _insert(
     links: list[str],
     edges: Sequence[bf_links.Claim],
 ) -> int:
-    """Insert one file's item with its passages, names, links and claims; SQLite numbers the item and each passage
-    after the existing ones. Returns the item's number."""
     defaults: dict[str, str | int] = {
         "item_type": "",
         "tasks_open": 0,
@@ -540,14 +417,15 @@ def _insert(
         "next": "",
         "weight": 1,
         "stale_after": "",
+        "sha256": "",
     }
     item = connection.execute(
         "INSERT INTO items(ref,path,kind,source,title,time,type,item_type,status,lead,url,updated,observed,partial,"
-        "tasks_open,tasks_done,next,weight,stale_after) VALUES(:ref,:path,:kind,:source,:title,:time,:type,:item_type,"
-        ":status,:lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,:stale_after)",
+        "tasks_open,tasks_done,next,weight,stale_after,sha256) VALUES(:ref,:path,:kind,:source,:title,:time,:type,"
+        ":item_type,:status,:lead,:url,:updated,:observed,:partial,:tasks_open,:tasks_done,:next,:weight,:stale_after,"
+        ":sha256)",
         {**defaults, **values},
     ).lastrowid
-    # `heading` is what ranks; `title` is what readers see, such as "Note — Section".
     for fragment, title, heading, text, identity, context in passages:
         folded = fold(text)
         passage = connection.execute(
@@ -560,13 +438,11 @@ def _insert(
         )
     connection.executemany("INSERT OR IGNORE INTO names VALUES(?,?)", [(name, item) for name in names])
     connection.executemany("INSERT OR IGNORE INTO links VALUES(?,?)", [(item, link) for link in links])
-    # Two identical claims from one file are one edge; support from other files stays separate.
     claims = dict.fromkeys((item, e.subject, e.relation, e.target, e.origin) for e in edges)
     connection.executemany("INSERT INTO edges VALUES(?,?,?,?,?)", claims)
     return cast("int", item)
 
 
-# The passages of these files, by path.
 _PASSAGES = (
     "SELECT title,text,names,context FROM search WHERE rowid IN (SELECT p.id FROM items i "
     "JOIN passages p ON p.item=i.id WHERE i.path IN (SELECT value FROM json_each(?)))"
@@ -574,13 +450,7 @@ _PASSAGES = (
 
 
 def _spell(connection: sqlite3.Connection, paths: Sequence[str] | None, change: int = 1) -> None:
-    """Count in `words` each word whose stem differs from its folded spelling, with that stem, in the passages of these
-    files or of every passage: `change` 1 adds the files a refresh indexed without error, read back from the index,
-    and -1 subtracts the files it is about to drop, so a word no passage holds any more leaves `words`.
-
-    Both directions read the same stored passages, so a file subtracts exactly what it added. Batches bound memory: a
-    word in several batches is tokenized again.
-    """
+    """Update `words` occurrence counts (+1/-1) for passages of `paths` or the whole table."""
     rows = connection.execute(
         "SELECT title,text,names,context FROM search" if paths is None else _PASSAGES,
         () if paths is None else (json.dumps(paths),),
@@ -589,8 +459,6 @@ def _spell(connection: sqlite3.Connection, paths: Sequence[str] | None, change: 
     for row in rows:
         for column in row:
             if column.isascii():
-                # An ASCII run is one token, and no English suffix ends in a digit: such a word, as most identifiers,
-                # indexes as itself.
                 words.update(word for word in _ASCII_WORD.findall(column) if not word[-1].isdigit())
             else:
                 words.update(_WORD.findall(column))
@@ -601,7 +469,6 @@ def _spell(connection: sqlite3.Connection, paths: Sequence[str] | None, change: 
 
 
 def _respell(connection: sqlite3.Connection, words: Counter[str], change: int) -> None:
-    """Add or subtract the occurrences of the words of one batch that their stem respells."""
     candidates = sorted(words)
     held: Counter[tuple[str, str]] = Counter()
     for candidate, tokens in zip(candidates, _spellings(candidates) if candidates else [], strict=True):
@@ -618,13 +485,7 @@ def _respell(connection: sqlite3.Connection, words: Counter[str], change: int) -
 
 
 def _spellings(words: Sequence[str]) -> list[list[tuple[str, str]]]:
-    """Each word's tokens as the search table indexes them, folded without and with its stemmer.
-
-    FTS5 tokenizes them itself, so each stem is exactly a term of the passages holding the word, whatever the
-    candidate regex split. The words form one row of two in-memory tables, whose tokens pair up by position: one row
-    costs about half as much as a row per word. A private-use character between words, a token no candidate holds,
-    tells which word each token comes from.
-    """
+    """Tokenize `words` through in-memory FTS5 folded and stemmed tables, split by `_APART`."""
     with closing(sqlite3.connect(":memory:")) as memory:
         for table, tokenizer in (("folded", _FOLDED), ("stemmed", _TOKENIZER)):
             memory.execute(f"CREATE VIRTUAL TABLE {table} USING fts5(x, tokenize={tokenizer!r})")
@@ -641,7 +502,6 @@ def _spellings(words: Sequence[str]) -> list[list[tuple[str, str]]]:
 
 
 def _scalars(value: object) -> list[str]:
-    """Searchable scalar strings from relations and attributes, skipping JSON keys and booleans."""
     if isinstance(value, str):
         return [value] if value else []
     if isinstance(value, bool) or value is None:
@@ -656,17 +516,14 @@ def _scalars(value: object) -> list[str]:
 
 
 def _index(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
-    """Insert one file; a parse failure raises. Refs cannot repeat: a note ref is its path, and a record
-    ref `source:id` names the one file whose SHA-256 filename matches that id.
-    """
+    """Index one note or stored record; parse or safety errors raise."""
     if unnamed(path):
-        # Only the scan's escaped form of the name exists: nothing can open it.
         raise Error(UNNAMED)
     if authored(path):
-        projection = note(path, store.read(path, MAX_NOTE))
+        raw = store.read(path, MAX_NOTE)
+        projection = note(path, raw)
         knowledge = projection.knowledge
         edges = ontology.note_claims(projection, config)
-        # Explicit relations and attribute scalars are searchable words; attributes never create graph edges.
         values = [*_scalars(knowledge.relations), *_scalars(knowledge.attributes)]
         stem = PurePosixPath(path).stem
         title_folded = fold(projection.title).lower()
@@ -702,8 +559,8 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
                 "tasks_done": sum(task.done for task in projection.tasks),
                 "next": next((task.text for task in projection.tasks if not task.done), ""),
                 "stale_after": knowledge.stale_after,
+                "sha256": digest(raw),
             },
-            # The whole note ranks under its tags and each section under its stem, aliases and parents (see _lexical).
             [
                 (
                     p.fragment,
@@ -735,21 +592,17 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
         )
         return
     if "/" not in path:
-        # A file, link or special file in a scanned folder's place, such as projects, or that folder when unreadable:
-        # named as bf validate names it, never as a misnamed record.
         raise Error(unread(store, path))
     try:
         source = records.source_of(path)
     except Error:
-        # A link, special file or unreadable folder names its own problem, whatever its name or folder; a misnamed
-        # file is rejected by its name without being read.
         if not stat.S_ISREG(store.mode(path)):
             store.read(path, 0)
         raise
-    record = records.load(store, path)
+    raw = store.read(path, models.MAX_RECORD)
+    record = records.parse(path, raw)
     ref = f"{source}:{record.id}"
     edges = ontology.record_claims(record, config, ref)
-    # Explicit relation targets and attribute scalars are searchable words; attributes never create graph edges.
     values = [*_scalars(record.relations), *_scalars(record.attributes)]
     identity = " ".join(
         [source, *([record.type] if record.type else []), *record.aliases, *record.links, record.url, *values]
@@ -771,6 +624,7 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
             "updated": record.updated,
             "observed": record.observed,
             "partial": int(record.attributes.get("partial") is True),
+            "sha256": digest(raw),
         },
         [("", record.title, record.title, record.text, identity, "")],
         sorted({ontology.qualify(config, ref), *(bf_links.target(v) for v in record.aliases)}),
@@ -780,11 +634,7 @@ def _index(connection: sqlite3.Connection, store: Store, path: str, config: Conf
 
 
 def lead(record: Record) -> str:
-    """A preview of the text with whitespace collapsed, reading only a growing prefix of a long text.
-
-    Collapsing a prefix always yields a prefix of the collapsed text, even when the cut splits a word: one character
-    beyond LEAD shows that the preview cuts the text.
-    """
+    """Preview of collapsed text within LEAD chars."""
     size = 4 * LEAD
     while True:
         collapsed = " ".join(record.text[:size].split())
@@ -794,65 +644,38 @@ def lead(record: Record) -> str:
 
 
 def refresh(
-    store: Store,
-    *,
-    full: bool = False,
-    wait: float = 30,
-    recover: bool = False,
-    compared: Scan | None = None,
+    store: Store, *, full: bool = False, wait: float = 30, recover: bool = False, compared: Scan | None = None
 ) -> dict[str, object]:
-    """Re-index only changed files; a file that fails to parse is skipped and reported, not fatal.
-
-    `full`, or a cache that is missing or incompatible, builds a new generation, listing every folder. `full` and
-    `recover` first roll back an interrupted record transaction, as build and update do; reads refuse to apply its
-    journal instead. `recover` also checks every page of the live generation: a damaged one is discarded and built
-    again. `compared` is the scan a freshness check just made: while the cache still holds what it compared, the
-    refresh indexes from that scan instead of scanning the brain again.
-    """
+    """Re-index changed files or build a new generation, skipping invalid files with diagnostics."""
     try:
         try:
             return _refresh(store, full=full, wait=wait, recover=full or recover, compared=compared)
         except sqlite3.DatabaseError as error:
             if not _damaged(error):
                 raise
-        # SQLite never repairs a damaged file in place, and the cache holds nothing the brain's files do not.
         _discard(store, wait)
         return _refresh(store, full=full, wait=wait, recover=full or recover, compared=compared)
     except sqlite3.DatabaseError as error:
         if getattr(error, "sqlite_errorcode", 0) & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
-            # Another program, such as a sqlite3 shell, holds the cache: a rebuild would wait on it too.
             raise Error("another process holds the search cache; close it and retry") from error
         raise Error("could not refresh the search cache; check free space and run bf build") from error
 
 
 class _DamagedError(sqlite3.DatabaseError):
-    """A page check found damage that no query has read yet."""
+    """Page check detected damage before a query ran."""
 
 
 def _damaged(error: sqlite3.DatabaseError) -> bool:
-    """Whether SQLite found the cache file damaged or not a database, rather than busy, full or unreadable."""
     code = getattr(error, "sqlite_errorcode", None)
-    # Extended codes, such as SQLITE_CORRUPT_VTAB for FTS5 damage, keep the primary code in their low byte.
     return isinstance(error, _DamagedError) or (
         isinstance(code, int) and code & 0xFF in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}
     )
 
 
 def _discard(store: Store, wait: float) -> None:
-    """Delete a damaged generation so the next freshness check builds another, once its connections close.
-
-    Only a generation whose own page check fails goes: the error may have come from another brain's cache in the
-    same reply. A build in progress replaces it anyway; a busy writer or reader leaves it to the next one to fail.
-    """
-    with (
-        suppress(BusyError),
-        building(store, 0),
-        writer(store, wait),
-        generation(store, shared=False, wait=wait),
-    ):
+    with suppress(BusyError), building(store, 0), writer(store, wait), generation(store, shared=False, wait=wait):
         connection = _open(store)
         if connection is not None:
-            # No other connection can be open here: any database error means this file cannot serve.
             with closing(connection), suppress(sqlite3.DatabaseError):
                 if connection.execute("PRAGMA quick_check(1)").fetchone()[0] == "ok":
                     return
@@ -866,14 +689,13 @@ def _refresh(store: Store, *, full: bool, wait: float, recover: bool, compared: 
         if full:
             with writer(store, wait):
                 records.recover(store)
-        # Another build may have published a compatible generation while this one waited.
         elif (result := _incremental(store, wait=wait, recover=recover, compared=compared)) is not None:
             return result
         return _build(store, wait)
 
 
 def _incremental(store: Store, *, wait: float, recover: bool, compared: Scan | None) -> dict[str, object] | None:
-    """Update the live generation in place; None when there is no compatible one."""
+    """Update the live generation in place; None when no compatible generation exists."""
     checked = ""
     if recover or compared is None or compared.unchanged():
         with reader(store, wait):
@@ -886,7 +708,6 @@ def _incremental(store: Store, *, wait: float, recover: bool, compared: Scan | N
                     return None
                 with closing(connection):
                     connection.execute("PRAGMA cache_size=-65536")
-                    # Refreshes read only the pages of changed files: damage elsewhere would fail every later search.
                     if recover:
                         if connection.execute("PRAGMA quick_check(1)").fetchone()[0] != "ok":
                             raise _DamagedError("the search cache is damaged")
@@ -918,37 +739,20 @@ def _incremental(store: Store, *, wait: float, recover: bool, compared: Scan | N
 
 
 def _build(store: Store, wait: float) -> dict[str, object]:
-    """Fill a new generation beside the live cache, then publish it; a failed build leaves the live cache.
-
-    The build lock keeps one build at a time, but the brain writer lock is held only to publish: searches keep
-    reading the live cache, incremental refreshes keep updating it, and collections keep committing. A file that
-    changes after the build fingerprinted it no longer matches its fingerprint, so the next refresh indexes it again;
-    a freshness check that found no usable generation compares the one it built once more before answering.
-    """
+    """Fill a new generation beside the live cache and publish it atomically."""
     config = load(store)
     try:
         with closing(_create(store, config)) as connection:
             result = _fill(store, connection, config, new=True)
-            # Incremental refreshes then commit beside readers instead of blocking them.
             connection.execute("PRAGMA journal_mode=WAL")
-        # Rather than discard a finished build, wait out a collection's commit.
         with writer(store, max(wait, _PUBLISH)):
             _publish(store)
     finally:
-        # After a publish, only sidecars an unclean close left can remain.
         _remove(store, BUILD)
     return result
 
 
 def _publish(store: Store) -> None:
-    """Rename the finished build over the live cache, under the brain writer lock.
-
-    SQLite finds a database's -wal and -shm files by name, never checking which database they belong to: a
-    connection to the old file would attach the new generation's log. Readers therefore hold the generation lock
-    while connected, and the publish takes it exclusively. The old generation leaves WAL mode, which removes both
-    files, so connections to the new file can neither replay nor share them; a first build has no old generation, so
-    the rename alone publishes it. The rename keeps the inode `file` records.
-    """
     with generation(store, shared=False, wait=_PUBLISH):
         _replace(store)
 
@@ -958,13 +762,13 @@ def _replace(store: Store) -> None:
     try:
         store.lstat(CACHE)
     except FileNotFoundError:
-        # A first build: connecting would create an empty, non-private file that a crash before the rename leaves.
         pass
     else:
         deadline = time.monotonic() + _PUBLISH
         with closing(_connect(path)) as live:
             while True:
                 try:
+                    # Leave WAL mode before replacing so new generation never attaches old -wal/-shm sidecars.
                     live.execute("PRAGMA journal_mode=DELETE")
                     break
                 except sqlite3.OperationalError as error:
@@ -974,7 +778,6 @@ def _replace(store: Store) -> None:
                         raise BusyError("readers kept the search cache open; retry bf build") from error
                     time.sleep(0.05)
                 except sqlite3.DatabaseError:
-                    # Not a database: no connection can use a log beside it.
                     break
     _remove(store, CACHE, _SIDECARS[1:])
     with _writable(), store.parent(CACHE) as (directory, leaf):
@@ -982,29 +785,15 @@ def _replace(store: Store) -> None:
 
 
 def _fill(
-    store: Store,
-    connection: sqlite3.Connection,
-    config: Config,
-    *,
-    new: bool,
-    compared: Scan | None = None,
+    store: Store, connection: sqlite3.Connection, config: Config, *, new: bool, compared: Scan | None = None
 ) -> dict[str, object]:
-    """Index changed files in one transaction; a new generation has nothing to drop and then gains its indexes.
-
-    Every file is indexed with `config`, whose signature the generation carries: a bf.yaml edit during the fill
-    makes the next refresh rebuild instead of failing the files indexed meanwhile.
-    """
-    # Keep the index B-trees being written in memory: up to 64 MiB, released when the refresh closes.
+    """Index changed files in one transaction; a new build creates secondary indexes after loading."""
     connection.execute("PRAGMA cache_size=-65536")
-    # A freshness check's scan still applies while the cache holds what it compared, so no other refresh has
-    # committed since; as during a build, a file or folder changed after the scan no longer matches.
     if compared is None or new:
         compared = _scan(store, None if new else connection)
     if not new and compared.unchanged():
         return _counts(connection, compared, 0, 0)
     known, current = compared.known, compared.current
-    # A file's problem depends on its own bytes and the configuration signature: an unchanged
-    # fingerprint keeps its result.
     changed = sorted(path for path, info in current.items() if known.get(path) != info)
     removed = sorted(known.keys() - current.keys())
     vanished = sorted((compared.stored.keys() & compared.scope) - compared.trees.keys())
@@ -1020,23 +809,16 @@ def _fill(
             try:
                 _index(connection, store, path, config)
             except FileNotFoundError:
-                # Removed after the scan, as by a commit during a build or an editor's atomic save: without a
-                # fingerprint, the next refresh compares it again.
                 connection.execute("ROLLBACK TO file")
                 connection.execute("RELEASE file")
                 continue
             except (Error, UnicodeError) as problem:
                 connection.execute("ROLLBACK TO file")
-                # Most parse errors name their file first, which `path` already holds: a long path would leave no
-                # room for the reason.
                 error = _capped(str(problem).removeprefix(f"{path}: ") or "invalid file")
             except PermissionError:
-                # Restoring access changes the file's ctime, and so its fingerprint.
                 connection.execute("ROLLBACK TO file")
                 error = "inaccessible file or folder; check permissions"
             except OSError:
-                # A transient failure, such as EIO on a network mount, leaves the file unchanged: a fingerprint that
-                # matches nothing makes the next refresh read it again instead of keeping the failure.
                 connection.execute("ROLLBACK TO file")
                 connection.execute("RELEASE file")
                 connection.execute(
@@ -1054,13 +836,11 @@ def _fill(
         )
         for statement in _INDEXES if new else ():
             connection.execute(statement)
-        # PRAGMA has no bound-parameter form; SCHEMA is an internal integer constant.
         connection.execute(f"PRAGMA user_version={SCHEMA}")
     return _counts(connection, compared, len(changed), len(removed))
 
 
 def _counts(connection: sqlite3.Connection, compared: Scan, changed: int, removed: int) -> dict[str, object]:
-    # The files of the source folders the scan did not list, which keep their rows.
     kept = connection.execute(
         "SELECT count(*) FROM files WHERE tree NOT IN (SELECT value FROM json_each(?))",
         (json.dumps(sorted(compared.scope)),),
@@ -1070,39 +850,19 @@ def _counts(connection: sqlite3.Connection, compared: Scan, changed: int, remove
 
 
 def _capped(text: str) -> str:
-    """At most _PROBLEM bytes of a problem, cut with an ellipsis: a validation error names every invalid field."""
     data = text.encode()
     return text if len(data) <= _PROBLEM else data[: _PROBLEM - 3].decode(errors="ignore") + "…"
 
 
 def _sweep(store: Store) -> None:
-    """Delete the file a killed build left beside the cache, which can be as large as the cache.
-
-    Only the build lock holder fills BUILD, so holding the lock proves a file there abandoned; a running build
-    keeps it. The cleanup never fails a read: the next build replaces what remains.
-    """
     with suppress(Error, OSError):
-        # Checked first, so a read takes the build lock only when there is something to delete.
         store.lstat(BUILD)
         with building(store, 0):
             _remove(store, BUILD)
 
 
 def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
-    """Refresh a changed cache, or keep serving it as `busy` while another writer or build holds the brain beyond
-    _CONTENDED seconds.
-
-    `counts` receives the entries of each scanned tree, as from `inputs`, when the check scans the brain.
-    Never call it while holding the generation lock: its refresh may publish a rebuilt generation.
-
-    The check lists the authored folders and memories/ itself, but only the source folders whose fingerprint
-    changed or is not trusted yet: records are renamed into place, so collection always changes their folder. A
-    record file edited in place, which collection never does, therefore waits for bf build.
-
-    A check that finds no usable generation builds one, then compares it once more: the build reads the brain
-    without the writer lock, so a collection that committed meanwhile is indexed, or the cache answers as `busy`.
-    """
-    # The cache folder's own checks come first: they name the problem more precisely than a lock would.
+    """Refresh changed files or return `busy` while another writer holds the brain past `_CONTENDED`."""
     _path(store)
     _sweep(store)
     for _ in range(2):
@@ -1113,7 +873,6 @@ def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
                 connection = _open(store)
                 try:
                     with reader(store, wait=_CONTENDED):
-                        # A live writer may have a pending journal; only an abandoned one blocks cached reads.
                         records.require_ready(store)
                         if connection is not None:
                             if counts is not None:
@@ -1130,28 +889,22 @@ def fresh(store: Store, counts: dict[str, int] | None = None) -> str:
         except sqlite3.DatabaseError as error:
             if not _damaged(error):
                 raise
-            # Nothing to serve: the refresh below discards the damaged generation and builds another.
             connection, compared = None, None
         try:
-            # Without any usable generation there is nothing to serve, so wait for the other writer or build.
             refresh(store, wait=_CONTENDED if connection is not None else 120, compared=compared)
         except BusyError:
-            # A check whose files all matched only had folder rows to update: the cache answers as it is.
             return "ready" if compared is not None and compared.matches() else "busy"
-        # Only a check that found no usable generation compares again. A check that found one refreshed it in place
-        # under the writer lock, unless a structural bf.yaml edit or damage made that refresh rebuild.
         if connection is not None:
             break
     return "ready"
 
 
-# Freshness already established for each brain root within the current reply, when one is being built.
 _CHECKED: ContextVar[dict[Path, str] | None] = ContextVar("checked", default=None)
 
 
 @contextmanager
 def session() -> Generator[None]:
-    """Compare each brain's files with its cache once per reply, however many views the reply opens."""
+    """Compare each brain once per reply across multiple view opens."""
     token = _CHECKED.set({})
     try:
         yield
@@ -1161,11 +914,9 @@ def session() -> Generator[None]:
 
 @contextmanager
 def database(store: Store, counts: dict[str, int] | None = None) -> Generator[tuple[sqlite3.Connection, str]]:
-    """The fresh cache generation and its state, within one read snapshot; `counts` as for `fresh`."""
+    """Open the fresh cache generation and state inside one read snapshot."""
     checked = _CHECKED.get()
     state = checked.get(store.root, "") if checked is not None else ""
-    # A full rebuild may replace the generation between the freshness check and open: check again, twice at most.
-    # fresh() waits for an in-progress generation instead of serving it, so it runs outside the generation lock.
     for attempt in range(3):
         if attempt or not state:
             state = fresh(store, counts)
@@ -1176,18 +927,13 @@ def database(store: Store, counts: dict[str, int] | None = None) -> Generator[tu
                 connection = _open(store)
                 if connection is None:
                     if state == "busy":
-                        # fresh() already waited for the other writer: another wait would only delay this answer.
                         raise BusyError("another writer is building the search cache; retry when it finishes")
                     continue
                 with closing(connection):
                     connection.execute("PRAGMA query_only=ON")
-                    # Counts, rows, snippets and claims must see one generation even while a WAL writer
-                    # commits between their queries. Closing the connection releases this read snapshot.
                     connection.execute("BEGIN")
                     yield connection, state
         except Exception as error:
-            # This reply fails; without the damaged generation, the next freshness check builds another. Callers
-            # may already have named the cache in an Error raised from the database error.
             cause = error if isinstance(error, sqlite3.DatabaseError) else error.__cause__
             if isinstance(cause, sqlite3.DatabaseError) and _damaged(cause):
                 _discard(store, _DISCARD)
@@ -1197,11 +943,7 @@ def database(store: Store, counts: dict[str, int] | None = None) -> Generator[tu
 
 
 def terms(text: str) -> list[str]:
-    """Distinct query terms in the indexed form: words, `word*` prefixes and phrases as space-separated words.
-
-    Function words drop unless they are the whole query, quoted or written as an acronym; a phrase keeps its own.
-    FTS5 folds case itself. Python's casefold would turn ß into ss, a spelling the index never holds.
-    """
+    """Folded terms (words, `word*` prefixes, phrases), keeping acronyms/quoted words and capping at `WORDS`."""
     found: dict[str, str] = {}
     literal: set[str] = set()
     for match in _TERM.finditer(fold(text)):
@@ -1219,30 +961,21 @@ def identity(text: str) -> bool:
 
 
 def _note_time(value: str) -> str:
-    # Notes carry dates, not instants. Resolve midnight on the reading machine, including DST,
-    # at query time so changing timezone never requires rebuilding a shared/disposable cache.
     try:
         return moment(value[:10]) if value else ""
     except Error:
-        # SQLite would abort the whole query; an unplaceable date only leaves the note undated.
         return ""
 
 
-# Fixed SQL expressions over `items i`, shared with page builders: event time and last modification.
 TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE i.time END"
-# Period placement keeps observation separate from event time in replies and review signals.
 PERIOD_TIME = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i.time,''),i.observed) END"
-# A note's date as written: replies state it instead of the local midnight that orders it.
 DATE = "CASE WHEN i.kind='note' THEN substr(i.time,1,10) ELSE '' END"
 UPDATED = "CASE WHEN i.kind='note' THEN note_time(i.time) ELSE coalesce(nullif(i.updated,''),i.time) END"
-# Event time within [:since, :until), both given. Records compare their stored instants as a range on
-# items(kind,time); only the few notes resolve their dates one by one.
 WITHIN = (
     "((i.kind='record' AND i.time>=:since AND i.time<:until) "
     "OR (i.kind='note' AND i.time!='' AND note_time(i.time)>=:since AND note_time(i.time)<:until))"
 )
 PERIOD_WITHIN = f"({WITHIN} OR (i.kind='record' AND i.time='' AND i.observed>=:since AND i.observed<:until))"
-# UPDATED within [:since, :until), both given, with the same split over items_kind_modified.
 MODIFIED = (
     "((i.kind='record' AND coalesce(nullif(i.updated,''),i.time)>=:since "
     "AND coalesce(nullif(i.updated,''),i.time)<:until) "
@@ -1256,26 +989,16 @@ _ROW = f"{_FIELDS},'' AS fragment,i.title,i.lead AS excerpt,i.tasks_open,i.tasks
 
 
 def within(column: str, note: str) -> str:
-    """Fixed SQL: whether `column` names a section of `note`, a note path or BF address, as `note#fragment` does.
-
-    A range over the column's index: `$` follows `#`, so every `note#...` sorts between them. A fragment never ends
-    in `.md`, so a path such as `a.md#x.md` names another note, not a section of `a.md`.
-    """
+    """Fixed SQL matching sections of `note` (`note#...` before `$`, never `.md`)."""
     return f"{column}>{note}||'#' AND {column}<{note}||'$' AND substr({column},-3)!='.md'"
 
 
-# Fixed SQL: each name of the JSON array :names that exactly one item holds, with that item. A name that several
-# items claim identifies none of them.
 OWNED = (
     "SELECT name,min(item) AS item FROM names WHERE name IN (SELECT value FROM json_each(:names)) "
     "GROUP BY name HAVING count(*)=1"
 )
-# An item links to a target when it names it exactly, or names a section of a target note.
-# Two index lookups: exact targets, then the sections of targets. One OR across both would scan every link,
-# and CROSS JOIN keeps the few section prefixes as the outer loop of each range search.
 _LINKING = f"""SELECT l.item FROM links l WHERE l.target IN (SELECT value FROM json_each(:targets))
   UNION SELECT l.item FROM json_each(:sections) s CROSS JOIN links l ON {within("l.target", "s.value")}"""  # noqa: S608 - fixed SQL
-# Fixed SQL: whether item `i` lies within a scope's bounds, with the parameters `scoped` gives.
 FILTERS = f"""((:since='' AND :until='') OR ({PERIOD_TIME})!='')
   AND (:since='' OR ({PERIOD_TIME})>=:since) AND (:until='' OR ({PERIOD_TIME})<:until)
   AND (:observed_since='' OR (i.observed!='' AND i.observed>=:observed_since))
@@ -1285,11 +1008,7 @@ FILTERS = f"""((:since='' AND :until='') OR ({PERIOD_TIME})!='')
 
 
 def sections(targets: set[str]) -> list[str]:
-    """Identities whose #section links also count as links to them: BF addresses and note paths.
-
-    A BF address encodes a literal `#` in its path, so only a real fragment follows it; a bare
-    `source:id` may contain `#` in its id and never takes a section.
-    """
+    """Targets eligible for #section inheritance: whole note paths and unfragmented BF addresses."""
     result = []
     for value in targets:
         with suppress(Error):
@@ -1304,7 +1023,7 @@ def _parameters(targets: set[str]) -> dict[str, object]:
 
 
 def scoped(bounds: Bounds, targets: set[str]) -> dict[str, object]:
-    """FILTERS' parameters: the scope's bounds, and `targets`, the identities its target expands to in this brain."""
+    """Build SQL parameter dict for `FILTERS` from `bounds` and expanded `targets`."""
     return {
         **bounds.model_dump(include=set(Bounds.model_fields)),
         **_parameters(targets),
@@ -1313,25 +1032,20 @@ def scoped(bounds: Bounds, targets: set[str]) -> dict[str, object]:
 
 
 def _string(term: str) -> str:
-    """One quoted FTS5 string per term, so no query text is FTS5 syntax; only a prefix adds its `*` outside."""
     words = term.removesuffix("*")
     return '"' + words.replace('"', '""') + '"' + ("*" if words != term else "")
 
 
 @lru_cache(maxsize=256)
 def _forms(word: str) -> tuple[str, str] | None:
-    """A word's folded spelling and stem as the search table indexes them; None unless it is one token."""
     pairs = set(_spellings([word])[0])
     return pairs.pop() if len(pairs) == 1 else None
 
 
-# The words a prefix begins whose stems differ from them, one per stem, in stem order.
 _CHANGED = (
     "SELECT stem,min(word) FROM words WHERE word>=:folded AND word<:end AND substr(stem,1,:length)!=:stem "
     "GROUP BY stem ORDER BY stem LIMIT :limit"
 )
-# The terms a prefix begins: words the stemmer leaves alone index as themselves. The vocabulary returns terms in
-# order, so the limit needs no sort.
 _UNCHANGED = (
     "SELECT term FROM vocabulary WHERE term>=:folded AND term<:end AND substr(term,1,:length)!=:stem "
     "ORDER BY term LIMIT :limit"
@@ -1340,24 +1054,14 @@ _MATCHES = "SELECT 1 FROM search WHERE search MATCH ? LIMIT 1"
 
 
 def _expanded(connection: sqlite3.Connection, term: str) -> str:
-    """A term's FTS5 string. A prefix also names one word per stem of the indexed words it begins, up to EXPANSIONS
-    in stem order: FTS5 matches the stemmed prefix, so `pay*` would otherwise miss `payment` and `organi*` miss
-    `organ`.
-
-    Stems that the stemmed prefix already begins are left out. Each word is a quoted FTS5 string, and the lookups bind
-    their values.
-    """
     string = _string(term)
     forms = _forms(term[:-1]) if term.endswith("*") and " " not in term else None
     if forms is None or len(forms[0]) < SPELLED:
         return string
     folded, stem = forms
     values = {"folded": folded, "end": folded + "\U0010ffff", "length": len(stem), "stem": stem, "limit": EXPANSIONS}
-    # `words` holds only words some passage holds, so each stem is one the index holds.
     spellings: dict[str, str] = dict(connection.execute(_CHANGED, values))
     if folded != stem:
-        # Only a prefix the stemmer respells, such as `pay` as `pai`, misses words that index as themselves, such as
-        # `payment`. Such a term is its own spelling once it stems to itself.
         candidates = [row[0] for row in connection.execute(_UNCHANGED, values) if row[0] not in spellings]
         own = _spellings(candidates) if candidates else []
         spellings.update((word, word) for tokens in own for word, stemmed in tokens if word == stemmed)
@@ -1366,14 +1070,12 @@ def _expanded(connection: sqlite3.Connection, term: str) -> str:
 
 
 def expand(connection: sqlite3.Connection, text: str) -> dict[str, str]:
-    """Each term of a word query with its FTS5 string in this brain, prefixes expanded: build it once per brain for
-    `search`, `unmatched` and `excerpt`."""
+    """Map each extracted term in `text` to its brain-expanded FTS5 query string."""
     return {term: _expanded(connection, term) for term in terms(text)}
 
 
 def unmatched(connection: sqlite3.Connection, expanded: Mapping[str, str]) -> list[str]:
-    """The query's terms that match nothing in this brain, whatever the scope; a phrase is shown quoted. `expanded` is
-    the query's `expand` in this brain."""
+    """Expanded terms that match nothing anywhere in the brain."""
     return [
         f'"{term}"' if " " in term else term
         for term, string in expanded.items()
@@ -1381,16 +1083,14 @@ def unmatched(connection: sqlite3.Connection, expanded: Mapping[str, str]) -> li
     ]
 
 
-# An unmatched word gets up to SUGGESTIONS close indexed terms, chosen among CANDIDATES sharing its first two letters.
 SUGGESTIONS = 3
 CANDIDATES = 5000
-# A stem in more than SPREAD passages is first looked for among the WALK items whose refs sort first.
 SPREAD, WALK = 1000, 64
 _SORTED = (
     "SELECT p.id FROM search s JOIN passages p ON p.id=s.rowid JOIN items i ON i.id=p.item "
     "WHERE s.search MATCH :stem ORDER BY i.ref,p.fragment LIMIT 1"
 )
-# CROSS JOIN keeps the items outermost, in ref order, so the walk ends at the first passage holding the stem.
+# CROSS JOIN keeps leading items outermost for deterministic spelling selection on common stems.
 _WALKED = (
     "SELECT p.id FROM items i CROSS JOIN passages p ON p.item=i.id "
     "WHERE i.ref<=(SELECT ref FROM items ORDER BY ref LIMIT 1 OFFSET :walk) "
@@ -1399,7 +1099,7 @@ _WALKED = (
 
 
 def suggestions(connection: sqlite3.Connection, term: str) -> list[str]:
-    """Words of this brain close to an unmatched word, compared as indexed stems; none for phrases and prefixes."""
+    """Close indexed spellings for an unmatched plain word."""
     if " " in term or term.endswith("*") or len(term) < 4:
         return []
     stem = _stem(term)
@@ -1409,13 +1109,11 @@ def suggestions(connection: sqlite3.Connection, term: str) -> list[str]:
     )
     passages = {row[0]: row[1] for row in rows}
     close = difflib.get_close_matches(stem, list(passages), n=SUGGESTIONS, cutoff=0.75)
-    # The index holds stems, such as `polici`: show a word one of its passages spells, such as `policy`.
     return list(dict.fromkeys(word for found in close if (word := _spelled(connection, found, passages[found]))))
 
 
 @lru_cache(maxsize=256)
 def _stem(word: str, tokenizer: str = _TOKENIZER) -> str:
-    """A word as the search table indexes it, from the same tokenizer; without its stemmer, as search folds it."""
     with closing(sqlite3.connect(":memory:")) as connection:
         connection.execute(f"CREATE VIRTUAL TABLE t USING fts5(x, tokenize={tokenizer!r})")
         connection.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, row)")
@@ -1425,19 +1123,11 @@ def _stem(word: str, tokenizer: str = _TOKENIZER) -> str:
 
 
 def _spelled(connection: sqlite3.Connection, stem: str, passages: int) -> str:
-    """An indexed spelling of a stem, lowercased with Latin accents folded as search folds query words: a one-token
-    snippet of the passage holding it whose ref sorts first. Passage numbers follow the order files were indexed in,
-    so a refreshed cache would otherwise suggest another word than a full build of the same files.
-
-    Sorting every passage that holds a stem found in most records took about 5 ms at 20,000 records: such a stem is
-    first looked for among the first WALK items by ref, which find the same passage whenever one of them holds it.
-    """
     parameters = {"stem": _string(stem), "walk": WALK - 1}
     passage = connection.execute(_WALKED, parameters).fetchone() if passages > SPREAD else None
     if not (passage := passage or connection.execute(_SORTED, parameters).fetchone()):
         return ""
-    # A separate lookup by number: FTS5 ignores a `rowid=NULL` constraint, so a subquery finding no passage would
-    # return the stem's first passage by number.
+    # Separate lookup by rowid because FTS5 ignores rowid=NULL constraints.
     row = connection.execute(
         "SELECT snippet(search,-1,char(1),char(2),'',1) FROM search WHERE search MATCH ? AND rowid=?",
         (parameters["stem"], passage[0]),
@@ -1447,26 +1137,7 @@ def _spelled(connection: sqlite3.Connection, stem: str, passages: int) -> str:
 
 
 def _lexical(connection: sqlite3.Connection, params: dict[str, object]) -> Iterator[dict[str, object]]:
-    """One ranked any-term query: BM25 adds the weight of each matched term, so fuller matches rank higher.
-
-    `hits` counts the distinct `:terms` each passage matches, when there are several: matching them all adds
-    COVERAGE to its score. That tips near ties; a long record holding every word still ranks below a note whose
-    headings hold most of them.
-
-    Every match is ranked on narrow rows; only the returned items read their display fields. Each row
-    names its best passage: snippets cost far more than ranking, so only a reply's items get an excerpt.
-
-    `context` ranks below a heading but above body text: a note's tags, and a section's note title and enclosing
-    headings (see _index). "Atlas" and "Next actions" outrank another note's "Next actions" that merely mentions
-    Atlas in its text, while "Atlas" alone finds the note before a section mentioning it. A section matching through
-    its context alone repeats its parent, which answers instead. Equal scores list the newest item first, then by ref.
-
-    One window keeps each note's best passage and, for each URL, the records of its best-ranked record's source,
-    before the window is cut: a record has one passage and a note no URL, and an item number never equals a URL
-    string. Another source's record of that URL, such as a catalog entry for a collected file, becomes the kept
-    record's `also`; one source's records stay distinct, such as several highlights of one document. A note's
-    next-best sections become its `sections`. A ROWS frame spares first_value the default frame's scan of tied rows.
-    """
+    """Rank lexical passage matches by BM25, term coverage, and source priority, deduplicating by note/URL."""
     rows = connection.execute(
         f"""WITH hits AS MATERIALIZED (
              SELECT s.rowid AS passage,count(*) AS n
@@ -1504,16 +1175,11 @@ def _lexical(connection: sqlite3.Connection, params: dict[str, object]) -> Itera
     return (dict(row) for row in rows)
 
 
-# FTS5 marks a snippet cut short at either end with this text.
 _ELLIPSIS = " … "
 
 
 def excerpt(connection: sqlite3.Connection, expression: str, passage: int) -> str:
-    """The query's words in context within one ranked passage, as a one-line preview in the evidence's characters.
-
-    `expression` joins the query's `expand` strings in this brain with OR. A whole note without introduction text,
-    such as one matching by its title, previews its lead instead.
-    """
+    """One-line snippet for one passage matching `expression`, falling back to its lead."""
     row = connection.execute(
         "SELECT snippet(search,1,'','',?,48),p.original,CASE WHEN p.fragment='' THEN i.lead ELSE '' END "
         "FROM search JOIN passages p ON p.id=search.rowid JOIN items i ON i.id=p.item "
@@ -1526,11 +1192,7 @@ def excerpt(connection: sqlite3.Connection, expression: str, passage: int) -> st
 
 
 def _verbatim(snippet: str, original: str) -> str:
-    """The original words behind a snippet of a folded passage, so `m²` or `…` never reads as `m2` or `...`.
-
-    Folding each whitespace-separated run yields the folded passage, so every snippet position maps to one run.
-    ASCII is already folded, which keeps a large passage with a single `²` or no-break space fast.
-    """
+    """Map folded snippet spans back to whitespace runs of `original`."""
     runs = re.findall(r"\s+|\S+", original)
     forms = [run if run.isascii() else fold(run) for run in runs]
     head = _ELLIPSIS if snippet.startswith(_ELLIPSIS) else ""
@@ -1549,8 +1211,6 @@ def _verbatim(snippet: str, original: str) -> str:
     return head + "".join(kept) + tail
 
 
-# An identity search's candidates and their owner rank: the item whose ref is :text, the items holding one of
-# :identities as a name, then the items linking to one of them or to a section of one.
 _CANDIDATES = f"""SELECT id AS item,2e6 AS score FROM items WHERE ref=:text
   UNION ALL SELECT item,1e6 FROM names WHERE name IN (SELECT value FROM json_each(:identities))
   UNION ALL SELECT item,1e3 FROM links WHERE target IN (SELECT value FROM json_each(:identities))
@@ -1580,13 +1240,12 @@ def _identity(connection: sqlite3.Connection, params: dict[str, object]) -> Iter
 
 
 def known(connection: sqlite3.Connection, text: str, identities: set[str]) -> bool:
-    """Whether an identity search finds an owner or link of `text`, expanded to `identities`, whatever its scope."""
-    query = f"SELECT EXISTS (SELECT 1 FROM ({_CANDIDATES}))"  # noqa: S608 - fixed SQL
-    return bool(connection.execute(query, _identities(text, identities)).fetchone()[0])
+    """Whether an identity search matches an owner or incoming link."""
+    sql = f"SELECT EXISTS (SELECT 1 FROM ({_CANDIDATES}))"  # noqa: S608 - fixed SQL
+    return bool(connection.execute(sql, _identities(text, identities)).fetchone()[0])
 
 
 def _identities(text: str, identities: set[str]) -> dict[str, object]:
-    """The parameters of _CANDIDATES: an identity search's text and its expanded identities."""
     expanded = identities or {text}
     return {
         "text": text,
@@ -1596,7 +1255,7 @@ def _identities(text: str, identities: set[str]) -> dict[str, object]:
 
 
 def holders(connection: sqlite3.Connection, name: str) -> list[str]:
-    """The refs of the items holding a name, at most two: one owns it, while two make it ambiguous."""
+    """At most two item refs claiming `name` (two indicates ambiguity)."""
     rows = connection.execute(
         "SELECT i.ref FROM names n JOIN items i ON i.id=n.item WHERE n.name=? ORDER BY i.ref LIMIT 2", (name,)
     )
@@ -1614,15 +1273,9 @@ def search(
     expanded: Mapping[str, str],
     low: Collection[str] = (),
 ) -> Iterator[dict[str, object]]:
-    """An exact identity or tag returns its owners, then what links to it; other text ranks lexically, within the scope.
-
-    `limit` bounds this brain's rows, such as enough to fill a continued multi-brain window.
-    Lexical rows name their `_passage` for `excerpt`, `also` other matching records of their URL and `sections`
-    other matching sections of their note; records of `low` sources rank at half weight there. `expanded` is the
-    query's `expand` in this brain; an exact search ignores it. Identity rows carry their owner `_rank`.
-    """
+    """Search for an identity/tag exactly or rank words lexically within scope."""
     text = query.text.strip()
-    # Only an identity-shaped query can be a tag address: "bf: how to configure sensors" stays words.
+    # Only an identity-shaped query can be a tag address ("bf: how to..." stays words).
     if identity(text) and bf_links.tag(text) is not None:
         text = bf_links.identity(text)
     params: dict[str, object] = {
@@ -1636,7 +1289,6 @@ def search(
     strings = list(expanded.values())
     if not strings:
         return iter(())
-    # One term has nothing to count: its query need not run twice.
     counted = json.dumps(strings if len(strings) > 1 else [])
     values = {**params, "match": " OR ".join(strings), "terms": counted, "low": json.dumps(sorted(low))}
     rows = _lexical(connection, values)
@@ -1645,7 +1297,6 @@ def search(
             {
                 **row,
                 "also": sorted(json.loads(str(row["also"]))) if row["also"] else None,
-                # Best first: each entry pairs a section's position within its note with its fragment.
                 "sections": [f"{row['ref']}#{f}" for _, f in sorted(json.loads(str(row["sections"])))]
                 if row["sections"]
                 else None,
@@ -1665,8 +1316,7 @@ def listing(
     *,
     counted: bool = True,
 ) -> tuple[Iterator[dict[str, object]], int]:
-    """Stream items matching fixed SQL written by the page builders from `offset` on, at most `limit` of them, with
-    the total before both."""
+    """Stream items matching fixed page-builder SQL with optional total count."""
     values = {
         "since": "",
         "until": "",
@@ -1680,7 +1330,6 @@ def listing(
         "limit": limit,
         "offset": offset,
     }
-    # `where` and `order` are fixed SQL written by the page builders; values stay bound parameters.
     total = (
         connection.execute(f"SELECT count(*) FROM items i WHERE {where}", values).fetchone()[0]  # noqa: S608
         if counted
@@ -1699,8 +1348,6 @@ _INCOMING = f"""WITH typed AS (
       CROSS JOIN edges e ON {within("e.target", "s.value")} WHERE e.relation!=''),
   plain AS (SELECT item,'' AS relation FROM ({_LINKING}) WHERE item NOT IN (SELECT item FROM typed)),
   linked AS (SELECT * FROM typed UNION ALL SELECT * FROM plain)"""  # noqa: S608 - fixed SQL fragments
-# A read previews the backlinks of at most this many relation groups, untyped links last; it counts the others, which
-# their relation pages list.
 GROUPS = 64
 _GROUPS = f"""{_INCOMING} SELECT k.relation,count(*) AS total FROM linked k JOIN items i ON i.id=k.item
   WHERE i.ref!=:exclude GROUP BY k.relation ORDER BY k.relation='',k.relation"""  # noqa: S608
@@ -1715,10 +1362,7 @@ _RELATION_ROWS = f"""{_INCOMING} SELECT {_ROW},k.relation FROM linked k JOIN ite
 def incoming(
     connection: sqlite3.Connection, targets: set[str], *, exclude: str = "", limit: int
 ) -> list[dict[str, object]]:
-    """Items linking to any target, grouped by explicit relation; links without one come last as LINKS.
-
-    Every group is counted, but only the first GROUPS read their newest items.
-    """
+    """Backlinks grouped by explicit relation (untyped LINKS last), previewing the first GROUPS."""
     values = {**_parameters(targets), "exclude": exclude, "limit": limit}
     groups = []
     for number, (relation, total) in enumerate(connection.execute(_GROUPS, values).fetchall()):
@@ -1736,12 +1380,7 @@ def linking(
     limit: int = -1,
     offset: int = 0,
 ) -> tuple[Iterator[dict[str, object]], int]:
-    """Stream the items linking to any target through these relations, newest first, from `offset` on and at most
-    `limit` of them, with their total.
-
-    Each row names its `relation`, LINKS for an untyped link; an item linking through two of the relations
-    appears once per relation.
-    """
+    """Stream items linking to `targets` through `relations`, newest first, with total count."""
     values = {
         **_parameters(targets),
         "exclude": exclude,
@@ -1755,22 +1394,13 @@ def linking(
 
 
 def _shared(name: str, item: str) -> str:
-    """Fixed SQL: whether an item other than `item` also holds `name`, as a name or its ref.
-
-    Like graph.local_refs, a name that several items claim identifies none of them.
-    """
     return (
         f"(EXISTS (SELECT 1 FROM names o WHERE o.name={name} AND o.item!={item}) "  # noqa: S608 - fixed SQL
         f"OR EXISTS (SELECT 1 FROM items o WHERE o.ref={name} AND o.id!={item}))"
     )
 
 
-# For each reviewed note, given as [id, last edit] in :reviewed and [id, name, takes sections] in :names: the items
-# linking to it by a name or a section of one, as _LINKING finds them, and the records it links to by ref or name.
-# As for backlinks, a name that another item also holds identifies neither: :names omits it, and a link by it names
-# no record, unless it is that record's own ref, which reads resolve exactly.
-# CROSS JOIN keeps the few reviewed notes as the outer loop of each index search, never every record or link.
-# Each newer item counts once, ranked by the instant that makes it newer; a note keeps its total and :limit refs.
+# CROSS JOIN keeps reviewed notes as the outer loop instead of scanning every link/record.
 _NEWER = f"""WITH reviewed(note,after) AS MATERIALIZED (
     SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(:reviewed)),
   named(note,name,sections) AS MATERIALIZED (
@@ -1797,14 +1427,7 @@ WHERE n<=:limit ORDER BY note,n"""  # noqa: S608 - fixed SQL fragments
 def newer_links(
     connection: sqlite3.Connection, edits: Mapping[int, str], now: str, limit: int
 ) -> dict[int, tuple[int, list[str]]]:
-    """Per note id, how many linked items hold evidence newer than its last edit in `edits`, and the newest refs.
-
-    Linked items link to the note or are records it links to. One counts when its event time or, for a record, its
-    upstream `updated` falls between the edit and `now`: a future event counts once it happens, so an edit clears
-    the count until newer evidence arrives. `observed` never counts: a first collection is not a change. As for
-    backlinks, a name that another item also holds, such as a shared alias, identifies neither: links by it never count,
-    except a link by a record's own ref, which reads resolve exactly.
-    """
+    """Per note id, count and newest refs of linked items dated or updated between its edit and `now`."""
     if not edits:
         return {}
     found: dict[int, set[str]] = {}
@@ -1837,10 +1460,8 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
     if fragment:
         row["ref"] = f"{row['ref']}#{fragment}"
     if isinstance(excerpt := row.get("excerpt"), str):
-        # A one-line preview; `bf read` returns the exact text.
         row["excerpt"] = re.sub(r"\s+", " ", excerpt).strip()
     if isinstance(title := row.get("title"), str):
-        # Some sources title records with a whole message, such as a commit.
         row["title"] = preview(title, TITLE)
     row.pop("score", None)
     row.pop("position", None)
@@ -1856,7 +1477,6 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
         row.pop("source", None)
         row.pop("updated", None)
     else:
-        # Every record's type is `record`, which its kind already states; expose @type only when present.
         row.pop("type", None)
         if item_type:
             row["@type"] = item_type
@@ -1864,11 +1484,7 @@ def _clean(row: dict[str, object]) -> dict[str, object]:
 
 
 def problems(connection: sqlite3.Connection) -> list[dict[str, object]]:
-    """Skipped files shared by search, pages and status, up to 200 and a count of the rest; bf validate also lists at
-    most 200 problems per run.
-
-    Each error keeps at most _PROBLEM bytes, so a few files with long errors cannot push a reply past its limit.
-    """
+    """Skipped files shared across search, pages, and status, capped at 200 entries."""
     rows = connection.execute("SELECT path,error FROM files WHERE error!='' ORDER BY path LIMIT 201").fetchall()
     result: list[dict[str, object]] = [{"file": row["path"], "error": _capped(row["error"])} for row in rows[:200]]
     if len(rows) > 200:
@@ -1879,11 +1495,7 @@ def problems(connection: sqlite3.Connection) -> list[dict[str, object]]:
 
 
 def sources(connection: sqlite3.Connection) -> dict[str, dict[str, object]]:
-    """Indexed record totals, latest event time and latest change per source.
-
-    `changed` is the newest `observed`: when this brain last gained a new or changed record of the source, whatever
-    its event time. A source without dated records has no `latest`.
-    """
+    """Indexed record totals, latest event time, and latest `observed` change per source."""
     return {
         row["source"]: {
             "records": row["records"],
@@ -1910,10 +1522,7 @@ def activity(connection: sqlite3.Connection, since: str, until: str) -> list[tup
 
 
 def capacity(store: Store, counts: dict[str, int] | None = None) -> list[dict[str, object]]:
-    """Scanned trees, each authored folder and each source of memories/, holding more than CROWDED entries.
-
-    `counts`, the entries per tree of a scan this reply already made, spares scanning the brain again.
-    """
+    """Scanned trees exceeding `CROWDED` entries, reusing `counts` when already scanned."""
     if not counts:
         counts = {}
         inputs(store, counts)
@@ -1925,23 +1534,16 @@ def capacity(store: Store, counts: dict[str, int] | None = None) -> list[dict[st
 
 
 def status(store: Store) -> dict[str, object]:
-    """Cache state, note and record counts, bytes per source, skipped files, and trees nearing the scan limit.
-
-    An interrupted record transaction keeps the cache from refreshing until a writer recovers it: status then
-    describes the last generation as `stale`, or an empty `missing` one, instead of failing.
-    """
+    """Cache state, counts, per-source sizes, skipped files, and trees nearing `MAX_FILES`."""
     pending = _abandoned(store)
-    # The freshness check's scan of the brain also counts the entries that capacity warns about.
     entries: dict[str, int] = {}
     with _last(store) if pending else database(store, entries) as (connection, state):
         counts = sources(connection)
         notes = connection.execute("SELECT count(*) FROM items WHERE kind='note'").fetchone()[0]
         skipped = problems(connection)
-        # The sizes the last refresh fingerprinted: bytes on disk below each source, invalid files included.
         sizes = dict(
             connection.execute(
                 "SELECT substr(path,10,instr(substr(path,10),'/')-1),sum(size) FROM files "
-                # A size of -1 marks a file a transient error left unstated.
                 "WHERE path GLOB 'memories/?*/*' AND size>=0 GROUP BY 1"
             ).fetchall()
         )
@@ -1962,7 +1564,6 @@ def status(store: Store) -> dict[str, object]:
 
 
 def _abandoned(store: Store) -> bool:
-    """Whether an interrupted record transaction waits for recovery; a live writer's own journal does not."""
     try:
         with reader(store, wait=0):
             return records.interrupted(store)
@@ -1972,7 +1573,7 @@ def _abandoned(store: Store) -> bool:
 
 @contextmanager
 def _last(store: Store) -> Generator[tuple[sqlite3.Connection, str]]:
-    """The last generation as it is, never refreshed, since that would index half-changed records."""
+    """Last cache generation without refreshing when a pending transaction exists."""
     _path(store)
     with generation(store, shared=True, wait=_PUBLISH):
         connection, state = _open(store), "stale"
@@ -1981,3 +1582,88 @@ def _last(store: Store) -> Generator[tuple[sqlite3.Connection, str]]:
             connection.executescript(_DDL)
         with closing(connection):
             yield connection, state
+
+
+@contextmanager
+def _readonly(store: Store) -> Generator[sqlite3.Connection | None]:
+    """Read-only snapshot of an existing cache without creating or touching `.bf/`, or None when missing/older."""
+    try:
+        store.fingerprint(CACHE)
+    except FileNotFoundError:
+        yield None
+        return
+    except OSError as error:
+        raise Error(f"the search cache is unreadable: {error}") from error
+    with generation(store, shared=True, wait=_PUBLISH):
+        try:
+            connection = _connect(store.root / CACHE)
+            try:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                if version == 0 or (version == SCHEMA and _schema(connection) != _layout()):
+                    raise Error("the search cache is unreadable; run bf build")
+                if version != SCHEMA:
+                    connection.close()
+                    yield None
+                    return
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute("BEGIN")
+            except Exception:
+                connection.close()
+                raise
+        except sqlite3.DatabaseError as error:
+            raise Error("the search cache is unreadable; run bf build") from error
+        with closing(connection):
+            try:
+                yield connection
+            except sqlite3.DatabaseError as error:
+                raise Error("the search cache is unreadable; run bf build") from error
+
+
+def watermarks(store: Store) -> dict[str, tuple[str, str, str, str, str]]:
+    """Indexed items keyed by ref: (kind, source, observed, sha256, title), or {} when the cache is absent."""
+    with _readonly(store) as connection:
+        if connection is None:
+            return {}
+        cursor = connection.cursor()
+        cursor.row_factory = None
+        return {
+            row[0]: (row[1], row[2], row[3], row[4], row[5])
+            for row in cursor.execute("SELECT ref,kind,source,observed,sha256,title FROM items")
+        }
+
+
+def match_refs(store: Store, query: str, refs: Collection[str]) -> set[str]:
+    """Refs among `refs` currently indexed whose passages match `query`, or set() when absent."""
+    if not refs or not terms(query):
+        return set()
+    with _readonly(store) as connection:
+        if connection is None or not (strings := list(expand(connection, query).values())):
+            return set()
+        return {
+            row[0]
+            for row in connection.execute(
+                "SELECT DISTINCT i.ref FROM search JOIN passages p ON p.id=search.rowid "
+                "JOIN items i ON i.id=p.item WHERE search MATCH ? AND i.ref IN (SELECT value FROM json_each(?))",
+                (" OR ".join(strings), json.dumps(sorted(set(refs)))),
+            )
+        }
+
+
+def text_matches(query: str, text: str) -> bool:
+    """Whether plain `text` matches `query` under FTS5 word folding, stemming, prefixes and phrases."""
+    if not (found := terms(query)) or not text.strip():
+        return False
+    _supported()
+    match = " OR ".join(_string(term) for term in found)
+    folded = fold(text)
+    with closing(sqlite3.connect(":memory:")) as connection:
+        connection.execute(f"CREATE VIRTUAL TABLE s USING fts5(x, tokenize={_TOKENIZER!r})")
+        connection.execute(f"CREATE VIRTUAL TABLE f USING fts5(x, tokenize={_FOLDED!r})")
+        connection.execute("INSERT INTO s VALUES(?)", (folded,))
+        connection.execute("INSERT INTO f VALUES(?)", (folded,))
+        return bool(
+            connection.execute(
+                "SELECT EXISTS(SELECT 1 FROM s WHERE s MATCH ?) OR EXISTS(SELECT 1 FROM f WHERE f MATCH ?)",
+                (match, match),
+            ).fetchone()[0]
+        )

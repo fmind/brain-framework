@@ -14,7 +14,7 @@ Standalone sensors for common providers. Copy the ones you need into a brain's `
 | `gmail-headers.py`                               | `START END [--query=SEARCH]`                                          | Gmail senders, recipients, subjects and dates with thread links; never message bodies. |
 | [Four-tool demo](../context-hub/sensors/demo.py) | `TOOL END`, where `TOOL` is `workspace`, `jira`, `github` or `gcloud` | Fictional adapter records for the four-tool walkthrough; no provider access.           |
 
-Start with the [one-file local walkthrough](../../docs/docs/getting-started.md#collect-your-first-source), which [Add a sensor](../../docs/docs/sensors.md#your-first-sensor) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). Each example is a standalone Python 3.11+ script using only the standard library. Copy the selected script from the release tag matching `bf --version` and make it executable, since the configuration below runs each script as a command and a download does not keep the executable bit:
+Start with the [one-file local walkthrough](../../docs/docs/getting-started.md), which [Jobs](../../docs/docs/jobs.md) then replaces with `local-documents.py`, or the [credential-free example brain](../brain/README.md). Each example is a standalone Python 3.11+ script using only the standard library. Copy the selected script from the release tag matching `bf --version` and make it executable, since the configuration below runs each script as a command and a download does not keep the executable bit:
 
 ```bash
 mkdir -p sensors
@@ -24,11 +24,11 @@ chmod +x sensors/git-history.py
 
 Then merge its configuration below into `bf.yaml`. Review paths and account scope first; do not copy all sources unless you intend to run them.
 
-The [four-tool walkthrough](../context-hub/README.md) shows how differently named fields become one shared `@type`, `project` relation, and `status` attribute during collection. Its fixtures are not live integrations. Use `gh`, `gws`, `acli` or `gcloud` with [declarative `map:`](#map-json-output-without-writing-python) or selected provider access in a brain-owned script, as [adapt a sensor](#adapt-a-sensor) describes; the [integration table](../../docs/docs/context-hub.md#use-it-on-your-work) distinguishes reviewed examples from adapters you write.
+The [four-tool walkthrough](../context-hub/README.md) shows how differently named fields become one shared `@type`, `project` relation, and `status` attribute during collection. Its fixtures are not live integrations. Use `gh`, `gws`, `acli` or `gcloud` with [declarative `map:`](#map-json-output-without-writing-python) or selected provider access in a brain-owned script, as [adapt a sensor](#adapt-a-sensor) describes; the [integration table](../context-hub/README.md#use-it-on-your-work) distinguishes reviewed examples from adapters you write.
 
 ```yaml
-# https://fmind.github.io/brain-framework/docs/configuration/
-version: 10
+# https://fmind.github.io/brain-framework/docs/jobs/
+version: 11
 name: brain
 jobs:
   git-commits:
@@ -94,7 +94,7 @@ For scheduled window jobs, `on.every` controls the regular cadence and `overlap`
 
 GitHub history documents its scope and limits in [its guide](github-history.md#evidence-and-limits).
 
-The limits below also bound the time of each call to a provider or converter, while BF's [`timeout`](../../docs/docs/sensors.md#sensor-settings), 300 seconds by default and at most 3,600, bounds the whole run. When a large `ROOT`, many PDFs or a busy inbox fails with `program timed out after 300s`, narrow the folder or the window, or raise that job's `timeout`.
+The limits below also bound the time of each call to a provider or converter, while BF's [`timeout`](../../docs/docs/jobs.md), 300 seconds by default and at most 3,600, bounds the whole run. When a large `ROOT`, many PDFs or a busy inbox fails with `program timed out after 300s`, narrow the folder or the window, or raise that job's `timeout`.
 
 ### Git history
 
@@ -122,7 +122,7 @@ The limits below also bound the time of each call to a provider or converter, wh
 
 ### Highlights
 
-- Reads one complete export in the [portable format](#highlights-export), not a provider-specific download. The [fictional export](highlights.json) and [walkthrough](../../docs/docs/sensors.md#selected-highlights) show the provenance mapping.
+- Reads one complete export in the [portable format](#highlights-export), not a provider-specific download. The [fictional export](highlights.json) and [walkthrough](../../docs/docs/jobs.md) show the provenance mapping.
 - Keeps source text in `text` and annotations in `attributes.annotation`. It never fetches a URL or reads credentials.
 - Refuses duplicate ids or keys, unknown fields, invalid dates or locations, symlinks in any path component and special files.
 - Limits: 8 MiB and 1,000 highlights of input, 64 KiB per selection or annotation and 16 MiB of output. Any failure emits no records; nothing is silently truncated.
@@ -139,7 +139,7 @@ The limits below also bound the time of each call to a provider or converter, wh
 `--agenda-days N`, from 1 to 366, turns a run into an agenda of the events from two days before `END` through N days after it; `START` must still precede `END` but does not bound the agenda. Add it as a separate `mode: snapshot` job beside `google-calendar-events`:
 
 ```yaml
-# https://fmind.github.io/brain-framework/docs/configuration/
+# https://fmind.github.io/brain-framework/docs/jobs/
 jobs:
   google-calendar-agenda:
     run: [sensors/google-calendar.py, primary, "{{start}}", "{{end}}", --agenda-days, "14"]
@@ -151,7 +151,7 @@ jobs:
       every: 3600
 ```
 
-Preview it with `bf collect google-calendar-agenda --dry-run`. Expected result: each sample has an alias such as `agenda:primary/EVENT_ID` and links `calendar:primary/EVENT_ID`, the same event's identity in `google-calendar-events`. Each replacement removes events that left the range. An agenda that becomes empty, or loses more than half of its events (and more than 10) at once, for example after a long pause, trips the [removal guard](../../docs/docs/sensors.md#define-the-scope-before-adding-a-sensor) and keeps its saved records. Check the preview, then accept that one run with `bf collect google-calendar-agenda --allow-removal`.
+Preview it with `bf collect google-calendar-agenda --dry-run`. Expected result: each sample has an alias such as `agenda:primary/EVENT_ID` and links `calendar:primary/EVENT_ID`, the same event's identity in `google-calendar-events`. Each replacement removes events that left the range. An agenda that becomes empty, or loses more than half of its events (and more than 10) at once, for example after a long pause, trips the [removal guard](../../docs/docs/jobs.md) and keeps its saved records. Check the preview, then accept that one run with `bf collect google-calendar-agenda --allow-removal`.
 
 ### Google Drive folders
 
@@ -183,7 +183,7 @@ chmod +x sensors/github-issues.py
 ```
 
 ```yaml
-# https://fmind.github.io/brain-framework/docs/configuration/
+# https://fmind.github.io/brain-framework/docs/jobs/
 jobs:
   github-issues:
     run: [sensors/github-issues.py, OWNER/REPO, "{{start}}", "{{end}}"]
@@ -244,8 +244,8 @@ Preview it with `bf collect github-issues --since 7d --dry-run`. Expected result
 When a CLI already returns clean JSON, JSONL, or one object, `map:` extracts records directly from RFC 6901 JSON Pointers in `bf.yaml` (`items`, `id`, `@type`, `title`, `text`/`body`, `url`, `created`/`time`, `updated`, `relations`, and `attributes`). Transforms (`{path, prefix, lower}`) normalize identifiers, and `/*/` fans out across arrays:
 
 ```yaml
-# https://fmind.github.io/brain-framework/docs/configuration/
-version: 10
+# https://fmind.github.io/brain-framework/docs/jobs/
+version: 11
 name: brain
 jobs:
   highlights-mapped:
@@ -318,6 +318,6 @@ Use declarative `map:` when the provider CLI already emits clean data within BF 
 
 ## Adapt a sensor
 
-Each script needs only Python 3.11 or later and calls its provider CLI, which owns the credentials, without a shell and from `/`: `gws` loads a `.env` file from its working directory or any parent folder, so one in the brain or above it could change the account a sensor collects from. Pass time windows (`{{start}}`, `{{end}}`) and optional cursors (`{{cursor}}`) explicitly in `run:`. The script prints one JSON array (or JSONL) in the [record format](../../docs/docs/schema.md#record-schema), keeping each record within BF's limits, or, when anything fails or a page is missing, exits nonzero with nothing on stdout and one content-free line on stderr, so BF keeps the saved records. Keep these behaviors when you adapt a script, and test them with fake provider output. `{{start}}` and `{{end}}` are timezone-aware bounds of a half-open window. A sensor emits `@type`, `relations`, and `attributes` (never `fields`); `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/schema.md#record-revisions-and-provenance), such as Drive's `modifiedTime` stored in `attributes.updated`.
+Each script needs only Python 3.11 or later and calls its provider CLI, which owns the credentials, without a shell and from `/`: `gws` loads a `.env` file from its working directory or any parent folder, so one in the brain or above it could change the account a sensor collects from. Pass time windows (`{{start}}`, `{{end}}`) and optional cursors (`{{cursor}}`) explicitly in `run:`. The script prints one JSON array (or JSONL) in the [record format](../../docs/docs/reference.md), keeping each record within BF's limits, or, when anything fails or a page is missing, exits nonzero with nothing on stdout and one content-free line on stderr, so BF keeps the saved records. Keep these behaviors when you adapt a script, and test them with fake provider output. `{{start}}` and `{{end}}` are timezone-aware bounds of a half-open window. A sensor emits `@type`, `relations`, and `attributes` (never `fields`); `updated`, `observed` and `partial` are [reserved attribute keys](../../docs/docs/reference.md), such as Drive's `modifiedTime` stored in `attributes.updated`.
 
-Typed edges work directly with zero `bf.yaml` configuration: pass `relations={"author": ..., "repository": ...}` (or `part-of`, `label`, `assignee`, `organizer`, `attendee`, `participant`, `sender`, `recipient`, `cc`) with valid explicit identities (`scheme:value` or `bf://`). Declare optional `fields:` entries in `bf.yaml` only when adding `description`, `broader`, or `targets` prefix constraints; see [schema configuration](../../docs/docs/schema.md).
+Typed edges work directly with zero `bf.yaml` configuration: pass `relations={"author": ..., "repository": ...}` (or `part-of`, `label`, `assignee`, `organizer`, `attendee`, `participant`, `sender`, `recipient`, `cc`) with valid explicit identities (`scheme:value` or `bf://`). Declare optional `fields:` entries in `bf.yaml` only when adding `description`, `broader`, or `targets` prefix constraints; see [reference](../../docs/docs/reference.md).

@@ -160,7 +160,7 @@ assert Path(bf.__file__).resolve().is_relative_to(Path.cwd())
             if (home / "config/bf/config.yaml").exists():
                 raise SystemExit("init unexpectedly registered the smoke-test brain")
             starter_yaml = (brain / "bf.yaml").read_text()
-            if "version: 10" not in starter_yaml or "fields:" in starter_yaml:
+            if "version: 11" not in starter_yaml or "fields:" in starter_yaml:
                 raise SystemExit(f"{artifact.name}: unexpected starter bf.yaml: {starter_yaml}")
             skill_install = json.loads(
                 run(bf, "skill", "install", "--brain", str(brain), cwd=home, env=env, capture=True)

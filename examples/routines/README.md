@@ -42,7 +42,7 @@ Path("bf.yaml").write_text(text.replace("\nfields:\n", job + "fields:\n", 1))
 )
 ```
 
-The dry run lists the due `demo` and `weekly-review` jobs. The update collects one fictional record, then saves an action at `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, where `XXXXXXXX` is a random suffix. The action counts the seven open tasks across three notes and lists each with its section ref and line, then counts the period's records by source: `records by source: demo 1`. It says `No project note is due for review.`: the copied project is newer than the demo record it links, and its `stale_after` falls due on 2026-12-18, after which the action lists it with `review due 2026-12-18`. [Prepare a weekly review](../../docs/docs/routines.md#prepare-a-weekly-review) describes the full layout and ordering. Validation returns `"valid":true`. A second update within the week creates nothing. Read the returned action to continue the review: the routine completes no task for you.
+The dry run lists the due `demo` and `weekly-review` jobs. The update collects one fictional record, then saves an action at `actions/YYYY-MM-DD_weekly-review-XXXXXXXX/ACTION.md`, where `XXXXXXXX` is a random suffix. The action counts the seven open tasks across three notes and lists each with its section ref and line, then counts the period's records by source: `records by source: demo 1`. It says `No project note is due for review.`: the copied project is newer than the demo record it links, and its `stale_after` falls due on 2026-12-18, after which the action lists it with `review due 2026-12-18`. [Jobs](../../docs/docs/jobs.md) describes deterministic routines and scheduling. Validation returns `"valid":true`. A second update within the week creates nothing. Read the returned action to continue the review: the routine completes no task for you.
 
 ## Validate before each commit
 
@@ -81,11 +81,11 @@ EOF
 
 Git shows the hook's reply. The first commit passes with `"hook":"pre-commit","ok":true`. The second note links to a missing `plan.md`, so the hook reports `"status":"failed"`, exits 1 and Git refuses the commit. `bf run validate` fails the same way; `logs/validate.log` holds the validation reply with `"error":"broken link: plan.md"` for `projects/launch.md`, then the failure line.
 
-`bf validate` checks the working tree, including unstaged edits, not only the staged snapshot. A job with `emit: log`, the default, keeps its output in `logs/NAME.log`; `bf init` ignores `logs/` in Git. For `pre-push` hooks and pinned brains, see [Run routines from hooks](../../docs/docs/routines.md#run-routines-from-hooks).
+`bf validate` checks the working tree, including unstaged edits, not only the staged snapshot. A job with `emit: log`, the default, keeps its output in `logs/NAME.log`; `bf init` ignores `logs/` in Git. For `pre-push` hooks and pinned brains, see [Authoring](../../docs/docs/authoring.md) and [Getting started](../../docs/docs/getting-started.md).
 
 ## Use the weekly review in your brain
 
-[Prepare a weekly review](../../docs/docs/routines.md#prepare-a-weekly-review) copies the routine into your brain, configures it and previews its action. The routine only reads pages: it never edits notes and links nothing, naming items by their `uri` or ref, because a link from a dated action would count as newer evidence for its target. An incomplete page makes it write nothing and exit non-zero.
+[Jobs](../../docs/docs/jobs.md) describes how to configure deterministic routines in `bf.yaml` (`emit: action`). The routine only reads pages: it never edits notes and links nothing, naming items by their `uri` or ref, because a link from a dated action would count as newer evidence for its target. An incomplete page makes it write nothing and exit non-zero.
 
 Name the job `weekly-review` in `bf.yaml`, after its file, so it filters its own active run out of `attention` when computing whether other jobs need attention. Its changed notes, recent open actions and coming week come from the home page: recent actions are open (`status: draft`) actions whose folder date falls within the last seven days, up to today. When the 20-item preview of changed notes or upcoming items is full, or the 10 newest open actions all began within the period or later, the action names the `bf read` page that lists them all.
 
@@ -126,7 +126,7 @@ jobs:
 Usage: `records-gate.py SOURCE [SOURCE...] [--where ATTRIBUTE=VALUE]... [--period PERIOD] [--since/--start ISO] --until/--end ISO --state DIR`.
 
 - For each source, it runs `bf export --kind items --scope memories/SOURCE` and reads the lines as they arrive.
-- It keeps the records BF [observed](../../docs/docs/schema.md#record-revisions-and-provenance) from 10 minutes before `--since` (or 24 hours before `--until` when `--since` is empty) until `--until`. The 10 minutes reach a collection that started before the previous check but finished after it.
+- It keeps the records BF [observed](../../docs/docs/reference.md) from 10 minutes before `--since` (or 24 hours before `--until` when `--since` is empty) until `--until`. The 10 minutes reach a collection that started before the previous check but finished after it.
 - `--where status=open` keeps the records whose scalar `status` attribute reads `open`. Missing, list, or object attributes never match. Repeated `--where` conditions must all hold.
 - When one or more unseen matching records are found, it persists them in `STATE/records-gate.json`, prints `{"events":[...]}`, and exits 0 so the gated job runs. When nothing matches, it prints `{"events": []}` and exits 1 so BF skips the run as `gated`.
 
@@ -139,3 +139,15 @@ Limits:
 - **Memory:** remembered keys are forgotten 35 days after `--until`; deleting `records-gate.json` reports the window's records again. The file is capped at 64 MiB (dropping the oldest keys first).
 
 The gate uses only Python 3.11's standard library and runs no shell.
+
+## Audit evidence and job health
+
+[evidence-health.py](evidence-health.py) inspects `bf status` and every page of `bf read review`, failing closed on retrieval problems, stale/missing caches, or non-advancing offsets. When open queue incidents, failed or uncertain deliveries, failing/overdue/silent/degraded jobs or sources, or review-flagged notes exist, it prints one draft `ACTION.md` on stdout (zero `- [ ]` checkboxes and zero Markdown links); when everything is healthy, it prints nothing.
+
+```yaml
+jobs:
+  evidence-health:
+    run: [routines/evidence-health.py, "{{brain}}", "{{end}}"]
+    emit: action
+    on: { every: 1d }
+```

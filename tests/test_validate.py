@@ -81,7 +81,7 @@ def test_problems_are_collected_not_fail_fast(brain: Store) -> None:
 
 def test_non_finite_note_attributes_are_invalid_not_unanswerable(brain: Store) -> None:
     # YAML reads .nan and .inf as floats, which strict JSON replies cannot carry.
-    brain.write("bf.yaml", b"version: 10\nname: fixture\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\n")
     for value in (b".nan", b"-.inf", b"[1, .inf]"):
         brain.write("projects/weight.md", b"---\ntype: project\nattributes:\n  weight: " + value + b"\n---\n# Weight\n")
         assert "projects/weight.md: invalid frontmatter: attributes" in "\n".join(located(validate(brain)))
@@ -95,7 +95,7 @@ def test_non_finite_note_attributes_are_invalid_not_unanswerable(brain: Store) -
 def test_link_schema_and_identity_problems_name_their_file_once(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\nfields:\n  owner:\n    description: Owner.\n    targets: ['person:']\n",
+        b"version: 11\nname: fixture\nfields:\n  owner:\n    description: Owner.\n    targets: ['person:']\n",
     )
     brain.write("concepts/foreign.md", b"---\ntype: person\nentity: bf://other/people/alice\n---\n# Foreign\n")
     brain.write(
@@ -359,7 +359,7 @@ def test_okf_status_and_reserved_files_are_valid(brain: Store, folder: str, stat
 
 
 def test_case_variant_identities_warn_without_failing(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
-    brain.write("bf.yaml", b"version: 10\nname: fixture\nfields:\n  repository: {description: Repository.}\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\nfields:\n  repository: {description: Repository.}\n")
     records_file(
         brain,
         "github",
@@ -431,7 +431,7 @@ def test_an_interrupted_edit_warns_before_case_variants(brain: Store, monkeypatc
 
 
 GRAPH = (
-    b"version: 10\nname: fixture\nfields:\n"
+    b"version: 11\nname: fixture\nfields:\n"
     b'  owner:\n    description: Responsible person.\n    targets: ["person:email/"]\n'
     b"jobs:\n  calendar:\n    run: [gws]\n    emit: records\n"
 )
@@ -543,7 +543,7 @@ def test_one_problem_never_hides_a_note_s_others_or_breaks_links_to_it(brain: St
 def test_claim_errors_neither_hide_each_other_nor_unname_the_note(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
+        b"version: 11\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
     )
     brain.write(
         "concepts/alice.md",
@@ -570,7 +570,7 @@ def test_claim_errors_neither_hide_each_other_nor_unname_the_note(brain: Store) 
 def test_a_problem_repeated_across_links_is_reported_once_where_it_first_occurs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
+        b"version: 11\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
     )
     # A reserved relation in frontmatter and 250 sections, beside as many owner claims outside declared targets.
     body = "".join(
@@ -616,7 +616,7 @@ def test_a_link_no_bf_address_can_hold_hides_neither_its_note_nor_other_problems
 def test_every_problem_of_a_record_is_reported(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
+        b"version: 11\nname: fixture\nfields:\n  owner: {description: Owner., targets: ['person:']}\n",
     )
     brain.write(
         record_path("mail", "m1"),
@@ -686,7 +686,7 @@ def test_record_links_that_are_no_identities_warn_without_failing(brain: Store) 
 def test_scripts_run_through_an_interpreter_must_exist(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  brief:\n    emit: records\n    run: [uv, run, --no-project, sensors/brief.py, '{{start}}']\n"
         b"  packaged:\n    emit: records\n    run: [uv, run, --project, sensors/news, news]\n"
         b"  piped:\n    emit: records\n    run: [sh, -c, sensors/a.sh | sensors/b.sh]\n"
@@ -707,7 +707,7 @@ def test_scripts_run_through_an_interpreter_must_exist(brain: Store) -> None:
 
 def test_an_enabled_job_gate_is_checked_like_any_program(brain: Store) -> None:
     gated = (
-        b"version: 10\nname: fixture\njobs:\n  helper:\n    prompt: prompts/a.md\n    harness: [agent]\n"
+        b"version: 11\nname: fixture\njobs:\n  helper:\n    prompt: prompts/a.md\n    harness: [agent]\n"
         b"    on: {every: 300}\n"
         b'    gate: [routines/missing-gate.py, "{{lines:settings/missing.txt}}"]\n'
     )
@@ -764,7 +764,7 @@ def test_validation_parses_each_note_once(brain: Store, monkeypatch: pytest.Monk
 def test_validate_reports_a_prompt_file_every_run_would_reject(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  assistant:\n    prompt: prompts/a.md\n    harness: [agent]\n",
+        b"version: 11\nname: fixture\njobs:\n  assistant:\n    prompt: prompts/a.md\n    harness: [agent]\n",
     )
     brain.write("prompts/a.md", b"x" * (MAX_PROMPT + 1))
     problems = cast("list[dict[str, str]]", validate(brain)["problems"])
@@ -777,7 +777,7 @@ def test_validate_reports_a_prompt_file_every_run_would_reject(brain: Store) -> 
 def test_declarative_validate_policies_and_line_files(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\n"
+        b"version: 11\nname: fixture\n"
         b"validate:\n"
         b"  max_stale_days: 30\n"
         b"  warn_stale_days: 7\n"
@@ -870,7 +870,7 @@ def test_validate_policy_limits_canonical_actions_and_direct_helpers(brain: Stor
     brain.write("actions/2026-09-25_audit/ACTION.md", b"---\ntype: action\nstatus: draft\n---\n# Audit\n")
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\n"
+        b"version: 11\nname: fixture\n"
         b"fields:\n  follows:\n    description: Action relation.\n    targets: ['bf://fixture/actions/other']\n"
         b"defaults:\n  harness: [routines/missing.py]\n"
         b"validate:\n  index_note: concepts/missing-index.md\n"
@@ -942,7 +942,7 @@ def test_validate_policy_limits_canonical_actions_and_direct_helpers(brain: Stor
         )
 
     brain.write("concepts/bad-index.md", b"---\ntype: [invalid\n---\n")
-    brain.write("bf.yaml", b"version: 10\nname: fixture\nvalidate:\n  index_note: concepts/bad-index.md\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\nvalidate:\n  index_note: concepts/bad-index.md\n")
     invalid_index_problems = located(validate(brain))
     assert "bf.yaml: validate.index_note: concepts/bad-index.md does not exist" not in invalid_index_problems
     assert any(p.startswith("concepts/bad-index.md:") for p in invalid_index_problems)

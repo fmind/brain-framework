@@ -16,7 +16,7 @@ EXPECTED_TOPICS = [
     "authoring",
     "retrieval",
     "jobs",
-    "events",
+    "assist",
     "operations",
     "reference",
 ]

@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 9, 1, 12, tzinfo=UTC)
-CONFIG = b"""version: 10
+CONFIG = b"""version: 11
 name: fixture
 jobs:
   calendar:
@@ -767,7 +767,7 @@ def test_watcher_names_a_selected_program_bf_yaml_no_longer_declares(
 def test_job_runs_selected_program_and_retains_state(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  sample:\n    run: [python3, sensors/sample.py]\n    emit: records\n    on: {every: 60}\n",
+        b"version: 11\nname: fixture\njobs:\n  sample:\n    run: [python3, sensors/sample.py]\n    emit: records\n    on: {every: 60}\n",
     )
     brain.write("sensors/sample.py", b'import json\nprint(json.dumps([{"id":"one","title":"Local fixture"}]))\n')
     job = Job(brain, ("sample",))
@@ -879,7 +879,7 @@ def test_a_cancellation_while_stopping_still_waits_then_kills(brain: Store, monk
 def test_job_tells_skipped_cache_files_apart_from_failed_programs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  sample:\n    run: [python3, sensors/sample.py]\n    emit: records\n    on: {every: 60}\n"
         b"  failing:\n    run: [python3, sensors/failing.py]\n    emit: records\n    on: {every: 60}\n",
     )
@@ -924,7 +924,7 @@ def test_tui_exit_restores_terminal_and_cancels_sensor(
 ) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  slow:\n    run: [python3, sensors/slow.py]\n    emit: records\n    on: {every: 60}\n",
+        b"version: 11\nname: fixture\njobs:\n  slow:\n    run: [python3, sensors/slow.py]\n    emit: records\n    on: {every: 60}\n",
     )
     marker = tmp_path / "started"
     brain.write(
@@ -1294,7 +1294,7 @@ def test_a_new_assistant_schedule_needs_attention_only_once_due(brain: Store) ->
     # A weekday three days away is never today, even if the test crosses midnight.
     later = WEEKDAYS[(datetime.now(UTC).weekday() + 3) % 7]
     waiting = HELPER + f"    on:\n      - {{at: '00:00', timezone: UTC, days: [{later}]}}\n".encode()
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + waiting)
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n" + waiting)
     dashboard = Dashboard("fixture", rows=snapshot(brain))
     [helper] = dashboard.rows
     # As in bf status, the row says `never` but stays out of attention until its first slot.
@@ -1303,7 +1303,7 @@ def test_a_new_assistant_schedule_needs_attention_only_once_due(brain: Store) ->
     dashboard.key("\t")
     assert dashboard.visible() == []
     # An interval schedule without a success is due at once, so both views count it.
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + waiting + b"      - {every: 3600}\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n" + waiting + b"      - {every: 3600}\n")
     dashboard.replace_rows(snapshot(brain))
     [helper] = dashboard.rows
     assert (helper.status, helper.early) == (State.NEVER, False)
@@ -1349,8 +1349,8 @@ def test_watch_signals_the_update_then_stops_the_dispatcher_then_waits(
         def __exit__(self, *_: object) -> None:
             events.append("dispatcher close")
 
-        def tick(self) -> None:
-            pass
+        def tick(self, *, force: bool = False) -> None:
+            _ = force
 
     monkeypatch.setattr("bf.watch.Job", Update)
     monkeypatch.setattr("bf.watch.Dispatcher", Dispatching)
@@ -1370,13 +1370,13 @@ def test_watch_shows_dispatcher_errors_and_keeps_collecting(
     failure: str,
 ) -> None:
     # A due event job whose prompt is missing, a half-saved bf.yaml, or a full queue never stops watch.
-    config = CONFIG + HELPER + b"    on:\n      - {event: {kind: mail}}\n"
+    config = CONFIG + HELPER + b"    on:\n      - {event: {kind: message.received}}\n"
     brain.write("bf.yaml", config)
     if failure != "prompt":
         brain.write("prompts/helper.md", b"Review.\n")
     queue = Queue(brain)
     if failure in {"prompt", "capacity"}:
-        queue.record_event("mail", "inbox", {"id": "1"})
+        queue.record_event("message.received", "inbox", {"id": "1"})
     else:
         queue.set_progress("init", {"ok": True})
     if failure == "capacity":
@@ -1429,7 +1429,11 @@ def test_watch_shows_failing_inputs_and_deliveries_until_they_recover(
 ) -> None:
     if failure == "events":
         extra = (
-            b"  helper:\n    run: [python3, routines/check.py]\n    emit: log\n    on:\n      - {event: {kind: mail}}\n"
+            b"  helper:\n"
+            b"    run: [python3, routines/check.py]\n"
+            b"    emit: log\n"
+            b"    on:\n"
+            b"      - {event: {kind: message.received}}\n"
         )
         brain.write(
             "routines/check.py",
@@ -1449,7 +1453,7 @@ def test_watch_shows_failing_inputs_and_deliveries_until_they_recover(
     brain.write("fail", b"1")
     queue = Queue(brain)
     if failure == "events":
-        queue.record_event("mail", "inbox", {"id": "0"})
+        queue.record_event("message.received", "inbox", {"id": "0"})
     monkeypatch.setattr("bf.watch.job_ops.BACKOFF", 0.2)
     dispatchers: list[Dispatcher] = []
     enter = Dispatcher.__enter__
@@ -1460,7 +1464,7 @@ def test_watch_shows_failing_inputs_and_deliveries_until_they_recover(
         if dispatchers:
             futures.wait(list(dispatchers[0].tasks.values()), timeout=10)
         if failure == "events" and not recovered[0] and now in {0.5, 1.5, 2.5}:
-            queue.record_event("mail", "inbox", {"id": str(now)})
+            queue.record_event("message.received", "inbox", {"id": str(now)})
         if failure == "daemon" and now == 0.5:
             deadline = time.monotonic() + 10
             while not queue.progress("health:daemon:chat").get("error") and time.monotonic() < deadline:
@@ -1488,10 +1492,10 @@ def test_watch_shows_failing_inputs_and_deliveries_until_they_recover(
 def test_watch_rejects_second_json_watcher_and_skips_busy_event_job(
     brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    config = CONFIG + HELPER + b"    on:\n      - {event: {kind: mail}}\n"
+    config = CONFIG + HELPER + b"    on:\n      - {event: {kind: message.received}}\n"
     brain.write("bf.yaml", config)
     brain.write("prompts/helper.md", b"Review.\n")
-    Queue(brain).record_event("mail", "inbox", {"id": "1"})
+    Queue(brain).record_event("message.received", "inbox", {"id": "1"})
 
     # A second foreground JSON watcher refuses to share the .watch lock.
     with (
@@ -1560,9 +1564,9 @@ def test_an_idle_dispatcher_ticks_once_a_second(
     clock: list[float] = []
     original = Dispatcher.tick
 
-    def counted(self: Dispatcher) -> None:
+    def counted(self: Dispatcher, *, force: bool = False) -> None:
         ticks.append(1)
-        original(self)
+        original(self, force=force)
 
     monkeypatch.setattr(Dispatcher, "tick", counted)
     json_watch(brain, monkeypatch, capsys, 10, clock.append)
@@ -1589,3 +1593,34 @@ def test_watch_clears_the_transport_health_its_dispatcher_records(
     # Health describes a running dispatcher only: bf status --check recovers once watch stops.
     assert seen == [{}]
     assert queue.report()["transports"] == {}
+
+
+def test_watch_wakes_immediately_on_wakeup_ping(
+    brain: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from bf.storage import ping_wakeup
+
+    brain.write("bf.yaml", CONFIG)
+    Queue(brain).set_progress("init", {"ok": True})
+    seen_ticks: list[tuple[float, bool]] = []
+    original = Dispatcher.tick
+
+    def record_tick(self: Dispatcher, *, force: bool = False) -> None:
+        seen_ticks.append((clock_at[0], force))
+        original(self, force=force)
+
+    clock_at = [0.0]
+    pinged = [False]
+    monkeypatch.setattr(Dispatcher, "tick", record_tick)
+
+    def step(now: float) -> None:
+        clock_at[0] = now
+        if now == 0.2 and not pinged[0]:
+            pinged[0] = True
+            ping_wakeup(brain)
+
+    events, errors = json_watch(brain, monkeypatch, capsys, 0.5, step)
+    assert errors == []
+    # Initial tick at 0.0 (force=False), then immediate wakeup-driven tick(force=True) & JSON snapshot before TICK=1.0s.
+    assert seen_ticks == [(0.0, False), (0.2, True)]
+    assert len(events) >= 2

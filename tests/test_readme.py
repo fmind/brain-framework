@@ -25,6 +25,12 @@ def github_slug(title: str) -> str:
 def anchors(path: Path, *, site: bool) -> set[str]:
     """HTML ids and heading anchors as the documentation site (Python-Markdown `toc`) or GitHub renders them."""
     text = re.sub(r"\A---\n.*?\n---\n", "", path.read_text(), flags=re.DOTALL)  # front matter is no heading
+    text = re.sub(
+        r'^--8<--\s+"([^"]+)"\s*$',
+        lambda match: (ROOT / match[1]).read_text(),
+        text,
+        flags=re.MULTILINE,
+    )
     found = set(re.findall(r'\bid="([^"]+)"', text))
     tokens = MarkdownIt().parse(text)
     for token, inline in pairwise(tokens):

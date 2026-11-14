@@ -41,13 +41,8 @@ from bf.models import (
 )
 from bf.storage import BusyError, FileAncestorError, Store, relative
 
-# What a later page of an exact read repeats beside its text: identity, digest, notice, completeness and whether a
-# model generated the text.
 _TEXT = ("brain", "ref", "uri", "sha256", "modified", "notice", "problems", "stale", "generated")
-# Freshness that keeps a searched source in a search's coverage even when none of its records returned.
 _ATTENTION = {"overdue", "never"}
-
-# An authored read's file: its path, bytes and, for a section read, the parse its summary and outline reuse.
 type Source = tuple[str, bytes, Markdown | None]
 
 
@@ -58,7 +53,7 @@ def bounded(value: dict[str, object], limit: int = MAX_REPLY) -> dict[str, objec
 
 
 def search(store: Store, query: Query, *, counted: bool = True) -> dict[str, object]:
-    """Search one brain: exact identities list owners then newest links; otherwise rank matching words and phrases."""
+    """Search one brain by exact identity or ranked words/phrases within an optional scope."""
     with index.session():
         try:
             return _search(store, query, counted=counted)
@@ -76,8 +71,6 @@ def _search(store: Store, query: Query, *, counted: bool) -> dict[str, object]:
     problems.extend(target_problems)
     bound = query.offset + query.limit + 1
     scoped = query.prefix.split("/")[1] if query.prefix.startswith("memories/") else ""
-    # Coverage describes the sources searched, including those without matches; notes are not collected, and tags
-    # hold only notes. A memories scope still names its source, which must exist even for a tag search.
     tagged = links.tag(query.target) is not None or (shaped and links.tag(text) is not None)
     collected = query.prefix.split("/")[0] == "memories" or (not query.prefix and not tagged)
     with index.database(store) as (connection, state):
@@ -96,8 +89,6 @@ def _search(store: Store, query: Query, *, counted: bool) -> dict[str, object]:
             expanded=expanded,
             low=pages.low(store),
         )
-        # Counting sources scans every record's index entry: only a search that can return records needs them. Their
-        # `changed` tells whether a source fell silent.
         counts = pages.sources(store, connection) if collected else {}
         stale = [name] if state != "ready" else []
         extra: dict[str, object] = {
@@ -105,7 +96,6 @@ def _search(store: Store, query: Query, *, counted: bool) -> dict[str, object]:
             **({"problems": problems} if problems else {}),
         }
         if scoped and scoped not in counts:
-            # Like the source page: an unindexed, unconfigured source is unknown, never an empty answer.
             hint = suggest(scoped, set(counts), prefix="memories/")
             raise pages.absent(extra, f"unknown source; read memories to list sources{hint}")
         window = list(islice(rows, query.offset, query.offset + query.limit + 1))
@@ -119,7 +109,6 @@ def _search(store: Store, query: Query, *, counted: bool) -> dict[str, object]:
         if len(selected) < len(window):
             reply["next_offset"] = query.offset + len(selected)
         if shaped and not exact:
-            # Nothing is, names or links to it: say so, since its items only share words with the query.
             reply["identity"] = "unknown"
         if not exact and (unmatched := index.unmatched(connection, expanded)):
             reply["unmatched"] = unmatched
@@ -159,15 +148,11 @@ def _generated_sources(config: Config) -> set[str]:
 
 
 def _generated(item: dict[str, object], generated: Collection[str]) -> dict[str, object]:
-    """Mark a record of one of its brain's prompt jobs: model output, never evidence on its own."""
     return {**item, "generated": True} if item.get("kind") == "record" and item.get("source") in generated else item
 
 
 def _coverage(coverage: list[dict[str, object]], items: list[dict[str, object]], *, whole: bool) -> dict[str, object]:
-    """The sources of returned records and those whose evidence may be missing; `sources_omitted` counts the rest.
-
-    An empty reply, or a search of collected evidence alone, keeps every searched source: coverage is its answer.
-    """
+    """Sources of returned records plus unhealthy or overdue ones; `sources_omitted` counts the rest."""
     returned = {item.get("source") for item in items if item.get("kind") == "record"}
     kept = [
         entry
@@ -184,7 +169,6 @@ def _coverage(coverage: list[dict[str, object]], items: list[dict[str, object]],
 
 
 def _finish(item: dict[str, object], connection: sqlite3.Connection, match: str, explain: set[str] | None) -> None:
-    """Excerpts and relations cost far more than ranking: compute them only for the returned items."""
     item.pop("_rank", None)
     passage = item.pop("_passage", None)
     if passage is not None and (excerpt := index.excerpt(connection, match, cast("int", passage))):
@@ -197,77 +181,58 @@ def _finish(item: dict[str, object], connection: sqlite3.Connection, match: str,
             item["relations_truncated"] = True
 
 
-# Every claim in a stable order of its exported fields; `time` is the event time of the item asserting it.
 _EDGES = f"""SELECT e.subject,coalesce(nullif(e.relation,''),:links) AS relation,e.target,e.origin,{index.TIME} AS time,{index.DATE} AS date,
   i.observed FROM edges e JOIN items i ON i.id=e.item WHERE {index.FILTERS} ORDER BY 1,2,3,4"""  # noqa: S608 - fixed SQL
 
-
-# Every note or record declaring names beyond its own address: an entity, aliases, or a record's provider aliases.
 _IDENTITIES = f"""SELECT i.ref,i.kind,i.type,i.source,i.status,json_group_array(n.name) AS names FROM names n
   JOIN items i ON i.id=n.item WHERE {index.FILTERS} GROUP BY i.id HAVING count(*)>1 ORDER BY i.ref"""  # noqa: S608 - fixed SQL
 
-
-# Every indexed note and record, for retrievers outside BF such as embedding or multilingual search.
-# Each carries its file's cached fingerprint, so a file changed since the cache refreshed is not paired with it.
 _ITEMS = f"""SELECT i.ref,i.path,i.kind,i.source,i.title,i.time,i.type,i.item_type,i.status,i.url,i.updated,i.observed,
   i.partial,f.size,f.mtime,f.ctime,f.inode FROM items i LEFT JOIN files f ON f.path=i.path WHERE {index.FILTERS}
   ORDER BY i.ref"""  # noqa: S608 - fixed SQL
 
-# One brain's export rows, given index.FILTERS' parameters for the scope in that brain.
 type Rows = Callable[[Store, str, sqlite3.Connection, dict[str, object]], Iterator[dict[str, object]]]
 
 
 def edges(
     store: Store, stack: ExitStack, bounds: Bounds | None = None
 ) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
-    """Stream the claims of the brain from its cache, like search."""
+    """Stream the claims of the brain from its cache."""
     return _export(
         store,
         stack,
         bounds,
-        lambda _store, name, connection, scope: (
-            _edge(name, row) for row in connection.execute(_EDGES, {**scope, "links": LINKS})
-        ),
+        lambda _s, name, conn, scope: (_edge(name, row) for row in conn.execute(_EDGES, {**scope, "links": LINKS})),
     )
 
 
 def identities(
     store: Store, stack: ExitStack, bounds: Bounds | None = None
 ) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
-    """Stream each note or record with every identity it answers to, so duplicates of one subject stand out."""
+    """Stream each note or record with every identity it answers to."""
     return _export(
         store,
         stack,
         bounds,
-        lambda _store, name, connection, scope: (
-            _identity(name, row) for row in connection.execute(_IDENTITIES, scope)
-        ),
+        lambda _s, name, conn, scope: (_identity(name, row) for row in conn.execute(_IDENTITIES, scope)),
     )
 
 
 def items(
     store: Store, stack: ExitStack, bounds: Bounds | None = None
 ) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
-    """Stream every note and record with its text, read from its file, so other tools can index the brain.
-
-    The returned `omitted` list fills, while the stream runs, with each item whose text was left out.
-    """
+    """Stream every note and record with its text read from its file; populates returned `omitted` on drift."""
     omitted: list[dict[str, object]] = []
     stream, extra = _export(
         store,
         stack,
         bounds,
-        lambda s, name, connection, scope: (_item(s, name, row, omitted) for row in connection.execute(_ITEMS, scope)),
+        lambda s, name, conn, scope: (_item(s, name, row, omitted) for row in conn.execute(_ITEMS, scope)),
     )
     return stream, {**extra, "omitted": omitted}
 
 
 def _item(store: Store, brain: str, row: sqlite3.Row, omitted: list[dict[str, object]]) -> dict[str, object]:
-    """One note or record: its cache metadata, relations, attributes and text from the file.
-
-    A file that changed, vanished or became unreadable since the cache refreshed keeps its metadata without `text`
-    and is added to `omitted`.
-    """
     value: dict[str, object] = {"brain": brain}
     for key in ("ref", "kind", "title", "time", "source", "status", "url", "updated", "observed"):
         if row[key]:
@@ -282,14 +247,13 @@ def _item(store: Store, brain: str, row: sqlite3.Row, omitted: list[dict[str, ob
     with suppress(Error, OSError, UnicodeError):
         if row["kind"] == "record":
             loaded = records.load(store, path)
-            text = loaded.text
-            relations, attributes = loaded.relations, loaded.attributes
+            text, relations, attributes = loaded.text, loaded.relations, loaded.attributes
         else:
             data = store.read(path, MAX_NOTE)
             text = data.decode("utf-8")
             parsed = note(path, data)
             relations, attributes = parsed.knowledge.relations, parsed.knowledge.attributes
-        # Stated after the read: a file edited or replaced before or during it no longer has the cached fingerprint.
+        # Re-stat after reading to omit text/fields when the file mutated concurrently.
         if store.fingerprint(path) == (row["size"], row["mtime"], row["ctime"], row["inode"]):
             value["text"] = text
             if relations:
@@ -304,7 +268,6 @@ def _item(store: Store, brain: str, row: sqlite3.Row, omitted: list[dict[str, ob
 def _export(
     store: Store, stack: ExitStack, bounds: Bounds | None, rows: Rows
 ) -> tuple[Iterator[dict[str, object]], dict[str, object]]:
-    """Stream rows of one brain from its cache, like search."""
     bounds = bounds or Bounds()
     source = bounds.prefix.split("/")[1] if bounds.prefix.startswith("memories/") else ""
     with index.session():
@@ -315,7 +278,6 @@ def _export(
                 connection, state = local_stack.enter_context(index.database(store))
                 problems.extend(index.problems(connection))
                 scope = index.scoped(bounds, graph.local_refs(connection, targets, name))
-                # Only a source scope counts sources, which scans every record's index entry.
                 known = set(pages.sources(store, connection)) if source else set()
                 stale = [name] if state != "ready" else []
                 extra = {**({"stale": stale} if stale else {}), **_problems(problems, {})}
@@ -336,31 +298,23 @@ def _export(
 
 
 def _edge(brain: str, row: sqlite3.Row) -> dict[str, object]:
-    """One claim; an undated origin has no `time`, and only a collected record has an `observed` time."""
     return {"brain": brain, **{key: value for key, value in dict(row).items() if value != ""}}
 
 
 def _identity(brain: str, row: sqlite3.Row) -> dict[str, object]:
-    """One note or record: a note's type and status, or a record's source, and its sorted names."""
     value = {key: row[key] for key in ("ref", "kind", "status") if row[key]}
     value.update({"type": row["type"]} if row["kind"] == "note" else {"source": row["source"]})
     return {"brain": brain, **value, "names": sorted(json.loads(row["names"]))}
 
 
 def _relation(value: str) -> str:
-    """A relation page's relation: LINKS, CITES or any valid RelationName."""
     if value == TAGGED or not (1 <= len(value) <= 64 and re.fullmatch(RELATION, value)):
         raise InputError(f"invalid relation; use {LINKS}, {CITES} or a valid relation name", "rel")
     return value
 
 
 def read(store: Store, ref: str = "", *, rel: str = "", offset: int = 0, counted: bool = True) -> dict[str, object]:
-    """Resolve a page, a note, a note section, a `source:id` record or an explicit identity.
-
-    Without a ref, read returns the home page. With `rel`, read lists every item linking to a note, record or
-    identity through that relation, or through untyped links with LINKS. Malformed input raises InputError before
-    reading the brain.
-    """
+    """Resolve a page, note, section, `source:id` record, identity, or relation page."""
     if type(offset) is not int or not 0 <= offset <= MAX_OFFSET:
         raise InputError(f"offset must be an integer from 0 to {MAX_OFFSET}", "offset")
     pages.readable(ref, rel)
@@ -371,7 +325,6 @@ def read(store: Store, ref: str = "", *, rel: str = "", offset: int = 0, counted
 def _resolve(store: Store, ref: str, *, rel: str, offset: int, counted: bool) -> dict[str, object]:
     name = load(store).name
     ref = ref.strip()
-    # links.parse reads bf://NAME/ as that brain's home, an empty path.
     parsed = links.parse(ref) if ref else None
     if parsed and parsed.brain != name:
         raise NotFoundError(f"unknown brain {parsed.brain}; this brain is {name}")
@@ -383,31 +336,21 @@ def _resolve(store: Store, ref: str, *, rel: str, offset: int, counted: bool) ->
     return bounded(reply)
 
 
-def _lookup(
-    store: Store,
-    ref: str,
-    parsed: links.Address | None,
-    *,
-    offset: int,
-    counted: bool,
-) -> dict[str, object]:
+def _lookup(store: Store, ref: str, parsed: links.Address | None, *, offset: int, counted: bool) -> dict[str, object]:
     path = parsed.path if parsed else ref
-    if not (parsed and parsed.fragment):
-        view = pages.page(store, path, offset=offset, counted=counted)
-        if view is not None:
-            return {**view, "notice": NOTICE}
+    if (
+        not (parsed and parsed.fragment)
+        and (view := pages.page(store, path, offset=offset, counted=counted)) is not None
+    ):
+        return {**view, "notice": NOTICE}
     value = _read(store, _action(ref, parsed, path))
     if value is None:
-        # An identity with no owner reads as its links; a typed link reads as its target identity.
         view = pages.identity(store, parsed.identity if parsed else ref, counted=counted)
         if view is not None:
             if offset:
                 raise Error("offset applies to listing pages, exact reads and relation pages; page a relation with rel")
             return {**view, "notice": NOTICE}
         _absent(ref, store)
-    # A later page carries only its text slice and the read's own signals: the graph context's problems and stale
-    # state stay on the first page. A text past the page budget on its own is paged whatever that context adds, so
-    # that page does not build it; otherwise the context decides, as on the first page, whether the reply is paged.
     later = offset and len(encode({k: v for k, v in value.items() if k != "_source"})) > pages.BUDGET
     extra = {} if later else pages.context(store, value)
     stale = [*cast("list[str]", value.get("stale", [])), *cast("list[str]", extra.get("stale", []))]
@@ -422,7 +365,6 @@ def _lookup(
 
 
 def _action(ref: str, parsed: links.Address | None, path: str) -> str:
-    """An action folder reads as its ACTION.md with the action's files and linked projects."""
     if (target := pages.route(path)).kind == "action":
         return links.address(parsed.brain, target.name, parsed.fragment) if parsed else target.name
     return ref
@@ -431,7 +373,6 @@ def _action(ref: str, parsed: links.Address | None, path: str) -> str:
 def _absent(ref: str = "", store: Store | None = None) -> NoReturn:
     hint = ""
     if ref and ":" not in ref.split("/")[0] and store is not None:
-        # A mistyped page or note path: suggest what exists, from the pages and authored files.
         names = set(pages.BROWSE)
         with suppress(Error, OSError):
             names.update(name for directory in AUTHORED for name in store.files(directory) if authored(name))
@@ -440,15 +381,9 @@ def _absent(ref: str = "", store: Store | None = None) -> NoReturn:
 
 
 def _related(
-    store: Store,
-    ref: str,
-    parsed: links.Address | None,
-    relation: str,
-    *,
-    offset: int,
-    counted: bool,
+    store: Store, ref: str, parsed: links.Address | None, relation: str, *, offset: int, counted: bool
 ) -> dict[str, object]:
-    """The items linking to a whole note, record or identity through one relation, as a paged listing."""
+    """List items linking to a whole note, record or identity through `relation`, paged."""
     path = parsed.path if parsed else ref
     if pages.folder_page(store, path):
         raise InputError(pages.RELATIONLESS, "rel")
@@ -469,22 +404,16 @@ def _related(
             _absent()
         targets, issues = graph.expand(store, identity)
         view = pages.relation_page(store, targets, relation, offset=offset, counted=counted)
-        # Like an identity read, an identity nothing owns, links to or makes claims about is not found.
         if not view["total"] and pages.identity(store, identity, counted=False) is None:
             _absent()
     return {**view, "ref": ref, "notice": NOTICE, **_problems(issues, view)}
 
 
-# The text bytes a large note's first page returns beside its outline and graph context.
 OPENING = 4096
 
 
 def _exact_reply(value: dict[str, object], offset: int) -> dict[str, object]:
-    """A reply above the page budget returns its note or record text in pages; offsets count Unicode characters.
-
-    The first page carries everything else, with the note's outline and only its opening text; later pages carry
-    only their text slice.
-    """
+    """Page oversized notes or records by Unicode character offset, keeping outline/context on page 0."""
     source = cast("Source | None", value.pop("_source", None))
     record = cast("dict[str, object] | None", value.get("record"))
     text = str(record.get("text", "")) if record is not None else str(value["text"])
@@ -505,8 +434,6 @@ def _exact_reply(value: dict[str, object], offset: int) -> dict[str, object]:
     frame |= {"offset": offset, "total_characters": len(text), "next_offset": len(text)}
     if record is None:
         frame["text"] = ""
-    # A first page with a large context still returns some text, so every continuation advances. A large note's
-    # first page returns only its opening: its outline names the sections to read by ref instead of paging them all.
     room = max(pages.BUDGET - len(encode(frame)), pages.BUDGET // 4)
     if not offset and record is None and frame.get("outline"):
         room = min(room, OPENING)
@@ -519,15 +446,12 @@ def _exact_reply(value: dict[str, object], offset: int) -> dict[str, object]:
     if record is None:
         frame["text"] = piece
     else:
-        # Like a whole record, a record without text has no `text` field.
         record_data = {k: v for k, v in cast("dict[str, object]", frame["record"]).items() if k != "text"}
         frame["record"] = {**record_data, "text": piece} if piece else record_data
     return frame
 
 
 def _cut(text: str, start: int, room: int) -> int:
-    """The end of the longest slice from `start` whose serialized form fits `room` bytes, preferring a line end
-    in the slice's second half, so a page rarely splits a line."""
     end = min(len(text), start + room)
     while end > start + 1 and (size := len(encode(text[start:end]))) > room:
         end = start + max(1, (end - start) * room // size)
@@ -537,17 +461,11 @@ def _cut(text: str, start: int, room: int) -> int:
 
 
 def _outline(value: dict[str, object], path: str, data: bytes, markdown: Markdown | None) -> dict[str, object]:
-    """The sections within the returned text, each with its ref and length, up to 200.
-
-    Only headings inside the read are listed: never the section being read, nor the H1 that spans a whole note as
-    its title. Reading either would return the same text again.
-    """
+    """Sections within the returned text, each with ref and character count, up to LISTING."""
     try:
         markdown = markdown or parse(path, data)
     except Error:
-        # A note that search skips, such as one with a merge conflict marker, still reads as text.
         return {}
-    # A section ends at the next heading of the same or a higher level, as `section` reads it.
     headings = markdown.headings
     offsets = [0, *accumulate(map(len, lines(markdown.text)))]
     last = len(offsets) - 1
@@ -566,7 +484,6 @@ def _outline(value: dict[str, object], path: str, data: bytes, markdown: Markdow
     entries = [
         {"ref": f"{path}#{h.slug}", "title": h.title, "characters": offsets[end] - offsets[h.line]} for h, end in spans
     ]
-    # A read without sections inside it has no outline: an empty one would only add bytes.
     return {
         **({"outline": entries[: pages.LISTING]} if entries else {}),
         **({"outline_truncated": True} if len(entries) > pages.LISTING else {}),
@@ -579,7 +496,6 @@ def _problems(scope: list[dict[str, object]], reply: dict[str, object]) -> dict[
 
 
 def _stamp(data: bytes, nanoseconds: int) -> dict[str, object]:
-    """A file's digest and modification instant; an unrepresentable time is left out."""
     try:
         modified = {"modified": timestamp(datetime.fromtimestamp(nanoseconds / 1_000_000_000, UTC).isoformat())}
     except ValueError, OverflowError, OSError:
@@ -590,14 +506,11 @@ def _stamp(data: bytes, nanoseconds: int) -> dict[str, object]:
 def _record(
     store: Store, name: str, ref: str, source: str, record_id: str, *, complete: bool = False, started: float
 ) -> dict[str, object] | None:
-    """An exact record read; a record of one of the brain's prompt jobs is marked `generated`, as model output."""
-    # The cache's freshness check already waited for a busy writer: share one records.WAIT across both waits.
     wait = max(0.0, records.WAIT - (time.monotonic() - started))
     found = records.find(store, source, record_id, complete=complete, wait=wait)
     if not found:
         return None
     path, record, data, nanoseconds, busy = found
-    # One bf.yaml describes the read, even mid-save.
     config = load(store)
     return {
         "brain": name,
@@ -607,14 +520,11 @@ def _record(
         "collection": source_health(store, [source], config=config)[source],
         **({"generated": True} if source in _generated_sources(config) else {}),
         **_stamp(data, nanoseconds),
-        # Read whole while a writer held the brain: the record may be changing, like a busy brain's cache.
         **({"stale": [name]} if busy else {}),
     }
 
 
 def _complete(connection: sqlite3.Connection, state: str, source: str) -> bool:
-    """Whether a ready cache parsed every file of a source without a problem: a missing record file then proves
-    absence, so a read need not parse the whole source again."""
     return (
         state == "ready"
         and not connection.execute(
@@ -630,13 +540,10 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
         if parsed.brain != name:
             return None
         source, separator, record_id = parsed.path.partition(":")
-        # BF paths address authored files, records, or explicitly owned entity aliases. A first path segment
-        # with ':' names a record, as validate and backlinks read it, never another scheme's alias.
         if authored(parsed.path):
             value = _read(store, parsed.path)
         elif separator and "/" not in source:
             complete, started = False, time.monotonic()
-            # Without a usable cache, the record's own file still answers; only absence takes a full parse.
             with suppress(Error, OSError, sqlite3.DatabaseError), index.database(store) as (connection, state):
                 complete = _complete(connection, state, source)
             value = _record(store, name, parsed.path, source, record_id, complete=complete, started=started)
@@ -667,15 +574,12 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
         try:
             data, nanoseconds = store.stamped(path, MAX_NOTE)
         except FileNotFoundError, FileAncestorError:
-            # A file where the note's folder would be means this brain cannot hold it; another brain may.
             return None
         try:
-            # A section read parses once: its summary and outline reuse the parse.
             markdown = parse(path, data) if fragment else None
             text = section(path, markdown, fragment) if markdown else data.decode("utf-8")
         except UnicodeDecodeError:
             raise Error(f"{path}: note is not UTF-8") from None
-        # The digest covers the whole file, even for a section: a writer compares it before replacing the file.
         source: Source = (path, data, markdown)
         return {"brain": name, "ref": ref, "text": text, **_stamp(data, nanoseconds), "_source": source}
     aliases, cache_error, complete, started = [], None, False, time.monotonic()
@@ -685,11 +589,8 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
             aliases = index.holders(connection, ref)
             complete = _complete(connection, state, source)
     except (Error, OSError, sqlite3.DatabaseError) as error:
-        # An exact source:id still has a file recovery path when its disposable cache is unavailable.
         cache_error = error
     if separator:
-        # A name the cache resolved, such as a note alias jira:ATL beside a jira source, answers the read when no
-        # record file holds it: proving that absence would parse the whole source and fail on any problem there.
         try:
             value = _record(store, name, ref, source, record_id, complete=complete or bool(aliases), started=started)
         except BusyError:
@@ -699,11 +600,9 @@ def _read(store: Store, ref: str, *, alias: bool = True) -> dict[str, object] | 
         if value:
             return value
     if isinstance(cache_error, Error):
-        # A specific cause, such as a read-only .bf or a busy writer, names its own recovery; bf build would not.
         raise cache_error
     if cache_error:
         raise Error(CACHE_ERROR) from cache_error
     if len(aliases) > 1:
         raise Error("ambiguous identity; use bf search and read an exact ref")
-    # One hop: two records naming each other, both removed since the cache was built, never recurse.
     return _read(store, aliases[0], alias=False) if alias and aliases and aliases[0] != ref else None

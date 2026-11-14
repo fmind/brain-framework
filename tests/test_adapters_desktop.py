@@ -112,7 +112,7 @@ def test_an_invalid_message_exits_2_before_any_notification(provider: Provider, 
 def test_bf_post_accepts_the_receipt(provider: Provider, brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write("channels/desktop.py", (ROOT / "examples" / FOLDER / ADAPTER).read_bytes())
     desktop_job = {"desktop": {"send": ["python3", "channels/desktop.py", "send"]}}
-    brain.write("bf.yaml", yaml.safe_dump({"version": 10, "name": "fixture", "jobs": desktop_job}).encode())
+    brain.write("bf.yaml", yaml.safe_dump({"version": 11, "name": "fixture", "jobs": desktop_job}).encode())
     # Either platform's notifier: the adapter picks one by sys.platform.
     for notifier in ("notify-send", "osascript"):
         provider.install(notifier, [{"match": [], "stdout": ""}])

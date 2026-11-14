@@ -40,7 +40,7 @@ bf search "keep originals" --scope actions
 bf validate
 ```
 
-Then tick the action's tasks in `ACTION.md`, fill its Outcome and record any next step in Resume. Use `status: stable` when the note is reviewed and ready to use; task completion and note maturity are separate. For real data, create your own brain with `bf init ~/brain` (or another chosen path) and copy the patterns you need. See the [brain layout](../../docs/docs/brain.md).
+Then tick the action's tasks in `ACTION.md`, fill its Outcome and record any next step in Resume. Use `status: stable` when the note is reviewed and ready to use; task completion and note maturity are separate. For real data, create your own brain with `bf init ~/brain` (or another chosen path) and copy the patterns you need. See the [brain layout](../../docs/docs/reference.md).
 
 ## Follow an explicit link
 
@@ -84,7 +84,7 @@ A script that needs every record of one source exports it whole, without reading
 bf export --kind items --scope memories/demo
 ```
 
-It prints one line: the demo record with its `attributes`, its `time` and `observed` times, and `"ref":"demo:retention","relations":{"repository":["repo:example/project"]},"source":"demo","text":"Keep original evidence because upstream content can disappear."`. See [export the graph](../../docs/docs/commands.md#export-the-graph).
+It prints one line: the demo record with its `attributes`, its `time` and `observed` times, and `"ref":"demo:retention","relations":{"repository":["repo:example/project"]},"source":"demo","text":"Keep original evidence because upstream content can disappear."`. See [export the graph](../../docs/docs/retrieval.md).
 
 ## Review a decision
 
@@ -160,7 +160,7 @@ The integration test exercises this isolated destination with retrieval cases. I
 
 ## Try a brain-local skill
 
-`skills/weekly-review/SKILL.md` is a workflow skill kept with this brain. It reads the home, projects, tasks and recent-activity pages, then proposes note updates and writes only the ones you approve. To try it with an agent host and a `bf` on PATH, link it into this copy's host folder, as [Add your own workflow skills](../../docs/docs/agents.md#add-your-own-workflow-skills) shows for Claude Code. Then start a session in the copy and ask “Run my weekly review.” Its answer depends on the model and these fictional notes; no outcome is asserted. `bf validate` and `bf eval` ignore `skills/`, so their results above stay the same.
+`skills/weekly-review/SKILL.md` is a workflow skill kept with this brain. It reads the home, projects, tasks and recent-activity pages, then proposes note updates and writes only the ones you approve. To try it with an agent host and a `bf` on PATH, link it into this copy's host folder, as [Getting started](../../docs/docs/getting-started.md) shows for registering and installing `/bf` or linking workflow skills. Then start a session in the copy and ask “Run my weekly review.” Its answer depends on the model and these fictional notes; no outcome is asserted. `bf validate` and `bf eval` ignore `skills/`, so their results above stay the same.
 
 ## Clean up
 

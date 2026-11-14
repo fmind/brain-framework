@@ -30,7 +30,7 @@ def refs(reply: dict[str, object], key: str = "items") -> list[str]:
 def make(root: Path, name: str, files: dict[str, str]) -> Store:
     root.mkdir()
     store = Store(root)
-    store.write("bf.yaml", f"version: 10\nname: {name}\n".encode())
+    store.write("bf.yaml", f"version: 11\nname: {name}\n".encode())
     for path, text in files.items():
         store.write(path, text.encode())
     return store
@@ -62,7 +62,7 @@ def test_a_damaged_cache_is_an_error_not_a_crash(brain: Store, monkeypatch: pyte
 def test_invalid_config_and_qualified_reads(tmp_path: Path) -> None:
     alpha = make(tmp_path / "alpha", "alpha", {"projects/x.md": "# X\n\nzebracorn\n"})
     beta = make(tmp_path / "beta", "beta", {})
-    beta.write("bf.yaml", b"version: 10\nname: beta\nbogus: 1\n")
+    beta.write("bf.yaml", b"version: 11\nname: beta\nbogus: 1\n")
     for ref in ("projects/x.md", "bf://alpha/projects/x.md"):
         reply = read(alpha, ref)
         assert reply["ref"] == "projects/x.md"

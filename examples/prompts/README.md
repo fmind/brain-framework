@@ -1,12 +1,12 @@
 # Run prompt jobs offline
 
-A [prompt job](../../docs/docs/prompts.md) runs your agent harness over the brain and handles plain text, `NO_REPLY`, JSON `extract:` pointers, and `bf wake --run` / `bf action new --run` calls. This fictional brain replaces the harness with `cat`, `echo`, and `printf`, so no model, account, or network is needed.
+A [prompt job](../../docs/docs/assist.md) runs your agent harness over the brain and handles plain text, `NO_REPLY`, JSON `extract:` pointers, and `bf wake --run` / `bf action new --run` calls. This fictional brain replaces the harness with `cat`, `echo`, and `printf`, so no model, account, or network is needed.
 
-| File                                         | Purpose                                                                                                                                             |
-| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [bf.yaml](bf.yaml)                           | Declares `defaults.post`, a polled `inbox`, a manual `assistant` (`harness: [cat]`), and a `triage` job triggered on schedule and channel events.   |
-| [prompts/assistant.md](prompts/assistant.md) | The prompt template with `{{brain}}`, `{{start}}`, `{{end}}`, `{{run}}`, and `{{input}}`, plus `NO_REPLY` and `bf wake` / `bf action new` guidance. |
-| `projects/new-website.md`                    | A minimal project note (`updated: 2026-09-27`).                                                                                                     |
+| File                                         | Purpose                                                                                                                                                                                                 |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [bf.yaml](bf.yaml)                           | Declares `defaults.post`, a polled `inbox`, a manual `assistant` (`harness: [cat]`), a `triage` job triggered on schedule and `message.received` events, and a disabled `compile` job (`emit: action`). |
+| [prompts/assistant.md](prompts/assistant.md) | The prompt template with `{{brain}}`, `{{start}}`, `{{end}}`, `{{run}}`, and `{{input}}`, plus `NO_REPLY` and `bf wake` / `bf action new` guidance.                                                     |
+| `projects/new-website.md`                    | A minimal project note (`updated: 2026-09-27`).                                                                                                                                                         |
 
 Run from the Brain Framework checkout after `uv sync --locked`. This subshell copies the brain, isolates configuration and state, and removes its temporary files on exit:
 
@@ -79,4 +79,8 @@ Expect, in order:
 
 ## Use your harness
 
-Replace `[cat]` with your CLI harness, such as `[claude, -p, --output-format, json, --allowedTools, "Bash(bf read *),Bash(bf search *)", --permission-mode, dontAsk]` with `extract: /result` and `emit: message` or `emit: action`. Add `on: { every: 30m }` (plus an optional `gate:` script such as [records-gate.py](../routines/records-gate.py)) so the harness only wakes when new evidence arrives. See [Prompts and jobs](../../docs/docs/prompts.md) and [Troubleshooting](../../docs/docs/troubleshooting.md).
+Replace `[cat]` with your CLI harness, such as `[claude, -p, --output-format, json, --allowedTools, "Bash(bf read *),Bash(bf search *)", --permission-mode, dontAsk]` with `extract: /result` and `emit: message` or `emit: action`. Add `on: { every: 30m }` (plus an optional `gate:` script such as [records-gate.py](../routines/records-gate.py)) so the harness only wakes when new evidence arrives. See [Assist](../../docs/docs/assist.md) and [Operations](../../docs/docs/operations.md).
+
+## Disabled knowledge compiler (`compile`)
+
+`bf.yaml` also includes a disabled (`enabled: false`) `compile` job using [prompts/compile.md](prompts/compile.md) with `emit: action` and an event trigger on `[record.added, record.changed, note.changed]` (`cooldown: 1800`). Replace `[cat]` with your harness and set `enabled: true` when you want automatic note-compilation drafts on new evidence or edited notes.

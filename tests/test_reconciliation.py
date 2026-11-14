@@ -17,7 +17,7 @@ from bf.watch import snapshot
 
 NOW = datetime(2026, 9, 8, tzinfo=UTC)
 AT = "2026-09-08T00:00:00.000000Z"
-CONFIG = b"""version: 10
+CONFIG = b"""version: 11
 name: fixture
 jobs:
   mail:

@@ -1,5 +1,5 @@
-# https://fmind.github.io/brain-framework/docs/channels/
-version: 10
+# https://fmind.github.io/brain-framework/docs/assist/
+version: 11
 name: channel-demo
 jobs:
   local:
@@ -8,7 +8,7 @@ jobs:
     on: { daemon: true }
     send: [python3, channels/local.py, send]
   local-poll:
-    run: [python3, channels/local.py, read, "{{start}}", "{{end}}"]
+    run: [python3, channels/local.py, read, "{{start}}", "{{end}}", "{{lines:channels/allowlist.txt}}"]
     emit: messages
   # The walkthrough's scout posts its proposals here, and its actor reads the owner's reply.
   owner-chat:
@@ -29,4 +29,4 @@ jobs:
     post: local
     on:
       - { every: 30m }
-      - { event: { kind: [channel.received, message.received], source: local } }
+      - { event: { kind: message.received, source: local } }

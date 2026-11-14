@@ -1,4 +1,4 @@
-# https://fmind.github.io/brain-framework/docs/checks/
+# https://fmind.github.io/brain-framework/docs/operations/
 # yaml-language-server: $$schema=${schemas}eval.schema.json
 # Starter checks for the welcome note; extend or replace with your own questions and evidence.
 version: $version

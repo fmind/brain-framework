@@ -23,7 +23,7 @@ from bf.storage import Store, writer
 from bf.validate import validate
 
 MIB = 1 << 20
-ROUTINES = b"""version: 10
+ROUTINES = b"""version: 11
 name: fixture
 jobs:
   count:
@@ -140,7 +140,7 @@ def test_a_search_waits_two_seconds_for_a_busy_brain_then_answers_stale(brain: S
 def test_evaluation_runs_at_most_100_suites(brain: Store) -> None:
     (brain.root / "evals").mkdir()
     for number in range(101):
-        (brain.root / f"evals/suite-{number:03}.yaml").write_bytes(b"version: 10\ncases: []\n")
+        (brain.root / f"evals/suite-{number:03}.yaml").write_bytes(b"version: 11\ncases: []\n")
     with pytest.raises(Error, match="evaluation exceeds 100 suites"):
         evaluate(brain)
     # A hundred suites pass the limit, so the run reads them and rejects the first one, which has no case.

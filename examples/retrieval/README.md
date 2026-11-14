@@ -30,7 +30,7 @@ Expect validation to return `{"notes":15,"problems":[],"records":9,"valid":true}
 
 `bf.yaml`, `projects/`, `concepts/`, `actions/` and `memories/` form the brain; `evals/retrieval.yaml` holds its questions and expected results. The records are checked in: a disabled `catalog` record job only sets that source's `priority: low`, and nothing is collected. There are no scheduled jobs. The example pins UTC and uses fixed dates. Retrieval may refresh the disposable `.bf/` cache; it does not collect or count evaluation reads as user usage.
 
-For your own brain, adapt its starter `evals/retrieval.yaml` to the questions you need answered; see [Check your brain](../../docs/docs/checks.md). The [workflow example](../brain/README.md) demonstrates collection and actions as well as retrieval.
+For your own brain, adapt its starter `evals/retrieval.yaml` to the questions you need answered; see [Check your brain](../../docs/docs/operations.md). The [workflow example](../brain/README.md) demonstrates collection and actions as well as retrieval.
 
 ## What a case proves
 
@@ -42,8 +42,8 @@ For your own brain, adapt its starter `evals/retrieval.yaml` to the questions yo
 These two cases in `evals/retrieval.yaml` check the Atlas budget. Zephyr has a different budget to expose confusion between projects:
 
 ```yaml
-# https://fmind.github.io/brain-framework/docs/checks/
-version: 10
+# https://fmind.github.io/brain-framework/docs/operations/
+version: 11
 cases:
   - name: atlas-budget-first-result
     query: What is the Atlas launch budget?
@@ -74,7 +74,7 @@ Six cases cover the finer search rules:
 - `newest-of-identical-meetings` lists the later of two identical `calendar` status events first: equal scores list the newest item first.
 - `date-range-page` reads `2026-09-10..2026-09-14`, an inclusive range of local days: it lists the launch plan and both reviews, but neither status event, on 2026-09-08 and 2026-09-15.
 
-Each search case with `expect` reports `rank`, the position of each expected ref within the first 50 results, even below the case's `limit`, and the run reports `mrr`, the mean reciprocal rank. Every case ranks an expected ref first, hence `1.0`; the launch plan outranks a glossary definition sharing two of its three words, because a passage matching all the query's words gains 20%. To check a ranking change, save a reply with `bf eval > ../baseline.json` before it and run `bf eval --baseline ../baseline.json` after it: `regressions` lists cases that fail or rank lower, and `improvements` those that pass or rank higher. See [track ranking changes](../../docs/docs/checks.md#track-ranking-changes).
+Each search case with `expect` reports `rank`, the position of each expected ref within the first 50 results, even below the case's `limit`, and the run reports `mrr`, the mean reciprocal rank. Every case ranks an expected ref first, hence `1.0`; the launch plan outranks a glossary definition sharing two of its three words, because a passage matching all the query's words gains 20%. To check a ranking change, save a reply with `bf eval > ../baseline.json` before it and run `bf eval --baseline ../baseline.json` after it: `regressions` lists cases that fail or rank lower, and `improvements` those that pass or rank higher. See [track ranking changes](../../docs/docs/operations.md).
 
 These assertions evaluate retrieval, not generated prose, semantic equivalence or source truth. Search `text` is matched across all returned excerpts, so it does not bind an answer fragment to a particular hit when several hits are allowed. A passing score covers only these cases and this corpus; it does not establish performance on arbitrary questions, live freshness or private brains.
 

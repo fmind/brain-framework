@@ -23,8 +23,10 @@ MESSAGE = {
 def main(argv: list[str]) -> None:
     operation = argv[0]
     if operation == "read":
-        start, end = argv[1:]
-        sys.stdout.write(json.dumps({"messages": [MESSAGE] if start <= MESSAGE["time"] < end else []}) + "\n")
+        start, end, *allow = argv[1:]
+        in_window = start <= MESSAGE["time"] < end
+        permitted = not allow or MESSAGE["sender"] in allow
+        sys.stdout.write(json.dumps({"messages": [MESSAGE] if in_window and permitted else []}) + "\n")
     elif operation == "send":
         message = json.load(sys.stdin)
         if Path("logs/offline").exists():

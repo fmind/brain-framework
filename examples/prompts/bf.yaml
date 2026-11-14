@@ -1,5 +1,5 @@
-# https://fmind.github.io/brain-framework/docs/prompts/
-version: 10
+# https://fmind.github.io/brain-framework/docs/assist/
+version: 11
 name: prompt-demo
 defaults:
   post: inbox
@@ -27,4 +27,13 @@ jobs:
     emit: message
     on:
       - { every: 1d }
-      - { event: { kind: [message.received, channel.received], source: inbox } }
+      - { event: { kind: message.received, source: inbox } }
+  compile:
+    prompt: prompts/compile.md
+    harness: [cat]
+    emit: action
+    enabled: false
+    on:
+      event:
+        kind: [record.added, record.changed, note.changed]
+        cooldown: 1800

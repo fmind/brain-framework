@@ -46,7 +46,7 @@ From the framework checkout, run this isolated walkthrough:
     post: owner-chat
     on:
       event:
-        kind: [message.received, channel.received]
+        kind: message.received
         source: owner-chat
 YAML
   bf update --job scout
@@ -63,7 +63,7 @@ Expected observations:
 1. `bf post --to local --stdin` delivers directly through `local` (`"state":"delivered"`, receipt `"id":"sent-..."`).
 1. While `logs/offline` exists, `local.py send` fails before writing to `logs/deliveries.jsonl`: `bf post` exits `1` and leaves `"state":"uncertain"` in the queue (`bf queue demo-retry`). Once `logs/offline` is removed, `bf queue demo-retry --retry` sends `"Sent after the outage."` and returns `{"id":"demo-retry","status":"delivered"}`.
 1. `logs/deliveries.jsonl` has four lines (the failed attempt wrote nothing).
-1. `scout` posts its proposal (`Proposed: 1. ...`) to `owner-chat`. Next, `bf update --job owner-chat` polls `owner-chat`, admitting the fictional owner reply `"do 2"` in `"proactive-thread"`; then `bf update --job actor` dispatches that `channel.received` event to `actor`, whose `cat` harness posts `Invocation:` carrying `events` with `"do 2"` in `"proactive-thread"` back through `owner-chat`.
+1. `scout` posts its proposal (`Proposed: 1. ...`) to `owner-chat`. Next, `bf update --job owner-chat` polls `owner-chat`, admitting the fictional owner reply `"do 2"` in `"proactive-thread"`; then `bf update --job actor` dispatches that `message.received` event to `actor`, whose `cat` harness posts `Invocation:` carrying `events` with `"do 2"` in `"proactive-thread"` back through `owner-chat`.
 
 To try daemon streaming (`on: { daemon: true }`), copy this brain to a directory you keep and run:
 
@@ -71,6 +71,8 @@ To try daemon streaming (`on: { daemon: true }`), copy this brain to a directory
 bf watch --brain /path/to/channel-demo --json
 ```
 
-`channels/local.py stream` emits `hello-1` immediately as NDJSON. Watch durably admits the message (`"channel.received"`), invokes `personal`, and records `"Acknowledged."` in `logs/deliveries.jsonl`. Stop with Ctrl-C.
+`channels/local.py stream` emits `hello-1` immediately as NDJSON. Watch durably admits the message (`"message.received"`), invokes `personal`, and records `"Acknowledged."` in `logs/deliveries.jsonl`. Stop with Ctrl-C.
 
-[Channel contracts](../../docs/docs/channels.md) define send receipts, bounded polls, and NDJSON daemon streams. [Prompts and jobs](../../docs/docs/prompts.md) explains schedules, `extract:`, wakes, `post:`, and recovery.
+[Assist guide](../../docs/docs/assist.md) defines channel send receipts, bounded polls, NDJSON daemon streams, `{{lines:...}}` allowlists, schedules, `extract:`, wakes, `post:`, and recovery.
+
+`local-poll` also demonstrates a sender allowlist with `{{lines:channels/allowlist.txt}}`: [channels/allowlist.txt](channels/allowlist.txt) lists trusted sender IDs (one per line, `#` comments ignored), which BF expands as trailing arguments to `channels/local.py read` without a shell.

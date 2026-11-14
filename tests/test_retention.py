@@ -31,7 +31,7 @@ def emit(*items: Mapping[str, object]) -> bytes:
 
 
 def configure(brain: Store, sensor: str) -> None:
-    brain.write("bf.yaml", f"version: 10\nname: fixture\njobs:\n  mail:\n    emit: records\n{sensor}".encode())
+    brain.write("bf.yaml", f"version: 11\nname: fixture\njobs:\n  mail:\n    emit: records\n{sensor}".encode())
 
 
 def stored(brain: Store, source: str = "mail") -> list[str]:
@@ -167,13 +167,13 @@ def test_expire_after_is_bounded(brain: Store) -> None:
 def test_a_disabled_program_may_omit_its_command(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  retired:\n    enabled: false\n  old:\n    enabled: false\n",
+        b"version: 11\nname: fixture\njobs:\n  retired:\n    enabled: false\n  old:\n    enabled: false\n",
     )
     config = load(brain)
     assert config.jobs["retired"].run == []
     assert invoke("validate", "--brain", "fixture")["valid"] is True
     for job_cfg in ("retired:\n    on: {every: 60}\n", "retired:\n    enabled: true\n"):
-        brain.write("bf.yaml", f"version: 10\nname: fixture\njobs:\n  {job_cfg}".encode())
+        brain.write("bf.yaml", f"version: 11\nname: fixture\njobs:\n  {job_cfg}".encode())
         with pytest.raises(Error, match="job requires run, prompt or send unless enabled: false"):
             load(brain)
 
@@ -181,7 +181,7 @@ def test_a_disabled_program_may_omit_its_command(brain: Store) -> None:
 def test_collect_input_checks_saved_output_without_running_or_saving(brain: Store, tmp_path: Path) -> None:
     brain.write(
         "bf.yaml",
-        b'version: 10\nname: fixture\nfields:\n  sender:\n    description: Sender.\n    targets: ["person:"]\n'
+        b'version: 11\nname: fixture\nfields:\n  sender:\n    description: Sender.\n    targets: ["person:"]\n'
         b"jobs:\n  mail:\n    emit: records\n    enabled: false\n",
     )
     fixture = tmp_path / "mail.json"
@@ -254,7 +254,7 @@ def test_programs_receive_their_name_window_and_private_state_directory(brain: S
     brain.write("sensors/env.py", script.encode())
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  env:\n    emit: records\n"
+        b"version: 11\nname: fixture\njobs:\n  env:\n    emit: records\n"
         b'    run: [python3, sensors/env.py, "{{state}}", "{{start}}", "{{end}}"]\n',
     )
     os.environ["BF_TRIGGER"] = "inherited"
@@ -276,7 +276,7 @@ def test_programs_receive_their_name_window_and_private_state_directory(brain: S
 def test_routines_receive_their_window(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b'version: 10\nname: fixture\njobs:\n  check:\n    run: [python3, routines/check.py, "{{start}}", "{{end}}"]\n',
+        b'version: 11\nname: fixture\njobs:\n  check:\n    run: [python3, routines/check.py, "{{start}}", "{{end}}"]\n',
     )
     brain.write(
         "routines/check.py",

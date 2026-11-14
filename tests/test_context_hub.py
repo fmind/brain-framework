@@ -28,7 +28,7 @@ SOURCES = [
 def test_documented_walkthrough_flags_the_conclusion_when_jira_changes(tmp_path: Path) -> None:
     brain = tmp_path / "brain"
     shutil.copytree(EXAMPLE, brain)
-    page = (ROOT / "docs/docs/context-hub.md").read_text()
+    page = (ROOT / "examples/context-hub/README.md").read_text()
     blocks = re.findall(r"```bash\n(.*?)\n```", page, re.DOTALL)
     # The first block clones the release and the last removes the copy: run everything between on a local copy.
     assert "git clone" in blocks[0]

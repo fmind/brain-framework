@@ -59,7 +59,7 @@ def test_example_suites_link_to_the_suite_reference() -> None:
     suites = [*sorted((root / "examples").glob("*/evals/*.yaml")), root / "src/bf/starter/evals/retrieval.yaml"]
     assert len(suites) >= 4
     for suite in suites:
-        assert suite.read_text().startswith("# https://fmind.github.io/brain-framework/docs/checks/\n"), suite
+        assert suite.read_text().startswith("# https://fmind.github.io/brain-framework/docs/operations/\n"), suite
 
 
 def test_prepared_knowledge_transfer_works_without_the_source_brain(tmp_path: Path) -> None:
@@ -76,7 +76,7 @@ def test_prepared_knowledge_transfer_works_without_the_source_brain(tmp_path: Pa
     store.write(manifest["files"][0], candidate)
     store.write(
         "evals/retrieval.yaml",
-        b"version: 10\ncases:\n  - name: shared-procedure\n    read: concepts/selected-evidence.md\n"
+        b"version: 11\ncases:\n  - name: shared-procedure\n    read: concepts/selected-evidence.md\n"
         b"    text: [draft, Partial evidence remains partial, No successful outcome]\n"
         b"  - name: no-private-history\n    query: unverified belief\n    empty: true\n",
     )

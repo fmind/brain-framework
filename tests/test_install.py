@@ -27,7 +27,7 @@ def run(*args: str, code: int = 0) -> dict:
 def make_brain(root: Path, name: str = "fixture") -> Store:
     root.mkdir(parents=True, exist_ok=True)
     store = Store(root)
-    store.write("bf.yaml", f"version: 10\nname: {name}\n".encode())
+    store.write("bf.yaml", f"version: 11\nname: {name}\n".encode())
     return store
 
 

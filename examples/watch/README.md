@@ -33,7 +33,7 @@ bf schema
 
 Expect a JSON Schema with `title: Config` and a `watch` property referencing `WatchSettings`, whose `interval` defaults to 60 seconds with a minimum of 5. The example overrides that default to 5. Unknown settings and invalid values fail before any program starts.
 
-Within the first cycle, `calendar` and `git` each show one added record (`1/0/0`); `unavailable` shows `failed`, and manual/disabled jobs do not run. The failed job does not rerun every five-second cycle: a failure waits 1, 2, 4… minutes before its retry, never longer than its `on.every` interval, so this 60-second demo job retries once a minute and its Next due column shows that retry time. After 30 seconds the calendar record shows one update (`0/1/0`). Use `j`/`k` or arrows to select a row, Tab to filter attention, `?` for help, Space to pause future checks and `q` to cancel the active update and quit. Nothing is installed in the background. The [scheduling guide](../../docs/docs/schedule.md#watch-collection) shows this dashboard sorted by state.
+Within the first cycle, `calendar` and `git` each show one added record (`1/0/0`); `unavailable` shows `failed`, and manual/disabled jobs do not run. The failed job does not rerun every five-second cycle: a failure waits 1, 2, 4… minutes before its retry, never longer than its `on.every` interval, so this 60-second demo job retries once a minute and its Next due column shows that retry time. After 30 seconds the calendar record shows one update (`0/1/0`). Use `j`/`k` or arrows to select a row, Tab to filter attention, `?` for help, Space to pause future checks and `q` to cancel the active update and quit. Nothing is installed in the background. The [assist guide](../../docs/docs/assist.md) shows this dashboard sorted by state.
 
 Try refreshing after adding a source. In the second terminal, run `cd "$watch_demo/brain"`, then:
 
@@ -60,7 +60,7 @@ Try the sorting controls after that first cycle:
 | `t`                 | Most recent successful update first; programs without a success follow.                                     |
 | `n`, then `G` / `g` | Alphabetical order; jump to the last / first row.                                                           |
 
-The selected program stays selected as sorting or new history moves it. Items counts the records the last committed collection returned, even a backfill, not the stored total. Press `?` for every sort field, or see [dashboard sorting](../../docs/docs/schedule.md#sort-the-dashboard); view choices last only for the session and also work in the observation dashboard below.
+The selected program stays selected as sorting or new history moves it. Items counts the records the last committed collection returned, even a backfill, not the stored total. Press `?` for every sort field, or see the [assist guide](../../docs/docs/assist.md); view choices last only for the session and also work in the observation dashboard below.
 
 Observe the same local history without executing programs; its footer offers `u reread` instead of `f refresh` and no pause:
 
@@ -76,4 +76,4 @@ rm -rf -- "$watch_demo"
 unset watch_demo
 ```
 
-See [Watch and schedule updates](../../docs/docs/schedule.md#run-watch-as-a-service) to keep watch running as a service, and its platform limits.
+See [Watch and schedule updates](../../docs/docs/assist.md) to keep watch running as a service, and its platform limits.

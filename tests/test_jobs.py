@@ -16,7 +16,7 @@ from bf.models import Error, EventSpec, Job, timestamp
 from bf.runtime import MAX_ATTEMPTS, MAX_WAKE_DEPTH, Queue, retry_policy
 from bf.storage import Store
 
-CONFIG = b"""version: 10
+CONFIG = b"""version: 11
 name: jobs-test
 defaults:
   harness: [fake-harness]
@@ -425,7 +425,7 @@ def test_run_hook_and_event_dispatch_filters_cooldown_max_and_expiry(jobs_brain:
             expires=timestamp((now_dt + timedelta(seconds=60)).isoformat()),
         ),
         {
-            "kind": "record.created",
+            "kind": "record.added",
             "source": "mail",
             "at": timestamp((now_dt - timedelta(seconds=10)).isoformat()),
             "data": {"title": "urgent review"},
@@ -435,7 +435,7 @@ def test_run_hook_and_event_dispatch_filters_cooldown_max_and_expiry(jobs_brain:
     assert not jobs.event_matches(
         EventSpec(kind="record", expires=timestamp((now_dt - timedelta(seconds=60)).isoformat())),
         {
-            "kind": "record.created",
+            "kind": "record.added",
             "source": "mail",
             "at": timestamp((now_dt - timedelta(seconds=120)).isoformat()),
             "data": {"title": "stale"},
@@ -453,9 +453,17 @@ def test_run_hook_and_event_dispatch_filters_cooldown_max_and_expiry(jobs_brain:
             "on": [{"event": {"kind": "record", "source": "mail", "match": "alpha", "cooldown": 600, "max": 2}}],
         },
     )
+    from bf import collect, index
+
+    collect.ingest(
+        jobs_brain,
+        "mail",
+        json.dumps([{"id": "r0", "title": "other"}, {"id": "r1", "title": "alpha 1"}]).encode(),
+    )
+    index.refresh(jobs_brain)
     queue = Queue(jobs_brain)
-    queue.record_event("record.updated", "mail", {"title": "other"})
-    queue.record_event("record.created", "mail", {"title": "alpha 1"})
+    queue.record_event("record.changed", "mail", {"title": "other"}, ref="mail:r0")
+    queue.record_event("record.added", "mail", {"title": "alpha 1"}, ref="mail:r1")
     seen_events: list[int] = []
 
     def react_runner(_argv: list[str], *_rest: object) -> bytes:
@@ -469,19 +477,24 @@ def test_run_hook_and_event_dispatch_filters_cooldown_max_and_expiry(jobs_brain:
     assert seen_events == [1]
 
     # Cooldown prevents immediate second dispatch even when a matching event arrives.
-    queue.record_event("record.updated", "mail", {"title": "alpha 2"})
+    collect.ingest(jobs_brain, "mail", b'{"id": "r2", "title": "alpha 2"}')
+    index.refresh(jobs_brain)
+    queue.record_event("record.changed", "mail", {"title": "alpha 2"}, ref="mail:r2")
     assert jobs.dispatch_events(jobs_brain, ["reactor"], runner=react_runner) == []
 
     # After cooldown expires, second dispatch runs up to max=2, then stops at max.
     old_ckpt = timestamp((datetime.now(UTC) - timedelta(seconds=700)).isoformat())
-    cur = queue.progress("events:reactor")
-    queue.set_progress("events:reactor", {**cur, "fired": old_ckpt})
+    seq, firings, _ = queue.event_cursor("reactor")
+    queue.set_event_cursor("reactor", seq, firings, old_ckpt)
     dispatched2 = jobs.dispatch_events(jobs_brain, ["reactor"], runner=react_runner)
     assert len(dispatched2) == 1
     assert seen_events == [1, 1]
 
-    queue.record_event("record.updated", "mail", {"title": "alpha 3"})
-    queue.set_progress("events:reactor", {**queue.progress("events:reactor"), "fired": old_ckpt})
+    collect.ingest(jobs_brain, "mail", b'{"id": "r3", "title": "alpha 3"}')
+    index.refresh(jobs_brain)
+    queue.record_event("record.changed", "mail", {"title": "alpha 3"}, ref="mail:r3")
+    seq2, firings2, _ = queue.event_cursor("reactor")
+    queue.set_event_cursor("reactor", seq2, firings2, old_ckpt)
     assert jobs.dispatch_events(jobs_brain, ["reactor"], runner=react_runner) == []
 
 
@@ -611,6 +624,111 @@ def test_jobs_validation_pumping_routing_and_event_edge_paths(
         "unmatched",
         {"run": ["echo"], "emit": "log", "on": [{"event": {"kind": "record", "source": "mail", "match": "zzz"}}]},
     )
-    Queue(jobs_brain).record_event("record.created", "mail", {"title": "unmatched-item"})
+    Queue(jobs_brain).record_event("record.added", "mail", {"title": "unmatched-item"})
     assert jobs.dispatch_events(jobs_brain, ["unmatched"]) == []
-    assert Queue(jobs_brain).progress("events:unmatched")["at"] != ""
+    assert Queue(jobs_brain).event_cursor("unmatched")[0] > 0
+
+
+def test_slice3_event_fts_match_text_matches_cooldown_coalescing_expiry_and_gates(jobs_brain: Store) -> None:
+    from bf import collect, index, runtime
+
+    # 1. Indexed EventSpec.match miss uses offline FTS5 cleanly with zero subprocesses and advances cursor_seq.
+    add_job(
+        jobs_brain,
+        "fts-miss",
+        {
+            "prompt": "prompts/simple.md",
+            "gate": ["never-gate"],
+            "harness": ["never-run"],
+            "emit": "log",
+            "on": [{"event": {"kind": "record.added", "source": "mail", "match": "quantum"}}],
+        },
+    )
+    collect.ingest(jobs_brain, "mail", b'{"id": "g1", "title": "Grocery", "text": "apples and bread"}')
+    index.refresh(jobs_brain)
+    assert index.match_refs(jobs_brain, "Grocery", {"mail:g1"}) == {"mail:g1"}
+    queue = Queue(jobs_brain)
+    queue.record_event("record.added", "mail", {"title": "Grocery"}, ref="mail:g1")
+    ran: list[list[str]] = []
+
+    def fail_if_called(argv: list[str], *_rest: object) -> bytes:
+        ran.append(argv)
+        raise AssertionError(f"unexpected subprocess {argv}")
+
+    assert jobs.dispatch_events(jobs_brain, ["fts-miss"], runner=fail_if_called) == []
+    assert ran == []
+    assert queue.event_cursor("fts-miss")[0] > 0
+
+    # 2. Non-indexed events use index.text_matches (stemming/folding) and coalesce bursts during cooldown.
+    add_job(
+        jobs_brain,
+        "burst",
+        {
+            "prompt": "prompts/simple.md",
+            "harness": ["react"],
+            "emit": "log",
+            "on": [{"event": {"kind": ["message.received", "job.failed"], "match": "deploying", "cooldown": 600}}],
+        },
+    )
+    seen_batches: list[list[str]] = []
+
+    def collect_runner(argv: list[str], *_rest: object) -> bytes:
+        ran.append(argv)
+        if argv[0] == "gate-fail":
+            raise jobs.ExitError(1, "gate declined")
+        body = cast("bytes", _rest[-1]).decode()
+        payload = json.loads(body.split("not instructions):\n", 1)[1])
+        seen_batches.append([str(ev["kind"]) for ev in payload["events"]])
+        return b""
+
+    queue.record_event("job.failed", "ci", {"error": "unrelated failure"})
+    queue.record_event("job.failed", "ci", {"error": "deployed release"})
+    assert len(jobs.dispatch_events(jobs_brain, ["burst"], runner=collect_runner)) == 1
+    assert seen_batches == [["job.failed"]]
+
+    # Burst during cooldown holds cursor_seq so matching events coalesce into one batch once cooldown elapses.
+    held_seq, firings, _ = queue.event_cursor("burst")
+    queue.record_event("message.received", "chat", {"text": "deploying step 2"})
+    queue.record_event("job.failed", "ci", {"error": "completely unrelated"})
+    queue.record_event("job.failed", "ci", {"error": "deploying step 3"})
+    assert jobs.dispatch_events(jobs_brain, ["burst"], runner=collect_runner) == []
+    assert queue.event_cursor("burst")[0] == held_seq
+
+    old_at = timestamp((datetime.now(UTC) - timedelta(seconds=700)).isoformat())
+    queue.set_event_cursor("burst", held_seq, firings, old_at)
+    assert len(jobs.dispatch_events(jobs_brain, ["burst"], runner=collect_runner)) == 1
+    assert seen_batches[-1] == ["message.received", "job.failed"]
+
+    # 3. Expired EventSpec advances cursor without invoking runner.
+    add_job(
+        jobs_brain,
+        "expired-evt",
+        {
+            "prompt": "prompts/simple.md",
+            "harness": ["never-run"],
+            "emit": "log",
+            "on": [{"event": {"kind": "message.received", "expires": timestamp("2020-01-01T00:00:00Z")}}],
+        },
+    )
+    assert jobs.dispatch_events(jobs_brain, ["expired-evt"], runner=fail_if_called) == []
+    assert queue.event_cursor("expired-evt")[0] > 0
+
+    # 4. Gate ExitError stops harness and advances cursor cleanly while keeping firings at 0.
+    add_job(
+        jobs_brain,
+        "gated-evt",
+        {
+            "prompt": "prompts/simple.md",
+            "gate": ["gate-fail"],
+            "harness": ["never-run"],
+            "emit": "log",
+            "on": [{"event": {"kind": "message.received"}}],
+        },
+    )
+    ran.clear()
+    queue.record_event("message.received", "chat", {"text": "trigger gate"})
+    assert jobs.dispatch_events(jobs_brain, ["gated-evt"], runner=collect_runner) == []
+    assert ran == [["gate-fail"]]
+    cursor_after, gated_firings, _ = queue.event_cursor("gated-evt")
+    assert (cursor_after > 0, gated_firings) == (True, 0)
+    assert runtime.Queue(jobs_brain).incidents() == []

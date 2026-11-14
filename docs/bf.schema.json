@@ -49,9 +49,31 @@
         "expires": { "default": "", "title": "Expires", "type": "string" },
         "kind": {
           "anyOf": [
-            { "maxLength": 64, "minLength": 1, "pattern": "^[a-z][a-z0-9._:-]*$", "type": "string" },
             {
-              "items": { "maxLength": 64, "minLength": 1, "pattern": "^[a-z][a-z0-9._:-]*$", "type": "string" },
+              "enum": [
+                "record",
+                "record.added",
+                "record.changed",
+                "record.removed",
+                "note.changed",
+                "message.received",
+                "job.failed"
+              ],
+              "type": "string"
+            },
+            {
+              "items": {
+                "enum": [
+                  "record",
+                  "record.added",
+                  "record.changed",
+                  "record.removed",
+                  "note.changed",
+                  "message.received",
+                  "job.failed"
+                ],
+                "type": "string"
+              },
               "maxItems": 16,
               "minItems": 1,
               "type": "array"
@@ -68,6 +90,12 @@
         "source": {
           "anyOf": [
             { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+            {
+              "items": { "not": { "pattern": "[^a-z0-9-]" }, "pattern": "^[a-z][a-z0-9-]{0,63}$", "type": "string" },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
             { "const": "", "type": "string" }
           ],
           "default": "",
@@ -630,7 +658,7 @@
     },
     "validate": { "anyOf": [{ "$ref": "#/$defs/ValidateSettings" }, { "type": "null" }] },
     "version": {
-      "const": 10,
+      "const": 11,
       "description": "Brain format of bf.yaml, eval suites and stored records.",
       "title": "Version",
       "type": "integer"

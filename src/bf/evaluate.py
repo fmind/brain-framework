@@ -24,7 +24,7 @@ DEPTH = 50
 
 
 def _bounds(value: str) -> None:
-    """A scope checked on its own, so its failure names the scope field."""
+    """Check a scope on its own so its failure names the scope field."""
     query("scope", value)
 
 
@@ -72,23 +72,14 @@ class Case(Model):
     )
 
     name: Nonblank = Field(description="Nonblank case label, unique within this suite.")
-    query: Annotated[str, Field(max_length=4096)] = Field(
-        default="", description="Search words; use either query or read."
-    )
+    query: Annotated[str, Field(max_length=4096)] = Field(default="", description="Search words; use query or read.")
     scope: str = Field(
-        default="",
-        description="Optional search scope, as bf search --scope takes it: never a #section; unavailable for read cases.",
+        default="", description="Optional bf search --scope, never a #section; unavailable for read cases."
     )
-    limit: Annotated[int, Field(ge=1, le=50)] = Field(
-        default=10, description="Maximum search hits; unavailable for read cases."
-    )
-    read: str | None = Field(
-        default=None, description="Exact ref or page; an empty string reads home. Use instead of query."
-    )
+    limit: Annotated[int, Field(ge=1, le=50)] = Field(default=10, description="Max hits; unavailable for read cases.")
+    read: str | None = Field(default=None, description="Exact ref or page; '' reads home. Use instead of query.")
     # A note path without #fragment matches any of its sections.
-    expect: list[Nonblank] = Field(
-        default_factory=list, description="Refs that must appear; whole-note refs match any section."
-    )
+    expect: list[Nonblank] = Field(default_factory=list, description="Refs expected; whole-note refs match sections.")
     forbid: list[Nonblank] = Field(default_factory=list, description="Refs that must not appear.")
     # Each text must appear in the reply: search titles and excerpts, or any text of a read.
     text: list[Nonblank] = Field(
@@ -98,11 +89,10 @@ class Case(Model):
 
     _name = field_validator("name")(clean)
 
-    # Syntax is checked while loading, so a malformed case names its suite and field before any retrieval.
+    # Checked on load so malformed cases name their suite and field before retrieval runs.
     @field_validator("scope", "read", "expect", "forbid")
     @classmethod
     def syntax(cls, value: str | list[str] | None, info: ValidationInfo) -> str | list[str] | None:
-        # An expected or forbidden ref is one a reply lists, so `bf read` takes it: a page's #fragment never matches.
         check = {"scope": _bounds}.get(info.field_name or "", readable)
         try:
             for item in value if isinstance(value, list) else [] if value is None else [value]:
@@ -120,7 +110,6 @@ class Case(Model):
         if self.read is not None and (self.scope or "limit" in self.model_fields_set):
             raise ValueError(f"case {self.name}: scope and limit apply to query cases")
         if self.read is None:
-            # bf search's own checks: a query it rejects as invalid input fails while loading.
             try:
                 query(self.query, self.scope, limit=self.limit)
             except Error as error:
@@ -131,7 +120,7 @@ class Case(Model):
 class Suite(Model):
     """A bounded collection of retrieval assertions; evaluated offline without executing programs."""
 
-    version: Literal[10] = Field(description="Brain format, shared with bf.yaml; independent of the package version.")
+    version: Literal[11] = Field(description="Brain format, shared with bf.yaml; independent of the package version.")
     cases: Annotated[list[Case], Field(min_length=1, max_length=200)] = Field(
         description="One to 200 retrieval cases with unique names."
     )
@@ -184,8 +173,11 @@ def _whole(store: Store, ref: str) -> dict[str, object]:
         if reply.get("sha256") != first["sha256"]:
             raise Error("exact reply changed during evaluation; rerun bf eval")
     text = "".join(parts)
-    paging = {"offset", "next_offset", "total_characters", "outline", "outline_truncated"}
-    whole = {key: value for key, value in first.items() if key not in paging}
+    whole = {
+        k: v
+        for k, v in first.items()
+        if k not in {"offset", "next_offset", "total_characters", "outline", "outline_truncated"}
+    }
     if "record" in whole:
         whole["record"] = {**cast("dict[str, object]", whole["record"]), "text": text}
     else:
@@ -200,22 +192,18 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
         try:
             reply = _whole(store, case.read)
         except NotFoundError:
-            # Nothing to read answers "is anything there?"; every other failure fails the case.
             reply = {}
-        pairs = [(key, value) for key, value in _strings(reply) if key != "notice"]
-        # An exact record read names no kind: address it as a record, whose id may hold `#`, never as a note's section.
+        pairs = [(k, v) for k, v in _strings(reply) if k != "notice"]
         entries = [(str(entry.get("brain", name)), entry) for entry in _entries(reply)]
         return (
             reply,
             [str(entry["ref"]) for _, entry in entries],
             [str(entry["ref"]) for brain, entry in entries if brain == name]
-            + [value for key, value in pairs if key == "uri"]
+            + [v for k, v in pairs if k == "uri"]
             + [address(brain, {"kind": "record", **entry} if "record" in entry else entry) for brain, entry in entries],
-            "\n".join(value for _, value in pairs),
+            "\n".join(v for _, v in pairs),
             [],
         )
-    # The case's results are the leading items of a deeper search: continuing a search never reorders it. A reply
-    # stops at its byte budget, so continue like a client until DEPTH items; the last page carries any problem.
     found: list[dict[str, object]] = []
     offset = 0
     while True:
@@ -224,7 +212,6 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
         if len(found) >= DEPTH or "next_offset" not in reply or reply.get("problems") or reply.get("stale"):
             break
         offset = cast("int", reply["next_offset"])
-    # With one selected brain, items omit their address: every item is the evaluated brain's.
     ranking = [
         (str(item["ref"]) if item.get("brain", name) == name else "", str(item.get("uri") or address(name, item)))
         for item in found
@@ -241,7 +228,6 @@ def _answer(store: Store, case: Case) -> tuple[dict[str, object], list[str], lis
 
 def _matches(expected: str, refs: list[str]) -> bool:
     parsed = links.parse(expected)
-    # Like split_ref, a plain ref ending in .md names a whole note, even when the note's file name holds `#`.
     whole_note = (authored(parsed.path) and not parsed.fragment) if parsed else authored(expected)
     return any(ref == expected or (whole_note and split_ref(ref)[0] == expected) for ref in refs)
 
@@ -252,9 +238,6 @@ def _ranks(expect: list[str], ranking: list[tuple[str, str]]) -> dict[str, int |
 
 
 class _Outcome(BaseModel):
-    """One case of a previous `bf eval` reply; its other fields are diagnostics."""
-
-    # Only `bf eval --baseline` validates these models: build them then, like every Model, not at import.
     model_config = ConfigDict(strict=True, defer_build=True)
 
     suite: str
@@ -271,10 +254,8 @@ class _Baseline(BaseModel):
 
 def load_baseline(value: str) -> dict[tuple[str, str], _Outcome]:
     """A previous `bf eval` reply, keyed by suite and case name."""
-    # `--baseline=~/x.json` reaches bf unexpanded, as shells expand only a word's leading tilde.
     path = expand(Path(value))
     try:
-        # Bounded bytes from a regular file: a plain open would wait on a FIFO.
         data = Store(path.parent).read(path.name)
     except (Error, OSError) as error:
         raise Error(f"baseline must be a readable regular file of at most {MAX_FILE} bytes, not a symlink") from error
@@ -286,9 +267,7 @@ def load_baseline(value: str) -> dict[tuple[str, str], _Outcome]:
 
 
 def _change(before: _Outcome, after: dict[str, object]) -> int:
-    """-1 when a pass became a failure or an expected ref ranks lower, else 1 when a failure passes or one ranks higher."""
     ranks = cast("dict[str, int | None]", after.get("rank", {}))
-    # A missing ref ranks below every position.
     moves = [
         (old or inf) - (new or inf)
         for ref, new in ranks.items()
@@ -306,7 +285,7 @@ def _compare(results: list[dict[str, object]], previous: dict[tuple[str, str], _
         if before is not None and (change := _change(before, result)):
             changes[change].append(
                 {
-                    **{key: result[key] for key in ("suite", "name", "passed", "rank") if key in result},
+                    **{k: result[k] for k in ("suite", "name", "passed", "rank") if k in result},
                     "baseline": {"passed": before.passed, **({"rank": before.rank} if before.rank else {})},
                 }
             )
@@ -319,11 +298,8 @@ def evaluate(
     """Run every suite below `path`, or one suite file; with `previous`, compare each case with that baseline."""
     paths = [path]
     if not path.endswith((".yaml", ".yml")):
-        # An editor's lock beside a suite, such as Emacs `.#retrieval.yaml`, comes and goes with an open editor, as
-        # beside notes; any other link, special file or unreadable folder fails the run by name.
         skipped: dict[str, tuple[int, int, int, int]] = {}
         listed = store.files(path, skipped=skipped)
-        # A regular file at the path, or above it as for a path below a note, leaves no folder to read suites from.
         if any(stat.S_ISREG(store.mode(name)) for name in skipped if f"{path}/".startswith(f"{name}/")):
             raise Error(f"{path}: name a folder of suites or a .yaml or .yml suite file")
         if first := min((name for name in skipped if not editor_lock(name)), default=""):
@@ -347,8 +323,6 @@ def evaluate(
             raise Error(f"invalid {name}: " + explain(error)) from error
         cases.extend((name, case) for case in parsed.cases)
     results: list[dict[str, object]] = []
-    # Each ranked search case's reciprocal rank of its best-placed expected ref within DEPTH results, even below its
-    # limit; a miss or an error counts zero.
     reciprocal: list[float] = []
     for suite, case in cases:
         ranked = case.read is None and bool(case.expect)

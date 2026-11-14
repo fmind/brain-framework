@@ -36,28 +36,12 @@ DAY_TERMS = 32
 OTHER = "other"
 _CREATE = Lock()
 _SCHEMA = """
-CREATE TABLE usage_days(
-    day TEXT PRIMARY KEY,
-    search INTEGER NOT NULL DEFAULT 0,
-    empty INTEGER NOT NULL DEFAULT 0,
-    read INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE usage_kinds(
-    day TEXT NOT NULL,
-    op TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    count INTEGER NOT NULL DEFAULT 0,
-    empty_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (day, op, kind)
-);
-CREATE TABLE usage_terms(
-    day TEXT NOT NULL,
-    term TEXT NOT NULL,
-    count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (day, term)
-);
+CREATE TABLE usage_days(day TEXT PRIMARY KEY, search INTEGER NOT NULL DEFAULT 0,
+    empty INTEGER NOT NULL DEFAULT 0, read INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE usage_kinds(day TEXT NOT NULL, op TEXT NOT NULL, kind TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0, empty_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, op, kind));
+CREATE TABLE usage_terms(day TEXT NOT NULL, term TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (day, term));
 """
-# The shape of a search's scope or of a read's page, never its text. An unknown kind is counted as `other`.
 KINDS: dict[str, frozenset[str]] = {
     "search": frozenset(
         {"none", "period", "folder", "note", "memories", "source", "source-period", "record", "identity", "tag"}
@@ -184,29 +168,21 @@ def note(store: Store, operation: str, results: int, *, kind: str, unmatched: Se
                 connection.execute(f"PRAGMA user_version={VERSION}")
             elif version != VERSION:
                 raise Error("unsupported usage database version")
-            if operation == "search":
-                connection.execute(
-                    "INSERT INTO usage_days(day,search,empty,read) VALUES(?,1,?,0) "
-                    "ON CONFLICT(day) DO UPDATE SET search=search+1, empty=empty+excluded.empty",
-                    (day, is_empty),
-                )
-            else:
-                connection.execute(
-                    "INSERT INTO usage_days(day,search,empty,read) VALUES(?,0,0,1) "
-                    "ON CONFLICT(day) DO UPDATE SET read=read+1",
-                    (day,),
-                )
+            is_search = int(operation == "search")
+            connection.execute(
+                "INSERT INTO usage_days(day,search,empty,read) VALUES(?,?,?,?) ON CONFLICT(day) DO UPDATE "
+                "SET search=search+excluded.search, empty=empty+excluded.empty, read=read+excluded.read",
+                (day, is_search, is_empty, 1 - is_search),
+            )
             connection.execute(
                 "INSERT INTO usage_kinds(day,op,kind,count,empty_count) VALUES(?,?,?,1,?) "
                 "ON CONFLICT(day,op,kind) DO UPDATE SET count=count+1, empty_count=empty_count+excluded.empty_count",
                 (day, operation, known, is_empty),
             )
-            for term in tokens:
-                connection.execute(
-                    "INSERT INTO usage_terms(day,term,count) VALUES(?,?,1) "
-                    "ON CONFLICT(day,term) DO UPDATE SET count=count+1",
-                    (day, term),
-                )
+            connection.executemany(
+                "INSERT INTO usage_terms(day,term,count) VALUES(?,?,1) ON CONFLICT(day,term) DO UPDATE SET count=count+1",
+                [(day, term) for term in tokens],
+            )
             for table in ("usage_days", "usage_kinds", "usage_terms"):
                 connection.execute(f"DELETE FROM {table} WHERE day < ?", (oldest,))  # noqa: S608 - fixed table names
             if tokens:
@@ -227,12 +203,10 @@ def note(store: Store, operation: str, results: int, *, kind: str, unmatched: Se
 
 def summary(store: Store, now: datetime | None = None) -> dict[str, Counts]:
     """Searches, searches that found nothing, and reads over today and the 6 or 29 UTC days before it."""
-    now = now or datetime.now(UTC)
-    today = now.astimezone(UTC).date()
+    today = (now or datetime.now(UTC)).astimezone(UTC).date()
     counts = {window: Counts(search=0, empty=0, read=0) for window in WINDOWS}
     starts = {window: _first(today, days) for window, days in WINDOWS.items()}
-    oldest = min(starts.values()).isoformat()
-    today_iso = today.isoformat()
+    oldest, today_iso = min(starts.values()).isoformat(), today.isoformat()
     try:
         info = store.lstat(USAGE)
         if info.st_uid != os.getuid() or info.st_mode & 0o077:
@@ -248,79 +222,56 @@ def summary(store: Store, now: datetime | None = None) -> dict[str, Counts]:
             if connection.execute("PRAGMA user_version").fetchone()[0] != VERSION:
                 return counts
             day_rows = connection.execute(
-                "SELECT day,search,empty,read FROM usage_days WHERE day>=? AND day<=?",
-                (oldest, today_iso),
+                "SELECT day,search,empty,read FROM usage_days WHERE day>=? AND day<=?", (oldest, today_iso)
             ).fetchall()
             kind_rows = connection.execute(
-                "SELECT day,op,kind,count,empty_count FROM usage_kinds WHERE day>=? AND day<=?",
-                (oldest, today_iso),
+                "SELECT day,op,kind,count,empty_count FROM usage_kinds WHERE day>=? AND day<=?", (oldest, today_iso)
             ).fetchall()
             term_rows = connection.execute(
-                "SELECT day,term,count FROM usage_terms WHERE day>=? AND day<=?",
-                (oldest, today_iso),
+                "SELECT day,term,count FROM usage_terms WHERE day>=? AND day<=?", (oldest, today_iso)
             ).fetchall()
         finally:
             connection.close()
     except OSError, sqlite3.DatabaseError, Error:
         return counts
 
+    def _windows(raw: object) -> list[str]:
+        try:
+            row_day = date.fromisoformat(str(raw))
+        except ValueError:
+            return []
+        return [] if row_day > today else [w for w, start in starts.items() if row_day >= start]
+
     totals: dict[str, dict[str, int]] = {w: {"search": 0, "empty": 0, "read": 0} for w in WINDOWS}
     kinds: dict[str, dict[str, Counter[str]]] = {w: {op: Counter() for op in KINDS} for w in WINDOWS}
     empty_kinds: dict[str, Counter[str]] = {w: Counter() for w in WINDOWS}
     unmatched: dict[str, Counter[str]] = {w: Counter() for w in WINDOWS}
-
     for row in day_rows:
-        try:
-            row_day = date.fromisoformat(str(row["day"]))
-        except ValueError:
-            continue
-        if row_day > today:
-            continue
         s, e, r = max(0, int(row["search"])), max(0, int(row["empty"])), max(0, int(row["read"]))
-        for window, start in starts.items():
-            if row_day >= start:
-                totals[window]["search"] += s
-                totals[window]["empty"] += min(e, s)
-                totals[window]["read"] += r
-
+        for w in _windows(row["day"]):
+            totals[w]["search"] += s
+            totals[w]["empty"] += min(e, s)
+            totals[w]["read"] += r
     for row in kind_rows:
-        try:
-            row_day = date.fromisoformat(str(row["day"]))
-        except ValueError:
-            continue
         op, kind = str(row["op"]), str(row["kind"])
-        if row_day > today or op not in KINDS or kind not in KINDS[op]:
-            continue
-        c, ec = max(0, int(row["count"])), max(0, int(row["empty_count"]))
-        for window, start in starts.items():
-            if row_day >= start:
+        if op in KINDS and kind in KINDS[op]:
+            c, ec = max(0, int(row["count"])), max(0, int(row["empty_count"]))
+            for w in _windows(row["day"]):
                 if c:
-                    kinds[window][op][kind] += c
+                    kinds[w][op][kind] += c
                 if op == "search" and ec:
-                    empty_kinds[window][kind] += min(ec, c)
-
+                    empty_kinds[w][kind] += min(ec, c)
     for row in term_rows:
-        try:
-            row_day = date.fromisoformat(str(row["day"]))
-        except ValueError:
-            continue
         term, c = str(row["term"]), max(0, int(row["count"]))
-        if row_day > today or not term or len(term) > MAX_TOKEN or not c:
-            continue
-        for window, start in starts.items():
-            if row_day >= start:
-                unmatched[window][term] += c
-
-    for window in WINDOWS:
-        counts[window].update(
-            search=totals[window]["search"], empty=totals[window]["empty"], read=totals[window]["read"]
-        )
-        if any(kinds[window].values()):
-            counts[window]["kinds"] = {op: dict(sorted(counter.items())) for op, counter in kinds[window].items()}
-        if empty_kinds[window]:
-            counts[window]["empty_kinds"] = dict(sorted(empty_kinds[window].items()))
-        if unmatched[window]:
-            counts[window]["empty_terms"] = [
-                {"term": term, "count": count} for term, count in _top(unmatched[window], TOP_TERMS)
-            ]
+        if term and len(term) <= MAX_TOKEN and c:
+            for w in _windows(row["day"]):
+                unmatched[w][term] += c
+    for w in WINDOWS:
+        counts[w].update(search=totals[w]["search"], empty=totals[w]["empty"], read=totals[w]["read"])
+        if any(kinds[w].values()):
+            counts[w]["kinds"] = {op: dict(sorted(counter.items())) for op, counter in kinds[w].items()}
+        if empty_kinds[w]:
+            counts[w]["empty_kinds"] = dict(sorted(empty_kinds[w].items()))
+        if unmatched[w]:
+            counts[w]["empty_terms"] = [{"term": t, "count": c} for t, c in _top(unmatched[w], TOP_TERMS)]
     return counts

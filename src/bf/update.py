@@ -15,16 +15,12 @@ from pydantic import JsonValue
 from bf import collect, index
 from bf.config import load
 from bf.jobs import Runner, deliver_due, dispatch_events, run, run_job
-from bf.models import Config, Error, Job, reason, suggest
-from bf.runtime import Queue
+from bf.models import Config, Error, reason, suggest
+from bf.runtime import Queue, sync_item_events
 from bf.storage import BusyError, Store, collecting
 
 WAIT, WORKERS = 600, 4
 _INACCESSIBLE = "inaccessible files; check permissions and free space"
-
-
-def _is_daemon(job: Job) -> bool:
-    return any(t.daemon for t in job.triggers)
 
 
 def selection(config: Config, names: tuple[str, ...] = ()) -> set[str]:
@@ -36,14 +32,8 @@ def selection(config: Config, names: tuple[str, ...] = ()) -> set[str]:
 
 def scheduled(config: Config, names: tuple[str, ...] = ()) -> list[tuple[int, str]]:
     """Selected enabled non-daemon jobs with interval triggers, as (every_seconds, name), fastest first."""
-    sel = selection(config, names)
-    return sorted(
-        (t.every, n)
-        for n in sel
-        if (j := config.jobs[n]).enabled and not _is_daemon(j)
-        for t in j.triggers
-        if t.every is not None
-    )
+    sel = ((n, config.jobs[n]) for n in selection(config, names))
+    return sorted((t.every, n) for n, j in sel if j.enabled and not j.is_daemon for t in j.triggers if t.every)
 
 
 def late(config: Config, every: int, names: tuple[str, ...] = ()) -> str:
@@ -78,6 +68,18 @@ def _exec(
         return {**base, "status": "failed", "error": reason(error, _INACCESSIBLE)}, True
 
 
+def _refresh_index(store: Store, reply: dict[str, object], *, sync_events: bool = False) -> bool:
+    try:
+        idx = index.refresh(store, wait=120, recover=True)
+        reply["index"] = idx
+        if sync_events:
+            sync_item_events(store)
+        return bool(idx["skipped"])
+    except (Error, OSError, UnicodeError) as error:
+        reply["index"] = {"error": reason(error, _INACCESSIBLE)}
+        return True
+
+
 def run_wakes(
     store: Store,
     config: Config,
@@ -94,9 +96,8 @@ def run_wakes(
     for w in queue.due_wakes():
         if stopped is not None and stopped.is_set():
             break
-        name, wid = str(w["job"]), str(w["id"])
-        job = config.jobs.get(name)
-        if name not in selected or job is None or not job.enabled or _is_daemon(job):
+        name, wid, job = str(w["job"]), str(w["id"]), config.jobs.get(str(w["job"]))
+        if name not in selected or job is None or not job.enabled or job.is_daemon:
             continue
         if not dry_run and not queue.claim_wake(wid):
             continue
@@ -118,8 +119,7 @@ def run_deliveries(
     """Attempt up to currently-pending due outbound deliveries cleanly without infinite retry loops."""
     if not (queue := Queue(store)).exists():
         return 0, False
-    pending = max(0, int(cast("int", queue.status().get("pending", 0))))
-    attempted, failed = 0, False
+    pending, attempted, failed = max(0, int(cast("int", queue.status().get("pending", 0)))), 0, False
     for target in sorted(targets) if targets else [""]:
         for _ in range(pending):
             if stopped is not None and stopped.is_set():
@@ -156,14 +156,8 @@ def update(
         def _collect(item: tuple[str, str, str, bool], run_fn: Runner = runner) -> tuple[dict[str, object], bool]:
             n, s, e, rec = item
             base: dict[str, object] = {"job": n, "emit": "records", "start": s, "end": e, "reconcile": rec}
-
-            def _go() -> dict[str, object]:
-                live = given is None
-                return collect.collect(
-                    store, n, start=s, end=e, reconcile=rec, runner=run_fn, clock=lambda: now, live=live
-                )
-
-            return _exec(base, dry_run, "collected", _go)
+            p = partial(collect.collect, store, n, start=s, end=e, reconcile=rec)
+            return _exec(base, dry_run, "collected", partial(p, runner=run_fn, clock=lambda: now, live=given is None))
 
         if len(rec_win) > 1 and not dry_run:
             stop = Event()
@@ -178,49 +172,49 @@ def update(
             outcomes = [_collect(w) for w in rec_win]
         results.extend(r for r, _ in outcomes)
         failed |= any(f for _, f in outcomes)
-
     sched_now = given or max(datetime.now(UTC), now + timedelta(microseconds=1))
-    other = [w for w in collect.due_jobs(store, sched_now) if w[0] in selected and not _is_daemon(config.jobs[w[0]])]
-    other.sort(key=lambda w: (config.jobs[w[0]].is_low_priority, w[0]))
-    for n, s, e in other:
+    other = [w for w in collect.due_jobs(store, sched_now) if w[0] in selected and not config.jobs[w[0]].is_daemon]
+    after_records = len(results)
+    for n, s, e in sorted(other, key=lambda w: (config.jobs[w[0]].is_low_priority, w[0])):
         base: dict[str, object] = {"job": n, "emit": config.jobs[n].emit, "kind": "schedule", "start": s, "end": e}
         fn = partial(run_job, store, n, since=s, until=e, kind="schedule", runner=runner)
         res, err = _exec(base, dry_run, "ran", fn)
         results.append(res)
         failed |= err
+    reply: dict[str, object] = {"brain": config.name, "jobs": results}
+    if not dry_run:
+        failed |= _refresh_index(store, reply, sync_events=True)
+        if Queue(store).exists():
 
-    if not dry_run and Queue(store).exists():
+            def _on_event(n: str, evs: list[JsonValue]) -> dict[str, object]:
+                nonlocal failed
+                base: dict[str, object] = {"job": n, "emit": config.jobs[n].emit, "kind": "event"}
+                fn = partial(run_job, store, n, kind="event", events=evs, runner=runner, check_gate=False)
+                out, err = _exec(base, False, "ran", fn)
+                results.append(out)
+                failed |= err
+                return out
 
-        def _on_event(n: str, evs: list[JsonValue]) -> dict[str, object]:
-            nonlocal failed
-            base: dict[str, object] = {"job": n, "emit": config.jobs[n].emit, "kind": "event"}
-            out, err = _exec(base, False, "ran", partial(run_job, store, n, kind="event", events=evs, runner=runner))
-            results.append(out)
-            failed |= err
-            return out
-
-        active = [n for n in sorted(selected) if not _is_daemon(config.jobs[n])]
-        dispatch_events(store, active, runner=runner, submit=_on_event)
-
+            non_daemon = [n for n in sorted(selected) if not config.jobs[n].is_daemon]
+            dispatch_events(store, non_daemon, runner=runner, submit=_on_event)
     wake_res, wake_failed = run_wakes(store, config, selected, dry_run=dry_run, runner=runner)
     results.extend(wake_res)
+    failed |= wake_failed
+    if not dry_run and any(
+        r.get("status") == "ran" and ((j := config.jobs[str(r["job"])]).emit == "action" or bool(j.prompt))
+        for r in results[after_records:]
+    ):
+        failed |= _refresh_index(store, reply)
     delivered, del_failed = (0, False) if dry_run else run_deliveries(store, selected if jobs else (), runner=runner)
-    failed |= wake_failed or del_failed
-    manual = [
+    failed |= del_failed
+    if manual := [
         n
         for n in sorted(selected)
         if (j := config.jobs[n]).enabled
         and (j.run or j.prompt or not j.send)
         and not any(t.every or t.at or t.daemon or t.event for t in j.triggers)
-    ]
-    extras: dict[str, object] = {k: v for k, v in (("manual", manual), ("deliveries", delivered)) if v}
-    reply: dict[str, object] = {"brain": config.name, "jobs": results, **extras}
-    if not dry_run:
-        try:
-            idx = index.refresh(store, wait=120, recover=True)
-            reply["index"] = idx
-            failed |= bool(idx["skipped"])
-        except (Error, OSError, UnicodeError) as error:
-            reply["index"] = {"error": reason(error, _INACCESSIBLE)}
-            failed = True
+    ]:
+        reply["manual"] = manual
+    if delivered:
+        reply["deliveries"] = delivered
     return {"ok": not failed, "dry_run": dry_run, **reply}

@@ -86,15 +86,15 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
     }
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 10\ncases:\n  - name: decision\n    query: retention decision\n    expect: [projects/offline.md]\n",
+        b"version: 11\ncases:\n  - name: decision\n    query: retention decision\n    expect: [projects/offline.md]\n",
     )
     assert invoke("eval", "--brain", "fixture")["passed"]
-    brain.write("evals/retrieval.yaml", b"version: 10\ncases:\n  - name: missing\n    query: lunch\n    empty: true\n")
+    brain.write("evals/retrieval.yaml", b"version: 11\ncases:\n  - name: missing\n    query: lunch\n    empty: true\n")
     failed = invoke("eval", "--brain", "fixture", code=1)
     assert failed["cases"][0]["returned"] == ["meetings:lunch"]
     other = tmp_path / "clone"
     other.mkdir()
-    (other / "bf.yaml").write_text("version: 10\nname: clone\n")
+    (other / "bf.yaml").write_text("version: 11\nname: clone\n")
     assert invoke("register", str(other))["brain"] == "clone"
     assert invoke("update", "--brain", "clone", "--dry-run")["jobs"] == []
     brain.write("projects/bad.md", b"# Bad [x](missing.md)\n")
@@ -105,12 +105,12 @@ def test_cli_lifecycle(tmp_path: Path, brain: Store) -> None:
 def test_status_check_fails_on_overdue_sources(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n",
+        b"version: 11\nname: fixture\njobs:\n  mail:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n",
     )
     report = invoke("status", "--brain", "fixture", "--check", code=1)
     assert report["sources"]["mail"]["freshness"] == "never"
     brain.write(
-        "bf.yaml", b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [sh, -c, exit 3]\n    emit: records\n"
+        "bf.yaml", b"version: 11\nname: fixture\njobs:\n  mail:\n    run: [sh, -c, exit 3]\n    emit: records\n"
     )
     assert invoke("collect", "mail", "--brain", "fixture", "--since", "2d", code=1) == {}
     # A failed manual job reports its error, log and attention entry and fails --check while enabled.
@@ -119,12 +119,12 @@ def test_status_check_fails_on_overdue_sources(brain: Store) -> None:
     assert entry["log"].endswith("mail.log")
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  mail:\n    enabled: false\n    run: [sh, -c, exit 3]\n    emit: records\n",
+        b"version: 11\nname: fixture\njobs:\n  mail:\n    enabled: false\n    run: [sh, -c, exit 3]\n    emit: records\n",
     )
     assert invoke("status", "--brain", "fixture", "--check", code=0)["healthy"] is True
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [sh, -c, exit 3]\n    emit: records\n    on: {every: 60}\n",
+        b"version: 11\nname: fixture\njobs:\n  mail:\n    run: [sh, -c, exit 3]\n    emit: records\n    on: {every: 60}\n",
     )
     assert invoke("status", "--brain", "fixture", "--check", code=1)["healthy"] is False
 
@@ -132,10 +132,10 @@ def test_status_check_fails_on_overdue_sources(brain: Store) -> None:
 def test_status_and_queue_state_every_instant_with_the_local_offset(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  chat:\n    run: [receive-chat]\n    emit: messages\n"
+        b"version: 11\nname: fixture\njobs:\n  chat:\n    run: [receive-chat]\n    emit: messages\n"
         b"    on: {daemon: true}\n    send: [send-chat]\n  personal:\n    prompt: prompts/personal.md\n"
         b"    harness: [harness]\n    emit: message\n    post: chat\n"
-        b"    on:\n      - {every: 1800}\n      - {event: {kind: channel.received, source: chat}}\n",
+        b"    on:\n      - {every: 1800}\n      - {event: {kind: message.received, source: chat}}\n",
     )
     brain.write("prompts/personal.md", b"Answer {{context}}.\n")
     at = datetime.now(UTC).isoformat()
@@ -425,7 +425,7 @@ def test_encoding_failures_name_the_note_and_replies_stay_utf8(brain: Store) -> 
 def test_eval_rejects_malformed_cases_before_any_retrieval(brain: Store, case: str, location: str, reason: str) -> None:
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 10\ncases:\n  - name: valid\n    query: offline\n    expect: [projects/offline.md]\n"
+        b"version: 11\ncases:\n  - name: valid\n    query: offline\n    expect: [projects/offline.md]\n"
         b"  - name: malformed\n" + case.encode(),
     )
     result = CliRunner().invoke(app, ["eval", "--brain", "fixture"])
@@ -439,7 +439,7 @@ def test_eval_rejects_malformed_cases_before_any_retrieval(brain: Store, case: s
 def test_eval_reports_ranks_and_compares_them_with_a_baseline(brain: Store, tmp_path: Path) -> None:
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 10\ncases:\n"
+        b"version: 11\ncases:\n"
         b"  - name: decision\n    query: retention decision\n    expect: [projects/offline.md#decision]\n"
         b"  - name: rollout\n    query: rollout checklist\n    expect: [bf://fixture/projects/rollout.md]\n"
         b"  - name: unknown-source\n    query: x\n    scope: memories/absent\n    expect: [absent:x]\n"
@@ -493,7 +493,7 @@ def test_eval_reads_every_page_of_a_long_note(brain: Store) -> None:
     assert "Closing marker" not in first["text"]
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 10\ncases:\n  - name: long\n    read: concepts/long.md\n    text: [Closing marker]\n",
+        b"version: 11\ncases:\n  - name: long\n    read: concepts/long.md\n    text: [Closing marker]\n",
     )
     assert invoke("eval", "--brain", "fixture")["score"] == "1/1"
 
@@ -588,7 +588,7 @@ def test_new_brains_point_editors_at_the_schemas_of_their_release(tmp_path: Path
 def test_bf_yaml_mistakes_get_plain_reasons_and_the_closest_allowed_key(
     brain: Store, config: str, expected: str
 ) -> None:
-    brain.write("bf.yaml", b"version: 10\nname: fixture\n" + config.encode())
+    brain.write("bf.yaml", b"version: 11\nname: fixture\n" + config.encode())
     with pytest.raises(Error) as caught:
         load(brain)
     if config.endswith("25:61'}]\n"):
@@ -707,7 +707,7 @@ def text(result: object) -> str:
 def test_typed_tag_links_validate_and_read_through_cli_and_mcp(brain: Store, tag: str) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\nfields:\n  depends-on:\n    description: Explicit dependency.\n",
+        b"version: 11\nname: fixture\nfields:\n  depends-on:\n    description: Explicit dependency.\n",
     )
     brain.write("projects/member.md", f"---\ntype: project\ntags: [{json.dumps(tag)}]\n---\n# Tagged\n".encode())
     target = links.address("fixture", f"tags/{tag}")
@@ -1027,7 +1027,7 @@ def test_export_scope_selects_the_items_search_would_search_without_pages(brain:
 
 
 def test_errors_name_what_exists(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  briefs:\n    run: [echo]\n    emit: records\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n  briefs:\n    run: [echo]\n    emit: records\n")
     runner = CliRunner()
     # A mistyped page or note path names its closest existing ones.
     for ref, hint in (("project", "projects"), ("projects/ofline.md", "projects/offline.md")):
@@ -1101,7 +1101,7 @@ def test_diagnostics_escape_terminal_controls_in_brain_file_names(
     assert isinstance(missing, CallToolResult)
     assert shown in text(missing)
     # A bf.yaml key reaches every command's failure through its validation message.
-    brain.write("bf.yaml", b'version: 10\nname: fixture\n"\\e]0;K\\a": 1\n')
+    brain.write("bf.yaml", b'version: 11\nname: fixture\n"\\e]0;K\\a": 1\n')
     monkeypatch.setattr(sys, "argv", ["bf", "read", "--brain", str(brain.root)])
     with pytest.raises(SystemExit):
         main()
@@ -1123,7 +1123,7 @@ def test_tag_pages_and_eval_folders_accept_a_trailing_slash(brain: Store) -> Non
         "search", "retention", "--scope", "2026-09", "--brain", "fixture"
     )
     brain.write(
-        "evals/retrieval.yaml", b"version: 10\ncases:\n- name: d\n  query: retention\n  expect: [projects/offline.md]\n"
+        "evals/retrieval.yaml", b"version: 11\ncases:\n- name: d\n  query: retention\n  expect: [projects/offline.md]\n"
     )
     assert invoke("eval", "--path", "evals/", "--brain", "fixture")["score"] == "1/1"
 

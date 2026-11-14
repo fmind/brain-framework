@@ -25,7 +25,7 @@ from bf.storage import Store, writer
 from bf.validate import validate
 from test_interfaces import invoke
 
-CONFIG = b"""version: 10
+CONFIG = b"""version: 11
 name: fixture
 fields:
   sender:
@@ -52,7 +52,7 @@ def ingest(brain: Store, values: list[dict], sensor: str = "mail") -> dict:
 
 
 def test_undeclared_camel_and_kebab_relations_work_and_rebuild_cleanly(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [fake-provider]\n    emit: records\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n  mail:\n    run: [fake-provider]\n    emit: records\n")
     brain.write("projects/alice.md", b"---\ntype: person\naliases: [person:alice, account:alice]\n---\n# Alice\n")
     brain.write(
         "projects/note.md",
@@ -193,9 +193,9 @@ def test_optional_field_rules_validate_targets_and_broader_without_legacy_keys()
         ({"owner": {"targets": []}}, "targets"),
     ]:
         with pytest.raises(ValidationError, match=message):
-            Config.model_validate({"version": 10, "name": "test", "fields": schema})
+            Config.model_validate({"version": 11, "name": "test", "fields": schema})
     with pytest.raises(ValidationError):
-        Config.model_validate({"version": 10, "name": "test", "jobs": {"x": {"run": ["fake"], "fields": {}}}})
+        Config.model_validate({"version": 11, "name": "test", "jobs": {"x": {"run": ["fake"], "fields": {}}}})
     with pytest.raises(ValidationError):
         Config.model_validate({"version": 9, "name": "old"})
 
@@ -268,11 +268,11 @@ def test_cli_mcp_and_evaluation_share_relation_pages(brain: Store) -> None:
     )
     brain.write(
         "evals/relations.yaml",
-        b"version: 10\ncases:\n- name: sender\n  read: person:alice\n  expect: [mail:one]\n  text: [sender]\n",
+        b"version: 11\ncases:\n- name: sender\n  read: person:alice\n  expect: [mail:one]\n  text: [sender]\n",
     )
     brain.write(
         "evals/nested/empty.yml",
-        b"version: 10\ncases:\n- name: absent\n  read: person:unknown\n  empty: true\n",
+        b"version: 11\ncases:\n- name: absent\n  read: person:unknown\n  empty: true\n",
     )
     assert evaluate(brain)["score"] == "2/2"
     assert evaluate(brain, "evals/relations.yaml")["score"] == "1/1"
@@ -280,7 +280,7 @@ def test_cli_mcp_and_evaluation_share_relation_pages(brain: Store) -> None:
         with pytest.raises(ValidationError):
             Query.model_validate(params)
     brain.write(
-        "evals/duplicate.yaml", b"version: 10\ncases:\n- name: twice\n  empty: true\n- name: twice\n  empty: true\n"
+        "evals/duplicate.yaml", b"version: 11\ncases:\n- name: twice\n  empty: true\n- name: twice\n  empty: true\n"
     )
     with pytest.raises(Error, match="duplicate"):
         evaluate(brain)

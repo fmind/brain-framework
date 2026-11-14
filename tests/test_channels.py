@@ -18,7 +18,7 @@ from bf.runtime import Message, Queue, QueueFullError
 from bf.storage import Store
 
 START, END, INSIDE = "2026-10-15T00:00:00.000000Z", "2026-10-16T00:00:00.000000Z", "2026-10-15T12:00:00.000000Z"
-DAEMON_CONFIG = b"""version: 10
+DAEMON_CONFIG = b"""version: 11
 name: fixture
 jobs:
   chat:
@@ -26,7 +26,7 @@ jobs:
     on: {daemon: true}
     emit: messages
 """
-BATCH_CONFIG = b"""version: 10
+BATCH_CONFIG = b"""version: 11
 name: fixture
 jobs:
   chat:
@@ -428,7 +428,7 @@ def test_job_config_names_missing_post_target_without_quoting_bad_values(job_cfg
     with pytest.raises(ValidationError) as failure:
         Config.model_validate(
             {
-                "version": 10,
+                "version": 11,
                 "name": "fixture",
                 "jobs": {
                     "listen": {"run": ["listen"], "on": {"daemon": True}, "emit": "messages"},

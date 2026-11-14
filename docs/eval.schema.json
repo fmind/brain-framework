@@ -42,7 +42,7 @@
           "type": "boolean"
         },
         "expect": {
-          "description": "Refs that must appear; whole-note refs match any section.",
+          "description": "Refs expected; whole-note refs match sections.",
           "items": { "pattern": "\\S", "type": "string" },
           "title": "Expect",
           "type": "array"
@@ -55,7 +55,7 @@
         },
         "limit": {
           "default": 10,
-          "description": "Maximum search hits; unavailable for read cases.",
+          "description": "Max hits; unavailable for read cases.",
           "maximum": 50,
           "minimum": 1,
           "title": "Limit",
@@ -69,7 +69,7 @@
         },
         "query": {
           "default": "",
-          "description": "Search words; use either query or read.",
+          "description": "Search words; use query or read.",
           "maxLength": 4096,
           "title": "Query",
           "type": "string"
@@ -77,12 +77,12 @@
         "read": {
           "anyOf": [{ "type": "string" }, { "type": "null" }],
           "default": null,
-          "description": "Exact ref or page; an empty string reads home. Use instead of query.",
+          "description": "Exact ref or page; '' reads home. Use instead of query.",
           "title": "Read"
         },
         "scope": {
           "default": "",
-          "description": "Optional search scope, as bf search --scope takes it: never a #section; unavailable for read cases.",
+          "description": "Optional bf search --scope, never a #section; unavailable for read cases.",
           "title": "Scope",
           "type": "string"
         },
@@ -111,7 +111,7 @@
       "type": "array"
     },
     "version": {
-      "const": 10,
+      "const": 11,
       "description": "Brain format, shared with bf.yaml; independent of the package version.",
       "title": "Version",
       "type": "integer"

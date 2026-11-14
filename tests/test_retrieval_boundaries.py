@@ -99,7 +99,7 @@ def test_authored_folder_continuation(brain: Store) -> None:
 def test_empty_search_describes_failed_and_never_collected_sources(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b'version: 10\nname: fixture\njobs:\n  mail:\n    run: ["fake"]\n    emit: records\n    on:\n      every: 3600\n',
+        b'version: 11\nname: fixture\njobs:\n  mail:\n    run: ["fake"]\n    emit: records\n    on:\n      every: 3600\n',
     )
 
     def failed(*_args: object) -> bytes:
@@ -227,7 +227,7 @@ def test_evaluation_assembles_paged_exact_reads_before_checking_them(brain: Stor
     records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000 + "closing clause")])
     brain.write(
         "evals/large.yaml",
-        b"version: 10\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n  text: [closing clause]\n",
+        b"version: 11\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n  text: [closing clause]\n",
     )
     assert "closing clause" not in str(retrieve.read(brain, "docs:large"))
     reply = evaluate(brain)
@@ -238,7 +238,7 @@ def test_evaluation_rejects_a_paged_read_that_changes_between_pages(
     brain: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     records_file(brain, "docs", [Record(id="large", title="Large", text="evidence " * 20000)])
-    brain.write("evals/large.yaml", b"version: 10\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n")
+    brain.write("evals/large.yaml", b"version: 11\ncases:\n- name: large\n  read: docs:large\n  expect: [docs:large]\n")
     original = retrieve.read
 
     def changing(store: Store, ref: str = "", *, offset: int = 0, counted: bool = True) -> dict[str, object]:
@@ -441,7 +441,7 @@ sys.addaudithook(_audit)
 def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [sensors/marker.sh]\n    emit: records\n"
+        b"version: 11\nname: fixture\njobs:\n  mail:\n    run: [sensors/marker.sh]\n    emit: records\n"
         b"    on:\n      every: 60\n  digest:\n    run: [routines/marker.sh]\n    on:\n      every: 60\n",
     )
     marker = brain.root / "ran"
@@ -452,7 +452,7 @@ def test_retrieval_never_starts_programs_or_opens_connections(brain: Store) -> N
         script.chmod(0o700)
     brain.write(
         "evals/retrieval.yaml",
-        b"version: 10\ncases:\n- name: decision\n  query: retention\n  expect: [projects/offline.md]\n",
+        b"version: 11\ncases:\n- name: decision\n  query: retention\n  expect: [projects/offline.md]\n",
     )
     mcp = server(brain)
     events: set[str] = set()
@@ -506,7 +506,7 @@ def test_an_identity_read_without_a_cache_keeps_its_cause(
 def test_a_brain_whose_bf_yaml_fails_names_its_cause(brain: Store, tmp_path: Path) -> None:
     (tmp_path / "other").mkdir()
     other = Store(tmp_path / "other")
-    other.write("bf.yaml", b"version: 10\nname: other\nbogus: true\n")
+    other.write("bf.yaml", b"version: 11\nname: other\nbogus: true\n")
     for call in (
         lambda: retrieve.read(other, "projects/offline.md"),
         lambda: retrieve.search(other, Query(text="offline")),

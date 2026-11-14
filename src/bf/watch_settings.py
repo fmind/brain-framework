@@ -25,63 +25,33 @@ def settings(store: Store, **overrides: object) -> WatchSettings:
         raise Error("invalid watch overrides: " + explain(error)) from error
 
 
+_DEVNULL = subprocess.DEVNULL
+_GDBUS = ("call", "--session", "--dest=org.freedesktop.Notifications", "--object-path=/org/freedesktop/Notifications")
+_GDBUS_M = ("--method=org.freedesktop.Notifications.Notify", "Brain Framework", "uint32 0", "")
+_APPLE = "display notification (item 2 of argv) with title (item 1 of argv)"
+
+
+def _argv(title: str, body: str, path: str | None) -> tuple[str | None, list[str]]:
+    if sys.platform == "darwin":
+        exe = shutil.which("osascript", path=path)
+        return exe, [exe or "osascript", "-e", "on run argv", "-e", _APPLE, "-e", "end run", title, body]
+    if exe := shutil.which("notify-send", path=path):
+        return exe, [exe, "--app-name=Brain Framework", "--", title, body]
+    exe = shutil.which("gdbus", path=path)
+    return exe, [exe or "gdbus", *_GDBUS, *_GDBUS_M, title, body, "@as []", "@a{sv} {}", "int32 5000"]
+
+
 def desktop(title: str, body: str) -> bool:
     """Use native local notifications, fixed scripts and literal argv; never a shell."""
     env = environment()
-    # Look tools up on the sanitized PATH they run with: a relative entry would find a program in the working
-    # directory, such as the brain root.
-    path = env.get("PATH")
-    if sys.platform == "darwin":
-        executable = shutil.which("osascript", path=path)
-        argv = [
-            executable or "osascript",
-            "-e",
-            "on run argv",
-            "-e",
-            "display notification (item 2 of argv) with title (item 1 of argv)",
-            "-e",
-            "end run",
-            title,
-            body,
-        ]
-    elif executable := shutil.which("notify-send", path=path):
-        argv = [executable, "--app-name=Brain Framework", "--", title, body]
-    else:
-        executable = shutil.which("gdbus", path=path)
-        argv = [
-            executable or "gdbus",
-            "call",
-            "--session",
-            "--dest",
-            "org.freedesktop.Notifications",
-            "--object-path",
-            "/org/freedesktop/Notifications",
-            "--method",
-            "org.freedesktop.Notifications.Notify",
-            "Brain Framework",
-            "uint32 0",
-            "",
-            title,
-            body,
-            "@as []",
-            "@a{sv} {}",
-            "int32 5000",
-        ]
-    if not executable:
+    exe, argv = _argv(title, body, env.get("PATH"))
+    if not exe:
         return False
     try:
-        return (
-            subprocess.run(  # noqa: S603 - fixed native tool, no shell or provider content
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env=env,
-                timeout=5,
-                check=False,
-            ).returncode
-            == 0
+        proc = subprocess.run(  # noqa: S603 - fixed native tool, no shell or provider content
+            argv, check=False, stdin=_DEVNULL, stdout=_DEVNULL, stderr=_DEVNULL, env=env, timeout=5
         )
+        return proc.returncode == 0
     except OSError, subprocess.TimeoutExpired:
         return False
 
@@ -94,36 +64,22 @@ class Notifications:
     warned: bool = False
 
     def completed(self, *, failures: tuple[str, ...], worked: bool, now: float) -> str:
-        """Notify on failure transitions/recovery or successful work, never idle cycles.
-
-        Work completes even while another program keeps failing, such as one waiting out its retry backoff.
-        """
-        mode = self.preferences.notifications
-        if mode == "off":
+        """Notify on failure transitions/recovery or successful work, never idle cycles."""
+        if (mode := self.preferences.notifications) == "off":
             return ""
-        recovery = bool(self.failure) and not failures
-        changed_failure = bool(failures) and failures != self.failure
-        event = (
-            "failed"
-            if changed_failure and mode in {"failure", "all"}
-            else "recovered"
-            if recovery
-            else "completed"
-            if worked and mode in {"success", "all"}
-            else ""
-        )
-        if not event:
-            self.failure = failures
+        event = ""
+        if failures and failures != self.failure and mode in {"failure", "all"}:
+            event = "failed"
+        elif self.failure and not failures:
+            event = "recovered"
+        elif worked and mode in {"success", "all"}:
+            event = "completed"
+        if not event or now - self.last_sent < self.preferences.notification_cooldown:
+            if not event:
+                self.failure = failures
             return ""
-        if now - self.last_sent < self.preferences.notification_cooldown:
+        self.last_sent, self.failure = now, failures
+        if desktop(f"Brain collection {event}", "Open bf watch to inspect local program status.") or self.warned:
             return ""
-        # Remember attempts too: an unavailable desktop must not cause repeated subprocesses or warnings.
-        self.last_sent = now
-        self.failure = failures
-        if desktop(f"Brain collection {event}", "Open bf watch to inspect local program status."):
-            return ""
-        if not self.warned:
-            self.warned = True
-            # One screen line (80 columns): the dashboard truncates longer messages.
-            return "Desktop alerts unavailable; collection continues (set notifications: off)"
-        return ""
+        self.warned = True
+        return "Desktop alerts unavailable; collection continues (set notifications: off)"

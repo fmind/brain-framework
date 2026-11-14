@@ -31,7 +31,7 @@ from bf.storage import QUEUE, Store
 def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  mail:\n    run: [echo]\n    emit: records\n    mode: window\n    on: {every: 3600}\n"
         b"    reconcile: {every: 86400, lookback: 604800}\n"
         b"  folders:\n    run: [echo]\n    emit: records\n    mode: snapshot\n    on: {every: 86400}\n"
@@ -96,7 +96,7 @@ def test_status_describes_each_program_once_in_canonical_utc(brain: Store) -> No
 def test_history_offsets_read_back_as_canonical_utc_in_status_and_home(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  mail:\n    run: [echo]\n    emit: records\n    mode: window\n    on: {every: 3600}\n"
         b"  review:\n    run: [review]\n    emit: log\n    on: {every: 60}\n",
     )
@@ -143,7 +143,7 @@ def test_invalid_usage_counts_do_not_break_health_or_hide_valid_events(brain: St
 def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  current:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n"
         b"  missing:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n"
         b"  paused:\n    run: [echo]\n    emit: records\n    enabled: false\n"
@@ -175,7 +175,7 @@ def test_collection_coverage_does_not_claim_archives_are_fresh(brain: Store) -> 
 
 
 def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  current:\n    run: [echo]\n    emit: records\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n  current:\n    run: [echo]\n    emit: records\n")
     brain.write(
         "memories/current/ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb.json",
         b'{"id":"a","title":"First"}\n',
@@ -196,7 +196,7 @@ def test_status_keeps_indexed_totals_separate_from_last_run_counts(brain: Store)
 def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failures_are_inactive(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  agenda:\n    run: [echo]\n    emit: records\n    mode: snapshot\n    enabled: false\n",
+        b"version: 11\nname: fixture\njobs:\n  agenda:\n    run: [echo]\n    emit: records\n    mode: snapshot\n    enabled: false\n",
     )
     Queue(brain).remember(
         "agenda",
@@ -215,7 +215,7 @@ def test_snapshot_health_does_not_claim_a_historical_window_and_disabled_failure
 def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  meetings:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n",
+        b"version: 11\nname: fixture\njobs:\n  meetings:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n",
     )
     record = cast("dict[str, object]", read(brain, "meetings:decision-1")["collection"])
     found = cast("list[dict[str, object]]", search(brain, Query(text="offline retrieval"))["sources"])
@@ -230,9 +230,9 @@ def test_reads_and_searches_report_the_same_freshness_as_status(brain: Store) ->
 def test_status_fails_on_a_broken_brain(tmp_path: Path) -> None:
     (tmp_path / "other-dir").mkdir()
     other = Store(tmp_path / "other-dir")
-    other.write("bf.yaml", b"version: 10\nname: other\n")
+    other.write("bf.yaml", b"version: 11\nname: other\n")
     register(other, default=True)
-    other.write("bf.yaml", b"version: 10\nname: [broken\n")
+    other.write("bf.yaml", b"version: 11\nname: [broken\n")
     for command in (["status"], ["status", "--check"], ["status", "--brain", str(other.root)]):
         result = CliRunner().invoke(app, command)
         assert result.exit_code == 1
@@ -242,7 +242,7 @@ def test_status_fails_on_a_broken_brain(tmp_path: Path) -> None:
 def test_status_fails_when_the_default_brain_is_absent(tmp_path: Path) -> None:
     (tmp_path / "moved").mkdir()
     moved = Store(tmp_path / "moved")
-    moved.write("bf.yaml", b"version: 10\nname: moved\n")
+    moved.write("bf.yaml", b"version: 11\nname: moved\n")
     register(moved, default=True)
     (tmp_path / "moved").rename(tmp_path / "elsewhere")
     result = CliRunner().invoke(app, ["status", "--check"])
@@ -300,7 +300,7 @@ def test_status_reports_the_bytes_each_source_holds(brain: Store) -> None:
 def test_a_source_that_succeeds_without_new_evidence_falls_silent(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  papers:\n    run: [echo]\n    emit: records\n    on: {every: 86400}\n    silent_after: 345600\n"
         b"  quiet:\n    run: [echo]\n    emit: records\n    on: {every: 86400}\n",
     )
@@ -364,7 +364,7 @@ def test_status_names_the_installed_and_pinned_runtime(brain: Store) -> None:
         assert "pinned" not in cast("dict", health.report(brain))["runtime"]
 
 
-DISPATCH = b"""version: 10
+DISPATCH = b"""version: 11
 name: fixture
 defaults:
   harness: [harness]
@@ -502,7 +502,7 @@ def test_status_names_unresolved_work_and_recovers_once_it_is_resolved(brain: St
 def test_a_wall_clock_schedule_is_overdue_once_a_slot_after_its_last_success_passes_unrun(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  daily:\n    run: [daily]\n    emit: log\n    on: {at: '09:00', timezone: UTC}\n"
         b"  weekly:\n    run: [weekly]\n    emit: log\n    on: {at: '09:00', timezone: UTC, days: [mon]}\n",
     )
@@ -525,7 +525,7 @@ def test_a_wall_clock_schedule_is_overdue_once_a_slot_after_its_last_success_pas
 
 def test_a_schedule_without_a_success_needs_attention_only_once_due(brain: Store) -> None:
     morning = b"  morning:\n    run: [morning]\n    emit: log\n    on: {at: '07:30', timezone: UTC, days: [mon, tue, wed, thu, fri]}\n"
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + morning)
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n" + morning)
     sunday, monday = datetime(2026, 9, 27, 19, 5, tzinfo=UTC), datetime(2026, 9, 28, 7, 31, tzinfo=UTC)
     # Declared on Sunday evening: it has not run, which its freshness says, but its first slot is Monday morning.
     status = cast("dict", health.report(brain, now=sunday))
@@ -541,7 +541,7 @@ def test_a_schedule_without_a_success_needs_attention_only_once_due(brain: Store
     assert attention(brain, now=monday) == late
     # An interval schedule without a success is due at once beside a waiting wall-clock job.
     hourly = b"  hourly:\n    run: [hourly]\n    emit: log\n    on: {every: 3600}\n"
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + morning + hourly)
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n" + morning + hourly)
     assert attention(brain, now=sunday) == [{"kind": "job", "name": "hourly", "freshness": "never"}]
     Queue(brain).remember("hourly", last_success=timestamp(sunday.isoformat()))
     assert attention(brain, now=sunday) == []
@@ -552,19 +552,19 @@ def test_status_check_passes_before_a_new_schedule_first_falls_due(brain: Store)
     later = WEEKDAYS[(datetime.now(UTC).weekday() + 3) % 7]
     waiting = f"  weekly:\n    run: [weekly]\n    emit: log\n    on: {{at: '00:00', timezone: UTC, days: [{later}]}}\n".encode()
     command = ["status", "--check", "--brain", str(brain.root)]
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + waiting)
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n" + waiting)
     result = CliRunner().invoke(app, command)
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["jobs"]["weekly"]["freshness"] == "never"
     hourly = b"  hourly:\n    run: [hourly]\n    emit: log\n    on: {every: 3600}\n"
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n" + waiting + hourly)
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n" + waiting + hourly)
     result = CliRunner().invoke(app, command)
     assert result.exit_code == 1
     assert json.loads(result.stdout)["attention"] == [{"kind": "job", "name": "hourly", "freshness": "never"}]
 
 
 def test_coverage_marks_a_record_job_with_failed_latest_run_as_failed(brain: Store) -> None:
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  notes:\n    run: [echo]\n    emit: records\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n  notes:\n    run: [echo]\n    emit: records\n")
     now = datetime(2026, 9, 23, 13, tzinfo=UTC)
     start, end = "2026-09-22T13:00:00Z", "2026-09-23T13:00:00Z"
     collect(
@@ -641,9 +641,9 @@ def test_status_and_coverage_describe_one_bf_yaml_while_it_is_saved(
     assert set(entry["jobs"]) == {"chat-in", "chat-send", "notes", "personal"}
     loads = iter([original])
     assert attention(brain) == []
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [echo]\n    emit: records\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n  mail:\n    run: [echo]\n    emit: records\n")
     src_a = load(brain)
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  renamed:\n    run: [echo]\n    emit: records\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n  renamed:\n    run: [echo]\n    emit: records\n")
     src_b = load(brain)
     loads = iter([src_a])
     monkeypatch.setattr("bf.health.load", lambda _store: next(loads, src_b))
@@ -652,7 +652,7 @@ def test_status_and_coverage_describe_one_bf_yaml_while_it_is_saved(
 
 def test_disabled_programs_report_no_failure_while_their_queued_work_stays_listed(brain: Store) -> None:
     configured = (
-        b"version: 10\nname: fixture\ndefaults:\n  harness: [harness]\njobs:\n"
+        b"version: 11\nname: fixture\ndefaults:\n  harness: [harness]\njobs:\n"
         b"  mail:\n    run: [mail]\n    emit: records\n    on: {every: 3600}\n"
         b"  review:\n    run: [review]\n    emit: log\n    on: {every: 3600}\n"
         b"  notes:\n    prompt: prompts/personal.md\n    emit: message\n"
@@ -703,7 +703,7 @@ def test_disabled_programs_report_no_failure_while_their_queued_work_stays_liste
 def test_a_source_that_keeps_missing_parts_needs_attention_after_three_runs(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  feeds:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n"
         b"  manual:\n    run: [echo]\n    emit: records\n",
     )
@@ -749,7 +749,7 @@ def test_a_source_that_keeps_missing_parts_needs_attention_after_three_runs(brai
 def test_hand_edited_incomplete_counts_never_report_a_gap(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  feeds:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n",
+        b"version: 11\nname: fixture\njobs:\n  feeds:\n    run: [echo]\n    emit: records\n    on: {every: 3600}\n",
     )
     queue = Queue(brain)
     for counts in (
@@ -787,7 +787,7 @@ def test_doctor_checks_bins_env_scripts_prompts_and_runtime_without_leaking_secr
     brain.write("not-a-dir", b"file\n")
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  healthy-job:\n    run: [sensors/good.sh]\n    emit: log\n    requires: {env: [BF_DOC_PRESENT]}\n"
         b"  disabled-broken:\n    enabled: false\n    run: [bf-nonexistent-binary]\n    emit: log\n"
         b"    requires: {bins: [bf-missing-bin], env: [BF_DOC_MISSING]}\n"
@@ -810,7 +810,7 @@ def test_doctor_checks_bins_env_scripts_prompts_and_runtime_without_leaking_secr
     assert "not-a-dir" in str(report["jobs"]["broken-prompt"]["error"])
 
     # Corrupt runtime SQLite surfaces in doctor problems while offline doctor CLI exits non-zero.
-    brain.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  healthy-job:\n    run: [sensors/good.sh]\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n  healthy-job:\n    run: [sensors/good.sh]\n")
     brain.write(QUEUE, b"corrupt")
     cli = CliRunner().invoke(app, ["doctor", "--brain", str(brain.root)])
     assert cli.exit_code == 1

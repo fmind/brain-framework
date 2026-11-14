@@ -14,7 +14,7 @@ _ORDER = (
     "authoring",
     "retrieval",
     "jobs",
-    "events",
+    "assist",
     "operations",
     "reference",
 )

@@ -70,7 +70,7 @@ def test_routine_help_never_runs_a_routine(
     marker = tmp_path / "ran"
     store.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [routines/review.sh]\n    on: { hook: pre-push }\n",
+        b"version: 11\nname: fixture\njobs:\n  review:\n    run: [routines/review.sh]\n    on: { hook: pre-push }\n",
     )
     store.write("routines/review.sh", f"#!/bin/sh\ntouch '{marker}'\n".encode())
     (store.root / "routines/review.sh").chmod(0o700)
@@ -91,7 +91,7 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
     (tmp_path / "brain").mkdir()
     store = Store(tmp_path / "brain")
     received = tmp_path / "received"
-    store.write("bf.yaml", b"version: 10\nname: fixture\njobs:\n  review:\n    run: [routines/review.sh]\n")
+    store.write("bf.yaml", b"version: 11\nname: fixture\njobs:\n  review:\n    run: [routines/review.sh]\n")
     store.write("routines/review.sh", f"#!/bin/sh\nprintf %s \"$1\" > '{received}'\n".encode())
     (store.root / "routines/review.sh").chmod(0o700)
     # Python passes an undecodable argument byte, such as a Latin-1 é, as a lone surrogate.
@@ -149,6 +149,7 @@ def test_routine_arguments_that_are_not_utf8_reach_the_routine_as_given(
         (["wake", "--at", ""], "--at: give a timestamp; an empty value names none"),
         (["run", "--hook", ""], "--hook: give an event name; an empty value would run the first argument as a job"),
         (["collect", ""], "JOB"),
+        (["ingest", ""], "SOURCE"),
         # An empty --input, as an unset variable gives, used to run the collector and save records instead of checking.
         (["collect", "calendar", "--input", ""], "--input"),
         (["action", "status", "rotate", "unknown"], "STATUS: 'unknown' is not one of 'draft', 'stable', 'deprecated'"),
@@ -250,6 +251,7 @@ def test_repeated_flags_and_multiple_options_stay_valid(tmp_path: Path) -> None:
     "arguments",
     [
         ["init", "", "-h"],
+        ["ingest", "", "--help"],
         ["guide", "", "--help"],
         ["unregister", "", "--help"],
         ["skill", "install", "--help"],
@@ -306,6 +308,7 @@ def test_root_help_explains_first_use_and_output() -> None:
         ("search", "QUERY"),
         ("read", "REF"),
         ("collect", "JOB"),
+        ("ingest", "SOURCE"),
         ("init", "PATH"),
         ("register", "PATH"),
         ("unregister", "TARGET"),
@@ -611,7 +614,7 @@ def test_export_items_emits_relations_attributes_and_observed_since(brain: Store
 
     brain.write(
         "bf.yaml",
-        b'version: 10\nname: fixture\nfields:\n  topic:\n    description: Topics\n    targets: ["topic:"]\n'
+        b'version: 11\nname: fixture\nfields:\n  topic:\n    description: Topics\n    targets: ["topic:"]\n'
         b"jobs:\n  feed:\n    run: [echo]\n    emit: records\n",
     )
     brain.write(
@@ -663,7 +666,7 @@ def test_action_status_preserves_rich_frontmatter_and_resolves_unique_slugs(brai
 
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\n",
+        b"version: 11\nname: fixture\n",
     )
     runner = CliRunner()
     created = runner.invoke(app, ["action", "new", "audit-logs", "--unique", "--brain", str(brain.root)])
@@ -695,7 +698,7 @@ def test_action_status_preserves_rich_frontmatter_and_resolves_unique_slugs(brai
 def test_cli_run_wake_post_action_watch_and_input_validation(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  feed:\n    run: [routines/noop.sh]\n    emit: records\n"
+        b"version: 11\nname: fixture\njobs:\n  feed:\n    run: [routines/noop.sh]\n    emit: records\n"
         b"  brief:\n    prompt: prompts/brief.md\n    harness: [routines/noop.sh]\n"
         b"  noop:\n    run: [routines/noop.sh]\n",
     )
@@ -761,7 +764,7 @@ def test_cli_mcp_signal_main_errors_and_closed_stdin(brain: Store, monkeypatch: 
 
     import bf.cli as cli_mod
 
-    brain.write("bf.yaml", b"version: 10\nname: fixture\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\n")
     called = False
 
     class _FakeTools:
@@ -811,3 +814,70 @@ def test_cli_mcp_signal_main_errors_and_closed_stdin(brain: Store, monkeypatch: 
     finally:
         if prev_hup is not None:
             signal.signal(signal.SIGHUP, prev_hup)
+
+
+def test_cli_ingest_reads_input_stdin_snapshot_dry_run_and_validation(brain: Store, tmp_path: Path) -> None:
+    brain.write(
+        "bf.yaml",
+        b"version: 11\nname: fixture\njobs:\n"
+        b"  mapped:\n"
+        b"    run: [echo]\n"
+        b"    emit: records\n"
+        b"    map:\n"
+        b"      items: /items\n"
+        b"      id: /key\n"
+        b"      title: /subject\n"
+        b"      text: /body\n",
+    )
+    runner = CliRunner()
+    payload = tmp_path / "mapped.json"
+    payload.write_text('{"items":[{"key":"m-1","subject":"Mapped title","body":"Mapped evidence."}]}')
+
+    # --dry-run validates and previews without writing memories/, .bf/wakeup, or .bf/runtime.sqlite3.
+    dry = runner.invoke(app, ["ingest", "mapped", "--input", str(payload), "--dry-run", "--brain", str(brain.root)])
+    assert dry.exit_code == 0, dry.output
+    assert json.loads(dry.stdout)["records"] == 1
+    assert not (brain.root / "memories/mapped").exists()
+    assert not (brain.root / ".bf/wakeup").exists()
+    assert not (brain.root / ".bf/runtime.sqlite3").exists()
+
+    # --input commits mapped records, pings .bf/wakeup, and keeps .bf/runtime.sqlite3 untouched.
+    saved = runner.invoke(app, ["ingest", "mapped", "--input", str(payload), "--brain", str(brain.root)])
+    assert saved.exit_code == 0, saved.output
+    assert json.loads(saved.stdout)["added"] == 1
+    assert len(list((brain.root / "memories/mapped").glob("*.json"))) == 1
+    assert (brain.root / ".bf/wakeup").exists()
+    assert not (brain.root / ".bf/runtime.sqlite3").exists()
+
+    # Omitting --input reads pre-normalized JSONL from stdin.
+    jsonl = (
+        '{"id":"s-1","title":"Stdin one","text":"First streamed record."}\n'
+        '{"id":"s-2","title":"Stdin two","text":"Second streamed record."}\n'
+    )
+    streamed = runner.invoke(app, ["ingest", "feed", "--brain", str(brain.root)], input=jsonl)
+    assert streamed.exit_code == 0, streamed.output
+    assert json.loads(streamed.stdout)["added"] == 2
+    assert len(list((brain.root / "memories/feed").glob("*.json"))) == 2
+    assert not (brain.root / ".bf/runtime.sqlite3").exists()
+
+    # --snapshot trips removal guard when emptying a catalog; --allow-removal accepts it.
+    blocked = runner.invoke(app, ["ingest", "feed", "--snapshot", "--brain", str(brain.root)], input="[]")
+    assert blocked.exit_code == 1
+    assert "allow-removal" in str(blocked.exception)
+    assert len(list((brain.root / "memories/feed").glob("*.json"))) == 2
+
+    accepted = runner.invoke(
+        app, ["ingest", "feed", "--snapshot", "--allow-removal", "--brain", str(brain.root)], input="[]"
+    )
+    assert accepted.exit_code == 0, accepted.output
+    assert json.loads(accepted.stdout)["removed"] == 2
+    assert list((brain.root / "memories/feed").glob("*.json")) == []
+
+    # Invalid source, reserved source, missing file, and malformed JSON fail cleanly.
+    assert runner.invoke(app, ["ingest", "BadName", "--input", str(payload), "--brain", str(brain.root)]).exit_code == 2
+    assert runner.invoke(app, ["ingest", "bf", "--brain", str(brain.root)], input="[]").exit_code == 2
+    missing = runner.invoke(
+        app, ["ingest", "feed", "--input", str(tmp_path / "missing.json"), "--brain", str(brain.root)]
+    )
+    assert missing.exit_code == 2
+    assert runner.invoke(app, ["ingest", "feed", "--brain", str(brain.root)], input="{broken").exit_code == 1

@@ -440,7 +440,7 @@ def test_the_gate_reads_records_collected_by_the_same_update(brain: Store, monke
     brain.write("prompts/watcher.md", b"---\ntype: action\nstatus: draft\n---\n# Watcher\n\nEvents: {{context}}\n")
     record = {"id": "m1 #launch", "title": "Launch moved", "time": "2026-09-29T12:00:00Z"}
     config = {
-        "version": 10,
+        "version": 11,
         "name": "fixture",
         "jobs": {
             "mail": {"run": ["printf", json.dumps([record])], "emit": "records", "on": {"every": 3600}},

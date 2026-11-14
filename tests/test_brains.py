@@ -29,7 +29,7 @@ from bf.validate import validate
 def make(root: Path, name: str) -> Store:
     root.mkdir(parents=True, exist_ok=True)
     store = Store(root)
-    store.write("bf.yaml", yaml.safe_dump({"version": 10, "name": name}).encode())
+    store.write("bf.yaml", yaml.safe_dump({"version": 11, "name": name}).encode())
     store.write(
         "projects/example.md",
         f"# Shared evidence\n\n{name} decision.\n\n## Decision {{#decision}}\n\n{name} durable answer.\n".encode(),
@@ -125,13 +125,13 @@ def test_register_and_unregister_contracts(tmp_path: Path, monkeypatch: pytest.M
 
 def test_brains_key_is_rejected_and_foreign_addresses_fail(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
-        Config.model_validate({"version": 10, "name": "test", "brains": {"other": {"path": "../other"}}})
+        Config.model_validate({"version": 11, "name": "test", "brains": {"other": {"path": "../other"}}})
     first = make(tmp_path / "first", "first")
     second = make(tmp_path / "second", "second")
-    first.write("bf.yaml", b"version: 10\nname: first\nbrains:\n  second:\n    path: ../second\n")
+    first.write("bf.yaml", b"version: 11\nname: first\nbrains:\n  second:\n    path: ../second\n")
     with pytest.raises(Error, match=r"invalid bf\.yaml"):
         load(first)
-    first.write("bf.yaml", b"version: 10\nname: first\n")
+    first.write("bf.yaml", b"version: 11\nname: first\n")
     assert "first durable answer" in str(read(first, "bf://first/projects/example.md#decision")["text"])
     with pytest.raises(NotFoundError):
         read(first, "bf://second/projects/example.md")
@@ -151,7 +151,7 @@ def test_mcp_and_evaluations_use_single_selected_brain(tmp_path: Path) -> None:
     first = make(tmp_path / "first", "first")
     first.write(
         "evals/retrieval.yaml",
-        b"version: 10\ncases:\n- name: own\n  query: durable\n  expect: [projects/example.md]\n",
+        b"version: 11\ncases:\n- name: own\n  query: durable\n  expect: [projects/example.md]\n",
     )
     assert evaluate(first)["passed"]
     mcp = server(first)
@@ -264,7 +264,7 @@ def test_default_brain_is_selected_for_retrieval_and_execution(tmp_path: Path, m
     (team.root / "sensors/pulled.sh").chmod(0o700)
     team.write(
         "bf.yaml",
-        b"version: 10\nname: team\njobs:\n  pulled:\n    run: [sensors/pulled.sh]\n    emit: records\n"
+        b"version: 11\nname: team\njobs:\n  pulled:\n    run: [sensors/pulled.sh]\n    emit: records\n"
         b"    on:\n      every: 900\n",
     )
     register(team, default=True)
@@ -291,7 +291,7 @@ def test_execution_names_only_registered_or_enclosing_brains(tmp_path: Path, mon
     (team.root / "sensors/s.sh").chmod(0o700)
     team.write(
         "bf.yaml",
-        b"version: 10\nname: team\njobs:\n  s:\n    run: [sensors/s.sh]\n    emit: records\n    on:\n      every: 60\n",
+        b"version: 11\nname: team\njobs:\n  s:\n    run: [sensors/s.sh]\n    emit: records\n    on:\n      every: 60\n",
     )
     # A subdirectory below the working directory is not checked for ownership, so execution requires a deliberate path.
     monkeypatch.chdir(tmp_path)

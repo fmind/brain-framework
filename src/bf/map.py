@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import cast
 
 from bf import links
 from bf.models import Error, MapSpec, TransformSpec, decode
@@ -12,8 +13,8 @@ _INDEX = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _ESCAPE = re.compile(r"~(?![01])")
 
 
-def _load(raw: bytes | object) -> object:
-    """Decode JSON or newline-delimited JSON objects, returning an empty list for blank bytes."""
+def load_json(raw: bytes | object) -> object:
+    """Decode JSON or NDJSON objects, returning [] for blank bytes."""
     if not isinstance(raw, bytes):
         return raw
     if not (stripped := raw.strip()):
@@ -25,19 +26,18 @@ def _load(raw: bytes | object) -> object:
         if stripped.startswith(b"[") or len(raw_lines) < 2:
             raise
         items: list[object] = []
-        for index, line in enumerate(raw_lines, 1):
+        for idx, line in enumerate(raw_lines, 1):
             try:
                 obj = decode(line)
-            except Error as line_error:
-                raise Error(f"line {index}: {line_error}") from line_error
+            except Error as err:
+                raise Error(f"line {idx}: {err}") from err
             if not isinstance(obj, dict):
-                raise Error(f"line {index}: collector JSONL line must be a JSON object") from None
+                raise Error(f"line {idx}: collector JSONL line must be a JSON object") from None
             items.append(obj)
         return items
 
 
 def _tokens(pointer: str, *, allow_root: bool = False) -> tuple[tuple[str, ...], bool]:
-    """Parse an RFC 6901 JSON Pointer into unescaped segments and report `/*` wildcard usage."""
     if not pointer:
         if allow_root:
             return (), False
@@ -48,26 +48,23 @@ def _tokens(pointer: str, *, allow_root: bool = False) -> tuple[tuple[str, ...],
     for raw in pointer.split("/")[1:]:
         if _ESCAPE.search(raw):
             raise Error(f"invalid JSON pointer {pointer!r}: '~' must precede 0 or 1")
-        # Unescape ~1 before ~0 so "~01" decodes to literal "~1" rather than "/".
         parts.append(raw.replace("~1", "/").replace("~0", "~"))
     return tuple(parts), "*" in parts
 
 
 def _walk(node: object, tokens: tuple[str, ...]) -> list[object]:
-    """Traverse objects and arrays iteratively, fanning out across `/*` array wildcards."""
     current: list[object] = [node]
-    for segment in tokens:
+    for seg in tokens:
         nxt: list[object] = []
         for item in current:
-            if segment == "*":
-                if isinstance(item, list):
-                    nxt.extend(item)
-                elif isinstance(item, dict) and "*" in item:
-                    nxt.append(item["*"])
-            elif isinstance(item, dict) and segment in item:
-                nxt.append(item[segment])
-            elif isinstance(item, list) and _INDEX.match(segment) and (index := int(segment)) < len(item):
-                nxt.append(item[index])
+            if seg == "*":
+                nxt.extend(
+                    item if isinstance(item, list) else [item["*"]] if isinstance(item, dict) and "*" in item else ()
+                )
+            elif isinstance(item, dict) and seg in item:
+                nxt.append(item[seg])
+            elif isinstance(item, list) and _INDEX.match(seg) and (idx := int(seg)) < len(item):
+                nxt.append(item[idx])
         if not nxt:
             return []
         current = nxt
@@ -75,28 +72,23 @@ def _walk(node: object, tokens: tuple[str, ...]) -> list[object]:
 
 
 def _apply(value: object, expr: str | TransformSpec, context: str) -> str | None:
-    """Coerce a non-empty scalar value to string and apply optional TransformSpec."""
     if value is None or value == "":
         return None
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise Error(f"{context} must resolve to a string or number")
     text = value if isinstance(value, str) else str(value)
     if isinstance(expr, TransformSpec):
-        if expr.lower:
-            text = text.lower()
-        return f"{expr.prefix}{text}"
+        return f"{expr.prefix}{text.lower() if expr.lower else text}"
     return text
 
 
 def _single(node: object, expr: str | TransformSpec, context: str) -> str | None:
-    """Resolve one non-wildcard JSON Pointer or TransformSpec into an optional scalar string."""
     if isinstance(expr, str) and not expr:
         return None
     tokens, wildcard = _tokens(expr.path if isinstance(expr, TransformSpec) else expr)
     if wildcard:
         raise Error(f"{context}: wildcard '*' is not valid here")
-    hits = _walk(node, tokens)
-    return _apply(hits[0], expr, context) if hits else None
+    return _apply(hits[0], expr, context) if (hits := _walk(node, tokens)) else None
 
 
 def _flatten(hits: list[object]) -> list[object]:
@@ -104,14 +96,10 @@ def _flatten(hits: list[object]) -> list[object]:
 
 
 def _extract_items(payload: object, pointer: str) -> list[dict[str, object]]:
-    """Select record objects from decoded payload via an optional `items` pointer."""
     if not pointer:
-        if isinstance(payload, list):
-            raw_items = payload
-        elif isinstance(payload, dict):
-            raw_items = [payload]
-        else:
+        if not isinstance(payload, (list, dict)):
             raise Error("payload must be a JSON object or array")
+        raw_items = payload if isinstance(payload, list) else [payload]
     else:
         tokens, wildcard = _tokens(pointer)
         hits = _walk(payload, tokens)
@@ -123,31 +111,26 @@ def _extract_items(payload: object, pointer: str) -> list[dict[str, object]]:
             raise Error("items pointer must resolve to a JSON array")
         else:
             raw_items = hits[0]
-    rows: list[dict[str, object]] = []
     for pos, row in enumerate(raw_items):
         if not isinstance(row, dict):
             raise Error(f"record {pos}: item must be a JSON object")
-        rows.append(row)
-    return rows
+    return cast("list[dict[str, object]]", raw_items)
 
 
 def _extract_relations(
     row: dict[str, object], spec: dict[str, str | TransformSpec | list[str | TransformSpec]], pos: int
 ) -> dict[str, list[str]]:
-    """Extract, transform, deduplicate, and identity-validate record relations."""
     relations: dict[str, list[str]] = {}
     for name, expr in spec.items():
-        targets: dict[str, None] = {}
-        context = f"record {pos}: relations.{name}"
+        targets, ctx = dict[str, None](), f"record {pos}: relations.{name}"
         for entry in expr if isinstance(expr, list) else (expr,):
             tokens, _ = _tokens(entry.path if isinstance(entry, TransformSpec) else entry)
             for val in _flatten(_walk(row, tokens)):
-                if (candidate := _apply(val, entry, context)) is None:
-                    continue
-                try:
-                    targets[links.identity(candidate)] = None
-                except Error as error:
-                    raise Error(f"{context}: {error}") from error
+                if (cand := _apply(val, entry, ctx)) is not None:
+                    try:
+                        targets[links.identity(cand)] = None
+                    except Error as err:
+                        raise Error(f"{ctx}: {err}") from err
         if targets:
             relations[name] = list(targets)
     return relations
@@ -164,19 +147,18 @@ def _attr_value(value: object, expr: str | TransformSpec, context: str) -> objec
 
 
 def _extract_attributes(row: dict[str, object], spec: dict[str, str | TransformSpec], pos: int) -> dict[str, object]:
-    """Extract structured JSON attributes, applying TransformSpec when declared."""
     attributes: dict[str, object] = {}
     for name, expr in spec.items():
         tokens, wildcard = _tokens(expr.path if isinstance(expr, TransformSpec) else expr)
-        context = f"record {pos}: attributes.{name}"
-        if vals := [val for hit in _walk(row, tokens) if (val := _attr_value(hit, expr, context)) is not None]:
+        ctx = f"record {pos}: attributes.{name}"
+        if vals := [v for hit in _walk(row, tokens) if (v := _attr_value(hit, expr, ctx)) is not None]:
             attributes[name] = vals if wildcard else vals[0]
     return attributes
 
 
 def extract(raw: bytes | object, spec: MapSpec) -> tuple[list[dict[str, object]], str | None]:
-    """Extract Record-shaped dicts and an optional next cursor from JSON/JSONL output."""
-    payload = _load(raw)
+    """Extract Record-shaped dicts and optional cursor from JSON/NDJSON."""
+    payload = load_json(raw)
     cursor = _single(payload, spec.cursor, "cursor") if spec.cursor else None
     records: list[dict[str, object]] = []
     for pos, row in enumerate(_extract_items(payload, spec.items)):
@@ -187,31 +169,31 @@ def extract(raw: bytes | object, spec: MapSpec) -> tuple[list[dict[str, object]]
             rtype := _single(row, spec.type, f"record {pos}: @type") if spec.type.startswith("/") else spec.type
         ):
             record["@type"] = rtype
-        for field, pointer in (("title", spec.title), ("text", spec.text), ("url", spec.url)):
-            if pointer and (val := _single(row, pointer, f"record {pos}: {field}")) is not None:
+        for field, ptr in (("title", spec.title), ("text", spec.text), ("url", spec.url)):
+            if ptr and (val := _single(row, ptr, f"record {pos}: {field}")) is not None:
                 record[field] = val
         created = _single(row, spec.created, f"record {pos}: created") if spec.created else None
         updated = _single(row, spec.updated, f"record {pos}: updated") if spec.updated else None
         if event_time := (created or updated):
             record["time"] = event_time
-        attributes = _extract_attributes(row, spec.attributes, pos)
-        if updated is not None and "updated" not in attributes:
-            attributes["updated"] = updated
-        if attributes:
-            record["attributes"] = attributes
-        if relations := _extract_relations(row, spec.relations, pos):
-            record["relations"] = relations
+        attrs = _extract_attributes(row, spec.attributes, pos)
+        if updated is not None and "updated" not in attrs:
+            attrs["updated"] = updated
+        if attrs:
+            record["attributes"] = attrs
+        if rels := _extract_relations(row, spec.relations, pos):
+            record["relations"] = rels
         records.append(record)
     return records, cursor
 
 
 def extract_pointer(data: bytes | object, pointer: str) -> str:
-    """Extract one non-empty scalar string from decoded JSON output using an RFC 6901 pointer."""
+    """Extract one non-empty scalar string from JSON using an RFC 6901 pointer."""
     payload = decode(data) if isinstance(data, bytes) else data
     tokens, wildcard = _tokens(pointer, allow_root=True)
     if wildcard:
         raise Error(f"extract pointer {pointer!r} must not contain wildcard '*'")
-    context = f"extract pointer {pointer!r}"
-    if not (hits := _walk(payload, tokens)) or (value := _apply(hits[0], pointer, context)) is None:
-        raise Error(f"{context} resolved empty or missing")
-    return value
+    ctx = f"extract pointer {pointer!r}"
+    if not (hits := _walk(payload, tokens)) or (val := _apply(hits[0], pointer, ctx)) is None:
+        raise Error(f"{ctx} resolved empty or missing")
+    return val

@@ -145,7 +145,7 @@ def test_skipped_links_and_special_files_name_their_own_repair(brain: Store, tmp
 def test_disabled_job_keeps_source_identity_and_memories_readable(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  meetings:\n    run: [unavailable-provider]\n    emit: records\n    enabled: false\n",
+        b"version: 11\nname: fixture\njobs:\n  meetings:\n    run: [unavailable-provider]\n    emit: records\n    enabled: false\n",
     )
     reply = read(brain, "meetings:decision-1")
     assert reply["brain"] == "fixture"

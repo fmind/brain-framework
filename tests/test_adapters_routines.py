@@ -484,3 +484,108 @@ def test_weekly_review_formats_safe_yaml_frontmatter() -> None:
     assert front["attributes"] == {"kind": "yes", "count": 3, "active": True}
     with pytest.raises(ValueError, match="non-JSON"):
         mod.format_action({"status": "draft", "attributes": {"bad": float("nan")}}, ["# Bad"])
+
+
+def _health_status(
+    *,
+    cache: str = "fresh",
+    pending_tx: bool = False,
+    queue: dict[str, object] | None = None,
+    jobs: dict[str, object] | None = None,
+    sources: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "brain": "main",
+        "cache": cache,
+        "pending_transaction": pending_tx,
+        "queue": queue or {"incidents": 0, "failed": 0, "uncertain": 0},
+        "jobs": jobs or {},
+        "sources": sources or {},
+    }
+
+
+def _health_provider(provider: Provider, status: object, *reviews: object, stderr: str = "") -> None:
+    entries: list[dict[str, object]] = [
+        {"match": ["status"], "stdout": status, "stderr": stderr},
+        *({"match": ["read", "review"], "stdout": rev, "stderr": stderr} for rev in reviews),
+    ]
+    provider.install("bf", entries)
+
+
+def test_evidence_health_stays_silent_when_clean_and_reports_paginated_findings(provider: Provider) -> None:
+    _health_provider(provider, _health_status(), {"page": "review", "items": [], "attention": []})
+    clean = provider.run("evidence-health.py", "/brains/main", END, folder="routines")
+    assert (clean.returncode, clean.stdout, clean.stderr) == (0, "", "")
+
+    # Reports queue incidents/deliveries, failing jobs (ignoring non-failed self), silent sources, and paginated notes.
+    status = _health_status(
+        queue={"incidents": 1, "failed": 2, "uncertain": 1},
+        jobs={
+            "evidence-health": {"freshness": "overdue", "failed": False},
+            "mail": {
+                "freshness": "overdue",
+                "failed": True,
+                "failures": 3,
+                "error": "bad\x1b[31m\n`tick",
+                "log": "logs/mail.log",
+            },
+        },
+        sources={"feeds": {"freshness": "fresh", "silent": True, "degraded": {"missed": 1, "of": 3, "runs": 2}}},
+    )
+    page1 = {
+        "page": "review",
+        "attention": [{"kind": "job", "name": "backup", "freshness": "overdue"}],
+        "items": [
+            {
+                "ref": "projects/alpha.md",
+                "uri": "bf://brain/projects/`alpha`.md",
+                "title": "Alpha\x07\nPlan",
+                "review_reasons": ["due"],
+                "review_due": "2026-09-20",
+                "new_links": 2,
+            }
+        ],
+        "next_offset": 1,
+    }
+    page2 = {
+        "page": "review",
+        "items": [{"ref": "concepts/beta.md", "title": "Beta", "review_reasons": ["newer_evidence"]}],
+        "next_offset": None,
+    }
+    _health_provider(provider, status, page1, page2)
+    out = provider.run("evidence-health.py", "/brains/main", END, folder="routines")
+    assert (out.returncode, out.stderr) == (0, "")
+    assert "## Incidents and queue" in out.stdout
+    assert "- Open failure incidents: 1 (check `bf status` and offending job logs)." in out.stdout
+    assert "- Job `mail`: overdue; failed (3 consecutive) (log: `logs/mail.log`): bad [31m `tick." in out.stdout
+    assert "- Job `backup`: overdue." in out.stdout
+    assert "- Source `feeds`: silent past silent_after; degraded (1/3 parts over 2 runs)." in out.stdout
+    assert "- Alpha Plan (``bf://brain/projects/`alpha`.md``): due 2026-09-20, 2 newer linked." in out.stdout
+    assert "- Beta (`concepts/beta.md`): newer_evidence." in out.stdout
+    assert "evidence-health" not in out.stdout
+    validate_okf("actions/2026-09-25_evidence-health/ACTION.md", out.stdout.encode())
+    assert note("actions/2026-09-25_evidence-health/ACTION.md", out.stdout.encode()).targets == []
+
+
+def test_evidence_health_fails_closed_on_bad_usage_missing_cli_stale_cache_or_bad_pages(provider: Provider) -> None:
+    bad_usage = provider.run("evidence-health.py", "/brains/main", "not-an-iso", folder="routines")
+    assert (bad_usage.returncode, bad_usage.stdout) == (2, "")
+
+    missing_bf = provider.run("evidence-health.py", "/brains/main", END, folder="routines")
+    assert (missing_bf.returncode, missing_bf.stdout) == (1, "")
+    assert "bf is not on PATH" in missing_bf.stderr
+
+    for bad_status in (_health_status(cache="stale"), _health_status(pending_tx=True)):
+        _health_provider(provider, bad_status)
+        res = provider.run("evidence-health.py", "/brains/main", END, folder="routines")
+        assert (res.returncode, res.stdout) == (1, "")
+
+    _health_provider(provider, _health_status(), {"page": "review", "items": [], "next_offset": 0})
+    looped = provider.run("evidence-health.py", "/brains/main", END, folder="routines")
+    assert (looped.returncode, looped.stdout) == (1, "")
+    assert "non-advancing next_offset" in looped.stderr
+
+    _health_provider(provider, _health_status(), {"page": "review", "items": []}, stderr="unexpected diag\n")
+    noisy = provider.run("evidence-health.py", "/brains/main", END, folder="routines")
+    assert (noisy.returncode, noisy.stdout) == (1, "")
+    assert "emitted warnings on stderr" in noisy.stderr

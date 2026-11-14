@@ -9,7 +9,7 @@ import re
 import stat
 import time
 from collections.abc import Callable, Generator
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from pathlib import Path
 
 from bf.models import MAX_FILE, MAX_FILES, Error
@@ -23,32 +23,25 @@ class FileAncestorError(Error):
     """A regular file stands where a path needs a directory, so nothing below it can exist."""
 
 
+_Stamp = tuple[int, int, int, int]
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-# The temporary name `write` gives new bytes before renaming them over their file.
 _TEMPORARY = re.compile(r"\.write-[0-9a-f]{32}")
-# A scanned name BF cannot address: its bytes are not UTF-8, or it holds a backslash, which relative() rejects.
 UNNAMED = "file name is not valid UTF-8 or contains a backslash; rename it"
-# A link BF never follows, to a file or to a folder such as memories/: its owner puts the real one in its place.
 LINKED = "symlinks are not followed; replace the link with the file or folder itself"
-# The assistant queue's file inside <brain>/.bf/ (bf.runtime owns its schema).
-QUEUE = ".bf/runtime.sqlite3"
+QUEUE, _UNSTATED = ".bf/runtime.sqlite3", (0, 0, 0, 0)
+_LOCK_BUSY = "another writer is active for this brain; retry after it finishes"
+_WRITE_BUSY = "another process is reading or changing this brain's records; retry after it finishes"
 
 
 def temporary(path: str) -> bool:
-    """A file an interrupted write left behind: BF names its temporaries `.write-HEX`, never a note or an input."""
     return _TEMPORARY.fullmatch(path.rsplit("/", 1)[-1]) is not None
 
 
 def unnamed(path: str) -> bool:
-    """Whether a scanned path names an entry that `scan` could only show escaped, never open or index."""
     return "\\" in path
 
 
 def _shown(name: str) -> str | None:
-    """A display-safe form of an unaddressable name, which always holds a backslash; None for other names.
-
-    Undecodable bytes arrive as lone surrogates that SQLite and JSON cannot store: show them as `\\xNN` escapes.
-    """
     try:
         name.encode()
     except UnicodeEncodeError:
@@ -57,12 +50,20 @@ def _shown(name: str) -> str | None:
 
 
 def relative(value: str) -> tuple[str, ...]:
-    """A normalized brain-relative path's parts; absolute paths, empty, `.` or `..` parts, NUL and backslashes fail."""
+    """Validate and split a normalized brain-relative path."""
     parts = value.split("/")
-    # An absolute path starts with an empty part.
     if any(p in {"", ".", ".."} for p in parts) or "\x00" in value or "\\" in value:
         raise Error("expected a normalized brain-relative path")
     return tuple(parts)
+
+
+def _atomic_replace(parent: int, temporary: str, leaf: str, name: str, *, durable: bool = False) -> None:
+    with suppress(FileNotFoundError):
+        if not stat.S_ISREG(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode):
+            raise Error(f"{name}: refusing to replace a non-regular file")
+    os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+    if durable:
+        os.fsync(parent)
 
 
 class Store:
@@ -76,52 +77,46 @@ class Store:
             raise Error("brain directory does not exist; pass an existing --brain or BF_BRAIN") from error
         if not stat.S_ISDIR(info.st_mode):
             raise Error("brain must be a directory")
-        # Locks and brain selection compare the physical directory: bind mounts and case variants share it.
+        # Locks and brain selection compare physical directory identity (handles bind mounts/case variants).
         self.identity = f"{info.st_dev}-{info.st_ino}"
 
     @contextmanager
     def parent(self, name: str, *, create: bool = False) -> Generator[tuple[int, str]]:
         parts = relative(name)
-        descriptor = os.open(self.root, _DIR)
+        fd = os.open(self.root, _DIR)
         try:
             for number, part in enumerate(parts[:-1], 1):
                 if create:
-                    try:
-                        os.mkdir(part, 0o700, dir_fd=descriptor)
-                    except FileExistsError:
-                        pass
-                    else:
-                        # Persist the new directory entry before a transaction can depend on its files.
-                        os.fsync(descriptor)
+                    with suppress(FileExistsError):
+                        os.mkdir(part, 0o700, dir_fd=fd)
+                        os.fsync(fd)
                 try:
-                    child = os.open(part, _DIR, dir_fd=descriptor)
+                    child = os.open(part, _DIR, dir_fd=fd)
                 except OSError as error:
                     if error.errno not in {errno.ELOOP, errno.ENOTDIR}:
                         raise
-                    location = "/".join(parts[:number])
-                    if stat.S_ISREG(os.stat(part, dir_fd=descriptor, follow_symlinks=False).st_mode):
-                        raise FileAncestorError(f"{location}: expected a directory, found a file") from error
-                    raise Error(
-                        f"{location}: expected a directory; symlinks and special files are not followed"
-                    ) from error
-                os.close(descriptor)
-                descriptor = child
-            yield descriptor, parts[-1]
+                    loc = "/".join(parts[:number])
+                    if stat.S_ISREG(os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode):
+                        raise FileAncestorError(f"{loc}: expected a directory, found a file") from error
+                    raise Error(f"{loc}: expected a directory; symlinks and special files are not followed") from error
+                os.close(fd)
+                fd = child
+            yield fd, parts[-1]
         finally:
-            os.close(descriptor)
+            os.close(fd)
 
     def read(self, name: str, limit: int = MAX_FILE) -> bytes:
         return self.stamped(name, limit)[0]
 
     def stamped(self, name: str, limit: int = MAX_FILE) -> tuple[bytes, int]:
-        """A regular file's bytes and the modification time, in nanoseconds, of the descriptor that read them."""
+        """A regular file's bytes and descriptor mtime_ns."""
         with self.parent(name) as (parent, leaf):
             try:
                 fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
             except OSError as error:
                 if error.errno == errno.ELOOP:
                     raise Error(f"{name}: {LINKED}") from error
-                # A Unix socket fails to open before the type check below: ENXIO on Linux, EOPNOTSUPP on macOS.
+                # Unix sockets fail before fstat: ENXIO on Linux, EOPNOTSUPP on macOS.
                 if error.errno in {errno.ENXIO, errno.EOPNOTSUPP} and not stat.S_ISREG(
                     os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode
                 ):
@@ -131,8 +126,6 @@ class Store:
                 info = os.fstat(stream.fileno())
                 if not stat.S_ISREG(info.st_mode):
                     raise Error(f"{name}: expected a regular file")
-                # Avoid allocating the full limit for every small file. The extra byte detects
-                # in-place growth after fstat; finish that read within the original byte bound.
                 size = min(info.st_size, limit) + 1
                 data = stream.read(size)
                 if len(data) == size and len(data) <= limit:
@@ -142,56 +135,32 @@ class Store:
         return data, info.st_mtime_ns
 
     def write(self, name: str, data: bytes, *, durable: bool = True) -> None:
-        """Replace a regular file atomically; readers see the old or the new bytes, never a mix.
-
-        The bytes are always synced; `durable=False` leaves syncing the directory entry to one later `sync()`.
-        """
+        """Replace a regular file atomically (`durable=False` defers directory fsync to `sync()`)."""
         with self.parent(name, create=True) as (parent, leaf):
-            temporary = ".write-" + os.urandom(16).hex()
-            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            tmp = ".write-" + os.urandom(16).hex()
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
             try:
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(data)
                     stream.flush()
                     os.fsync(stream.fileno())
-                try:
-                    info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-                except FileNotFoundError:
-                    pass
-                else:
-                    if not stat.S_ISREG(info.st_mode):
-                        raise Error(f"{name}: refusing to replace a non-regular file")
-                os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
-                if durable:
-                    os.fsync(parent)
+                _atomic_replace(parent, tmp, leaf, name, durable=durable)
             finally:
                 with suppress(FileNotFoundError):
-                    os.unlink(temporary, dir_fd=parent)
+                    os.unlink(tmp, dir_fd=parent)
 
     def link(self, name: str, target: str) -> None:
-        """Replace `target` atomically with a second name for a regular file's bytes, without copying or syncing them.
-
-        Safe as a snapshot only because `write` renames new files into place: no BF write changes an existing inode.
-        A later `sync()` of the target's directory persists the entry. Raises OSError where the filesystem cannot link.
-        """
+        """Atomically hard-link regular file `name` to `target`."""
         with self.parent(name) as (source, leaf), self.parent(target, create=True) as (parent, new):
-            temporary = ".write-" + os.urandom(16).hex()
-            # A symlink is linked as itself, never followed; the check below then refuses it.
-            os.link(leaf, temporary, src_dir_fd=source, dst_dir_fd=parent, follow_symlinks=False)
+            tmp = ".write-" + os.urandom(16).hex()
+            os.link(leaf, tmp, src_dir_fd=source, dst_dir_fd=parent, follow_symlinks=False)
             try:
-                if not stat.S_ISREG(os.stat(temporary, dir_fd=parent, follow_symlinks=False).st_mode):
+                if not stat.S_ISREG(os.stat(tmp, dir_fd=parent, follow_symlinks=False).st_mode):
                     raise Error(f"{name}: expected a regular file")
-                try:
-                    info = os.stat(new, dir_fd=parent, follow_symlinks=False)
-                except FileNotFoundError:
-                    pass
-                else:
-                    if not stat.S_ISREG(info.st_mode):
-                        raise Error(f"{target}: refusing to replace a non-regular file")
-                os.replace(temporary, new, src_dir_fd=parent, dst_dir_fd=parent)
+                _atomic_replace(parent, tmp, new, target)
             finally:
                 with suppress(FileNotFoundError):
-                    os.unlink(temporary, dir_fd=parent)
+                    os.unlink(tmp, dir_fd=parent)
 
     def delete(self, name: str, *, durable: bool = True) -> None:
         with self.parent(name) as (parent, leaf):
@@ -203,7 +172,6 @@ class Store:
 
     @contextmanager
     def _directory(self, name: str) -> Generator[int]:
-        """A descriptor of one directory, reached and opened without following links."""
         with self.parent(name) as (parent, leaf):
             descriptor = os.open(leaf, _DIR, dir_fd=parent)
         try:
@@ -212,16 +180,11 @@ class Store:
             os.close(descriptor)
 
     def sync(self, directory: str) -> None:
-        """Persist the entries that writes and deletes with `durable=False` changed in one directory."""
         with self._directory(directory) as descriptor:
             os.fsync(descriptor)
 
     def sweep(self, directory: str) -> None:
-        """Remove the temporary files that killed `write` calls left directly in a directory.
-
-        Call it under the brain writer lock for a directory only lock holders write, where no such file can belong to
-        a live write. Removal need not be durable: a file a crash brings back is removed again.
-        """
+        """Remove `.write-*` temporaries left directly inside `directory`."""
         try:
             with self._directory(directory) as descriptor, os.scandir(descriptor) as entries:
                 for entry in entries:
@@ -229,54 +192,41 @@ class Store:
                         with suppress(FileNotFoundError):
                             os.unlink(entry.name, dir_fd=descriptor)
         except OSError as error:
-            # Nothing to sweep; the caller's own access names a linked or special directory.
             if error.errno not in {errno.ENOENT, errno.ELOOP, errno.ENOTDIR}:
                 raise
 
     def entries(self, name: str) -> list[str]:
-        """The sorted names directly inside a directory, reached without following links."""
         with self._directory(name) as descriptor, os.scandir(descriptor) as found:
             return sorted(entry.name for entry in found)
 
     def rmdir(self, name: str) -> None:
-        """Remove an empty directory without following links."""
         with self.parent(name) as (parent, leaf):
             if not stat.S_ISDIR(os.stat(leaf, dir_fd=parent, follow_symlinks=False).st_mode):
                 raise Error(f"{name}: expected a directory")
             os.rmdir(leaf, dir_fd=parent)
             os.fsync(parent)
 
-    def files(
-        self, directory: str, *, skipped: dict[str, tuple[int, int, int, int]] | None = None, split: bool = False
-    ) -> list[str]:
+    def files(self, directory: str, *, skipped: dict[str, _Stamp] | None = None, split: bool = False) -> list[str]:
         return sorted(self.scan(directory, skipped=skipped, split=split))
 
     def scan(
         self,
         directory: str,
         *,
-        skipped: dict[str, tuple[int, int, int, int]] | None = None,
+        skipped: dict[str, _Stamp] | None = None,
         split: bool = False,
         counts: dict[str, int] | None = None,
         fingerprints: bool = True,
-        reuse: Callable[[str, tuple[int, int, int, int]], bool] | None = None,
-    ) -> dict[str, tuple[int, int, int, int]]:
-        """Regular files below a directory, fingerprinted by the traversal's own no-follow stats.
-
-        Symlinks, special files and names BF cannot address are never followed. They fail the scan, or, when
-        the caller passes `skipped`, land there with their own fingerprint so the caller can report them and
-        carry on; an unaddressable name lands under its escaped form, for which `unnamed` holds. So does a folder
-        BF cannot read, the scanned one included.
-        Each traversed tree holds at most MAX_FILES entries, counting directories and ignored extensions: the whole
-        directory, or with `split`, its own listing and each subdirectory's tree, such as one source of memories/.
-        `counts` receives the entries of each tree. Without `fingerprints`, the directory listing alone types regular
-        files and folders, without a stat each, and their fingerprints are zero.
-        With `split`, `reuse` receives each subdirectory tree's path and its folder's fingerprint, stated before it
-        is listed; a tree it accepts is neither listed nor counted, so the caller answers for its files.
-        """
+        reuse: Callable[[str, _Stamp], bool] | None = None,
+    ) -> dict[str, _Stamp]:
+        """Walk regular files below `directory` via no-follow stats, recording unreadable/linked entries in `skipped`."""
         relative(directory)
-        result: dict[str, tuple[int, int, int, int]] = {}
-        visited = {} if counts is None else counts
+        result, visited = {}, ({} if counts is None else counts)
+
+        def fail_or_skip(key: str, stamp: _Stamp, msg: str, err: Exception | None = None) -> None:
+            if skipped is None:
+                raise Error(msg) from err
+            skipped[key] = stamp
 
         def visit(fd: int, prefix: str, tree: str) -> None:
             if prefix.count("/") > 64:
@@ -285,62 +235,55 @@ class Store:
                 for entry in entries:
                     visited[tree] = visited.get(tree, 0) + 1
                     if visited[tree] > MAX_FILES:
-                        raise Error(f"{tree} exceeds the {MAX_FILES:,}-entry scan limit; {_crowded(tree)}")
-                    path = f"{prefix}/{entry.name}"
-                    shown = _shown(entry.name)
-                    stamp = _UNSTATED
+                        hint = (
+                            "split its sensor into several sources or archive older records outside the brain"
+                            if tree.split("/")[0] == "memories"
+                            else "keep bulky files in the brain's root inputs/ or originals/, which are not scanned"
+                        )
+                        raise Error(f"{tree} exceeds the {MAX_FILES:,}-entry scan limit; {hint}")
+                    path, shown, stamp = f"{prefix}/{entry.name}", _shown(entry.name), _UNSTATED
                     try:
-                        # The listing types regular files and folders; fingerprints, links and special files need
-                        # the entry's own no-follow stat.
-                        mode = 0 if fingerprints else _listed(entry)
-                        if not mode:
+                        if fingerprints or not (
+                            mode := stat.S_IFREG
+                            if entry.is_file(follow_symlinks=False)
+                            else (stat.S_IFDIR if entry.is_dir(follow_symlinks=False) else 0)
+                        ):
                             info = entry.stat(follow_symlinks=False)
                             mode, stamp = info.st_mode, _fingerprint(info)
-                        # An unaddressable folder is reported whole, like a linked one: its entries have no ref.
                         opened = stat.S_ISDIR(mode) and shown is None
                         if opened and split and prefix == directory and reuse is not None and reuse(path, stamp):
                             continue
                         child = os.open(entry.name, _DIR, dir_fd=fd) if opened else None
                     except FileNotFoundError:
-                        # Removed after listing, as by an editor's atomic save; later refreshes compare again.
                         continue
                     except PermissionError:
-                        # An unreadable folder is reported whole too, while the rest of the brain still answers.
+                        fail_or_skip(f"{prefix}/{shown}" if shown is not None else path, stamp, "")
                         if skipped is None:
                             raise
-                        skipped[f"{prefix}/{shown}" if shown is not None else path] = stamp
                         continue
                     except OSError as error:
-                        # A folder replaced by a link or a file after listing: report it as the next scan sees it.
                         if error.errno not in {errno.ELOOP, errno.ENOTDIR}:
                             raise
-                        if skipped is None:
-                            raise Error(f"{path}: symlinks and special files are forbidden") from error
-                        skipped[path] = stamp
+                        fail_or_skip(path, stamp, f"{path}: symlinks and special files are forbidden", error)
                         continue
                     if shown is not None:
-                        if skipped is None:
-                            raise Error(f"{prefix}/{shown}: {UNNAMED}")
-                        skipped[f"{prefix}/{shown}"] = stamp
-                        continue
-                    if child is not None:
+                        fail_or_skip(f"{prefix}/{shown}", stamp, f"{prefix}/{shown}: {UNNAMED}")
+                    elif child is not None:
                         try:
                             visit(child, path, path if split and prefix == directory else tree)
                         finally:
                             os.close(child)
                     elif stat.S_ISREG(mode):
                         result[path] = stamp
-                    elif skipped is not None:
-                        skipped[path] = stamp
                     else:
-                        raise Error(f"{path}: symlinks and special files are forbidden")
+                        fail_or_skip(path, stamp, f"{path}: symlinks and special files are forbidden")
 
         fd = os.open(self.root, _DIR)
         try:
             prefix = []
             for part in relative(directory):
                 prefix.append(part)
-                stamp = _UNSTATED
+                stamp, key = _UNSTATED, "/".join(prefix)
                 try:
                     info = os.stat(part, dir_fd=fd, follow_symlinks=False)
                     stamp = _fingerprint(info)
@@ -348,16 +291,12 @@ class Store:
                 except FileNotFoundError:
                     return {}
                 except PermissionError:
-                    # Like a nested folder: an unreadable projects/ or memories/ leaves the rest of the brain answering.
                     if skipped is None:
                         raise
-                    skipped["/".join(prefix)] = stamp
+                    skipped[key] = stamp
                     return {}
                 if child is None:
-                    path = "/".join(prefix)
-                    if skipped is None:
-                        raise Error(f"{path}: expected a directory; symlinks and special files are forbidden")
-                    skipped[path] = stamp
+                    fail_or_skip(key, stamp, f"{key}: expected a directory; symlinks and special files are forbidden")
                     return {}
                 os.close(fd)
                 fd = child
@@ -371,94 +310,54 @@ class Store:
             return os.stat(leaf, dir_fd=parent, follow_symlinks=False)
 
     def mode(self, name: str) -> int:
-        """An entry's own type and permission bits, never a link target's; FileNotFoundError when it is absent."""
         return self._status(name).st_mode
 
     def lstat(self, name: str) -> os.stat_result:
-        """A regular file's own status, never a link target's."""
         if not stat.S_ISREG((info := self._status(name)).st_mode):
             raise Error(f"{name}: expected a regular file")
         return info
 
-    def fingerprint(self, name: str, *, regular: bool = True) -> tuple[int, int, int, int]:
-        """Size, mtime, ctime and inode: ctime catches an edit whose mtime was preserved.
-
-        `regular=False` states a link, special file or folder as itself instead of refusing it.
-        """
+    def fingerprint(self, name: str, *, regular: bool = True) -> _Stamp:
         return _fingerprint(self.lstat(name) if regular else self._status(name))
 
 
-def _listed(entry: os.DirEntry[str]) -> int:
-    """The type of a regular file or folder as its directory entry states it, usually without a stat; else 0."""
-    if entry.is_file(follow_symlinks=False):
-        return stat.S_IFREG
-    return stat.S_IFDIR if entry.is_dir(follow_symlinks=False) else 0
-
-
-# The fingerprint of an entry the scan did not stat: a name-only listing, or a folder it could not reach.
-_UNSTATED = (0, 0, 0, 0)
-
-
-def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int]:
-    # Hashed inode numbers, as mergerfs reports them, can exceed SQLite's signed 64-bit integers: wrap them.
+def _fingerprint(info: os.stat_result) -> _Stamp:
+    # Wrap unsigned 64-bit inodes (e.g. mergerfs) into signed SQLite INTEGER.
     inode = info.st_ino - (1 << 64) if info.st_ino >= 1 << 63 else info.st_ino
     return info.st_size, info.st_mtime_ns, info.st_ctime_ns, inode
 
 
 def unread(store: Store, name: str) -> str:
-    """Why a scan left a path out: its name, an unreadable folder, a link, a special file or a file in a folder's
-    place."""
     if unnamed(name):
         return UNNAMED
     try:
         mode = (store.root / name).lstat().st_mode
     except PermissionError:
-        # A folder above it cannot be searched, such as a memories/ of mode 600: the advice is the same.
         mode = stat.S_IFDIR
     except OSError:
         mode = 0
     if stat.S_ISDIR(mode):
         return "unreadable folder; grant read and search permission or move it out of the brain"
-    # A linked folder, such as a synced one, is as common as a linked file.
     if stat.S_ISLNK(mode):
         return LINKED
-    # The scan reads regular files below a folder, so a skipped one stands in a scanned folder's place, such as
-    # projects; so does a special file at the top of the brain.
     if stat.S_ISREG(mode) or "/" not in name:
         return "expected a folder; replace the file with a folder"
     return "special files are not read; replace it with a regular file"
 
 
-def _crowded(tree: str) -> str:
-    """How to bring a tree back under the scan limit."""
-    if tree.split("/")[0] == "memories":
-        return "split its sensor into several sources or archive older records outside the brain"
-    return "keep bulky files in the brain's root inputs/ or originals/, which are not scanned"
-
-
 def expand(path: Path) -> Path:
-    """Expand a leading ~ or ~user; a user without a home directory is an input error, not a crash."""
     try:
         return path.expanduser()
     except RuntimeError as error:
-        # A bare ~ needs HOME, or a passwd entry, which some container users lack.
         hint = "set HOME" if path.parts[:1] == ("~",) else "check the user name"
         raise Error(f"a path's ~ or ~user home directory cannot be resolved; {hint}") from error
 
 
-def xdg_setting(name: str) -> Path | None:
-    """An explicit XDG base directory; like the specification, ignore empty and relative values."""
-    try:
-        path = Path(os.environ.get(name, "")).expanduser()
-    except RuntimeError:
-        return None
-    return path if path.is_absolute() else None
-
-
 def xdg(name: str, default: str) -> Path:
-    """An XDG base directory, or `default` below home."""
-    if found := xdg_setting(name):
-        return found
+    """Resolve an XDG base directory, ignoring empty, invalid, or relative values."""
+    with suppress(RuntimeError):
+        if (path := Path(os.environ.get(name, "")).expanduser()).is_absolute():
+            return path
     try:
         return Path.home() / default
     except RuntimeError as error:
@@ -466,87 +365,87 @@ def xdg(name: str, default: str) -> Path:
 
 
 def private_dir(store: Store, *parts: str) -> Store:
-    """Ensure a brain-local private directory under `<brain>/.bf/` exists with mode 700, owned by you and
-    reached without following symlinks."""
+    """Ensure `<brain>/.bf/...` exists with mode 700, owned by you, without following symlinks."""
     target = parts or (".bf",)
-    for part in target:
-        if not part or part in {".", ".."} or "/" in part or "\\" in part or "\x00" in part:
-            raise Error("invalid private state path")
-    descriptor = os.open(store.root, _DIR)
+    if any(not p or p in {".", ".."} or "/" in p or "\\" in p or "\x00" in p for p in target):
+        raise Error("invalid private state path")
+    fd = os.open(store.root, _DIR)
     try:
         for part in target:
             try:
-                os.mkdir(part, 0o700, dir_fd=descriptor)
-            except FileExistsError:
-                pass
-            except OSError as error:
-                cause = f" ({error.strerror})" if error.strerror else ""
-                raise Error(f"state directory {part} is inaccessible{cause}") from error
-            else:
-                os.fsync(descriptor)
-            try:
-                child = os.open(part, _DIR, dir_fd=descriptor)
+                with suppress(FileExistsError):
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                    os.fsync(fd)
+                child = os.open(part, _DIR, dir_fd=fd)
             except OSError as error:
                 if error.errno in {errno.ELOOP, errno.ENOTDIR}:
                     raise Error("state directory must be a directory and may not contain symlinks") from error
-                cause = f" ({error.strerror})" if error.strerror else ""
-                raise Error(f"state directory {part} is inaccessible{cause}") from error
-            os.close(descriptor)
-            descriptor = child
-            info = os.fstat(descriptor)
+                extra = f" ({error.strerror})" if error.strerror else ""
+                raise Error(f"state directory {part} is inaccessible{extra}") from error
+            os.close(fd)
+            fd = child
+            info = os.fstat(fd)
             if info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise Error("state directory must be owned by you with mode 700")
     finally:
-        os.close(descriptor)
+        os.close(fd)
     return Store(store.root.joinpath(*target))
 
 
 def program_state(store: Store, name: str) -> Store:
-    """A program's private directory under `<brain>/.bf/state/<name>/`, for cursors and tokens kept between runs.
-
-    It stays inside `.bf/state/`, ignored by Git and excluded from search, and may be deleted: a program must then
-    start again from its lookback.
-    """
+    """Ensure `<brain>/.bf/state/<name>/` exists for one program's private cursors and tokens."""
     if not name or name.startswith(".") or "/" in name or "\\" in name or "\x00" in name:
         raise Error("invalid program name")
     return private_dir(store, ".bf", "state", name)
 
 
+def ping_wakeup(store: Store) -> None:
+    """Write a monotonic timestamp atomically to `.bf/wakeup`, ignoring access failures."""
+    with suppress(Error, OSError):
+        private_dir(store, ".bf").write("wakeup", f"{time.monotonic_ns()}\n".encode(), durable=False)
+
+
+def wakeup_mtime(store: Store) -> int:
+    """Return `.bf/wakeup` modification time in nanoseconds, or `0` when absent."""
+    try:
+        return store.lstat(".bf/wakeup").st_mtime_ns
+    except Error, OSError:
+        return 0
+
+
 def lock_file(store: Store, name: str) -> tuple[Store, str]:
-    """Where a brain-local lock lives: `<brain>/.bf/locks/<name>`."""
+    """Return `(.bf/locks Store, lock_leaf)`."""
     if not name or name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
         raise Error("invalid lock name")
     return private_dir(store, ".bf", "locks"), name
 
 
 @contextmanager
-def _lock(
-    store: Store,
-    name: str,
-    wait: float,
-    *,
-    shared: bool = False,
-    busy: str = "another writer is active for this brain; retry after it finishes",
-) -> Generator[None]:
-    # The writer lock also holds the brain directory; other locks serialize brain-local operations inside .bf/locks/.
-    whole = name == "write.lock"
+def _lock(store: Store, name: str, wait: float, *, shared: bool = False, busy: str = _LOCK_BUSY) -> Generator[None]:
     state, leaf = lock_file(store, name)
     with state.parent(leaf) as (parent, entry):
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
             fd = os.open(entry, flags | os.O_CREAT, 0o600, dir_fd=parent)
         except FileNotFoundError:
-            # Concurrent first creation can report ENOENT on macOS. Reopen only an existing lock;
-            # keep the pinned parent and safety flags, and never replace a missing lock on recovery.
+            # Concurrent first creation can report ENOENT on macOS; reopen without creating.
             fd = os.open(entry, flags, dir_fd=parent)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise Error("invalid writer lock")
         deadline = time.monotonic() + wait
         _flock(fd, shared=shared, deadline=deadline, busy=busy)
-        if whole:
-            with _brain_lock(store, shared=shared, deadline=deadline, busy=busy):
+        if name == "write.lock":
+            root_fd = os.open(store.root, _DIR)
+            try:
+                try:
+                    _flock(root_fd, shared=shared, deadline=deadline, busy=busy)
+                except OSError as error:
+                    if error.errno not in {errno.EBADF, errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EINVAL}:
+                        raise
                 yield
+            finally:
+                os.close(root_fd)
         else:
             yield
     finally:
@@ -564,96 +463,43 @@ def _flock(fd: int, *, shared: bool, deadline: float, busy: str) -> None:
             time.sleep(0.05)
 
 
-@contextmanager
-def _brain_lock(store: Store, *, shared: bool, deadline: float, busy: str) -> Generator[None]:
-    """Also lock the brain directory itself: processes with different state directories keep separate lock files,
-    which alone would let two writers commit at once.
-
-    Some network filesystems cannot lock a directory, such as NFS for an exclusive lock: the state lock then stands
-    alone.
-    """
-    fd = os.open(store.root, _DIR)
-    try:
-        try:
-            _flock(fd, shared=shared, deadline=deadline, busy=busy)
-        except OSError as error:
-            if error.errno not in {errno.EBADF, errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EINVAL}:
-                raise
-        yield
-    finally:
-        os.close(fd)
+def writer(store: Store, wait: float = 0, *, busy: str = _WRITE_BUSY) -> AbstractContextManager[None]:
+    """Serialize writers of one physical brain."""
+    return _lock(store, "write.lock", wait, busy=busy)
 
 
-@contextmanager
-def writer(
-    store: Store,
-    wait: float = 0,
-    *,
-    # Readers, such as a long bf validate, block a writer as another writer does.
-    busy: str = "another process is reading or changing this brain's records; retry after it finishes",
-) -> Generator[None]:
-    """Serialize writers of one physical brain, or of another directory such as the registry's; wait up to `wait`
-    seconds for other writers and readers to finish."""
-    with _lock(store, "write.lock", wait, busy=busy):
-        yield
+def reader(store: Store, wait: float = 120) -> AbstractContextManager[None]:
+    """Hold shared access across record reads so writers wait cleanly."""
+    return _lock(store, "write.lock", wait, shared=True)
 
 
-@contextmanager
-def reader(store: Store, wait: float = 120) -> Generator[None]:
-    """Keep record files stable during one consistent read; readers can run concurrently."""
-    with _lock(store, "write.lock", wait, shared=True):
-        yield
-
-
-@contextmanager
-def building(store: Store, wait: float = 0) -> Generator[None]:
-    """Serialize full search-cache builds, which read the brain without holding its writer lock."""
-    with _lock(store, "build.lock", wait, busy="another search cache build is active; retry after it finishes"):
-        yield
+def building(store: Store, wait: float = 0) -> AbstractContextManager[None]:
+    """Serialize full search-cache builds."""
+    return _lock(store, "build.lock", wait, busy="another search cache build is active; retry after it finishes")
 
 
 @contextmanager
 def generation(store: Store, *, shared: bool, wait: float) -> Generator[None]:
-    """Search-cache readers hold this shared while connected; replacing the cache file holds it exclusively.
-
-    SQLite finds a database's -wal file by name, so no connection to a replaced cache may outlive its rename.
-    Readers pass a gate before connecting, which a replacement closes before it waits: overlapping readers cannot
-    keep it waiting forever, since only connections opened before it arrived delay it.
-    """
+    """Gate shared cache readers against exclusive cache replacement."""
     if shared:
         busy = "the search cache is being replaced; retry shortly"
         with ExitStack() as connected:
             with _lock(store, "cache-gate.lock", wait, shared=True, busy=busy):
                 connected.enter_context(_lock(store, "cache.lock", wait, shared=True, busy=busy))
             yield
-    else:
-        busy = "readers kept the search cache open; retry bf build"
-        with (
-            _lock(store, "cache-gate.lock", wait, busy=busy),
-            _lock(store, "cache.lock", wait, busy=busy),
-        ):
-            yield
+        return
+    busy = "readers kept the search cache open; retry bf build"
+    with _lock(store, "cache-gate.lock", wait, busy=busy), _lock(store, "cache.lock", wait, busy=busy):
+        yield
 
 
-@contextmanager
-def appending(store: Store, name: str, wait: float = 10) -> Generator[None]:
-    """Serialize writers of one program's log: a direct assistant run takes no program lock."""
+def appending(store: Store, name: str, wait: float = 10) -> AbstractContextManager[None]:
+    """Serialize writers of one program's log."""
     relative(name)
-    with _lock(store, f"log-{name}.lock", wait, busy=f"another run of {name} is writing its log"):
-        yield
+    return _lock(store, f"log-{name}.lock", wait, busy=f"another run of {name} is writing its log")
 
 
-@contextmanager
-def recording(store: Store, wait: float = 120) -> Generator[None]:
-    """Serialize saves of run history that no brain writer orders, such as routines', which change only this
-    machine's state directory; a writer that also saves it takes this lock second."""
-    with _lock(store, "history.lock", wait, busy="another run is saving its run history; retry shortly"):
-        yield
-
-
-@contextmanager
-def collecting(store: Store, sensor: str, wait: float = 0) -> Generator[None]:
-    """Order runs of one sensor without blocking offline reads while its provider is running."""
+def collecting(store: Store, sensor: str, wait: float = 0) -> AbstractContextManager[None]:
+    """Serialize runs of one job without blocking offline reads."""
     relative(sensor)
-    with _lock(store, f"collect-{sensor}.lock", wait, busy=f"{sensor} is already running for this brain; retry later"):
-        yield
+    return _lock(store, f"collect-{sensor}.lock", wait, busy=f"{sensor} is already running for this brain; retry later")

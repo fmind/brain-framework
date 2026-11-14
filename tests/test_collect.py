@@ -27,6 +27,7 @@ from bf import jobs, records
 from bf import validate as validate_module
 from bf.cli import app, main
 from bf.collect import collect, due
+from bf.config import load as load_config
 from bf.health import source_health
 from bf.jobs import Runner, run
 from bf.models import MAX_FIELDS, Error, Job, Record, ValidateSettings, encode, timestamp
@@ -38,7 +39,7 @@ from bf.watch import snapshot
 START = "2026-09-01T00:00:00.000000Z"
 END = "2026-09-02T00:00:00.000000Z"
 NOW = datetime(2026, 9, 2, tzinfo=UTC)
-CONFIG = b"""version: 10
+CONFIG = b"""version: 11
 name: fixture
 jobs:
   sample:
@@ -513,7 +514,7 @@ def stubborn(store: Store, markers: list[Path]) -> dict[str, object]:
         }
         for marker in markers
     }
-    return {"version": 10, "name": "fixture", "jobs": sensors}
+    return {"version": 11, "name": "fixture", "jobs": sensors}
 
 
 def graced(seconds: float) -> list[str]:
@@ -684,7 +685,7 @@ def test_only_a_program_using_home_needs_a_home_directory(
 def test_missing_source_does_not_prevent_other_sources(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  a-missing:\n    run: [sensors/missing.py]\n    emit: records\n    on: {every: 3600}\n"
         b'  b-good:\n    run: [echo, "[]"]\n    emit: records\n    on: {every: 3600}\n',
     )
@@ -953,7 +954,7 @@ def test_cancellation_kills_collector_and_descendants(
         "bf.yaml",
         json.dumps(
             {
-                "version": 10,
+                "version": 11,
                 "name": "fixture",
                 "jobs": {"sample": {"run": ["sensors/wait.sh", str(marker)], "emit": "records"}},
             }
@@ -1042,7 +1043,7 @@ def test_cancelled_update_stops_sensors_running_in_parallel(configured: Store, t
         }
         for marker in markers
     }
-    configured.write("bf.yaml", json.dumps({"version": 10, "name": "fixture", "jobs": sensors}).encode())
+    configured.write("bf.yaml", json.dumps({"version": 11, "name": "fixture", "jobs": sensors}).encode())
     child = subprocess.Popen(  # noqa: S603 - exercise the CLI boundary with temporary, synthetic collectors
         [sys.executable, "-m", "bf", "update", "--brain", str(configured.root)],
         stdout=subprocess.PIPE,
@@ -1340,7 +1341,7 @@ def test_line_list_file_expansion_and_oversized_text_truncation(configured: Stor
     configured.write("settings/repos.txt", b"# Tracked repositories\n\n org/alpha \norg/beta\n")
     configured.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  scoped:\n"
+        b"version: 11\nname: fixture\njobs:\n  scoped:\n"
         b'    run: [echo, "{{lines:settings/repos.txt}}"]\n'
         b"    emit: records\n"
         b"    max_text_bytes: 10\n",
@@ -1395,7 +1396,7 @@ def test_oversized_text_fails_without_truncation_opt_in(configured: Store) -> No
 def test_truncation_leaves_invalid_unicode_text_to_record_validation(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  sample:\n    run: [echo]\n    emit: records\n    max_text_bytes: 10\n",
+        b"version: 11\nname: fixture\njobs:\n  sample:\n    run: [echo]\n    emit: records\n    max_text_bytes: 10\n",
     )
     # A lone surrogate cannot be measured in UTF-8: the run names the field, not inaccessible files.
     with pytest.raises(Error, match=r"0\.text: .*unicode.*; nothing was written"):
@@ -1408,7 +1409,7 @@ def test_truncation_leaves_invalid_unicode_text_to_record_validation(configured:
 def test_update_executes_due_sensors_concurrently(configured: Store) -> None:
     configured.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n"
+        b"version: 11\nname: fixture\njobs:\n"
         b"  s1:\n    run: [echo]\n    emit: records\n    on: {every: 60}\n"
         b"  s2:\n    run: [echo]\n    emit: records\n    on: {every: 60}\n",
     )
@@ -1672,12 +1673,15 @@ def test_collect_accepts_jsonl_single_object_empty_and_reports_bad_jsonl_lines(
 
 
 def test_collect_edge_paths_reproject_and_due_recovery(configured: Store) -> None:
-    # _parse_collector_output whitespace, cursor-only envelope, and non-string cursor rejection.
-    assert collect_module._parse_collector_output(b"   \n") == ([], {}, None)  # noqa: SLF001
-    recs, inc, cur = collect_module._parse_collector_output(b'{"records": [], "cursor": "c-1"}')  # noqa: SLF001
+    # _parse_incoming whitespace, cursor-only envelope, and non-string cursor rejection.
+    cfg = load_config(configured)
+    assert collect_module._parse_incoming(configured, "sample", cfg, None, b"   \n", START) == ([], {}, None)  # noqa: SLF001
+    recs, inc, cur = collect_module._parse_incoming(  # noqa: SLF001
+        configured, "sample", cfg, None, b'{"records": [], "cursor": "c-1"}', START
+    )
     assert (recs, inc, cur) == ([], {}, "c-1")
     with pytest.raises(Error, match="cursor must be a string"):
-        collect_module._parse_collector_output(b'{"records": [], "cursor": 123}')  # noqa: SLF001
+        collect_module._parse_incoming(configured, "sample", cfg, None, b'{"records": [], "cursor": 123}', START)  # noqa: SLF001
 
     # Non-list JSON hits _truncate_text guard cleanly before schema failure.
     with pytest.raises(Error, match="one JSON array of records"):
@@ -1770,3 +1774,56 @@ def test_collect_edge_paths_reproject_and_due_recovery(configured: Store) -> Non
     # next_due returns now when last has an error without a last_run anchor.
     job = collect_module.load(configured).jobs["sample"]
     assert collect_module.next_due(job, {"last_error": "boom"}, NOW) == NOW
+
+
+def test_ingest_validates_maps_guards_and_pings_wakeup_without_runtime_db(configured: Store) -> None:
+    import yaml
+
+    from bf.collect import SHRINK_FLOOR, ingest
+    from bf.config import yaml_object
+    from bf.runtime import QUEUE
+    from bf.storage import wakeup_mtime
+
+    cfg_raw = yaml_object(configured.read("bf.yaml"), "bf.yaml")
+    cast("dict[str, object]", cfg_raw["jobs"])["mapped"] = {
+        "run": ["mapped"],
+        "emit": "records",
+        "source": "cal",
+        "map": {"id": "/uid", "title": "/subject", "attributes": {"room": "/loc"}},
+        "keep": 2,
+    }
+    configured.write("bf.yaml", yaml.safe_dump(cfg_raw).encode())
+
+    with pytest.raises(Error):
+        ingest(configured, "../bad", b"[]")
+    with pytest.raises(Error):
+        ingest(configured, "bf", b"[]")
+
+    jsonl = b'{"uid": "u1", "subject": "One", "loc": "R1"}\n\n{"uid": "u2", "subject": "Two", "loc": "R2"}\n'
+    res = ingest(configured, "cal", jsonl)
+    assert (res["source"], res["records"], res["added"], len(records.files(configured, "cal"))) == ("cal", 2, 2, 2)
+    loaded = [records.load(configured, p) for p in records.files(configured, "cal")]
+    assert {r.id: (r.title, r.attributes["room"]) for r in loaded} == {"u1": ("One", "R1"), "u2": ("Two", "R2")}
+    assert wakeup_mtime(configured) > 0
+    assert not (configured.root / QUEUE).exists()
+
+    # dry_run returns samples and neither mutates stored records nor pings .bf/wakeup.
+    (configured.root / ".bf/wakeup").unlink()
+    dry = ingest(configured, "cal", b'{"uid": "u3", "subject": "Three", "loc": "R3"}', dry_run=True)
+    assert len(cast("list[object]", dry["samples"])) == 1
+    assert dry["added"] == 1
+    assert len(records.files(configured, "cal")) == 2
+    assert wakeup_mtime(configured) == 0
+    assert not (configured.root / QUEUE).exists()
+
+    # snapshot shrink guard protects against >50% & >SHRINK_FLOOR removals unless allow_removal=True.
+    bulk = json.dumps([{"id": f"s-{i}", "title": f"S{i}"} for i in range(SHRINK_FLOOR + 2)]).encode()
+    assert ingest(configured, "sample", bulk)["added"] == SHRINK_FLOOR + 2
+    with pytest.raises(Error, match="--allow-removal"):
+        ingest(configured, "sample", b'[{"id": "s-0", "title": "Keep"}]', snapshot=True)
+    assert len(records.files(configured, "sample")) == SHRINK_FLOOR + 2
+    dry_snap = ingest(configured, "sample", b'[{"id": "s-0", "title": "Keep"}]', snapshot=True, dry_run=True)
+    assert dry_snap["removal_refused"] is True
+    shrunk = ingest(configured, "sample", b'[{"id": "s-0", "title": "Keep"}]', snapshot=True, allow_removal=True)
+    assert (shrunk["removed"], len(records.files(configured, "sample"))) == (SHRINK_FLOOR + 1, 1)
+    assert not (configured.root / QUEUE).exists()

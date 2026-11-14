@@ -16,7 +16,7 @@ from bf.models import Error, Job
 from bf.storage import Store, collecting
 from bf.update import update
 
-CONFIG = b"""version: 10
+CONFIG = b"""version: 11
 name: fixture
 jobs:
   mail:
@@ -145,7 +145,7 @@ def test_job_gate_halts_prompt_without_failing_update(selected: Store) -> None:
 
     selected.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  triage:\n    prompt: prompts/triage.md\n    harness: [agent]\n"
+        b"version: 11\nname: fixture\njobs:\n  triage:\n    prompt: prompts/triage.md\n    harness: [agent]\n"
         b"    gate: [check-pending]\n    on: {every: 3600}\n",
     )
     selected.write("prompts/triage.md", b"Review.\n")
@@ -173,7 +173,7 @@ def test_run_wakes_and_deliveries_edge_paths(brain: Store) -> None:
 
     brain.write(
         "bf.yaml",
-        b"""version: 10
+        b"""version: 11
 name: fixture
 jobs:
   worker:
@@ -251,3 +251,71 @@ jobs:
         db.close()
     assert run_deliveries(brain, ("worker",)) == (0, True)
     assert d1 != d2
+
+
+def test_update_syncs_historical_baseline_vs_live_item_events(selected: Store) -> None:
+    from typing import cast
+
+    from bf import collect, records
+    from bf.models import Record
+    from bf.runtime import Queue
+    from bf.storage import writer
+    from bf.update import update
+
+    selected.write(
+        "bf.yaml",
+        b"""version: 11
+name: fixture
+jobs:
+  cal:
+    run: [cal]
+    emit: records
+    on: {every: 3600}
+  reactor:
+    prompt: prompts/react.md
+    harness: [react]
+    emit: log
+    on:
+      - event:
+          kind: [record, note.changed]
+""",
+    )
+    selected.write("prompts/react.md", b"Handle changes.\nContext: {{context}}\n")
+    selected.write("projects/old.md", b"---\ntype: project\n---\n# Old Project\n")
+    old_rec = Record(id="old-1", title="Historical item", attributes={"observed": "2020-01-01T00:00:00.000000Z"})
+    with writer(selected):
+        selected.write(records.path("legacy", "old-1"), records.serialize(old_rec))
+
+    dispatched: list[list[tuple[str, str]]] = []
+    cal_payload = [b'[{"id": "live-1", "title": "Alpha Meeting"}]']
+
+    def runner(argv: list[str], *_rest: object) -> bytes:
+        if argv[0] == "cal":
+            return cal_payload[0]
+        payload = json.loads(cast("bytes", _rest[-1]).decode().split("Context: ", 1)[1])
+        dispatched.append([(str(ev["kind"]), str(ev["ref"])) for ev in payload["events"]])
+        return b""
+
+    # 1st update(): old note & pre-cutoff untracked record are seeded silently; live collected record emits record.added.
+    first = update(selected, runner=runner)
+    assert first["ok"], first
+    live_ref = "cal:live-1"
+    assert dispatched == [[("record.added", live_ref)]]
+    queue = Queue(selected)
+    assert "at" in queue.progress("items:seeded")
+
+    # 2nd update(): changing a note and modifying a record emits note.changed + record.changed cleanly.
+    selected.write("projects/old.md", b"---\ntype: project\n---\n# Old Project\nUpdated notes.\n")
+    cal_payload[0] = b'[{"id": "live-1", "title": "Alpha Meeting", "text": "Rescheduled"}]'
+    Queue(selected).set_progress("collect:cal", {})
+    with Queue(selected).connect() as db:
+        db.execute("UPDATE job_state SET data='{}', window_end='' WHERE job='cal'")
+    second = update(selected, runner=runner)
+    assert second["ok"], second
+    assert set(dispatched[-1]) == {("record.changed", live_ref), ("note.changed", "projects/old.md")}
+
+    # Removing the live record emits record.removed on the next update().
+    collect.ingest(selected, "cal", b"[]", snapshot=True, allow_removal=True)
+    third = update(selected, runner=runner)
+    assert third["ok"], third
+    assert dispatched[-1] == [("record.removed", live_ref)]

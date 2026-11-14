@@ -2,11 +2,11 @@
 
 Use only for an explicitly authorized release. [CD](../../../../.github/workflows/cd.yml) owns PyPI and GitHub publication: never create a competing release, move a tag or replace published assets. Keep private-brain details out of outgoing commits and release notes. [`scripts/release.py`](../../../../scripts/release.py) runs the mechanical steps; this checklist owns the judgment between them. Run long steps in the background.
 
-1. **Write the changelog**: In the primary checkout, complete `## Unreleased` and open it with one paragraph naming what stays unchanged and the upgrade step, such as `bf skill install --global` when `/bf` changed: “A documentation release. The brain format (`version: 9`), `bf.yaml`, the reply schemas and the search cache are unchanged; no upgrade step is needed.” A breaking change makes the release a major and needs manual upgrade steps.
+1. **Write the changelog**: In the primary checkout, complete `## Unreleased` and open it with one paragraph naming what stays unchanged and the upgrade step, such as `bf skill install --global` when `/bf` changed: “A documentation release. The brain format (`version: 11`), `bf.yaml`, the reply schemas and the search cache are unchanged; no upgrade step is needed.” A breaking change makes the release a major and needs manual upgrade steps.
 1. **Prepare the clone**: From the primary checkout on `main`, name the changed paths the release ships, or `--all` when every change belongs to it. Other sessions may hold uncommitted work there, so name paths whenever in doubt:
 
    ```bash
-   python3 scripts/release.py prepare X.Y.Z CHANGELOG.md src/bf/cli.py docs/docs/commands.md
+   python3 scripts/release.py prepare X.Y.Z CHANGELOG.md src/bf/cli.py src/bf/guides/reference.md docs/docs/reference.md
    ```
 
    It refuses a merge commit, an existing tag or a HEAD behind `origin/main`, then clones HEAD into `~/.cache/bf-release/vX.Y.Z`, copies those paths, bumps the version and dates the changelog section. For a new major it also updates each skill's `compatibility`, regenerates the schemas and refreshes `tests/contract/`; review each line in its `review` reply and update mentions of the previous major that mean the current release, keeping historical ones such as upgrade notes. Work in the clone from now on: pass `-C` or `cd` in the same command, since an agent's shell may reset its directory.

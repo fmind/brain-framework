@@ -5,38 +5,30 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable, Mapping
-from contextlib import ExitStack, suppress
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, cast
 
 from pydantic import FailFast, TypeAdapter, ValidationError
 
-from bf import jobs, ontology, records
+from bf import jobs, models, ontology, records, runtime
 from bf import map as mapper
 from bf.config import load
-from bf.models import RECORD_KEYS, Config, Error, Job, Record, decode, explain, local, suggest, timestamp
+from bf.models import Config, Error, InputError, Job, Record
 from bf.runtime import Queue, append_log
-from bf.storage import Store, collecting, writer
+from bf.storage import Store, collecting, ping_wakeup, writer
 
-CATCH_UP = timedelta(days=30)
-SCHEDULE_BACKOFF = 60
-SHRINK_FLOOR = 10
-MAX_COUNT = 2**53 - 1
-REPROJECT = 1000
-LIMIT = 200
+CATCH_UP, SCHEDULE_BACKOFF, SHRINK_FLOOR, MAX_COUNT, REPROJECT, LIMIT = timedelta(days=30), 60, 10, 2**53 - 1, 1000, 200
+_ts = models.timestamp
 
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _now() -> str:
-    return local(timestamp(_utc_now().isoformat()))
-
-
 def _window(start: str, end: str) -> tuple[str, str]:
     try:
-        s, e = timestamp(start), timestamp(end)
+        s, e = _ts(start), _ts(end)
     except ValueError as error:
         raise Error("start and end require timezone-aware timestamps") from error
     if s >= e:
@@ -44,36 +36,10 @@ def _window(start: str, end: str) -> tuple[str, str]:
     return s, e
 
 
-def _parse_collector_output(raw: bytes) -> tuple[object, dict[str, int], str | None]:
-    """Parse JSON array, `{records, incomplete?, cursor?}`, single JSON object, or JSON Lines."""
-    stripped = raw.strip()
-    if not stripped:
-        return [], {}, None
-    try:
-        printed = decode(raw)
-    except Error:
-        raw_lines = [line for line in raw.splitlines() if line.strip()]
-        if not stripped.startswith(b"[") and len(raw_lines) >= 2:
-            items: list[object] = []
-            for index, line in enumerate(raw_lines, 1):
-                try:
-                    obj = decode(line)
-                except Error as line_error:
-                    raise Error(f"line {index}: {line_error}") from line_error
-                if not isinstance(obj, dict):
-                    raise Error(f"line {index}: collector JSONL line must be a JSON object") from None
-                items.append(obj)
-            return items, {}, None
-        raise
-    if isinstance(printed, dict) and ({"records", "incomplete", "cursor"} & printed.keys()):
-        return _envelope(printed)
-    return ([printed] if isinstance(printed, dict) else printed), {}, None
-
-
 def _envelope(printed: dict[str, object]) -> tuple[object, dict[str, int], str | None]:
     if not (printed.keys() <= {"records", "incomplete", "cursor"}) or "records" not in printed:
         raise Error("collector object may hold only records, incomplete and cursor")
-    incomplete: dict[str, int] = {}
+    inc: dict[str, int] = {}
     if "incomplete" in printed:
         raw_inc = printed["incomplete"]
         if not isinstance(raw_inc, dict) or raw_inc.keys() != {"missed", "of"}:
@@ -83,106 +49,138 @@ def _envelope(printed: dict[str, object]) -> tuple[object, dict[str, int], str |
                 raise Error(f"incomplete.{key} must be an integer from 1 to {MAX_COUNT}")
         if raw_inc["missed"] > raw_inc["of"]:
             raise Error("incomplete.missed must not exceed incomplete.of")
-        incomplete = {"missed": raw_inc["missed"], "of": raw_inc["of"]}
+        inc = {"missed": raw_inc["missed"], "of": raw_inc["of"]}
     if not isinstance(printed["records"], list):
         raise Error("records must be one JSON array of records")
-    cursor = printed.get("cursor")
-    if cursor is not None and not isinstance(cursor, str):
+    if (cursor := printed.get("cursor")) is not None and not isinstance(cursor, str):
         raise Error("cursor must be a string")
-    return printed["records"], incomplete, cursor
+    return printed["records"], inc, cursor
 
 
-def _prepare(position: int, record: Record, config: Config, observed: str) -> Record:
-    try:
-        ontology.validate(record, config)
-        stamped = record.model_copy(update={"attributes": {**record.attributes, "observed": observed}})
-        return cast("Callable[[], Record]", stamped.readable)()
-    except (Error, ValueError) as error:
-        raise Error(f"record {position}: {error}") from error
-
-
-def _shrink(store: Store, src: str, job_name: str, retention: records.Retention) -> str:
-    exempt = set(retention.removals)
-    existing = [file for file in records.files(store, src) if file not in exempt]
-    kept = {records.path(src, record.id) for record in retention.kept}
-    removed = sum(file not in kept for file in existing)
-    if removed and (not retention.kept or (removed > len(existing) / 2 and removed > SHRINK_FLOOR)):
-        return (
-            f"snapshot would remove {removed} of {len(existing)} records; kept the existing catalog. "
-            f"Check the job's scope, then run bf collect {job_name} --allow-removal to accept the removal"
-        )
-    return ""
-
-
-def _retention(retention: records.Retention) -> dict[str, int]:
-    return {k: v for k, v in (("forgotten", retention.forgotten), ("expired", retention.expired)) if v}
-
-
-def _coverage(
-    previous: Mapping[str, object], start: str, end: str, observed: str, job: Job
-) -> tuple[dict[str, str], bool]:
+def _coverage(prev: Mapping[str, object], start: str, end: str, observed: str, job: Job) -> tuple[dict[str, str], bool]:
     """Compute updated contiguous window coverage `[window_start, window_end]` and whether this run is latest."""
-    mode = job.mode or "window"
-    covered = min(end, observed)
-    before_start, before_end = str(previous.get("window_start", "")), str(previous.get("window_end", ""))
-    if before_end:
-        last = previous.get("last_run") or previous.get("last_success") or observed
-        before_end = min(timestamp(before_end), timestamp(str(last)), observed)
-        before_start = timestamp(before_start) if before_start else ""
-        if before_start >= before_end:
-            before_start = before_end = ""
+    mode, covered = job.mode or "window", min(end, observed)
+    b_start, b_end = str(prev.get("window_start", "")), str(prev.get("window_end", ""))
+    if b_end:
+        last = prev.get("last_run") or prev.get("last_success") or observed
+        b_end = min(_ts(b_end), _ts(str(last)), observed)
+        b_start = "" if (s := _ts(b_start) if b_start else "") >= b_end else s
+        if not b_start and b_start >= b_end:
+            b_end = ""
     if start >= covered:
-        return ({"window_start": before_start, "window_end": before_end} if before_end else {}), False
-    horizon = timestamp((datetime.fromisoformat(observed) - CATCH_UP).isoformat())
-    resumes = mode == "window" and any(t.every is not None or t.at is not None for t in job.triggers)
-    contiguous = not before_end or (covered >= before_end and (not resumes or start <= max(before_end, horizon)))
-    interval = (start, covered) if contiguous else (before_start, before_end)
-    if before_start and before_end and start <= before_end and covered >= before_start:
-        interval = (min(start, before_start), max(covered, before_end))
-    latest = contiguous and (mode in {"snapshot", "cursor"} or end >= observed)
-    return {"window_start": interval[0], "window_end": interval[1]}, latest
+        return ({"window_start": b_start, "window_end": b_end} if b_end else {}), False
+    horizon = _ts((datetime.fromisoformat(observed) - CATCH_UP).isoformat())
+    resumes = mode == "window" and bool(job.timed)
+    contiguous = not b_end or (covered >= b_end and (not resumes or start <= max(b_end, horizon)))
+    lo, hi = (start, covered) if contiguous else (b_start, b_end)
+    if b_start and b_end and start <= b_end and covered >= b_start:
+        lo, hi = min(start, b_start), max(covered, b_end)
+    return {"window_start": lo, "window_end": hi}, contiguous and (mode in {"snapshot", "cursor"} or end >= observed)
 
 
-def _truncate_text(store: Store, name: str, job: Job, printed: object) -> None:
-    if not isinstance(printed, list):
-        return
-    truncated = 0
-    for pos, item in enumerate(printed):
-        if isinstance(item, dict) and "fields" in item:
-            raise Error(f"record {pos}: collectors must output @type, relations and attributes, not fields")
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
+def _parse_incoming(
+    store: Store, log_name: str, config: Config, job: Job | None, raw: bytes, observed: str
+) -> tuple[list[Record], dict[str, int], str | None]:
+    max_tb, inc = job.max_text_bytes if job else None, cast("dict[str, int]", {})
+    if not raw.strip():
+        printed: object = []
+        cursor_out: str | None = None
+    elif job is not None and job.map is not None:
+        printed, cursor_out = mapper.extract(raw, job.map)
+    else:
+        printed, cursor_out = mapper.load_json(raw), None
+        if isinstance(printed, dict):
+            printed, inc, cursor_out = (
+                _envelope(printed) if ({"records", "incomplete", "cursor"} & printed.keys()) else ([printed], {}, None)
+            )
+    if isinstance(printed, list):
+        truncated = 0
+        for pos, item in enumerate(printed):
+            if isinstance(item, dict) and "fields" in item:
+                raise Error(f"record {pos}: collectors must output @type, relations and attributes, not fields")
+            if not isinstance(item, dict) or not isinstance(text := item.get("text"), str):
+                continue
             try:
-                encoded = item["text"].encode("utf-8")
+                encoded = text.encode("utf-8")
             except UnicodeEncodeError:
                 continue
-            if job.max_text_bytes is not None and len(encoded) > job.max_text_bytes:
-                cut = encoded[: job.max_text_bytes].decode("utf-8", errors="ignore")
+            if max_tb is not None and len(encoded) > max_tb:
                 attrs = item.get("attributes")
-                new_attrs = {**(attrs or {}), "partial": True} if attrs is None or isinstance(attrs, dict) else attrs
-                printed[pos] = {**item, "text": cut, "attributes": new_attrs}
+                new_a = {**(attrs or {}), "partial": True} if attrs is None or isinstance(attrs, dict) else attrs
+                printed[pos] = {**item, "text": encoded[:max_tb].decode("utf-8", errors="ignore"), "attributes": new_a}
                 truncated += 1
-            elif job.max_text_bytes is None and len(encoded) > 4 << 20:
+            elif max_tb is None and len(encoded) > 4 << 20:
                 raise Error(f"record {pos}: text exceeds 4 MiB; set max_text_bytes on this job to cut longer text")
-    if truncated and job.max_text_bytes is not None:
-        with suppress(Error, OSError):
-            append_log(
-                store,
-                name,
-                f"{_now()} truncated {truncated} oversized record text value(s) to {job.max_text_bytes} bytes",
+        if truncated and max_tb is not None:
+            with suppress(Error, OSError):
+                msg = f"{models.local(runtime.now())} truncated {truncated} oversized record text value(s) to {max_tb} bytes"
+                append_log(store, log_name, msg)
+    try:
+        incoming = TypeAdapter(Annotated[list[Record], FailFast()]).validate_python(printed)
+    except ValidationError as error:
+        err_msg = "collector must print one JSON array of records: " + models.explain(error, models.RECORD_KEYS)
+        raise Error(err_msg) from error
+    validated: list[Record] = []
+    for pos, rec in enumerate(incoming):
+        try:
+            ontology.validate(rec, config)
+            stamped = rec.model_copy(update={"attributes": {**rec.attributes, "observed": observed}})
+            validated.append(cast("Callable[[], Record]", stamped.readable)())
+        except (Error, ValueError) as error:
+            raise Error(f"record {pos}: {error}") from error
+    if len({r.id for r in validated}) != len(validated):
+        raise Error("collector returned duplicate record ids")
+    return validated, inc, cursor_out
+
+
+_Batch = tuple[Store, str, str, list[Record]]
+_BatchOpts = tuple[tuple[bool, bool, bool], tuple[str, int | None, bool, float], Callable[[], str] | None]
+
+
+def _apply_batch(batch: _Batch, opts: _BatchOpts, base: dict[str, object]) -> dict[str, object]:
+    store, src, job_name, incoming = batch
+    (expire_stored, snapshot, allow_removal), (cutoff, keep, dry_run, measured), stamp_fn = opts
+    # Critical invariant: NEVER open/lock `.bf/runtime.sqlite3` inside `with writer(store):`.
+    with records.reading(store) if dry_run else writer(store, wait=120):
+        if not dry_run:
+            records.recover(store)
+            if stamp_fn and (stamp := stamp_fn()):
+                incoming = [r.model_copy(update={"attributes": {**r.attributes, "observed": stamp}}) for r in incoming]
+        kept = records.retention(store, src, incoming, cutoff=cutoff, expire_stored=expire_stored)
+        kept_paths, rem_set = {records.path(src, r.id) for r in kept.kept}, set(kept.removals)
+        existing = [f for f in records.files(store, src) if f not in rem_set] if snapshot and not allow_removal else []
+        rem = sum(f not in kept_paths for f in existing)
+        if (too_small := rem and (not kept.kept or (rem > len(existing) / 2 and rem > SHRINK_FLOOR))) and not dry_run:
+            raise Error(
+                f"snapshot would remove {rem} of {len(existing)} records; kept the existing catalog. "
+                f"Check the job's scope, then run bf collect {job_name} --allow-removal to accept the removal"
             )
+        extra: dict[str, object] = {}
+        if dry_run:
+            counts, _ = records.plan(store, src, kept.kept, snapshot=snapshot)
+            if snapshot:
+                counts["removed"] -= len(kept.removals)
+            if too_small:
+                extra["removal_refused"] = True
+            exp = kept.expired
+            extra["samples"] = [r.model_dump(exclude_defaults=True) for r in kept.kept[:3]]
+        else:
+            counts = records.upsert(store, src, kept.kept, snapshot=snapshot, removals=kept.removals)
+            pruned = records.prune(store, src, keep, re.compile(r".*")) if keep is not None else 0
+            exp = kept.expired + pruned
+        extra |= {k: v for k, v in (("forgotten", kept.forgotten), ("expired", exp)) if v}
+        elapsed = round(time.monotonic() - measured, 6)
+        return {**base, **counts, "records": len(kept.kept), **extra, "elapsed_seconds": elapsed}
 
 
-def _default_window(job: Job, prev: Mapping[str, object], started: datetime, start: str, end: str) -> tuple[str, str]:
-    resolved_end = timestamp(started.isoformat()) if end in {"", "now"} else end
-    if start:
-        return _window(start, resolved_end)
-    anchor = started - timedelta(seconds=job.lookback)
+def _resume_start(job: Job, prev: Mapping[str, object], anchor_now: datetime) -> datetime:
+    start = anchor_now - timedelta(seconds=job.lookback)
     if (job.mode or "window") == "window" and prev.get("window_end"):
-        floor = started - CATCH_UP
+        floor = anchor_now - CATCH_UP
         resumed = max(datetime.fromisoformat(str(prev["window_end"])), floor) - timedelta(seconds=job.overlap)
-        if resumed < started:
-            anchor = max(resumed, floor)
-    return _window(timestamp(anchor.isoformat()), resolved_end)
+        if resumed < anchor_now:
+            return max(resumed, floor)
+    return start
 
 
 def collect(
@@ -203,161 +201,117 @@ def collect(
     config = load(store)
     if fixture is None:
         job = jobs.enabled(config.jobs, name)
+    elif (job := config.jobs.get(name)) is None:
+        raise Error(f"unknown job {name}; check jobs in bf.yaml{models.suggest(name, list(config.jobs))}")
     else:
-        if (declared := config.jobs.get(name)) is None:
-            raise Error(f"unknown job {name}; check jobs in bf.yaml{suggest(name, list(config.jobs))}")
-        job, dry_run = declared, True
-        runner = cast("jobs.Runner", lambda *_: fixture)
+        dry_run, runner = True, cast("jobs.Runner", lambda *_: fixture)
     if job.emit != "records":
         raise Error(f"job {name} does not emit records (emit: {job.emit})")
     if reconcile and job.reconcile_spec is None:
         raise Error("reconciliation requires the job's reconcile setting")
-
     src, mode = job.source or name, job.mode or "window"
     previous = Queue(store).state_of(name) if fixture is None else {}
-    started = clock()
-    start, end = _default_window(job, previous, started, start, end)
-    observed, measured = timestamp(started.isoformat()), time.monotonic()
+    started, measured = clock(), time.monotonic()
+    res_end = _ts(started.isoformat()) if end in {"", "now"} else end
+    start, end = _window(start or _ts(_resume_start(job, previous, started).isoformat()), res_end)
+    observed = _ts(started.isoformat())
 
     with collecting(store, name):
         committed = False
         try:
-            if reconcile and job.reconcile_spec is not None:
-                lb = job.reconcile_spec.lookback or job.lookback
-                if start > timestamp((started - timedelta(seconds=lb)).isoformat()) or end < observed:
+            if reconcile and (rs := job.reconcile_spec) is not None:
+                earliest = _ts((started - timedelta(seconds=rs.lookback or job.lookback)).isoformat())
+                if start > earliest or end < observed:
                     raise Error("reconciliation must cover its lookback through the current run")
-            prev_cursor = str(previous.get("cursor") or "")
-            argv = (
-                []
-                if fixture is not None
-                else jobs.expand_argv(store, job.run, name, start=start, end=end, cursor=prev_cursor)
-            )
+            prev_cursor, exp = str(previous.get("cursor") or ""), jobs.expand_argv
+            argv = [] if fixture is not None else exp(store, job.run, name, start=start, end=end, cursor=prev_cursor)
             raw = runner(argv, job, store, name, b"")
-            if not raw.strip():
-                printed, incomplete, cursor_out = [], {}, None
-            elif job.map is not None:
-                printed, cursor_out = mapper.extract(raw, job.map)
-                incomplete = {}
-            else:
-                printed, incomplete, cursor_out = _parse_collector_output(raw)
-            _truncate_text(store, name, job, printed)
-            try:
-                incoming = TypeAdapter(Annotated[list[Record], FailFast()]).validate_python(printed)
-            except ValidationError as error:
-                raise Error("collector must print one JSON array of records: " + explain(error, RECORD_KEYS)) from error
-            incoming = [_prepare(pos, rec, config, observed) for pos, rec in enumerate(incoming)]
-            if len({r.id for r in incoming}) != len(incoming):
-                raise Error("collector returned duplicate record ids")
-            cutoff = timestamp((started - timedelta(seconds=job.expire_after)).isoformat()) if job.expire_after else ""
+            incoming, inc, cursor_out = _parse_incoming(store, name, config, job, raw, observed)
+            cutoff = _ts((started - timedelta(seconds=job.expire_after)).isoformat()) if job.expire_after else ""
             next_cursor = cursor_out if cursor_out is not None else prev_cursor
-            result: dict[str, object] = {
-                "job": name,
-                "source": src,
-                "records": len(incoming),
-                "requested_start": start,
-                "requested_end": end,
-                "reconcile": reconcile,
-                "output_bytes": len(raw),
-                **({"incomplete": incomplete} if incomplete else {}),
-                **({"cursor": next_cursor} if cursor_out is not None else {}),
-            }
-            snapshot, expire_stored = mode == "snapshot" and not incomplete, not incomplete
-            if dry_run:
-                with records.reading(store):
-                    kept = records.retention(store, src, incoming, cutoff=cutoff, expire_stored=expire_stored)
-                    counts, _ = records.plan(store, src, kept.kept, snapshot=snapshot)
-                    if snapshot:
-                        counts["removed"] -= len(kept.removals)
-                    refused = snapshot and not allow_removal and bool(_shrink(store, src, name, kept))
-                return {
-                    **result,
-                    "records": len(kept.kept),
-                    **counts,
-                    **_retention(kept),
-                    **({"removal_refused": True} if refused else {}),
-                    "elapsed_seconds": round(time.monotonic() - measured, 6),
-                    "samples": [r.model_dump(exclude_defaults=True) for r in kept.kept[:3]],
-                }
-            # Critical invariant: NEVER open/lock `.bf/runtime.sqlite3` inside `with writer(store):`.
-            with writer(store, wait=120):
-                records.recover(store)
-                if clock is _utc_now or live:
-                    commit_obs = timestamp(max(started, _utc_now()).isoformat())
-                    if commit_obs != observed:
-                        incoming = [
-                            r.model_copy(update={"attributes": {**r.attributes, "observed": commit_obs}})
-                            for r in incoming
-                        ]
-                kept = records.retention(store, src, incoming, cutoff=cutoff, expire_stored=expire_stored)
-                if snapshot and not allow_removal and (refusal := _shrink(store, src, name, kept)):
-                    raise Error(refusal)
-                result.update(records.upsert(store, src, kept.kept, snapshot=snapshot, removals=kept.removals))
-                if job.keep is not None:
-                    pruned = records.prune(store, src, job.keep, re.compile(r".*"))
-                    result["expired"] = kept.expired + pruned
-                else:
-                    result["expired"] = kept.expired
-                result.update(records=len(kept.kept), forgotten=kept.forgotten)
-                if not result["expired"]:
-                    result.pop("expired")
-                if not result["forgotten"]:
-                    result.pop("forgotten")
-                committed = True
-                result["elapsed_seconds"] = round(time.monotonic() - measured, 6)
+            result: dict[str, object] = {"job": name, "source": src, "records": len(incoming), "reconcile": reconcile}
+            result |= {"requested_start": start, "requested_end": end, "output_bytes": len(raw)}
+            if inc:
+                result["incomplete"] = inc
+            if cursor_out is not None:
+                result["cursor"] = next_cursor
 
-            coverage, latest = _coverage(previous, start, end, observed, job)
-            streak = int(cast("int", previous.get("incomplete_runs", 0)))
+            def _stamp() -> str:
+                s = _ts(max(started, _utc_now()).isoformat()) if (clock is _utc_now or live) else ""
+                return "" if s == observed else s
+
+            flags = (not inc, mode == "snapshot" and not inc, allow_removal)
+            opts = (cutoff, job.keep, dry_run, measured)
+            result = _apply_batch((store, src, name, incoming), (flags, opts, _stamp), result)
+            if dry_run:
+                return result
+            committed = True
+            cov, latest = _coverage(previous, start, end, observed, job)
             runs = int(cast("int", previous.get("runs", 0))) + 1
             metrics = {k: v for k, v in result.items() if k not in {"job", "source", "incomplete", "cursor"}}
+            patch: dict[str, object] = {"last_run": observed, **cov, "last_error": "", "error_count": 0}
+            patch |= {"runs": runs, "forgotten": 0, "expired": 0, **metrics}
+            streak = int(cast("int", previous.get("incomplete_runs", 0)))
+            if inc or streak:
+                patch |= {**inc, "incomplete_runs": streak + 1} if inc else {"missed": 0, "of": 0, "incomplete_runs": 0}
+            if latest:
+                patch["last_success"] = observed
+                if reconcile:
+                    patch["last_reconcile"] = observed
+            if cursor_out is not None:
+                patch["cursor"] = next_cursor
             queue = Queue(store)
-            state_patch: dict[str, object] = {
-                "last_run": observed,
-                **coverage,
-                "last_error": "",
-                "error_count": 0,
-                "runs": runs,
-                "forgotten": 0,
-                "expired": 0,
-                **({"last_success": observed} if latest else {}),
-                **({"last_reconcile": observed} if reconcile and latest else {}),
-                **({"cursor": next_cursor} if cursor_out is not None else {}),
-                **metrics,
-                **(
-                    {**incomplete, "incomplete_runs": streak + 1}
-                    if incomplete
-                    else {"missed": 0, "of": 0, "incomplete_runs": 0}
-                    if streak
-                    else {}
-                ),
-            }
-            queue.remember(name, **state_patch)
-            for ev_kind, key in (
-                ("record.created", "added"),
-                ("record.updated", "updated"),
-                ("record.removed", "removed"),
-            ):
-                if count := cast("int", result.get(key, 0)):
-                    queue.record_event(ev_kind, src, {"source": src, "job": name, "count": count})
-            queue.record_event(
-                "job.completed", name, {"job": name, "emit": "records", "source": src, "records": result["records"]}
-            )
+            queue.remember(name, **patch)
+            queue.resolve_incident(name)
+            ping_wakeup(store)
         except (Error, OSError, UnicodeError) as error:
-            base = (
-                str(error)
-                if isinstance(error, Error)
-                else "collector files are inaccessible; check executable, record permissions and free space"
-            )
-            msg = (
-                "records were committed but local run history could not be saved; retry is safe"
-                if committed
-                else f"{base}; nothing was written"
-            )
+            io_err = "collector files are inaccessible; check executable, record permissions and free space"
+            done_err = "records were committed but local run history could not be saved; retry is safe"
+            base_err = str(error) if isinstance(error, Error) else io_err
+            msg = done_err if committed else f"{base_err}; nothing was written"
             jobs.record_failure(store, name, error, msg, dry_run=dry_run, at=observed)
         counts_msg = ", ".join(f"{result.get(k, 0)} {k}" for k in ("added", "updated", "unchanged", "removed"))
-        missing = f"; missed {incomplete['missed']} of {incomplete['of']}" if incomplete else ""
+        missing = f"; missed {inc['missed']} of {inc['of']}" if inc else ""
         with suppress(Error, OSError):
-            append_log(store, name, f"{_now()} collected {result['records']} records: {counts_msg}{missing}")
+            append_log(
+                store,
+                name,
+                f"{models.local(runtime.now())} collected {result['records']} records: {counts_msg}{missing}",
+            )
         return result
+
+
+def ingest(
+    store: Store,
+    source: str,
+    raw: bytes,
+    *,
+    snapshot: bool = False,
+    allow_removal: bool = False,
+    dry_run: bool = False,
+    clock: Callable[[], datetime] = _utc_now,
+) -> dict[str, object]:
+    """Validate and upsert externally supplied records without opening `.bf/runtime.sqlite3`."""
+    if not re.fullmatch(models.NAME, source) or source == models.RESERVED:
+        raise InputError(
+            "record source must start with a lowercase letter and use only lowercase letters, digits and hyphens",
+            "source",
+        )
+    config, started, measured = load(store), clock(), time.monotonic()
+    job_name, job = config.record_sources().get(source, (source, None))
+    observed = _ts(started.isoformat())
+    incoming, inc, cursor_out = _parse_incoming(store, job_name, config, job, raw, observed)
+    cutoff = _ts((started - timedelta(seconds=job.expire_after)).isoformat()) if job and job.expire_after else ""
+    base: dict[str, object] = {"source": source, "records": len(incoming), "output_bytes": len(raw)}
+    if inc:
+        base["incomplete"] = inc
+    if cursor_out is not None:
+        base["cursor"] = cursor_out
+    flags, opts = (not inc, snapshot and not inc, allow_removal), (cutoff, job.keep if job else None, dry_run, measured)
+    out = _apply_batch((store, source, job_name, incoming), (flags, opts, None), base)
+    if not dry_run:
+        ping_wakeup(store)
+    return out
 
 
 def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, object]:
@@ -370,14 +324,9 @@ def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, ob
         job_name, src = sources[name][0], name
     else:
         raise Error(f"record job or source {name} is not declared in bf.yaml")
-    counts = {"records": 0, "changed": 0, "unchanged": 0, "failed": 0}
-    problems: list[dict[str, str]] = []
-    with ExitStack() as stack:
-        stack.enter_context(collecting(store, job_name))
-        if dry_run:
-            stack.enter_context(records.reading(store))
-        else:
-            stack.enter_context(writer(store, wait=120))
+    counts, problems = {"records": 0, "changed": 0, "unchanged": 0, "failed": 0}, []
+    with collecting(store, job_name), records.reading(store) if dry_run else writer(store, wait=120):
+        if not dry_run:
             records.recover(store)
         changed: list[Record] = []
         for file in records.files(store, src):
@@ -389,95 +338,77 @@ def reproject(store: Store, name: str, *, dry_run: bool = False) -> dict[str, ob
             except (Error, ValidationError) as error:
                 counts["failed"] += 1
                 if len(problems) <= LIMIT:
-                    msg = explain(error, RECORD_KEYS) if isinstance(error, ValidationError) else str(error)
+                    msg = (
+                        models.explain(error, models.RECORD_KEYS) if isinstance(error, ValidationError) else str(error)
+                    )
                     problems.append({"file": file, "error": msg.removeprefix(f"{file}: ")})
                 continue
             if normalized == stored:
                 counts["unchanged"] += 1
                 continue
             counts["changed"] += 1
-            if dry_run:
-                continue
-            changed.append(normalized)
-            if len(changed) >= REPROJECT:
-                records.upsert(store, src, changed, snapshot=False)
-                changed = []
+            if not dry_run:
+                changed.append(normalized)
+                if len(changed) >= REPROJECT:
+                    records.upsert(store, src, changed, snapshot=False)
+                    changed = []
         if changed and not dry_run:
             records.upsert(store, src, changed, snapshot=False)
-    return {
-        "job": job_name,
-        "source": src,
-        "dry_run": dry_run,
-        **counts,
-        **({"problems": problems[:LIMIT]} if problems else {}),
-        **({"problems_truncated": True} if len(problems) > LIMIT else {}),
-    }
+    out: dict[str, object] = {"job": job_name, "source": src, "dry_run": dry_run, **counts}
+    if problems:
+        out["problems"] = problems[:LIMIT]
+    if len(problems) > LIMIT:
+        out["problems_truncated"] = True
+    return out
 
 
 def next_due(job: Job, last: Mapping[str, object], now: datetime, *, default_tz: str | None = None) -> datetime | None:
     """UTC instant when an enabled scheduled job is next due; None when manual or disabled."""
-    if not job.enabled:
-        return None
-    timed = [t for t in job.triggers if t.every is not None or t.at is not None]
-    if not timed:
+    if not job.enabled or not (timed := job.timed):
         return None
     if last.get("last_error") or last.get("error"):
         cap = timedelta(seconds=min(t.every or 86_400 for t in timed))
         errs = max(1, int(str(last.get("error_count", last.get("failures", 1)))))
         delay = min(cap, timedelta(seconds=SCHEDULE_BACKOFF * 2 ** min(errs - 1, 30)))
-        anchor = str(last.get("last_run") or last.get("run") or "")
-        if not anchor:
+        if not (anchor := str(last.get("last_run") or last.get("run") or "")):
             return now
-        since = datetime.fromisoformat(anchor)
-        return now if since > now else since + delay
+        return now if (since := datetime.fromisoformat(anchor)) > now else since + delay
     last_success = str(last.get("last_success") or last.get("success") or "")
     return min(t.schedule_due(now, last_success, timezone=default_tz) for t in timed)
 
 
-def _is_due(job: Job, last: Mapping[str, object], now: datetime, tz: str | None) -> bool:
-    return (due_at := next_due(job, last, now, default_tz=tz)) is not None and due_at <= now
+def _due_iter(store: Store, now: datetime, emit_records: bool) -> list[tuple[Job, str, Mapping[str, object]]]:
+    config, states = load(store), Queue(store).all_states()
+    tz = config.defaults.timezone
+    return [
+        (job, name, last)
+        for name, job in sorted(config.jobs.items())
+        if (job.emit == "records") == emit_records
+        and (d := next_due(job, last := states.get(name, {}), now, default_tz=tz)) is not None
+        and d <= now
+    ]
 
 
 def due(store: Store, now: datetime) -> list[tuple[str, str, str, bool]]:
     """Due `emit: records` jobs with their `[start, end)` window and reconcile flag."""
-    config, states = load(store), Queue(store).all_states()
     windows: list[tuple[str, str, str, bool]] = []
-    for name, job in sorted(config.jobs.items()):
-        if job.emit != "records":
-            continue
-        last = states.get(name, {})
-        if not _is_due(job, last, now, config.defaults.timezone):
-            continue
-        start = now - timedelta(seconds=job.lookback)
-        if last.get("window_end") and (job.mode or "window") == "window":
-            floor = now - CATCH_UP
-            resumed = max(datetime.fromisoformat(str(last["window_end"])), floor) - timedelta(seconds=job.overlap)
-            if resumed < now:
-                start = max(resumed, floor)
-        rec = job.reconcile_spec
+    for job, name, last in _due_iter(store, now, True):
+        start, rec = _resume_start(job, last, now), job.reconcile_spec
         reconciled = str(last.get("last_reconcile") or "")
-        revisit = rec is not None and (
-            not reconciled
-            or not timedelta(0) <= now - datetime.fromisoformat(reconciled) < timedelta(seconds=rec.every)
-        )
-        if revisit and rec is not None:
+        span = timedelta(seconds=rec.every if rec else 0)
+        in_window = bool(reconciled) and timedelta(0) <= now - datetime.fromisoformat(reconciled) < span
+        if revisit := rec is not None and not in_window:
             start = min(start, now - timedelta(seconds=rec.lookback or job.lookback))
-        windows.append((name, timestamp(start.isoformat()), timestamp(now.isoformat()), revisit))
+        windows.append((name, _ts(start.isoformat()), _ts(now.isoformat()), revisit))
     return windows
 
 
 def due_jobs(store: Store, now: datetime) -> list[tuple[str, str, str]]:
     """Due scheduled jobs that do not emit records (`emit != "records"`)."""
-    config, states = load(store), Queue(store).all_states()
     items: list[tuple[str, str, str]] = []
-    for name, job in sorted(config.jobs.items()):
-        if job.emit == "records":
-            continue
-        last = states.get(name, {})
-        if not _is_due(job, last, now, config.defaults.timezone):
-            continue
+    for job, name, last in _due_iter(store, now, False):
         start = now - timedelta(seconds=job.lookback)
         if last.get("window_end") and (reviewed := datetime.fromisoformat(str(last["window_end"]))) < now:
             start = reviewed
-        items.append((name, timestamp(start.isoformat()), timestamp(now.isoformat())))
+        items.append((name, _ts(start.isoformat()), _ts(now.isoformat())))
     return items

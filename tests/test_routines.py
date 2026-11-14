@@ -38,7 +38,7 @@ END = "2026-09-25T08:00:00.000000Z"
 TODAY = NOW.astimezone().date().isoformat()
 UNIQUE_SUFFIX = "000000000001"
 FOLDER = f"actions/{datetime.now(UTC).astimezone().date().isoformat()}_digest-{UNIQUE_SUFFIX}"
-CONFIG = b"""version: 10
+CONFIG = b"""version: 11
 name: fixture
 jobs:
   digest:
@@ -78,17 +78,17 @@ def refs(reply: dict[str, object]) -> list[str]:
 
 
 def test_configuration_names_jobs_with_valid_identifiers() -> None:
-    assert Config.model_validate({"version": 10, "name": "b", "jobs": {"weekly-review": {"run": ["x"]}}}).jobs
+    assert Config.model_validate({"version": 11, "name": "b", "jobs": {"weekly-review": {"run": ["x"]}}}).jobs
     for name in ("Weekly", "1st", "a b"):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 10, "name": "b", "jobs": {name: {"run": ["x"]}}})
+            Config.model_validate({"version": 11, "name": "b", "jobs": {name: {"run": ["x"]}}})
     for settings in (
         {"run": ["x"], "max_bytes": 257 << 20},
         {"run": ["x", "{{secret}}"]},
         {"run": []},
     ):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 10, "name": "b", "jobs": {"digest": settings}})
+            Config.model_validate({"version": 11, "name": "b", "jobs": {"digest": settings}})
 
 
 def test_an_action_job_writes_and_remembers_validated_markdown(configured: Store) -> None:
@@ -384,7 +384,7 @@ def fixed_action_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(jobs, "uuid4", lambda: next(ids))
 
 
-HOOKED = b"""version: 10
+HOOKED = b"""version: 11
 name: fixture
 jobs:
   check:
@@ -534,7 +534,7 @@ def test_update_selection_suggests_close_names(hooked: Store) -> None:
 def test_hooks_are_distinct_slugs() -> None:
     for on in ({"hook": "pre-"}, {"hook": "Pre-Push"}, {"hook": "pre push"}, {"hook": "a--b"}):
         with pytest.raises(ValidationError):
-            Config.model_validate({"version": 10, "name": "b", "jobs": {"x": {"run": ["x"], "on": on}}})
+            Config.model_validate({"version": 11, "name": "b", "jobs": {"x": {"run": ["x"], "on": on}}})
 
 
 def test_update_names_the_manual_jobs_it_skipped(hooked: Store) -> None:
@@ -547,7 +547,7 @@ def test_update_names_the_manual_jobs_it_skipped(hooked: Store) -> None:
 def test_keep_removes_older_unchanged_reports_and_spares_edited_ones(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 2\n",
+        b"version: 11\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 2\n",
     )
     report_body = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     written = []
@@ -577,7 +577,7 @@ def test_update_skips_a_job_another_process_is_running(configured: Store) -> Non
 def test_run_suggests_prompt_job_names_too(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  assistant:\n    prompt: prompts/a.md\n    harness: [agent]\n    emit: log\n",
+        b"version: 11\nname: fixture\njobs:\n  assistant:\n    prompt: prompts/a.md\n    harness: [agent]\n    emit: log\n",
     )
     result = CliRunner().invoke(app, ["run", "asistant", "--brain", str(brain.root)])
     assert result.exit_code == 1
@@ -587,7 +587,7 @@ def test_run_suggests_prompt_job_names_too(brain: Store) -> None:
 def test_keep_spares_a_report_folder_holding_anything_else(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
+        b"version: 11\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
     )
     report_body = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     first = run_job(brain, "review", runner=printing(report_body))
@@ -601,7 +601,7 @@ def test_keep_spares_a_report_folder_holding_anything_else(brain: Store) -> None
 def test_keep_never_removes_the_action_it_just_wrote(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
+        b"version: 11\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
     )
     report_body = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     ahead = f"actions/{(NOW + timedelta(days=1)).astimezone().date().isoformat()}_review-0a0a0a0a/ACTION.md"
@@ -616,7 +616,7 @@ def test_keep_never_removes_the_action_it_just_wrote(brain: Store) -> None:
 def test_keep_logs_what_it_cannot_remove_and_never_fails_the_run(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
+        b"version: 11\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
     )
     report_body = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     first = str(run_job(brain, "review", runner=printing(report_body))["action"])
@@ -637,7 +637,7 @@ def test_keep_logs_what_it_cannot_remove_and_never_fails_the_run(brain: Store) -
 def test_keep_puts_a_report_back_when_its_folder_gains_an_entry(brain: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
+        b"version: 11\nname: fixture\njobs:\n  review:\n    run: [review]\n    emit: action\n    keep: 1\n",
     )
     report_body = b"---\ntype: action\nstatus: draft\n---\n\n# Review\n"
     first = str(run_job(brain, "review", runner=printing(report_body))["action"])
@@ -659,7 +659,7 @@ def test_jobs_support_wall_clock_schedules_and_shell_gates(brain: Store) -> None
 
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  digest:\n"
+        b"version: 11\nname: fixture\njobs:\n  digest:\n"
         b"    run: [routines/digest.py]\n"
         b"    gate: [sh, -c, 'exit 1']\n"
         b"    on: {at: '08:00', timezone: UTC}\n"

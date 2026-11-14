@@ -1,5 +1,5 @@
-# https://fmind.github.io/brain-framework/docs/configuration/
-version: 10
+# https://fmind.github.io/brain-framework/docs/reference/
+version: 11
 name: retrieval-eval
 fields:
   repository:

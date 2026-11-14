@@ -243,7 +243,7 @@ def test_incomplete_provider_snapshot_preserves_saved_records(
         "bf.yaml",
         yaml.safe_dump(
             {
-                "version": 10,
+                "version": 11,
                 "name": "fixture",
                 "jobs": {"demo": {"emit": "records", "mode": "snapshot", "run": command}},
             }

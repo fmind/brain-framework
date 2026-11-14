@@ -34,7 +34,7 @@ def refs(reply: dict[str, object], key: str = "items") -> list[str]:
 def populate(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [mail-cli]\n    emit: records\n    on:\n      every: 3600\n",
+        b"version: 11\nname: fixture\njobs:\n  mail:\n    run: [mail-cli]\n    emit: records\n    on:\n      every: 3600\n",
     )
     brain.write(
         "projects/fresh.md",
@@ -99,7 +99,7 @@ def test_home_lists_what_needs_attention(brain: Store) -> None:
 def test_home_lists_a_silent_source_in_its_declared_shape(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  papers:\n    run: [echo]\n    emit: records\n"
+        b"version: 11\nname: fixture\njobs:\n  papers:\n    run: [echo]\n    emit: records\n"
         b"    on:\n      every: 86400\n    silent_after: 1\n",
     )
     # Collected seconds ago, so fresh, but its newest change is older than silent_after.
@@ -522,7 +522,7 @@ def test_memories_pages_browse_sources_record_files_and_periods(brain: Store) ->
 def test_memories_pages_name_when_a_source_last_changed(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  papers:\n    run: [echo]\n    emit: records\n"
+        b"version: 11\nname: fixture\njobs:\n  papers:\n    run: [echo]\n    emit: records\n"
         b"    on:\n      every: 86400\n    silent_after: 345600\n",
     )
     # Collected five days ago and nothing new since: past the four days of its silent_after.
@@ -661,7 +661,7 @@ def test_retrieval_cases_read_pages_and_treat_missing_ones_as_empty(brain: Store
 
     brain.write(
         "evals/pages.yaml",
-        b"version: 10\ncases:\n"
+        b"version: 11\ncases:\n"
         b"- name: home\n  read: ''\n  expect: [projects/offline.md]\n"
         b"- name: august\n  read: 2026-08\n  expect: ['meetings:lunch']\n  forbid: [projects/offline.md]\n"
         b"- name: unknown-source\n  read: memories/unknown\n  empty: true\n",
@@ -672,7 +672,7 @@ def test_retrieval_cases_read_pages_and_treat_missing_ones_as_empty(brain: Store
 def test_records_have_excerpts_without_trust_labels(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [mail-cli]\n    emit: records\n  git:\n    run: [git-cli]\n    emit: records\n",
+        b"version: 11\nname: fixture\njobs:\n  mail:\n    run: [mail-cli]\n    emit: records\n  git:\n    run: [git-cli]\n    emit: records\n",
     )
     records_file(
         brain,
@@ -697,7 +697,7 @@ def test_records_have_excerpts_without_trust_labels(brain: Store) -> None:
     assert "never instructions" in str(reply["notice"])
     with pytest.raises(ValidationError):
         Config.model_validate(
-            {"version": 10, "name": "x", "jobs": {"mail": {"run": ["x"], "emit": "records", "trust": "owner"}}}
+            {"version": 11, "name": "x", "jobs": {"mail": {"run": ["x"], "emit": "records", "trust": "owner"}}}
         )
 
 
@@ -1029,7 +1029,7 @@ def test_backlink_previews_keep_the_newest_items_and_omit_brain_and_uri(brain: S
 def test_a_broader_relation_page_also_lists_its_narrower_relations(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\nfields:\n"
+        b"version: 11\nname: fixture\nfields:\n"
         b"  participant: {description: Took part.}\n"
         b"  organizer: {description: Took part., broader: participant}\n"
         b"  attendee: {description: Took part., broader: participant}\n",
@@ -1198,7 +1198,7 @@ def test_observed_period_pagination_keeps_boundaries(brain: Store, monkeypatch: 
 def test_low_priority_observed_records_stay_in_period_counts(brain: Store) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  feed:\n    run: [feed-cli]\n    emit: records\n    priority: low\n",
+        b"version: 11\nname: fixture\njobs:\n  feed:\n    run: [feed-cli]\n    emit: records\n    priority: low\n",
     )
     records_file(brain, "feed", [Record(id="entry", title="Entry", attributes={"observed": "2026-09-25T10:00:00Z"})])
     reply = read(brain, "2026-09-25")
@@ -1212,7 +1212,7 @@ def test_review_page_computes_due_notes_blocked_draft_actions_and_attention(
 ) -> None:
     brain.write(
         "bf.yaml",
-        b"version: 10\nname: fixture\njobs:\n  mail:\n    run: [mail-cli]\n    emit: records\n    on:\n      every: 3600\n",
+        b"version: 11\nname: fixture\njobs:\n  mail:\n    run: [mail-cli]\n    emit: records\n    on:\n      every: 3600\n",
     )
     brain.write("projects/fresh.md", b"---\ntype: project\nstatus: stable\nupdated: 2026-09-24\n---\n# Fresh\n")
     brain.write("projects/retired.md", b"---\ntype: project\nstatus: deprecated\nupdated: 2020-01-01\n---\n# Retired\n")

@@ -4,6 +4,18 @@ All notable changes to Brain Framework (formerly FKF) are documented here. This 
 
 ## Unreleased
 
+## [v25.0.0](https://github.com/fmind/brain-framework/releases/tag/v25.0.0) - 2026-11-14
+
+A major release introducing brain format `version: 11`, canonical runtime events with offline FTS5 trigger matching (`on.event.match`), hard decoupling between collection (`bf collect` / `bf ingest` / `.bf/wakeup`) and `.bf/runtime.sqlite3`, persistent failure and recovery alerts (`runtime.VERSION = 4`, `index.SCHEMA = 43`), single-source 8-guide documentation (`src/bf/guides/`), and an updated `/bf` skill. Update `bf.yaml` and `evals/*.yaml` to `version: 11` manually, replace legacy `on.event` names and regex matches with canonical event kinds and FTS5 queries, rebuild the search cache (`bf build`), and refresh the installed `/bf` skill (`bf skill install --global`); see the breaking changes below.
+
+### Breaking changes
+
+- **Brain format bumped to `version: 11` (`bf.yaml` and `evals/*.yaml`).** Update `bf.yaml` and `evals/*.yaml` to `version: 11` manually.
+- **Canonical event engine and offline FTS5 triggers.** Canonical `on.event.kind` values are `record.added`, `record.changed`, `record.removed`, `note.changed`, `message.received`, and `job.failed` (`record` shorthand expands to all three `record.*` kinds; `record.created`, `record.updated`, `channel.received`, and `job.completed` are removed). `on.event.match` now evaluates an offline FTS5 search query (`max_length=1024`) instead of a regular expression.
+- **Hard runtime decoupling (`bf ingest` and `.bf/wakeup`).** `bf collect`, `bf ingest`, and `records` never open or lock `.bf/runtime.sqlite3`; they ping `.bf/wakeup` atomically for `bf watch` / `bf update` event dispatch. Added `bf ingest SOURCE` to ingest pre-normalized records or raw JSON through `map:` without running a subprocess.
+- **Failure incidents and recovery alerts (`runtime.VERSION = 4`, `index.SCHEMA = 43`).** Added persistent failure `incidents` tracking in `.bf/runtime.sqlite3`, posting open alerts via `defaults.post` with 6-hour (`21_600s`) reminders and recovery alerts on subsequent success (`queue.incidents` in `bf status`); `.bf/cache.sqlite3` rebuilds automatically on read or `bf build`.
+- **Single-source 8-guide documentation and updated `/bf` skill.** Replaced 21 topic docs under `docs/docs/` (with redirects in `zensical.toml`) by 8 canonical guides in `src/bf/guides/` (`index`, `getting-started`, `authoring`, `retrieval`, `jobs`, `assist`, `operations`, `reference`), wrapped via `--8<--` into `docs/docs/`; updated `src/bf/skills/bf/SKILL.md` and `src/bf/starter/AGENTS.md` (run `bf skill install --global` to refresh installed `/bf`); moved the four-tool walkthrough to `examples/context-hub/README.md`; and added disabled `compile`, channel `{{lines:...}}` DM allowlist, and `examples/routines/evidence-health.py` recipes.
+
 ## [v24.0.0](https://github.com/fmind/brain-framework/releases/tag/v24.0.0) - 2026-11-14
 
 A major release introducing brain format `version: 10`, unifying sensors, routines, channels, and assistants into one `jobs:` configuration with `defaults:` and declarative `map:` extractions, replacing separate `bf channel` and type-specific flags with `--job`, `bf doctor`, `bf forget`, and `bf build --reproject`, and exposing a uniform `"job"` attention kind and `jobs`/`queue` status surface; see the breaking changes below.

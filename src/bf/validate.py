@@ -37,21 +37,15 @@ from bf.models import (
 from bf.storage import Store, relative, temporary, unread
 
 _ACTION = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}_[a-z0-9]+(?:-[a-z0-9]+)*")
-# A reply lists at most this many problems, warnings and unresolved targets; a `*_truncated` flag marks the rest.
-LIMIT = 200
-# A warning lists at most this many spellings of one identity.
-VARIANTS = 20
+LIMIT, VARIANTS = 200, 20
 
 
 def _kinds(store: Store) -> Callable[[str], int]:
-    """The file type of an exactly named brain path; 0 when it is absent or named with another case."""
+    """The file type of an exact-cased brain path; 0 when absent or differently cased."""
 
     @cache
     def entries(directory: str) -> frozenset[str]:
-        """Exact names: on a case-insensitive volume, stat would also accept a differently cased link."""
-        if not directory:
-            return frozenset(path.name for path in store.root.iterdir())
-        return frozenset(store.entries(directory))
+        return frozenset(p.name for p in store.root.iterdir()) if not directory else frozenset(store.entries(directory))
 
     def kind(name: str) -> int:
         try:
@@ -66,10 +60,7 @@ def _kinds(store: Store) -> Callable[[str], int]:
 
 
 def broken_links(store: Store, item: Note) -> list[str]:
-    """A note's relative links that name no brain file or heading, as `validate` reports them, before it is saved.
-
-    The note may not exist yet, as a routine's action: its own path and headings answer links to itself.
-    """
+    """A note's relative links that name no brain file or heading, before it is saved."""
     kind = _kinds(store)
     slugs = {item.path: item.slugs}
     for target in item.targets:
@@ -78,7 +69,6 @@ def broken_links(store: Store, item: Note) -> list[str]:
         name, fragment = resolve(item.path, target)
         entry = name + "/ACTION.md" if re.fullmatch(r"actions/[^/#]+", name) else name
         if fragment and authored(entry) and entry not in slugs and kind(entry) == stat.S_IFREG:
-            # An unreadable or invalid target is its own file's problem, not a broken link.
             with suppress(Error, OSError, UnicodeError):
                 slugs[entry] = note(entry, store.read(entry, MAX_NOTE)).slugs
     return broken(item, lambda name: name == item.path or kind(name) in {stat.S_IFREG, stat.S_IFDIR}, slugs)
@@ -88,13 +78,15 @@ def note_policy_errors(
     config: Config, name: str, text: str, attributes: dict[str, object], parsed_note: Note, *, check_okf: bool = False
 ) -> list[str]:
     """Check note frontmatter, stale_after, forbidden patterns and misplaced relation keys against brain policy."""
-    errors: list[str] = []
-    if check_okf:
-        errors.extend(
+    errors = (
+        [
             f"{key}: relations belong under relations:, such as relations: {{{key}: ...}}"
             for key in sorted(attributes)
             if key in config.ontology and key not in Knowledge.model_fields
-        )
+        ]
+        if check_okf
+        else []
+    )
     rules = config.validation
     if entry_note(name):
         if rules.required_status is not None and attributes.get("status") not in rules.required_status:
@@ -136,12 +128,12 @@ def validate_action_markdown(
 
 
 def _problem(file: str, message: str) -> dict[str, str]:
-    """One problem names its brain-relative file or folder once, whether or not the message already did."""
+    """One problem naming `file` once, whether or not `message` already did."""
     return {"file": file, "error": message.removeprefix(file + ":").lstrip()}
 
 
 def _actions(files: list[str]) -> list[dict[str, str]]:
-    """Each folder below actions/ is one dated action with its ACTION.md; loose files are allowed."""
+    """Each folder below actions/ must be YYYY-MM-DD_slug with an ACTION.md; loose files are allowed."""
     problems = []
     for folder in sorted({name.split("/")[1] for name in files if name.count("/") >= 2}):
         try:
@@ -159,21 +151,18 @@ def _actions(files: list[str]) -> list[dict[str, str]]:
 
 
 class _Spellings:
-    """How many files name each identity, grouped by its lowercase form: one subject spelled several ways."""
+    """Case variants of identities grouped by their lowercase form."""
 
     def __init__(self) -> None:
         self.files: dict[str, dict[str, int]] = {}
 
     def add(self, identities: set[str]) -> None:
-        """Count one file's identities once each; URLs and BF addresses are identities too."""
         for identity in identities:
             if re.fullmatch(IDENTITY, identity):
                 group = self.files.setdefault(identity.lower(), {})
                 group[identity] = group.get(identity, 0) + 1
 
     def warnings(self) -> list[dict[str, object]]:
-        """Case variants within one scheme, most referenced first; identities are case-sensitive, so each spelling
-        names a different subject until the evidence agrees on one."""
         groups = sorted(
             (group for group in self.files.values() if len(group) > 1),
             key=lambda group: (-sum(group.values()), min(group)),
@@ -191,10 +180,6 @@ class _Spellings:
 
 
 def _script(argument: str) -> bool:
-    """Whether a later command argument names a brain path in sensors/, routines/ or channels/, such as sensors/brief.py.
-
-    Normalized and without placeholders, like the program itself; whitespace marks a shell command line instead.
-    """
     parts = argument.split("/")
     return (
         parts[0] in {"sensors", "routines", "channels"}
@@ -239,7 +224,7 @@ def _check_cmd(
 
 
 def _programs(store: Store, config: Config) -> list[dict[str, str]]:
-    """Verify every enabled job's script, prompt, cwd and `{{lines:...}}` file cleanly."""
+    """Verify every enabled job's script, prompt, cwd and `{{lines:...}}` file."""
     from bf.jobs import expand_lines
 
     problems: list[dict[str, str]] = []
@@ -274,49 +259,33 @@ def _programs(store: Store, config: Config) -> list[dict[str, str]]:
 def validate(store: Store) -> dict[str, object]:
     """Report every problem instead of stopping at the first one."""
     with records.reading(store):
-        return _validate(store)
-
-
-def _validate(store: Store) -> dict[str, object]:
-    check = _Validation(store)
-    check.evidence()
-    check.notes()
-    check.note_links()
-    check.identities()
-    check.addresses()
-    return check.reply()
+        check = _Validation(store)
+        check.evidence()
+        check.notes()
+        check.note_links()
+        check.identities()
+        check.addresses()
+        return check.reply()
 
 
 class _Validation:
-    """One pass over a brain: records, then notes, then what their links and identities name.
-
-    Each phase adds to `problems` and to the state the later ones read: record ids, each identity's owners and the
-    BF addresses files write.
-    """
+    """Whole-brain validation pass across records, notes, links, identities and BF addresses."""
 
     def __init__(self, store: Store) -> None:
         self.store = store
         self.config = load(store)
         self.problems = _programs(store, self.config)
         self.ids: dict[str, set[str]] = {}
-        # Each identity's owners, note paths or record refs, with the file declaring each one.
         self.owners: dict[str, dict[str, str]] = {}
-        # Each BF address a file writes as a link, with the files writing it.
         self.written: dict[str, set[str]] = {}
         self.spellings = _Spellings()
         self.count = 0
-        # Linked and special files are never followed; the check reports those that would hold evidence.
         self.skipped: dict[str, tuple[int, int, int, int]] = {}
-        # The record files of each source whose links hold text that is no identity: it is stored and searchable,
-        # but links only to a note whose path it spells exactly.
         self.loose: dict[str, list[str]] = {}
         self.stored: set[str] = set()
         self.parsed: list[Note] = []
-        # Notes that exist but cannot be parsed: their own problem is reported once, and links to them are not broken.
         self.invalid: set[str] = set()
-        # Parsed notes whose identities or relations failed: their sections still resolve links, their names do not.
         self.unnamed: set[str] = set()
-        # Typed note claims outside their relation's literal targets: the target's owner may declare a matching alias.
         self.targeted: list[tuple[str, links.Claim]] = []
         self.leftovers: list[str] = []
         self.stale_warnings: list[dict[str, object]] = []
@@ -325,45 +294,42 @@ class _Validation:
         self.unresolved: set[str] = set()
         self.kind = _kinds(store)
 
+    def _fail(self, file: str, error: object) -> None:
+        self.problems.append(_problem(file, str(error)))
+
     def evidence(self) -> None:
         store, config = self.store, self.config
         listed = store.files("memories", skipped=self.skipped, split=True)
+        # Keep stored records (including AppleDouble `._<sha>.json`) and visible files; ignore .DS_Store & .pending.
         evidence = [
             name
             for name in listed
-            # Check every file collection and search read as a record, even a hidden AppleDouble `._<sha>.json`,
-            # and report other visible files; ignore other hidden files, such as .DS_Store, and the pending
-            # transaction.
             if not name.startswith("memories/.pending/")
             and (records.stored(name) or not name.rsplit("/", 1)[1].startswith("."))
         ]
         self.stored = set(evidence)
-        # A forgotten list collection could not parse would fail every run of its source.
         for name in listed:
             parts = name.split("/")
             if len(parts) == 3 and parts[2] == records.FORGOTTEN:
                 try:
                     records.forgotten(store, parts[1])
                 except Error as error:
-                    self.problems.append(_problem(name, str(error)))
+                    self._fail(name, error)
                 except OSError:
-                    self.problems.append(_problem(name, "inaccessible file; check permissions"))
+                    self._fail(name, "inaccessible file; check permissions")
         for name in evidence:
             try:
                 source = records.source_of(name)
                 record = records.load(store, name)
             except Error as error:
-                self.problems.append(_problem(name, str(error)))
+                self._fail(name, error)
                 continue
             except OSError:
-                self.problems.append(_problem(name, "inaccessible file; check permissions"))
+                self._fail(name, "inaccessible file; check permissions")
                 continue
-            # A readable record exists even when its fields no longer match the schema.
             self.count += 1
             ref = f"{source}:{record.id}"
-            # The SHA-256 filename makes each id unique within its source.
             self.ids.setdefault(source, set()).add(record.id)
-            # Edges follow the current schema; the check still names each stored value that schema now rejects.
             messages: list[str] = []
             ontology.validate(record, config, errors=messages)
             self.problems.extend(_problem(name, message) for message in messages)
@@ -373,11 +339,8 @@ class _Validation:
             try:
                 claims = ontology.record_claims(record, config, ref)
             except Error:
-                # An alias that cannot name it or a malformed link, as reported above: retrieval drops the record.
                 continue
-            # A record's ref is one of its names: a note alias repeating it is ambiguous.
-            identities = [links.target(alias) for alias in [ref, ontology.qualify(config, ref), *record.aliases]]
-            for identity in identities:
+            for identity in [links.target(alias) for alias in [ref, ontology.qualify(config, ref), *record.aliases]]:
                 self.owners.setdefault(identity, {})[ref] = name
             for claim in claims:
                 if links.parse(claim.target):
@@ -386,9 +349,6 @@ class _Validation:
 
     def notes(self) -> None:
         store, config = self.store, self.config
-        # Editor locks beside authored files, such as Emacs `.#note.md` links, come and go with an open editor. A
-        # write killed before its rename leaves a temporary file: a warning names it, and its folder is not a broken
-        # action.
         found = {directory: store.files(directory, skipped=self.skipped) for directory in AUTHORED}
         self.leftovers = sorted(name for names in found.values() for name in names if temporary(name))
         listed = {
@@ -403,26 +363,22 @@ class _Validation:
         self.problems.extend(_actions(listed["actions"]))
         for name in (n for directory in AUTHORED for n in listed[directory] if authored(n)):
             try:
-                # One parse serves the projection and the OKF checks.
                 markdown = parse(name, store.read(name, MAX_NOTE))
                 parsed_note = note(name, markdown)
             except (Error, UnicodeError) as error:
-                self.problems.append(_problem(name, str(error)))
+                self._fail(name, error)
                 self.invalid.add(name)
                 continue
             except OSError:
-                self.problems.append(_problem(name, "inaccessible file; check permissions"))
+                self._fail(name, "inaccessible file; check permissions")
                 self.invalid.add(name)
                 continue
-            # Each later check reports on its own, so one problem never hides the note's others.
             self.parsed.append(parsed_note)
             messages: list[str] = []
             try:
                 claims = ontology.note_claims(parsed_note, config, errors=messages)
             except Error as error:
-                # Like retrieval, only a path or identity that cannot name the note drops its names; a wrong
-                # relation, field value or link leaves the links to the note intact.
-                self.problems.append(_problem(name, str(error)))
+                self._fail(name, error)
                 self.unnamed.add(name)
             else:
                 self.problems.extend(_problem(name, message) for message in messages)
@@ -433,7 +389,7 @@ class _Validation:
                 try:
                     validate_okf(name, markdown)
                 except Error as error:
-                    self.problems.append(_problem(name, str(error)))
+                    self._fail(name, error)
             self._policy(name, markdown.text, markdown.attributes, parsed_note, check_okf=is_okf)
         if config.validation.index_note is not None:
             self._check_index_note(config.validation.index_note)
@@ -444,45 +400,44 @@ class _Validation:
         self, name: str, text: str, attributes: dict[str, object], parsed_note: Note, *, check_okf: bool = False
     ) -> None:
         rules = self.config.validation
-        self.problems.extend(
-            _problem(name, msg)
-            for msg in note_policy_errors(self.config, name, text, attributes, parsed_note, check_okf=check_okf)
-        )
-        if entry_note(name) and parsed_note.knowledge.stale_after and rules.warn_stale_days is not None:
-            due_days = (date.fromisoformat(parsed_note.knowledge.stale_after[:10]) - date.today()).days
-            if due_days <= rules.warn_stale_days:
-                self.stale_warnings.append(
-                    {
-                        "warning": f"stale_after is within {rules.warn_stale_days} days",
-                        "file": name,
-                        "stale_after": parsed_note.knowledge.stale_after[:10],
-                    }
-                )
+        for msg in note_policy_errors(self.config, name, text, attributes, parsed_note, check_okf=check_okf):
+            self._fail(name, msg)
+        if (
+            entry_note(name)
+            and parsed_note.knowledge.stale_after
+            and rules.warn_stale_days is not None
+            and (date.fromisoformat(parsed_note.knowledge.stale_after[:10]) - date.today()).days
+            <= rules.warn_stale_days
+        ):
+            self.stale_warnings.append(
+                {
+                    "warning": f"stale_after is within {rules.warn_stale_days} days",
+                    "file": name,
+                    "stale_after": parsed_note.knowledge.stale_after[:10],
+                }
+            )
 
     def _check_index_note(self, index_path: str) -> None:
-        by_path = {item.path: item for item in self.parsed}
-        index_item = by_path.get(index_path)
+        index_item = {item.path: item for item in self.parsed}.get(index_path)
         if index_item is None:
             if index_path not in self.invalid:
-                self.problems.append(_problem("bf.yaml", f"validate.index_note: {index_path} does not exist"))
+                self._fail("bf.yaml", f"validate.index_note: {index_path} does not exist")
             return
         bundle = index_path.rsplit("/", 1)[0]
-        linked = {
-            resolve(index_path, target)[0]
-            for target in index_item.targets
-            if not scheme(index_path, target) and target != "#"
-        }
+        linked = {resolve(index_path, t)[0] for t in index_item.targets if not scheme(index_path, t) and t != "#"}
         for item in self.parsed:
             if item.path.startswith(bundle + "/") and entry_note(item.path) and item.path not in linked:
-                self.problems.append(_problem(index_path, f"missing link to {item.path}"))
+                self._fail(index_path, f"missing link to {item.path}")
 
     def _exists(self, name: str) -> bool:
         return self.kind(name) in {stat.S_IFREG, stat.S_IFDIR}
 
     def _folder(self, path: str) -> bool:
-        if re.fullmatch(r"actions/[^/#]+", path):
-            return False
-        return path.split("/")[0] in AUTHORED and self.kind(path) == stat.S_IFDIR
+        return (
+            not re.fullmatch(r"actions/[^/#]+", path)
+            and path.split("/")[0] in AUTHORED
+            and self.kind(path) == stat.S_IFDIR
+        )
 
     def _canonical(self, target: str) -> str:
         if (
@@ -494,7 +449,6 @@ class _Validation:
         return target
 
     def _page(self, path: str) -> bool:
-        """Whether `bf read` opens this same-brain path as a page with evidence, following pages.route."""
         from bf import pages
 
         parts = path.split("/")
@@ -502,24 +456,20 @@ class _Validation:
             if path in {"", "review", "tasks", "tags", "memories", *AUTHORED} or pages.period(path):
                 return True
             if parts[0] == "tags":
-                # A label no note declares opens an empty page: most likely a typo.
                 return len(parts) == 2 and parts[1] in self.tagged
             if parts[0] == "memories":
-                known = parts[1] in self.ids or parts[1] in self.config.record_sources()
-                if len(parts) > 3 or not known:
+                if len(parts) > 3 or not (parts[1] in self.ids or parts[1] in self.config.record_sources()):
                     return False
                 name = parts[2] if len(parts) == 3 else ""
                 if re.fullmatch(r"[0-9a-f]{64}\.json", name):
                     return path in self.stored
                 return name in {"", "undated"} or pages.period(name) is not None
         except Error:
-            # An invalid period, such as 2026-13, fails to open.
             return False
         return self._folder(path)
 
     def note_links(self) -> None:
         config, ids, owners = self.config, self.ids, self.owners
-        # Every note's identities first, as retrieval resolves them: a link may name an alias a later note declares.
         for item in self.parsed:
             named = item.path not in self.unnamed
             for alias in [
@@ -527,7 +477,6 @@ class _Validation:
                 *(item.knowledge.names if named else []),
                 *([item.knowledge.entity] if item.knowledge.entity and named else []),
             ]:
-                # A path holding a control character or backslash has no BF address: note_claims reported it.
                 with suppress(Error):
                     owners.setdefault(links.target(alias), {})[item.path] = item.path
 
@@ -539,9 +488,8 @@ class _Validation:
             )
 
         for item in self.parsed:
-            self.problems.extend(
-                _problem(item.path, message) for message in broken(item, present, self.slugs, self.unresolved)
-            )
+            for message in broken(item, present, self.slugs, self.unresolved):
+                self._fail(item.path, message)
             for value in item.knowledge.relations.values():
                 for target in value if isinstance(value, list) else [value]:
                     if links.parse(target):
@@ -551,31 +499,18 @@ class _Validation:
                 written_source, _, record_id = target.partition(":")
                 collected = source in ids or source in config.record_sources()
                 if collected and written_source != source:
-                    # A URL scheme ignores case, but a record ref names its source exactly: Mail:m1 never links
-                    # mail:m1.
-                    self.problems.append(
-                        _problem(item.path, f"record refs are case-sensitive; write {source}:{record_id}, not {target}")
-                    )
-                elif (
-                    collected
-                    and record_id not in ids.get(source, set())
-                    # A record's provider alias, such as calendar:primary/ID beside calendar:ID, names it too.
-                    and target not in owners
-                ):
-                    self.problems.append(_problem(item.path, f"missing record {target}"))
+                    self._fail(item.path, f"record refs are case-sensitive; write {source}:{record_id}, not {target}")
+                elif collected and record_id not in ids.get(source, set()) and target not in owners:
+                    self._fail(item.path, f"missing record {target}")
                 if links.parse(target):
                     self.written.setdefault(links.target(target), set()).add(item.path)
                 elif "?rel=" in target and re.fullmatch(IDENTITY, target):
-                    # Only a bf:// link carries a relation; another identity would silently become a different one.
-                    self.problems.append(
-                        _problem(
-                            item.path, f"?rel= types bf:// links only; set the relation in relations instead: {target}"
-                        )
+                    self._fail(
+                        item.path, f"?rel= types bf:// links only; set the relation in relations instead: {target}"
                     )
 
     def identities(self) -> None:
         config, owners = self.config, self.owners
-        # Every identity each note or record answers to: a typed link may name its owner by any of them.
         names: dict[str, set[str]] = {}
         for alias, claimed in owners.items():
             for owner in claimed:
@@ -588,19 +523,13 @@ class _Validation:
                 for owner in owners.get(canonical, {})
                 for alias in {claim.target, *names[owner]}
             ):
-                # Search keeps such a claim: the note states it, and only its author can correct it.
-                self.problems.append(
-                    _problem(file, f"{claim.relation} link outside the declared targets: {claim.target}")
-                )
+                self._fail(file, f"{claim.relation} link outside the declared targets: {claim.target}")
         for alias, claimed in sorted(owners.items()):
-            # Prefer naming an authored note: its alias is usually the claim to revisit.
             file = min(claimed.values(), key=lambda value: (not authored(value), value))
             if len(claimed) > 1:
-                self.problems.append(_problem(file, f"ambiguous identity {alias}: " + ", ".join(sorted(claimed))))
+                self._fail(file, f"ambiguous identity {alias}: " + ", ".join(sorted(claimed)))
             if (parsed := links.parse(alias)) and parsed.brain == config.name and self._folder(parsed.path):
-                self.problems.append(
-                    _problem(file, f"identity {alias} is also a folder page; rename the entity or folder")
-                )
+                self._fail(file, f"identity {alias} is also a folder page; rename the entity or folder")
 
     def addresses(self) -> None:
         for value, files in sorted(self.written.items()):
@@ -609,11 +538,9 @@ class _Validation:
                 self.unresolved.add(value)
                 continue
             if self._page(parsed.path):
-                # `bf read` opens a page whole: a fragment selects nothing on it.
                 if parsed.fragment:
-                    self.problems.extend(
-                        _problem(file, f"page cannot select a section: {value}") for file in sorted(files)
-                    )
+                    for file in sorted(files):
+                        self._fail(file, f"page cannot select a section: {value}")
                 continue
             errors = set()
             resolved = f"{parsed.path}/ACTION.md" if re.fullmatch(r"actions/[^/#]+", parsed.path) else parsed.path
@@ -637,16 +564,14 @@ class _Validation:
                     self.unresolved.add(value)
                     for file in sorted(files):
                         if not authored(file):
-                            self.problems.append(_problem(file, f"unresolved BF target: {value}"))
+                            self._fail(file, f"unresolved BF target: {value}")
                 else:
                     errors.add("unresolved BF target")
-            self.problems.extend(
-                _problem(file, f"{error}: {value}") for file in sorted(files) for error in sorted(errors)
-            )
+            for file in sorted(files):
+                for error in sorted(errors):
+                    self._fail(file, f"{error}: {value}")
 
     def reply(self) -> dict[str, object]:
-        # Few sources and interrupted writes, each with one warning, come before the case variants a large brain can
-        # hold many of.
         warnings: list[dict[str, object]] = [
             {
                 "warning": "record links are not namespaced identities or URLs",
@@ -660,9 +585,7 @@ class _Validation:
             {"warning": "an interrupted write left this temporary file; delete it", "file": name}
             for name in self.leftovers
         )
-        warnings.extend(self.stale_warnings)
-        warnings.extend(self.spellings.warnings())
-        # One problem per file and error: a link repeated across a note or a record never crowds out the others.
+        warnings.extend([*self.stale_warnings, *self.spellings.warnings()])
         problems = list({(problem["file"], problem["error"]): problem for problem in self.problems}.values())
         unresolved = self.unresolved
         return {

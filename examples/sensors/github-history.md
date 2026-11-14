@@ -9,7 +9,7 @@ Install and authenticate [GitHub CLI](https://cli.github.com/manual/) for the in
 Replace the fictional `example/project` in these entries with the selected repository, then merge them into `bf.yaml` under its existing `jobs` mapping:
 
 ```yaml
-# https://fmind.github.io/brain-framework/docs/configuration/
+# https://fmind.github.io/brain-framework/docs/jobs/
 jobs:
   github-commits:
     run: [sensors/github-history.py, example/project, commits, "{{start}}", "{{end}}"]

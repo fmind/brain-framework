@@ -24,19 +24,13 @@ if TYPE_CHECKING:
     from markdown_it.rules_inline import StateInline
     from markdown_it.token import Token
 
-LEAD = 320
-# Record titles share this bound: a note title is copied into every listing and search row.
-MAX_TITLE = 4096
-# An OKF claim footnote's definition, `[^id]:`, at the start of a line, after a list item's indentation or a quote.
-# An id holds no `[`: each citation scan then stops at the next one, so a long run of `[^` parses in linear time.
+LEAD, MAX_TITLE = 320, 4096
+# No `[` in footnote ID keeps citation scanning linear.
 _FOOTNOTE = re.compile(r"([ \t>]*)\[\^([^\[\]\s]+)\]:")
 _CITATION = re.compile(r"\[\^([^\[\]\s]+)\]")
-# A setext underline: below a rewritten definition it would make that paragraph a phantom heading.
 _UNDERLINE = re.compile(r" {0,3}(?:=+|-+)[ \t]*")
-# A top-level code fence: its lines are literal, so a footnote-looking example inside it defines nothing.
 _FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 _TASK = re.compile(r"\[([ xX])\]\s+(\S.*)")
-# Emphasis markers open or close a word; inside one, `_` and `*` belong to identifiers and arithmetic (MAX_SIZE, 2*3).
 _EMPHASIS = re.compile(r"(?<![\w\]])[*_`]{1,3}|[*_`]{1,3}(?![\w(])")
 _CODE = re.compile(r"`+([^`]*)`+")
 
@@ -47,7 +41,6 @@ class Heading:
     title: str
     level: int
     line: int
-    # The first line after the heading; a setext heading spans two lines.
     end: int
 
 
@@ -64,11 +57,8 @@ class Markdown:
     text: str
     attributes: dict[str, object]
     headings: list[Heading]
-    # Each link as written, with the section it supports and its source line.
     contexts: list[tuple[str, str, int]]
-    # Task list items in document order, with their containing section and source line.
     tasks: list[Task] = field(default_factory=list)
-    # The first body line after any frontmatter.
     offset: int = 0
 
 
@@ -78,7 +68,6 @@ class Passage:
     title: str
     heading: str
     text: str
-    # A section's note title and enclosing headings, such as ("Plans", "Vega") above `### Budget`.
     parents: tuple[str, ...] = ()
 
 
@@ -91,11 +80,8 @@ class Note:
     passages: list[Passage]
     slugs: set[str] = field(default_factory=set)
     targets: list[str] = field(default_factory=list)
-    # Each body link as written, with the section it supports and its source line; frontmatter `links` and OKF
-    # `sources` support the whole note.
     contexts: list[tuple[str, str, int]] = field(default_factory=list)
     tasks: list[Task] = field(default_factory=list)
-    # OKF `sources` resources: whole-note `cites` claims unless a BF link names another relation.
     sources: list[str] = field(default_factory=list)
 
     @property
@@ -114,18 +100,14 @@ def slugify(title: str) -> str:
 
 @cache
 def _parser() -> MarkdownIt:
-    """One CommonMark parser, imported on first use: a fresh cache answers searches and pages without it."""
     from markdown_it import MarkdownIt
 
     class Parser(MarkdownIt):
         def normalizeLink(self, url: str) -> str:  # noqa: N802 - markdown-it's hook
-            # Keep destinations as written, like frontmatter links: BF parses its own addresses and resolve()
-            # decodes relative paths once, so percent-encoding here would change identities and record refs.
             return url
 
         def validateLink(self, url: str) -> bool:  # noqa: ARG002,N802 - markdown-it's hook
-            # BF renders no HTML: the XSS filter would drop record refs of sources named file, data, javascript or
-            # vbscript, such as [Notes](file:notes.txt). Inline data images still name no target (see parse).
+            # BF renders no HTML; allow file/data/etc. record-scheme links.
             return True
 
     parser = Parser()
@@ -134,12 +116,7 @@ def _parser() -> MarkdownIt:
 
 
 def _pending(state: StateInline, silent: bool) -> bool:
-    """Flush a long run of pending text as its own token; match nothing.
-
-    markdown-it appends each text run to one string, copying it every time, so one long line dense in punctuation,
-    such as pasted JSON, would parse in quadratic time. fragments_join and core text_join merge the pieces back. A
-    newline keeps its pending text: its rule strips the trailing spaces there and tells a hard break from a soft one.
-    """
+    # Flush long dense inline runs to avoid quadratic string concatenation in markdown-it.
     if not silent and len(state.pending) >= 1024 and state.src[state.pos] != "\n":
         state.pushPending()
     return False
@@ -147,13 +124,11 @@ def _pending(state: StateInline, silent: bool) -> bool:
 
 def parse(path: str, data: bytes) -> Markdown:
     try:
-        # A byte order mark would hide the frontmatter; removing it keeps every line number.
         text = data.decode("utf-8").removeprefix("\ufeff")
     except UnicodeError as error:
         raise Error(f"{path}: note is not UTF-8") from error
     source_lines = lines(text)
     for number, value in enumerate(source_lines, 1):
-        # Fail closed inside code blocks too: a real conflict can land there.
         if re.match(r"^(?:<{7,}|>{7,}|\|{7,})(?: |$)", value.rstrip("\r\n")):
             raise Error(
                 f"{path}: line {number}: unresolved merge conflict marker; reconcile both revisions, "
@@ -163,8 +138,6 @@ def parse(path: str, data: bytes) -> Markdown:
     attributes: dict[str, object] = {}
     if source_lines and source_lines[0].rstrip("\r\n") == "---":
         end = next((i for i, line in enumerate(source_lines[1:], 1) if line.rstrip("\r\n") == "---"), None)
-        # Ordinary Markdown, such as a document copied from another tool, stays searchable without foreign
-        # frontmatter it cannot parse: an unclosed block is text, and an invalid one is skipped whole.
         if end is None:
             if okf(path):
                 raise Error(f"{path}: unclosed frontmatter")
@@ -175,21 +148,13 @@ def parse(path: str, data: bytes) -> Markdown:
             except Error:
                 if okf(path):
                     raise
-    # OKF claim footnotes (`[^id]: [Source](ref)`) are not link reference definitions in CommonMark;
-    # parse them as ordinary lines so their links are checked, on a copy with the same line numbers. A fixed
-    # marker replaces the label, which could otherwise open a fence or an HTML block, such as [^```] or [^<pre>].
+    # Rewrite OKF claim footnote definitions into ordinary text lines so inline links stay indexed and validated.
     copy: list[str] = []
-    # The footnote each definition line starts, or an indented paragraph continues: its links support the section
-    # that first cites it, not the section where the definition happens to sit, usually the last one. Labels match
-    # case-insensitively, as on GitHub.
     definitions: dict[int, str] = {}
     label = fence = ""
-    # The columns a continuation line needs, and the block quote markers an underline right below a definition or its
-    # continuation starts with: None when the copy's last line holds neither, or a definition indented like code.
     indent, under = 4, None
     for number, line in enumerate(source_lines[offset:], offset + 1):
         if fence:
-            # Only a bare run of the same character, at least as long, closes the fence.
             closing = _FENCE.fullmatch(line.rstrip("\r\n"))
             if closing and closing[1][0] == fence[0] and len(closing[1]) >= len(fence) and not closing[2].strip():
                 fence = ""
@@ -201,31 +166,22 @@ def parse(path: str, data: bytes) -> Markdown:
             definitions[number] = definition[2].casefold()
             copy.append(definition[1] + "^:" + line[definition.end() :])
             columns = len(definition[1].expandtabs(4))
-            # Continuations need four columns, as on GitHub, or four more under a definition indented like code, such
-            # as an example in an indented code block or a definition in a nested list item. A definition inside an
-            # open footnote's continuation, such as an example in its fence, keeps that footnote's indentation.
             if not (label and columns >= indent):
                 indent = columns + 4 if columns >= 4 else 4
-            # Only a definition outside a block quote continues on indented lines.
             label = "" if ">" in definition[1] else definitions[number]
-            # In a block quote, the underline repeats the markers, and code starts five columns past the last one.
             quote = definition[1][: definition[1].rfind(">") + 1]
             coded = len(definition[1][len(quote) :].expandtabs(4)) > 4 if quote else indent != 4
             under = None if coded else quote
         elif label and line.strip() and len(lead.expandtabs(4)) >= indent:
             definitions[number] = label
-            # The copy keeps the columns beyond the four a continuation loses, so its code stays code.
             copy.append(" " * (len(lead.expandtabs(4)) - 4) + line[len(lead) :])
             under = "" if indent == 4 else None
         elif (
             under is not None
             and line.startswith(under)
-            # A block quote marker takes one space after it.
             and _UNDERLINE.fullmatch((rest := line[len(under) :]).removeprefix(" " if under else "").rstrip("\r\n"))
         ):
-            # Below a definition, GitHub reads `---` as a rule ending it and other underlines as its text: written as
-            # `***` or escaped, the line underlines no phantom heading. A definition indented like code stays as it
-            # is: it may be code, or text continuing the paragraph above, which the underline makes a heading.
+            # Neutralize setext underlines below rewritten footnote blocks so they never create phantom headings.
             if "---" in rest:
                 copy.append(under + rest.replace("-", "*"))
                 label, under = "", None
@@ -233,7 +189,6 @@ def parse(path: str, data: bytes) -> Markdown:
                 copy.append(under + "\\" + rest.lstrip(" "))
         else:
             under = None
-            # A blank line may separate a footnote's paragraphs; any other unindented line ends it.
             label = label if not line.strip() else ""
             if (opening := _FENCE.fullmatch(line.rstrip("\r\n"))) and not (opening[1][0] == "`" and "`" in opening[2]):
                 fence = opening[1]
@@ -241,12 +196,10 @@ def parse(path: str, data: bytes) -> Markdown:
     tokens = _parser().parse("".join(copy))
     headings = _headings(path, tokens, offset, strict=okf(path))
     sections = iter(headings)
-    # Each link with its section, line and footnote, then the section first citing each footnote.
     found: list[tuple[str, str, int, str]] = []
     cited: dict[str, str] = {}
     tasks: list[Task] = []
-    fragment = ""
-    quoted = 0
+    fragment, quoted = "", 0
     for i, token in enumerate(tokens):
         if token.type == "blockquote_open":
             quoted += 1
@@ -256,7 +209,6 @@ def parse(path: str, data: bytes) -> Markdown:
             fragment = next(sections).slug
         if token.type != "inline" or token.map is None:
             continue
-        # A task is an unquoted list paragraph starting with [ ] or [x]; code blocks never produce one.
         if (
             not quoted
             and i >= 2
@@ -264,9 +216,6 @@ def parse(path: str, data: bytes) -> Markdown:
             and (task := _TASK.match(token.content.split("\n", 1)[0]))
         ):
             tasks.append(Task(task[1] != " ", _task(path, task[2])[:LEAD], fragment, token.map[0] + offset + 1))
-        # Each line break moves to the next source line, so a link names its own line; a code span, image
-        # description or HTML tag spanning lines can only make it an earlier line of the same paragraph. A footnote
-        # holds the lines from its definition on.
         at = token.map[0] + offset + 1
         footnote = definitions.get(at, "")
         for child in token.children or []:
@@ -274,14 +223,10 @@ def parse(path: str, data: bytes) -> Markdown:
                 at += 1
                 footnote = definitions.get(at, footnote)
             elif child.type == "text":
-                # Only text cites: `[^1]` in a code span is an example.
                 for citation in _CITATION.findall(child.content):
                     cited.setdefault(citation.casefold(), fragment)
-            # An embedded image is a link too, so validation catches a missing asset; inline data names no target.
             elif child.type in {"link_open", "image"}:
                 target = str(child.attrGet("href" if child.type == "link_open" else "src"))
-                # Split local URL fragments before decoding: %23 is part of a filename.
-                # BF parses each component before decoding; external queries keep their original meaning.
                 if not (child.type == "image" and target.lower().startswith("data:")):
                     found.append((target, fragment, at, footnote))
     contexts = [(target, cited.get(footnote, origin), at) for target, origin, at, footnote in found]
@@ -289,17 +234,12 @@ def parse(path: str, data: bytes) -> Markdown:
 
 
 def _title(path: str, inline: Token, *, strict: bool) -> tuple[str, str]:
-    """A heading's words and its explicit anchor, written last in its source as ` {#id}`.
-
-    The anchor is read from the source, so braces in a code span or escaped with a backslash stay words. Outside
-    `strict` OKF notes, an anchor ending in .md stays words too.
-    """
+    """Heading text and optional trailing `{#id}` anchor read from source."""
     title = "".join(
         " " if child.type in {"softbreak", "hardbreak"} else child.content
         for child in inline.children or []
         if child.type in {"text", "code_inline", "image", "softbreak", "hardbreak"}
     )
-    # An anchor id holds no `{` or `#`, so only the last `{#` can start one: no regex backtracking.
     start = inline.content.rfind("{#")
     anchor = (
         re.fullmatch(r"\{#([A-Za-z0-9][A-Za-z0-9_.-]*)\}", inline.content[start:])
@@ -309,7 +249,6 @@ def _title(path: str, inline: Token, *, strict: bool) -> tuple[str, str]:
     if not anchor:
         return title, ""
     if anchor[1].endswith(".md"):
-        # `note.md#part.md` would read as a file name, not a section.
         if not strict:
             return title, ""
         raise Error(f"{path}: explicit heading anchors cannot end in .md")
@@ -317,12 +256,7 @@ def _title(path: str, inline: Token, *, strict: bool) -> tuple[str, str]:
 
 
 def _headings(path: str, tokens: Sequence[Token], offset: int, *, strict: bool) -> list[Heading]:
-    """Headings with unique slugs: an explicit anchor, otherwise the title's slug or its next free `-N` suffix.
-
-    Generated suffixes skip every explicit anchor, wherever it appears. In a `strict` OKF note, a title whose own
-    slug another heading anchors explicitly is ambiguous and fails, like two equal anchors. Ordinary Markdown, such as
-    a copied document, stays searchable: a repeated anchor yields to the first, and such a title takes a suffix.
-    """
+    """Build headings with unique slugs across explicit anchors and generated `-N` suffixes."""
     titled = [
         (int(token.tag[1:]), token.map[0] + offset, token.map[1] + offset, *_title(path, tokens[i + 1], strict=strict))
         for i, token in enumerate(tokens)
@@ -339,13 +273,11 @@ def _headings(path: str, tokens: Sequence[Token], offset: int, *, strict: bool) 
                 titled[number] = (level, start, end, title, "")
             kept.add(anchor)
     used: set[str] = set()
-    # The last suffix each slug took, so repeated headings, as in a transcript, probe each suffix once.
     last: dict[str, int] = {}
     headings = []
     for level, start, end, title, anchor in titled:
         slug = anchor
         if not anchor:
-            # A heading without word characters still needs an addressable, non-empty slug.
             stem = slug = slugify(title) or "section"
             if strict and stem in reserved:
                 raise Error(f"{path}: duplicate explicit heading anchor")
@@ -360,7 +292,7 @@ def _headings(path: str, tokens: Sequence[Token], offset: int, *, strict: bool) 
 
 
 def section(path: str, data: bytes | Markdown, fragment: str) -> str:
-    """A note section's Markdown, from its bytes or from a parse the caller already holds."""
+    """A note section's Markdown, from its bytes or an existing `Markdown` parse."""
     markdown = data if isinstance(data, Markdown) else parse(path, data)
     heading = next((h for h in markdown.headings if h.slug == fragment), None)
     if heading is None:
@@ -375,7 +307,7 @@ def section(path: str, data: bytes | Markdown, fragment: str) -> str:
 
 
 def split_ref(ref: str) -> tuple[str, str]:
-    """Split a readable ref, preserving hashes in Markdown filenames and directory names."""
+    """Split a readable ref while preserving literal hashes in filenames."""
     if authored(ref) or "#" not in ref:
         return ref, ""
     path, _, fragment = ref.rpartition("#")
@@ -383,16 +315,11 @@ def split_ref(ref: str) -> tuple[str, str]:
 
 
 def resolve(path: str, target: str) -> tuple[str, str]:
-    """A relative link as a brain-relative path and a fragment, split at the link's first unescaped `#`.
-
-    Splitting before decoding keeps a literal `%23` in a file name, such as `data%231.csv`, in the path.
-    """
+    """Resolve a relative link into a brain-relative path and decoded fragment, splitting before decoding."""
     name, _, fragment = target.partition("#")
     name, fragment = unquote(name), unquote(fragment)
     bundle = path.split("/")[0]
     if name.startswith("/") and bundle in {"projects", "concepts"}:
-        # OKF bundle-relative links start at the bundle root: each of these folders is one bundle.
-        # Actions and their attachments have no bundle root, so a leading `/` stays an absolute path there.
         joined = posixpath.normpath(bundle + name)
     else:
         joined = posixpath.normpath(posixpath.join(posixpath.dirname(path), name)) if name else path
@@ -400,7 +327,7 @@ def resolve(path: str, target: str) -> tuple[str, str]:
 
 
 def reference(path: str, target: str) -> str:
-    """Resolve a relative note link to a brain-relative path; identities and URLs stay unchanged."""
+    """Resolve a relative link to a brain-relative path while canonicalizing identities and URLs."""
     if scheme(path, target):
         return bf_links.target(target)
     name, fragment = resolve(path, target)
@@ -408,7 +335,6 @@ def reference(path: str, target: str) -> str:
 
 
 def scheme(path: str, target: str) -> str:
-    """Malformed URLs are file diagnostics, never exceptions escaping retrieval."""
     try:
         return urlsplit(target).scheme
     except ValueError as error:
@@ -417,7 +343,6 @@ def scheme(path: str, target: str) -> str:
 
 @contextmanager
 def _at(path: str, where: str) -> Generator[None]:
-    """Name where the note writes a failing value, such as `line 12` or a frontmatter key, rather than quoting it."""
     try:
         yield
     except Error as error:
@@ -431,11 +356,8 @@ def _sources(path: str, attributes: dict[str, object]) -> list[str]:
         for source in sources
     ):
         raise Error(f"{path}: OKF sources require mappings with a nonempty resource string")
-    # Bounded like frontmatter `links` and the note's own `resource`, whether or not a resource is a link.
     if any(len(str(source["resource"])) > 8192 for source in sources):
         raise Error(f"{path}: invalid frontmatter: sources: reference exceeds 8192 characters")
-    # OKF lets a resource describe a population, such as "all pull requests of a repository": only a link-shaped
-    # resource, a URL, identity or path, is cited and checked.
     return [
         resource
         for resource in (str(source["resource"]).strip() for source in sources)
@@ -445,11 +367,6 @@ def _sources(path: str, attributes: dict[str, object]) -> list[str]:
 
 
 def _task(path: str, markdown: str) -> str:
-    """A task's words with its links kept as `[label](ref)`: a relative target becomes the brain-relative ref that
-    `bf read` opens, so the next step names what to read without another lookup.
-
-    Only words and labels lose emphasis markers: a ref keeps every character, such as the `_` ending a document ID.
-    """
     text = markdown[: 8 * LEAD]
     words: list[str] = []
     end = 0
@@ -463,11 +380,6 @@ def _task(path: str, markdown: str) -> str:
 
 
 def _plain(markdown: str) -> str:
-    """A compact, readable lead: drop heading markers, rules, emphasis and link targets.
-
-    Callers preview it in LEAD characters. A bounded prefix keeps the link pattern's cost independent of note size;
-    a lead it cuts short ends with `…` too, even when its words fit.
-    """
     prefix = markdown[: 8 * LEAD]
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", prefix)
     text = re.sub(r"^#+\s*|^ {0,3}(?:-[ \t]*){3,}$", "", text, flags=re.MULTILINE)
@@ -476,7 +388,7 @@ def _plain(markdown: str) -> str:
 
 
 def preview(text: str, size: int = LEAD) -> str:
-    """At most `size` characters of a one-line text: a longer one is cut at a word when one is near, then `…`."""
+    """Trim one-line text to `size` chars on a near word boundary with trailing ellipsis."""
     if len(text) <= size:
         return text
     cut = text[: size - 1]
@@ -485,11 +397,9 @@ def preview(text: str, size: int = LEAD) -> str:
 
 
 def _unmarked(text: str) -> str:
-    """Text without emphasis markers; a code span keeps its words verbatim, such as `__init__.py`, without backticks."""
     return "".join(part if i % 2 else _EMPHASIS.sub("", part) for i, part in enumerate(_CODE.split(text)))
 
 
-# Display and lifecycle metadata, the only frontmatter ordinary Markdown contributes.
 _ORDINARY = {"title", "type", "status", "updated", "summary", "description"}
 
 
@@ -500,8 +410,6 @@ def okf(path: str) -> bool:
 
 def _knowledge(path: str, attributes: dict[str, object]) -> Knowledge:
     if not okf(path):
-        # Ordinary Markdown, such as a document copied into an action's inputs, declares no identity, tag, link or
-        # review date. Its other metadata applies only where valid, so foreign frontmatter stays searchable.
         attributes = {key: value for key, value in attributes.items() if key in _ORDINARY}
         try:
             return Knowledge.model_validate(attributes)
@@ -516,7 +424,6 @@ def _knowledge(path: str, attributes: dict[str, object]) -> Knowledge:
 
 def note(path: str, data: bytes | Markdown) -> Note:
     if not addressable(path):
-        # Every note has a BF address: links, backlinks and identities name it by that address.
         raise Error(f"{path}: path exceeds {MAX_ENCODED} characters once percent-encoded in a BF address; shorten it")
     markdown = data if isinstance(data, Markdown) else parse(path, data)
     knowledge = _knowledge(path, markdown.attributes)
@@ -525,17 +432,11 @@ def note(path: str, data: bytes | Markdown) -> Note:
     stem = PurePosixPath(path).stem.replace("-", " ")
     title = knowledge.title or next((h.title for h in markdown.headings if h.level == 1), stem)
     if not okf(path) and (len(title) > MAX_TITLE or not title.strip()):
-        # Ordinary Markdown stays searchable: an overlong or blank title gives way to the file name.
         title = stem if stem.strip() else PurePosixPath(path).name
     if len(title) > MAX_TITLE:
         raise Error(f"{path}: title exceeds {MAX_TITLE} characters")
     if not title.strip():
         raise Error(f"{path}: title must be nonempty")
-    # H2+ sections are separate passages, so a search can land on the answering section.
-    # Headings rank through each passage's title; its text, and so its excerpt, starts below them.
-    # A section also ranks under its parents: `## Vega` then `### Budget` answers "Vega budget".
-    # An H1 after the first section, as in a copied document, is one too, even the title's: it ends the section
-    # above it, as an exact read of that section's ref does, so search never lands on a section without the match.
     source_lines = lines(markdown.text)
     titled = next((h for h in markdown.headings if h.level == 1 and h.title == title), None)
     first = next((n for n, h in enumerate(markdown.headings) if h.level >= 2), len(markdown.headings))
@@ -556,13 +457,8 @@ def note(path: str, data: bytes | Markdown) -> Note:
         parents = (title, *(h.title for h in enclosing))
         passages.append(Passage(heading.slug, " — ".join((*parents, heading.title)), heading.title, text, parents))
         enclosing.append(heading)
-    lead = _plain(summary or introduction)
-    if not lead and len(passages) > 1:
-        lead = _plain(passages[1].text)
-    # OKF provenance cites its resources in each authored note format.
-    # Working inputs and outputs remain ordinary Markdown, even when their filename is ACTION.md.
+    lead = _plain(summary or introduction) or (_plain(passages[1].text) if len(passages) > 1 else "")
     sources = _sources(path, markdown.attributes) if okf(path) else []
-    # A link that cannot resolve makes the note invalid; the problem names its frontmatter key or line.
     for key, values in (("links", knowledge.links), ("sources", sources)):
         for target in values:
             with _at(path, key):
@@ -573,8 +469,6 @@ def note(path: str, data: bytes | Markdown) -> Note:
             with _at(path, f"line {line}"):
                 reference(path, target)
         except Error:
-            # Ordinary Markdown, such as a document copied from another tool, stays searchable without a URL Python
-            # cannot split, such as http://[host]/. Only BF writers write BF links: a malformed one fails any note.
             if okf(path) or target.lower().startswith("bf:"):
                 raise
             unsplit.add(target)
@@ -588,7 +482,6 @@ def note(path: str, data: bytes | Markdown) -> Note:
             if bf_links.parse(alias):
                 bf_links.identity(alias)
     with _at(path, "resource"):
-        # Like an alias, a BF resource names the note; one with spaces describes a population, as OKF allows.
         if re.fullmatch(IDENTITY, knowledge.resource) and bf_links.parse(knowledge.resource):
             bf_links.identity(knowledge.resource)
     return Note(
@@ -608,7 +501,7 @@ def note(path: str, data: bytes | Markdown) -> Note:
 def broken(
     note: Note, exists: Callable[[str], bool], slugs: dict[str, set[str]], unresolved: set[str] | None = None
 ) -> list[str]:
-    """This note's relative links that name no brain file or, for notes, no heading; the caller names the note."""
+    """This note's relative links that name no brain file or heading."""
     problems = []
     for target in note.targets:
         if scheme(note.path, target) or target == "#":
@@ -630,8 +523,7 @@ def broken(
 
 
 def validate_okf(path: str, data: bytes | Markdown) -> None:
-    """Check project, concept and action OKF v0.2 structure; retrieval remains tolerant. A caller holding the note's
-    parse passes it instead of its bytes."""
+    """Check project, concept and action OKF v0.2 structure."""
     markdown = data if isinstance(data, Markdown) else parse(path, data)
     attributes = markdown.attributes
     filename = PurePosixPath(path).name
@@ -673,16 +565,16 @@ def authored(path: str) -> bool:
 
 
 def editor_lock(path: str) -> bool:
-    """An Emacs lock, `.#NAME`: a dangling link or small file kept beside an edited file, never a note or input."""
+    """Emacs `.#NAME` lock files beside edited notes."""
     return path.rsplit("/", 1)[-1].startswith(".#")
 
 
 def action_note(path: str) -> bool:
-    """Only folders directly below actions/ hold an ACTION.md; inputs/ and outputs/ may hold other notes."""
+    """Only direct action subfolders hold `ACTION.md`; inputs/ and outputs/ may hold other notes."""
     parts = path.split("/")
     return len(parts) == 3 and parts[0] == "actions" and parts[2] == "ACTION.md"
 
 
 def entry_note(path: str) -> bool:
-    """OKF notes that hold knowledge or work, not bundle indexes or update logs: they rank, remind and queue tasks."""
+    """OKF knowledge/work entries excluding bundle indexes and update logs."""
     return okf(path) and path.rsplit("/", 1)[-1] not in {"index.md", "log.md"}

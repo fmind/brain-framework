@@ -174,7 +174,7 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
         "bf.yaml",
         json.dumps(
             {
-                "version": 10,
+                "version": 11,
                 "name": "fixture",
                 "jobs": {
                     "highlights": {
@@ -213,7 +213,7 @@ def test_highlight_import_search_read_link_repeat_and_failure_preserve_evidence(
     assert "because visitors need clarity" in str(read(brain, decision_ref)["text"])
     brain.write(
         "evals/highlights.yaml",
-        b"version: 10\ncases:\n  - name: recover-decision-reason\n    query: clarity before signup\n"
+        b"version: 11\ncases:\n  - name: recover-decision-reason\n    query: clarity before signup\n"
         b"    scope: projects/website.md\n    expect: [projects/website.md#decision]\n"
         b"  - name: locate-source-passage\n    read: highlights:reading/brief-clarity\n"
         b"    text: [https://example.com/website-brief, Audience, Visitors need a clear product explanation]\n",

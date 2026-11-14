@@ -21,13 +21,13 @@ from typer.testing import CliRunner
 
 from bf import index, records, retrieve, storage
 from bf.cli import app
-from bf.models import Config, Error, Query, Record, encode
+from bf.models import Config, Error, Query, Record, digest, encode
 from bf.retrieve import read, search
 from bf.storage import BusyError, Store, building, writer
 from bf.validate import validate
 from conftest import records_file
 
-FIELDS = b"""version: 10
+FIELDS = b"""version: 11
 name: fixture
 jobs: {}
 fields:
@@ -39,7 +39,7 @@ REVIEWER = b"""  reviewer:
     description: Who checks the work.
 """
 # Documentation, `broader`, `targets` and jobs leave the cached rows as they are: no rebuild follows.
-REWORDED = b"""version: 10
+REWORDED = b"""version: 11
 name: fixture
 jobs:
   tickets:
@@ -328,7 +328,7 @@ def test_bf_yaml_changed_during_a_refresh_rebuilds_at_the_next_one(
     indexing = index._index  # noqa: SLF001 - rename the brain while the note is indexed
 
     def renaming(connection: sqlite3.Connection, store: Store, path: str, config: Config) -> None:
-        brain.write("bf.yaml", b"version: 10\nname: renamed\n")
+        brain.write("bf.yaml", b"version: 11\nname: renamed\n")
         indexing(connection, store, path, config)
 
     with monkeypatch.context() as patch:
@@ -675,8 +675,8 @@ def plant(store: Store, *statements: str) -> None:
     with closing(sqlite3.connect(store.root / index.CACHE)) as connection, connection:
         connection.execute(
             "INSERT INTO items(id,ref,path,kind,source,title,time,type,item_type,status,lead,url,updated,observed,"
-            "partial,tasks_open,tasks_done,next,weight,stale_after) VALUES(999,'projects/roadmap.md',"
-            "'projects/roadmap.md','note','','Roadmap','','project','','','planted','','','',0,0,0,'',1,'')"
+            "partial,tasks_open,tasks_done,next,weight,stale_after,sha256) VALUES(999,'projects/roadmap.md',"
+            "'projects/roadmap.md','note','','Roadmap','','project','','','planted','','','',0,0,0,'',1,'','')"
         )
         connection.execute("INSERT INTO passages(id,item,fragment,title,original) VALUES(999,999,'','Roadmap','')")
         connection.execute("INSERT INTO search(rowid,title,text,names) VALUES(999,'roadmap','zanzibar planted','')")
@@ -1098,7 +1098,7 @@ def test_a_first_build_publishes_by_its_rename_alone(brain: Store, monkeypatch: 
 
 
 def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
-    schema = b"version: 10\nname: fixture\nfields:\n  owner:\n    description: Who owns it.\n"
+    schema = b"version: 11\nname: fixture\nfields:\n  owner:\n    description: Who owns it.\n"
     brain.write("bf.yaml", schema)
     index.refresh(brain)
     generation = cache_file(brain)
@@ -1107,10 +1107,10 @@ def test_rewording_schema_documentation_keeps_the_cache(brain: Store) -> None:
     assert index.refresh(brain)["changed"] == 0
     assert cache_file(brain) == generation
     # Adding or removing relation metadata also keeps the cache; renaming the brain rebuilds it.
-    brain.write("bf.yaml", b"version: 10\nname: fixture\n")
+    brain.write("bf.yaml", b"version: 11\nname: fixture\n")
     assert index.refresh(brain)["changed"] == 0
     assert cache_file(brain) == generation
-    brain.write("bf.yaml", b"version: 10\nname: renamed\n")
+    brain.write("bf.yaml", b"version: 11\nname: renamed\n")
     assert index.refresh(brain)["changed"] == 4
     assert cache_file(brain) != generation
 
@@ -1277,7 +1277,7 @@ def test_the_cache_is_private_and_distrusts_its_own_schema(brain: Store) -> None
 
 
 def test_schema_constants_and_type_relations_attributes(brain: Store) -> None:
-    assert index.SCHEMA == 42
+    assert index.SCHEMA == 43
     assert index.CACHE == ".bf/cache.sqlite3"
     brain.write(
         "concepts/ada.md",
@@ -1327,3 +1327,51 @@ def test_schema_constants_and_type_relations_attributes(brain: Store) -> None:
     assert exported["tickets:T-9"]["attributes"] == {"priority": 1, "meta": {"team": "infra", "labels": ["urgent"]}}
     assert exported["projects/attrs.md"]["relations"] == {"blockedBy": "person:ada"}
     assert exported["projects/attrs.md"]["attributes"] == {"sprint": "alpha", "score": 7}
+
+
+def test_watermarks_and_items_sha256(brain: Store) -> None:
+    assert index.watermarks(brain) == {}
+    assert not (brain.root / ".bf").exists()
+    records_file(
+        brain,
+        "tickets",
+        [
+            Record(
+                id="T-1",
+                title="Observed ticket",
+                text="Check digest.",
+                attributes={"observed": "2026-09-01T00:00:00Z"},
+            )
+        ],
+    )
+    index.refresh(brain, full=True)
+    note_sha = digest(brain.read("concepts/evidence.md"))
+    record_sha = digest(brain.read(records.path("tickets", "T-1")))
+    marks = index.watermarks(brain)
+    assert marks["concepts/evidence.md"] == ("note", "", "", note_sha, "Durable evidence")
+    assert marks["tickets:T-1"] == ("record", "tickets", "2026-09-01T00:00:00.000000Z", record_sha, "Observed ticket")
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection:
+        stored = dict(connection.execute("SELECT ref, sha256 FROM items").fetchall())
+    assert stored["concepts/evidence.md"] == note_sha
+    assert stored["tickets:T-1"] == record_sha
+    updated = b"---\ntype: concept\nstatus: stable\n---\n\n# Durable evidence\n\nUpdated text.\n"
+    brain.write("concepts/evidence.md", updated)
+    index.refresh(brain)
+    assert index.watermarks(brain)["concepts/evidence.md"] == (
+        "note",
+        "",
+        "",
+        digest(updated),
+        "Durable evidence",
+    )
+    assert digest(updated) != note_sha
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection, connection:
+        connection.execute(f"PRAGMA user_version = {index.SCHEMA - 1}")
+    assert index.watermarks(brain) == {}
+    with closing(sqlite3.connect(brain.root / index.CACHE)) as connection, connection:
+        connection.execute("PRAGMA user_version = 0")
+    with pytest.raises(Error, match="the search cache is unreadable; run bf build"):
+        index.watermarks(brain)
+    (brain.root / index.CACHE).write_bytes(b"not sqlite")
+    with pytest.raises(Error, match="the search cache is unreadable; run bf build"):
+        index.watermarks(brain)

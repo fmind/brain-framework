@@ -16,7 +16,7 @@ import yaml
 from conftest import BLOCK, FRAGMENT, anywhere
 
 ROOT = Path(__file__).parents[1]
-DOCS = ROOT / "docs" / "docs"
+GUIDES = ROOT / "src" / "bf" / "guides"
 SAVE = re.compile(r"(?:Save|Create) `([^`]+)`")
 ABSENT = re.compile(r"has no `([^`]+):` key")
 REPLACE = re.compile(r"replace the `([^`]+)` entry under `([^`]+):`")
@@ -107,12 +107,13 @@ def test_first_brain_guides_return_the_documented_replies() -> None:
     release = f"{(home / 'release').as_uri()}/"
     note = home / "brain" / "projects" / "new-website.md"
 
-    _follow((DOCS / "getting-started.md").read_text(), home, env, release)
+    started = (GUIDES / "getting-started.md").read_text()
+    _follow(started[: started.index("## Register, install")], home, env, release)
     assert "brief:website-brief" in note.read_text()
 
     # Add a sensor starts from the brain Getting started leaves and replaces its tutorial sensor.
-    sensors = (DOCS / "sensors.md").read_text()
-    first = sensors[sensors.index("## Your first sensor") : sensors.index("## Selected highlights")]
+    jobs = (GUIDES / "jobs.md").read_text()
+    first = jobs[jobs.index("## Your first sensor") : jobs.index("## Selected highlights")]
     _follow(first, home, env, release)
     assert "local-documents:website-demo/brief.txt" in note.read_text()
     assert not (home / "brain" / "memories" / "brief").exists()
@@ -135,7 +136,7 @@ def _messages() -> list[str]:
 def test_quoted_queue_errors_are_ones_bf_reports() -> None:
     """A recovery row must match a message the code can print, so renaming one in code leaves no dead diagnosis."""
     messages = _messages()
-    guides = [*DOCS.glob("*.md"), *(ROOT / "src" / "bf" / "skills").rglob("*.md")]
+    guides = [*GUIDES.glob("*.md"), *(ROOT / "src" / "bf" / "skills").rglob("*.md")]
     quoted = {text for path in guides for text in QUEUE_ERROR.findall(path.read_text(encoding="utf-8"))}
     assert quoted
     for text in sorted(quoted):

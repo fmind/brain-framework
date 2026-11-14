@@ -133,13 +133,13 @@ def test_readme_walkthrough(example: str, block: int | None, expected: list[str]
         assert all(item["reply_to"] == "" and item["text"] == "Acknowledged." for item in sent[:2])
         # The failed attempt recorded nothing: two personal runs, then scout's proposal and actor's reply.
         assert re.search(r"^\s*4$", result.stdout, re.MULTILINE), result.stdout
-        # The scout posts its proposal; the owner's reply reaches the actor via channel.received in events.
+        # The scout posts its proposal; the owner's reply reaches the actor via message.received in events.
         proposal, answer = sent[2:]
         assert proposal["reply_to"] == ""
         assert proposal["text"].startswith("The review is ready. Proposed: 1.")
         context = json.loads(answer["text"].split("Invocation: ", 1)[1])
         assert (context["job"], context["kind"]) == ("actor", "event")
-        received = [event for event in context["events"] if event["kind"] == "channel.received"]
+        received = [event for event in context["events"] if event["kind"] == "message.received"]
         assert len(received) == 1
         assert (
             received[0]["source"],
